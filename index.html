@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard | Polymarket Trading Bot</title>
+  <link rel="stylesheet" href="css/virtuoso.css">
+</head>
+<body>
+  <div class="grid-overlay"></div>
+  
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="./" class="nav-brand">
+        <span>⚡</span>
+        <span>Polymarket Bot</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="./" class="nav-link active">Dashboard</a></li>
+        <li><a href="arb.html" class="nav-link">Arb Scanner</a></li>
+        <li><a href="cross-arb.html" class="nav-link">Cross-Platform</a></li>
+        <li><a href="whales.html" class="nav-link">🐋 Whales</a></li>
+        <li><a href="rewards.html" class="nav-link">Rewards</a></li>
+        <li><a href="trade.html" class="nav-link">Trade</a></li>
+        <li><a href="markets.html" class="nav-link">Markets</a></li>
+      </ul>
+      <div class="live-indicator">
+        <span class="live-dot"></span>
+        <span>Paper Trading</span>
+      </div>
+    </div>
+  </nav>
+  
+  <!-- Main Content -->
+  <main class="main-content">
+    <div class="container">
+      
+      <!-- Page Header -->
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Portfolio Dashboard</h1>
+          <p class="page-subtitle">Paper trading with real market data</p>
+        </div>
+        <button class="btn btn-secondary" onclick="loadDashboard()">
+          ↻ Refresh
+        </button>
+      </div>
+      
+      <!-- Stats Grid -->
+      <div id="stats-grid" class="stats-grid">
+        <div class="loading">
+          <div class="spinner"></div>
+          <span>Loading portfolio data...</span>
+        </div>
+      </div>
+      
+      <!-- Open Positions -->
+      <section class="section">
+        <div class="section-header">Open Positions</div>
+        <div id="positions-table" class="table-container">
+          <div class="loading">
+            <div class="spinner"></div>
+            <span>Loading positions...</span>
+          </div>
+        </div>
+      </section>
+      
+      <!-- Recent Trades -->
+      <section class="section">
+        <div class="card">
+          <div id="recent-trades">
+            <div class="loading">
+              <div class="spinner"></div>
+              <span>Loading recent trades...</span>
+            </div>
+          </div>
+        </div>
+      </section>
+      
+    </div>
+  </main>
+  
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+  
+  <script src="js/app.js"></script>
+</body>
+</html>

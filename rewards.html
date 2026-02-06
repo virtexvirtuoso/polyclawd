@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Liquidity Rewards | Polymarket Trading Bot</title>
+  <link rel="stylesheet" href="css/virtuoso.css">
+</head>
+<body>
+  <div class="grid-overlay"></div>
+  
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="./" class="nav-brand">
+        <span>⚡</span>
+        <span>Polymarket Bot</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="./" class="nav-link">Dashboard</a></li>
+        <li><a href="arb.html" class="nav-link">Arb Scanner</a></li>
+        <li><a href="rewards.html" class="nav-link active">Rewards</a></li>
+        <li><a href="trade.html" class="nav-link">Trade</a></li>
+        <li><a href="markets.html" class="nav-link">Markets</a></li>
+      </ul>
+      <div class="live-indicator">
+        <span class="live-dot"></span>
+        <span>Live Data</span>
+      </div>
+    </div>
+  </nav>
+  
+  <!-- Main Content -->
+  <main class="main-content">
+    <div class="container">
+      
+      <!-- Page Header -->
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Liquidity Rewards</h1>
+          <p class="page-subtitle">Earn rewards for providing market liquidity</p>
+        </div>
+        <button class="btn btn-primary" onclick="loadRewards()">
+          ↻ Refresh
+        </button>
+      </div>
+      
+      <!-- Info Card -->
+      <div class="card mb-2">
+        <div class="section-header" style="border: none; padding-bottom: 0;">How Scoring Works</div>
+        <div class="grid-2 mt-2">
+          <div>
+            <p class="text-secondary mb-1"><strong class="text-primary">Higher Score = Better:</strong></p>
+            <ul class="text-secondary" style="padding-left: 1.5rem; font-size: 0.875rem;">
+              <li>High daily reward pool</li>
+              <li>Low competition (fewer market makers)</li>
+              <li>Wide max spread tolerance</li>
+              <li>Reasonable liquidity levels</li>
+              <li>Safe midpoint (0.2-0.8 range)</li>
+            </ul>
+          </div>
+          <div>
+            <p class="text-secondary mb-1"><strong class="text-primary">Key Metrics:</strong></p>
+            <ul class="text-secondary" style="padding-left: 1.5rem; font-size: 0.875rem;">
+              <li><strong>Daily Pool:</strong> USDC rewards paid daily</li>
+              <li><strong>Min Size:</strong> Minimum order to qualify</li>
+              <li><strong>Max Spread:</strong> Distance from midpoint (cents)</li>
+              <li><strong>Competition:</strong> % of liquidity taken</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Results Table -->
+      <section class="section">
+        <div class="section-header">Top Opportunities</div>
+        <div id="rewards-table" class="table-container">
+          <div class="loading">
+            <div class="spinner"></div>
+            <span>Scanning for reward opportunities...</span>
+          </div>
+        </div>
+      </section>
+      
+      <!-- Stats Summary -->
+      <div id="rewards-summary" class="stats-grid">
+        <!-- Populated by JS if needed -->
+      </div>
+      
+    </div>
+  </main>
+  
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+  
+  <script src="js/app.js"></script>
+</body>
+</html>

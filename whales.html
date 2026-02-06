@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Whale Tracker | Polyclawd</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/virtuoso.css">
+</head>
+<body>
+  <div class="grid-overlay"></div>
+  
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="index.html" class="nav-brand">
+        <span>⚡</span> Polyclawd
+      </a>
+      <ul class="nav-links">
+        <li><a href="index.html" class="nav-link">Dashboard</a></li>
+        <li><a href="arb.html" class="nav-link">Arb Scanner</a></li>
+        <li><a href="cross-arb.html" class="nav-link">Cross-Platform</a></li>
+        <li><a href="whales.html" class="nav-link active">🐋 Whales</a></li>
+        <li><a href="rewards.html" class="nav-link">Rewards</a></li>
+        <li><a href="trade.html" class="nav-link">Trade</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <main class="main-content">
+    <div class="container">
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">🐋 Whale Tracker</h1>
+          <p class="page-subtitle">Monitor top Polymarket traders in real-time</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="live-indicator" id="live-status">
+            <span class="live-dot"></span> <span id="status-text">LOADING</span>
+          </span>
+          <button class="btn btn-primary btn-sm" onclick="loadWhales()">
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      <div class="stats-grid" id="whale-stats">
+        <div class="card">
+          <div class="card-header">🐋 Tracked Whales</div>
+          <div class="card-value" id="whale-count">-</div>
+        </div>
+        <div class="card">
+          <div class="card-header">💰 Total USDC Tracked</div>
+          <div class="card-value" id="total-usdc">-</div>
+        </div>
+        <div class="card">
+          <div class="card-header">⛽ Total POL</div>
+          <div class="card-value" id="total-pol">-</div>
+        </div>
+        <div class="card">
+          <div class="card-header">💵 With Balance</div>
+          <div class="card-value" id="active-count">-</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-header">Tracked Whales - Live Balances</div>
+        <div class="table-container" id="whales-table">
+          <div class="loading"><div class="spinner"></div><span>Loading whale balances...</span></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-header">Whale Positions on Polymarket</div>
+        <div id="whale-positions">
+          <div class="loading"><div class="spinner"></div><span>Loading positions...</span></div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="js/app.js"></script>
+  <script>
+    const API_BASE = '/polyclawd/api';
+
+    async function loadWhales() {
+      document.getElementById('status-text').textContent = 'LOADING';
+      
+      try {
+        // Load whale balances
+        const res = await fetch(API_BASE + '/whales/balances');
+        const data = await res.json();
+        
+        renderWhaleStats(data);
+        renderWhalesTable(data);
+        loadWhalePositions(data.whales || []);
+        
+        document.getElementById('status-text').textContent = 'LIVE';
+        
+      } catch (error) {
+        console.error('Failed to load whales:', error);
+        document.getElementById('status-text').textContent = 'ERROR';
+        document.getElementById('whales-table').innerHTML = 
+          '<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>Failed to load whale data</p></div>';
+      }
+    }
+
+    function renderWhaleStats(data) {
+      const whales = data.whales || [];
+      
+      document.getElementById('whale-count').textContent = whales.length;
+      
+      const totalUsdc = whales.reduce((sum, w) => sum + (w.usdc || 0), 0);
+      document.getElementById('total-usdc').textContent = '$' + totalUsdc.toLocaleString(undefined, {maximumFractionDigits: 0});
+      
+      const totalPol = whales.reduce((sum, w) => sum + (w.pol || 0), 0);
+      document.getElementById('total-pol').textContent = totalPol.toFixed(2);
+      
+      const activeCount = whales.filter(w => (w.usdc || 0) > 10).length;
+      document.getElementById('active-count').textContent = activeCount;
+    }
+
+    function renderWhalesTable(data) {
+      const whales = data.whales || [];
+
+      let html = `
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Address</th>
+              <th>USDC Balance</th>
+              <th>POL Balance</th>
+              <th>Est. Profit</th>
+              <th>Win Rate</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+      `;
+
+      for (const whale of whales) {
+        const name = whale.name || whale.address.slice(0, 10) + '...';
+        const shortAddr = whale.address.slice(0, 6) + '...' + whale.address.slice(-4);
+        const usdc = whale.usdc || 0;
+        const pol = whale.pol || 0;
+        
+        const usdcClass = usdc > 1000 ? 'text-success' : usdc > 0 ? 'text-primary' : 'text-secondary';
+
+        html += `
+          <tr>
+            <td class="cell-mono font-bold">${name}</td>
+            <td class="cell-mono text-secondary">
+              <a href="https://polygonscan.com/address/${whale.address}" target="_blank" style="color: var(--primary);">${shortAddr}</a>
+            </td>
+            <td class="cell-mono ${usdcClass}">$${usdc.toLocaleString(undefined, {maximumFractionDigits: 2})}</td>
+            <td class="cell-mono">${pol.toFixed(4)} POL</td>
+            <td class="cell-mono text-success">${whale.profit_estimate || '-'}</td>
+            <td class="cell-mono">${whale.win_rate || '-'}</td>
+            <td>
+              <button class="btn btn-sm btn-secondary" onclick="viewWhalePositions('${whale.address}')">
+                Positions
+              </button>
+            </td>
+          </tr>
+        `;
+      }
+
+      html += '</tbody></table>';
+      document.getElementById('whales-table').innerHTML = html;
+    }
+
+    async function loadWhalePositions(whales) {
+      const container = document.getElementById('whale-positions');
+      
+      try {
+        const res = await fetch(API_BASE + '/whales/positions?limit=20');
+        const data = await res.json();
+        
+        if (!data.whales || data.whales.length === 0) {
+          container.innerHTML = '<div class="card"><p class="text-secondary">No whale positions found via Polymarket Data API. Whales may have withdrawn or positions may be in different wallets.</p></div>';
+          return;
+        }
+        
+        let html = '<div class="grid-2" style="gap: 1rem;">';
+        
+        for (const wp of data.whales.slice(0, 10)) {
+          const shortAddr = wp.address.slice(0, 6) + '...' + wp.address.slice(-4);
+          html += `
+            <div class="card">
+              <div class="flex justify-between items-center mb-1">
+                <span class="text-mono font-bold">${wp.name || shortAddr}</span>
+                <span class="badge badge-primary">${wp.position_count || 0} positions</span>
+              </div>
+              <div class="text-secondary" style="font-size: 0.85rem;">
+                Value: <span class="text-primary">$${(wp.portfolio_value || 0).toLocaleString(undefined, {maximumFractionDigits: 0})}</span>
+              </div>
+              <div class="text-secondary" style="font-size: 0.85rem;">
+                P&L: <span class="${(wp.total_pnl || 0) >= 0 ? 'text-success' : 'text-error'}">
+                  ${(wp.total_pnl || 0) >= 0 ? '+' : ''}$${(wp.total_pnl || 0).toLocaleString(undefined, {maximumFractionDigits: 0})}
+                </span>
+              </div>
+            </div>
+          `;
+        }
+        
+        html += '</div>';
+        container.innerHTML = html;
+        
+      } catch (error) {
+        console.error('Failed to load positions:', error);
+        container.innerHTML = '<div class="card"><p class="text-secondary">Failed to load whale positions from Polymarket Data API.</p></div>';
+      }
+    }
+
+    async function viewWhalePositions(address) {
+      try {
+        const res = await fetch(API_BASE + '/whales/' + address + '/positions');
+        const data = await res.json();
+        
+        if (data.whales && data.whales.length > 0) {
+          let msg = 'Positions for ' + address.slice(0, 10) + '...\n\n';
+          for (const pos of data.whales.slice(0, 5)) {
+            msg += '• ' + (pos.title || pos.asset || 'Unknown').slice(0, 40) + '\n';
+            msg += '  Size: $' + (pos.size || pos.currentValue || 0).toLocaleString() + '\n';
+          }
+          if (data.whales.length > 5) {
+            msg += '\n... and ' + (data.whales.length - 5) + ' more positions';
+          }
+          alert(msg);
+        } else {
+          alert('No positions found for this wallet on Polymarket Data API.\nWhale may have exited positions or uses different wallets.');
+        }
+      } catch (error) {
+        alert('Failed to fetch positions: ' + error.message);
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', loadWhales);
+    setInterval(loadWhales, 120000); // Refresh every 2 minutes
+  </script>
+</body>
+</html>

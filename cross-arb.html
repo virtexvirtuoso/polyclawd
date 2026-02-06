@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cross-Platform Arb | Polyclawd</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/virtuoso.css">
+</head>
+<body>
+  <div class="grid-overlay"></div>
+  
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="index.html" class="nav-brand">
+        <span>⚡</span> Polyclawd
+      </a>
+      <ul class="nav-links">
+        <li><a href="index.html" class="nav-link">Dashboard</a></li>
+        <li><a href="arb.html" class="nav-link">Arb Scanner</a></li>
+        <li><a href="cross-arb.html" class="nav-link active">Cross-Platform</a></li>
+        <li><a href="whales.html" class="nav-link">🐋 Whales</a></li>
+        <li><a href="rewards.html" class="nav-link">Rewards</a></li>
+        <li><a href="trade.html" class="nav-link">Trade</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <main class="main-content">
+    <div class="container">
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">🔄 Cross-Platform Arbitrage</h1>
+          <p class="page-subtitle">Find price gaps between Polymarket & Kalshi</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="live-indicator" id="live-status">
+            <span class="live-dot"></span> <span id="status-text">SCANNING</span>
+          </span>
+          <button class="btn btn-primary btn-sm" onclick="scanCrossArb()">
+            Scan Now
+          </button>
+        </div>
+      </div>
+
+      <div class="stats-grid">
+        <div class="card">
+          <div class="card-header">🎯 Curated Pairs</div>
+          <div class="card-value" id="pairs-count">-</div>
+        </div>
+        <div class="card">
+          <div class="card-header">💰 Opportunities Found</div>
+          <div class="card-value text-primary" id="arb-count">-</div>
+        </div>
+        <div class="card">
+          <div class="card-header">📈 Best Spread</div>
+          <div class="card-value text-success" id="best-spread">-</div>
+        </div>
+        <div class="card">
+          <div class="card-header">🕐 Last Scan</div>
+          <div class="card-value" id="last-scan" style="font-size: 1rem;">-</div>
+        </div>
+      </div>
+
+      <!-- Tabs -->
+      <div class="flex gap-2 mb-2">
+        <button class="btn btn-primary" id="tab-curated" onclick="showTab('curated')">Curated Pairs</button>
+        <button class="btn btn-secondary" id="tab-fuzzy" onclick="showTab('fuzzy')">Fuzzy Match</button>
+        <button class="btn btn-secondary" id="tab-pairs" onclick="showTab('pairs')">View Pairs Config</button>
+      </div>
+
+      <div class="section">
+        <div class="section-header" id="results-header">Curated Arbitrage Opportunities</div>
+        <div class="table-container" id="arb-results">
+          <div class="loading"><div class="spinner"></div><span>Scanning platforms...</span></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-header">How It Works</div>
+        <div class="card">
+          <div class="grid-2" style="gap: 2rem;">
+            <div>
+              <h4 class="text-primary mb-1">1. Find Price Gaps</h4>
+              <p class="text-secondary">Same event priced differently on Polymarket vs Kalshi due to different user bases and liquidity.</p>
+            </div>
+            <div>
+              <h4 class="text-primary mb-1">2. Execute Arbitrage</h4>
+              <p class="text-secondary">Buy YES cheap on one platform, sell YES (or buy NO) on the other. Lock in risk-free profit.</p>
+            </div>
+          </div>
+          <div class="mt-2 p-1" style="background: var(--bg-dark); border-radius: 6px;">
+            <p class="text-mono" style="font-size: 0.85rem;">
+              <span class="text-success">Example:</span> "Next Pope" - Polymarket 45% YES, Kalshi 52% YES = <span class="text-primary">7% spread</span>
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="js/app.js"></script>
+  <script>
+    const API_BASE = '/polyclawd/api';
+    let currentTab = 'curated';
+
+    function showTab(tab) {
+      currentTab = tab;
+      document.getElementById('tab-curated').className = tab === 'curated' ? 'btn btn-primary' : 'btn btn-secondary';
+      document.getElementById('tab-fuzzy').className = tab === 'fuzzy' ? 'btn btn-primary' : 'btn btn-secondary';
+      document.getElementById('tab-pairs').className = tab === 'pairs' ? 'btn btn-primary' : 'btn btn-secondary';
+      
+      if (tab === 'pairs') {
+        loadPairsConfig();
+      } else {
+        scanCrossArb();
+      }
+    }
+
+    async function scanCrossArb() {
+      document.getElementById('status-text').textContent = 'SCANNING';
+      document.getElementById('arb-results').innerHTML = '<div class="loading"><div class="spinner"></div><span>Scanning platforms...</span></div>';
+      
+      const endpoint = currentTab === 'curated' ? '/cross-arb/curated' : '/cross-arb?min_spread=1&min_match=0.5';
+      const header = currentTab === 'curated' ? 'Curated Arbitrage Opportunities' : 'Fuzzy Match Results (may include false positives)';
+      document.getElementById('results-header').textContent = header;
+
+      try {
+        const res = await fetch(API_BASE + endpoint);
+        const data = await res.json();
+        
+        if (currentTab === 'curated') {
+          renderCuratedResults(data);
+        } else {
+          renderFuzzyResults(data);
+        }
+        
+        document.getElementById('status-text').textContent = 'LIVE';
+        document.getElementById('last-scan').textContent = new Date().toLocaleTimeString();
+        
+      } catch (error) {
+        console.error('Scan failed:', error);
+        document.getElementById('status-text').textContent = 'ERROR';
+        document.getElementById('arb-results').innerHTML = 
+          '<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>Failed to scan platforms</p></div>';
+      }
+    }
+
+    function renderCuratedResults(data) {
+      document.getElementById('pairs-count').textContent = data.pairs_configured || 0;
+      document.getElementById('arb-count').textContent = data.opportunities_found || 0;
+      
+      const opportunities = data.opportunities || [];
+      
+      if (opportunities.length > 0) {
+        const bestSpread = Math.max(...opportunities.map(o => o.spread_pct));
+        document.getElementById('best-spread').textContent = bestSpread.toFixed(1) + '%';
+      } else {
+        document.getElementById('best-spread').textContent = '-';
+      }
+      
+      if (opportunities.length === 0) {
+        document.getElementById('arb-results').innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">✅</div>
+            <p>No arbitrage opportunities found above 1% threshold.</p>
+            <p class="text-secondary mt-1">Markets are efficiently priced. Cross-platform arb opportunities are rare.</p>
+          </div>
+        `;
+        return;
+      }
+
+      let html = `
+        <table>
+          <thead>
+            <tr>
+              <th>Pair</th>
+              <th>Category</th>
+              <th>Polymarket</th>
+              <th>Kalshi</th>
+              <th>Spread</th>
+              <th>Direction</th>
+            </tr>
+          </thead>
+          <tbody>
+      `;
+
+      for (const opp of opportunities) {
+        const directionBadge = opp.direction === 'buy_poly' 
+          ? '<span class="badge badge-success">Buy Poly</span>'
+          : '<span class="badge badge-primary">Buy Kalshi</span>';
+        
+        const spreadClass = opp.spread_pct >= 5 ? 'text-success' : opp.spread_pct >= 3 ? 'text-primary' : '';
+
+        html += `
+          <tr>
+            <td class="font-bold">${opp.pair_name}</td>
+            <td><span class="badge badge-secondary">${opp.category}</span></td>
+            <td class="cell-mono">
+              <div>${truncate(opp.polymarket.title, 35)}</div>
+              <div class="text-secondary" style="font-size: 0.75rem;">YES: ${(opp.polymarket.yes_price * 100).toFixed(0)}%</div>
+            </td>
+            <td class="cell-mono">
+              <div>${truncate(opp.kalshi.title, 35)}</div>
+              <div class="text-secondary" style="font-size: 0.75rem;">YES: ${(opp.kalshi.yes_price * 100).toFixed(0)}%</div>
+            </td>
+            <td class="cell-mono ${spreadClass}" style="font-weight: bold;">${opp.spread_pct.toFixed(1)}%</td>
+            <td>${directionBadge}</td>
+          </tr>
+        `;
+      }
+
+      html += '</tbody></table>';
+      document.getElementById('arb-results').innerHTML = html;
+    }
+
+    function renderFuzzyResults(data) {
+      document.getElementById('pairs-count').textContent = '-';
+      
+      const opportunities = data.opportunities || [];
+      document.getElementById('arb-count').textContent = opportunities.length;
+      
+      if (opportunities.length > 0) {
+        const bestSpread = Math.max(...opportunities.map(o => o.spread));
+        document.getElementById('best-spread').textContent = bestSpread.toFixed(1) + '%';
+      } else {
+        document.getElementById('best-spread').textContent = '-';
+      }
+      
+      if (opportunities.length === 0) {
+        document.getElementById('arb-results').innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">✅</div>
+            <p>No fuzzy matches found above threshold.</p>
+          </div>
+        `;
+        return;
+      }
+
+      let html = `
+        <table>
+          <thead>
+            <tr>
+              <th>Polymarket</th>
+              <th>Kalshi</th>
+              <th>Match Score</th>
+              <th>Spread</th>
+            </tr>
+          </thead>
+          <tbody>
+      `;
+
+      for (const opp of opportunities.slice(0, 30)) {
+        html += `
+          <tr>
+            <td class="cell-mono">
+              <div>${truncate(opp.polymarket_title || opp.question, 40)}</div>
+              <div class="text-secondary" style="font-size: 0.75rem;">YES: ${((opp.polymarket_yes || opp.yes_price) * 100).toFixed(0)}%</div>
+            </td>
+            <td class="cell-mono">
+              <div>${truncate(opp.kalshi_title || 'N/A', 40)}</div>
+              <div class="text-secondary" style="font-size: 0.75rem;">YES: ${((opp.kalshi_yes || 0) * 100).toFixed(0)}%</div>
+            </td>
+            <td class="cell-mono">${((opp.match_score || 0) * 100).toFixed(0)}%</td>
+            <td class="cell-mono text-primary">${(opp.spread || 0).toFixed(1)}%</td>
+          </tr>
+        `;
+      }
+
+      html += '</tbody></table>';
+      document.getElementById('arb-results').innerHTML = html;
+    }
+
+    async function loadPairsConfig() {
+      document.getElementById('results-header').textContent = 'Configured Market Pairs';
+      document.getElementById('arb-results').innerHTML = '<div class="loading"><div class="spinner"></div><span>Loading pairs config...</span></div>';
+
+      try {
+        const res = await fetch(API_BASE + '/cross-arb/pairs');
+        const data = await res.json();
+        
+        document.getElementById('pairs-count').textContent = data.count || 0;
+        
+        let html = '<div class="grid-2" style="gap: 1rem;">';
+        
+        for (const pair of data.pairs || []) {
+          html += `
+            <div class="card">
+              <div class="flex justify-between items-center mb-1">
+                <span class="font-bold">${pair.name}</span>
+                <span class="badge badge-secondary">${pair.category}</span>
+              </div>
+              <div class="text-secondary" style="font-size: 0.85rem;">${pair.notes || ''}</div>
+              <div class="mt-1" style="font-size: 0.75rem;">
+                <div class="text-mono">Poly keywords: ${pair.polymarket_keywords.join(', ')}</div>
+                <div class="text-mono">Kalshi tickers: ${pair.kalshi_tickers.join(', ')}</div>
+              </div>
+            </div>
+          `;
+        }
+        
+        html += '</div>';
+        document.getElementById('arb-results').innerHTML = html;
+        
+      } catch (error) {
+        console.error('Failed to load pairs:', error);
+        document.getElementById('arb-results').innerHTML = 
+          '<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>Failed to load pairs config</p></div>';
+      }
+    }
+
+    function truncate(text, maxLen) {
+      if (!text) return '';
+      return text.length > maxLen ? text.slice(0, maxLen) + '...' : text;
+    }
+
+    document.addEventListener('DOMContentLoaded', scanCrossArb);
+  </script>
+</body>
+</html>

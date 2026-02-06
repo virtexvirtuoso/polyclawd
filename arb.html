@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Arb Scanner | Polymarket Trading Bot</title>
+  <link rel="stylesheet" href="css/virtuoso.css">
+</head>
+<body>
+  <div class="grid-overlay"></div>
+  
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="./" class="nav-brand">
+        <span>⚡</span>
+        <span>Polymarket Bot</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="./" class="nav-link">Dashboard</a></li>
+        <li><a href="arb.html" class="nav-link active">Arb Scanner</a></li>
+        <li><a href="cross-arb.html" class="nav-link">Cross-Platform</a></li>
+        <li><a href="whales.html" class="nav-link">🐋 Whales</a></li>
+        <li><a href="rewards.html" class="nav-link">Rewards</a></li>
+        <li><a href="trade.html" class="nav-link">Trade</a></li>
+        <li><a href="markets.html" class="nav-link">Markets</a></li>
+      </ul>
+      <div class="live-indicator">
+        <span class="live-dot"></span>
+        <span>Scanning</span>
+      </div>
+    </div>
+  </nav>
+  
+  <!-- Main Content -->
+  <main class="main-content">
+    <div class="container">
+      
+      <!-- Page Header -->
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Arbitrage Scanner</h1>
+          <p class="page-subtitle">Find markets where Yes + No ≠ $1.00</p>
+        </div>
+        <div class="flex gap-1">
+          <button id="auto-refresh-btn" class="btn btn-secondary" onclick="toggleAutoRefresh()">
+            Auto-Refresh: OFF
+          </button>
+          <button id="scan-btn" class="btn btn-primary" onclick="scanForArb()">
+            🔍 Scan Now
+          </button>
+        </div>
+      </div>
+      
+      <!-- Info Card -->
+      <div class="card mb-2">
+        <div class="flex justify-between items-center">
+          <div>
+            <p class="text-secondary">
+              <strong class="text-primary">How it works:</strong> 
+              In an efficient market, Yes + No should always equal $1.00. 
+              When they don't, there may be an arbitrage opportunity.
+            </p>
+          </div>
+          <div class="text-mono text-secondary">
+            Last scan: <span id="last-scan">-</span>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Results Table -->
+      <section class="section">
+        <div class="section-header">Opportunities Found</div>
+        <div id="arb-results" class="table-container">
+          <div class="loading">
+            <div class="spinner"></div>
+            <span>Scanning markets...</span>
+          </div>
+        </div>
+      </section>
+      
+      <!-- Disclaimer -->
+      <div class="card" style="border-color: var(--warning);">
+        <p class="text-secondary" style="font-size: 0.85rem;">
+          ⚠️ <strong>Paper Trading Only</strong> — No real trades are executed. 
+          In real trading, consider fees, slippage, and execution risk. 
+          Apparent arbitrage may disappear by the time you execute.
+        </p>
+      </div>
+      
+    </div>
+  </main>
+  
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+  
+  <script src="js/app.js"></script>
+</body>
+</html>

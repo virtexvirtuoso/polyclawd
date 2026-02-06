@@ -1,0 +1,106 @@
+{
+  "description": "Curated market pairs for cross-platform arbitrage between Polymarket and Kalshi",
+  "last_updated": "2026-02-06",
+  "notes": "Keywords must be specific enough to avoid false positives. Use unique phrases.",
+  "pairs": [
+    {
+      "id": "next-pope",
+      "name": "Next Pope",
+      "polymarket_keywords": ["next pope", "new pope", "papal conclave"],
+      "kalshi_keywords": ["pope"],
+      "kalshi_tickers": ["KXNEWPOPE", "KXNEXTPOPE"],
+      "category": "religion",
+      "notes": "Who will be the next Pope"
+    },
+    {
+      "id": "iran-supreme-leader",
+      "name": "Next Supreme Leader of Iran",
+      "polymarket_keywords": ["supreme leader of iran", "iran supreme leader", "khamenei successor"],
+      "kalshi_keywords": ["supreme leader of iran"],
+      "kalshi_tickers": ["KXNEXTIRANLEADER"],
+      "category": "politics",
+      "notes": "Who will succeed Khamenei"
+    },
+    {
+      "id": "israel-pm",
+      "name": "Next Israeli PM",
+      "polymarket_keywords": ["prime minister of israel", "israeli prime minister", "netanyahu resign"],
+      "kalshi_keywords": ["prime minister of israel"],
+      "kalshi_tickers": ["KXNEXTISRAELPM"],
+      "category": "politics",
+      "notes": "Next Israeli Prime Minister"
+    },
+    {
+      "id": "openai-anthropic-ipo",
+      "name": "OpenAI vs Anthropic IPO",
+      "polymarket_keywords": ["openai ipo", "anthropic ipo", "openai or anthropic"],
+      "kalshi_keywords": ["openai or anthropic"],
+      "kalshi_tickers": ["KXOAIANTH"],
+      "category": "tech",
+      "notes": "Which AI company IPOs first"
+    },
+    {
+      "id": "stripe-klarna-ipo",
+      "name": "Stripe vs Klarna IPO",
+      "polymarket_keywords": ["stripe ipo", "klarna ipo"],
+      "kalshi_keywords": ["klarna or stripe"],
+      "kalshi_tickers": ["KXKLARSTRIP"],
+      "category": "tech",
+      "notes": "Which fintech IPOs first"
+    },
+    {
+      "id": "xi-successor",
+      "name": "Xi Jinping Successor",
+      "polymarket_keywords": ["xi jinping successor", "xi jinping step down"],
+      "kalshi_keywords": ["xi jinping's successor"],
+      "kalshi_tickers": ["KXXISUCCESSOR"],
+      "category": "politics",
+      "notes": "Who will succeed Xi Jinping"
+    },
+    {
+      "id": "elon-mars",
+      "name": "Elon Musk Mars Visit",
+      "polymarket_keywords": ["elon musk mars", "elon visit mars"],
+      "kalshi_keywords": ["elon musk visit mars"],
+      "kalshi_tickers": ["KXELONMARS"],
+      "category": "space",
+      "notes": "Will Elon Musk visit Mars"
+    },
+    {
+      "id": "human-mars",
+      "name": "Human on Mars",
+      "polymarket_keywords": ["human land on mars", "humans on mars", "person land on mars"],
+      "kalshi_keywords": ["colonize mars", "human land on mars"],
+      "kalshi_tickers": ["KXCOLONIZEMARS"],
+      "category": "space",
+      "notes": "Will humans land on/colonize Mars"
+    },
+    {
+      "id": "nuclear-fusion",
+      "name": "Nuclear Fusion Achievement",
+      "polymarket_keywords": ["nuclear fusion achieved", "fusion power plant", "commercial fusion"],
+      "kalshi_keywords": ["nuclear fusion"],
+      "kalshi_tickers": ["KXFUSION"],
+      "category": "science",
+      "notes": "When will nuclear fusion be achieved"
+    },
+    {
+      "id": "california-earthquake-8",
+      "name": "California 8.0+ Earthquake",
+      "polymarket_keywords": ["8.0 magnitude earthquake california", "california earthquake 8"],
+      "kalshi_keywords": ["8.0 magnitude earthquake in california"],
+      "kalshi_tickers": ["KXEARTHQUAKECALIFORNIA"],
+      "category": "natural",
+      "notes": "8.0+ magnitude earthquake in California"
+    },
+    {
+      "id": "james-bond-theme",
+      "name": "Next James Bond Theme Artist",
+      "polymarket_keywords": ["james bond theme", "bond theme song"],
+      "kalshi_keywords": ["bond theme"],
+      "kalshi_tickers": ["KXPERFORMBONDSONG", "KXPERFORMBOND"],
+      "category": "entertainment",
+      "notes": "Who performs next Bond theme"
+    }
+  ]
+}

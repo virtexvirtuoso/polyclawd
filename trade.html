@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Paper Trading | Polymarket Trading Bot</title>
+  <link rel="stylesheet" href="css/virtuoso.css">
+</head>
+<body>
+  <div class="grid-overlay"></div>
+  
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="./" class="nav-brand">
+        <span>⚡</span>
+        <span>Polymarket Bot</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="./" class="nav-link">Dashboard</a></li>
+        <li><a href="arb.html" class="nav-link">Arb Scanner</a></li>
+        <li><a href="cross-arb.html" class="nav-link">Cross-Platform</a></li>
+        <li><a href="whales.html" class="nav-link">🐋 Whales</a></li>
+        <li><a href="rewards.html" class="nav-link">Rewards</a></li>
+        <li><a href="trade.html" class="nav-link active">Trade</a></li>
+        <li><a href="markets.html" class="nav-link">Markets</a></li>
+      </ul>
+      <div class="live-indicator">
+        <span class="live-dot"></span>
+        <span id="trade-balance">Loading...</span>
+      </div>
+    </div>
+  </nav>
+  
+  <!-- Main Content -->
+  <main class="main-content">
+    <div class="container">
+      
+      <!-- Page Header -->
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Paper Trading</h1>
+          <p class="page-subtitle">Practice trading with virtual $10,000</p>
+        </div>
+        <button class="btn btn-danger" onclick="resetPaperTrading()">
+          🔄 Reset Account
+        </button>
+      </div>
+      
+      <div class="grid-2">
+        
+        <!-- Left Column: Trading Interface -->
+        <div>
+          
+          <!-- Market Search -->
+          <div class="card mb-2">
+            <div class="section-header" style="border: none; padding-bottom: 0;">Find Market</div>
+            <div class="form-group mt-2">
+              <div class="flex gap-1">
+                <input 
+                  type="text" 
+                  id="market-search" 
+                  class="form-input" 
+                  placeholder="Search markets (e.g., 'election', 'bitcoin')..."
+                >
+                <button class="btn btn-secondary" onclick="searchMarkets()">Search</button>
+              </div>
+            </div>
+            <div id="search-results" style="max-height: 200px; overflow-y: auto;">
+              <p class="text-secondary" style="font-size: 0.85rem;">
+                Search for a market above, or enter a market ID directly below.
+              </p>
+            </div>
+          </div>
+          
+          <!-- Trade Form -->
+          <div class="card">
+            <div class="section-header" style="border: none; padding-bottom: 0;">Place Order</div>
+            
+            <div class="form-group mt-2">
+              <label class="form-label">Market ID</label>
+              <input 
+                type="text" 
+                id="market-id" 
+                class="form-input" 
+                placeholder="Enter market ID or select from search..."
+              >
+            </div>
+            
+            <div class="grid-2">
+              <div class="form-group">
+                <label class="form-label">Side</label>
+                <select id="trade-side" class="form-input">
+                  <option value="YES">YES</option>
+                  <option value="NO">NO</option>
+                </select>
+              </div>
+              
+              <div class="form-group">
+                <label class="form-label">Amount ($)</label>
+                <input 
+                  type="number" 
+                  id="trade-amount" 
+                  class="form-input" 
+                  placeholder="100"
+                  min="1"
+                  step="1"
+                >
+              </div>
+            </div>
+            
+            <button id="trade-btn" class="btn btn-success" style="width: 100%;" onclick="executeTrade()">
+              Buy
+            </button>
+          </div>
+          
+        </div>
+        
+        <!-- Right Column: Positions & History -->
+        <div>
+          
+          <!-- Open Positions -->
+          <div class="card mb-2">
+            <div class="section-header" style="border: none; padding-bottom: 0;">Open Positions</div>
+            <div id="positions-list" class="mt-2" style="max-height: 300px; overflow-y: auto;">
+              <div class="loading">
+                <div class="spinner"></div>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Trade History -->
+          <div class="card">
+            <div class="section-header" style="border: none; padding-bottom: 0;">Trade History</div>
+            <div id="trades-list" class="mt-2" style="max-height: 300px; overflow-y: auto;">
+              <div class="loading">
+                <div class="spinner"></div>
+              </div>
+            </div>
+          </div>
+          
+        </div>
+        
+      </div>
+      
+    </div>
+  </main>
+  
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+  
+  <script src="js/app.js"></script>
+</body>
+</html>

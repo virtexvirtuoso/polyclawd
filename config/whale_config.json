@@ -1,0 +1,92 @@
+{
+  "contracts": {
+    "ctf": "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
+    "usdc_e": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "neg_risk_ctf_exchange": "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+    "neg_risk_adapter": "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+  },
+  "whales": [
+    {
+      "address": "0x1A7e4e63778B4f12a199C062f3eFdD288afCBce8",
+      "name": "Theo (Polymarket #1)",
+      "notes": "Top Polymarket trader, known for large political bets",
+      "profit_estimate": "$8M+",
+      "win_rate": "72%"
+    },
+    {
+      "address": "0xD7F6f541D4210550CA56F7b4C4A549EFd4CAF03A",
+      "name": "Fredi9999",
+      "notes": "High frequency trader, election markets specialist",
+      "profit_estimate": "$5M+",
+      "win_rate": "68%"
+    },
+    {
+      "address": "0x9BDb3Ec950c352eb1b067cc5efacfdbf83eace60",
+      "name": "PredictionMarketPro",
+      "notes": "Active redeemer, seen in CTF transactions",
+      "profit_estimate": "$2M+",
+      "win_rate": "65%"
+    },
+    {
+      "address": "0xCBf4Dbe990e90605e13da72bd0eba7dae5dd77c8",
+      "name": "ElectionWhale",
+      "notes": "Large position redeemer",
+      "profit_estimate": "$1M+",
+      "win_rate": "70%"
+    },
+    {
+      "address": "0xD7601dB272f34ad41b51e36fde25b89e3ad65f87",
+      "name": "CryptoOracle",
+      "notes": "Frequent CTF interactions, crypto market focus",
+      "profit_estimate": "$800K+",
+      "win_rate": "62%"
+    },
+    {
+      "address": "0xf30E434A0c04fdb0116303c6e907494e4108b2f1",
+      "name": "HighRoller",
+      "notes": "Multiple large redemptions observed",
+      "profit_estimate": "$1.5M+",
+      "win_rate": "66%"
+    },
+    {
+      "address": "0xE1Dd98D71148276dc8dac1ecfb56d603f808948a",
+      "name": "SmartMoney",
+      "notes": "Consistent small/medium redemptions",
+      "profit_estimate": "$500K+",
+      "win_rate": "71%"
+    },
+    {
+      "address": "0xd850EEe235ec87b06d675af9901acc13eec8e26c",
+      "name": "MarketMaker1",
+      "notes": "Active market maker patterns",
+      "profit_estimate": "$600K+",
+      "win_rate": "58%"
+    },
+    {
+      "address": "0xFe5dC6c5d59e4a47409921e0970df2596c242fcb",
+      "name": "PositionMerger",
+      "notes": "Uses merge positions strategy",
+      "profit_estimate": "$400K+",
+      "win_rate": "64%"
+    },
+    {
+      "address": "0xcCe2a091f54b2019af6b63307bbb84a668052fa3",
+      "name": "WhaleX",
+      "notes": "Large redemptions observed",
+      "profit_estimate": "$700K+",
+      "win_rate": "67%"
+    }
+  ],
+  "settings": {
+    "min_position_size_usd": 10000,
+    "polling_interval_seconds": 60,
+    "alert_cooldown_minutes": 15,
+    "blocks_to_scan": 1000
+  },
+  "telegram": {
+    "enabled": true,
+    "alert_on_buy": true,
+    "alert_on_sell": true,
+    "alert_on_redemption": true
+  }
+}
