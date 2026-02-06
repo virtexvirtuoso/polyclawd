@@ -34,8 +34,6 @@ Open: **http://127.0.0.1:8000**
 ```bash
 # Service runs on port 8420
 sudo systemctl status polyclawd-api
-
-# Nginx proxies to: https://virtuosocrypto.com/polyclawd/
 ```
 
 ## Pages
