@@ -1,195 +1,134 @@
-# Polyclawd - Polymarket Trading Bot
+# Polyclawd - AI-Powered Prediction Market Trading Bot
 
-**Virtuoso Crypto's AI-powered prediction market trading system.**
-
-Combines intelligent scanning with safe execution for Polymarket trading.
+**Virtuoso Crypto's intelligent trading system for Polymarket and Simmer.**
 
 ## Features
 
-| Feature | Description |
-|---------|-------------|
-| **Dashboard** | Portfolio overview, P&L tracking, open positions |
-| **Arb Scanner** | Find same-platform arbitrage (Yes + No ≠ $1.00) |
-| **Cross-Platform Arb** | Polymarket vs Kalshi price gaps |
-| **Whale Tracker** | Monitor top traders with live balances |
-| **Liquidity Rewards** | Optimal market making opportunities |
-| **Paper Trading** | Practice with virtual $10,000 |
+### Signal Sources (9 Active)
+| Source | Description | Platform |
+|--------|-------------|----------|
+| **Inverse Whale** | Fade positions of losing traders (<50% accuracy) | Polymarket |
+| **Smart Money Flow** | Follow net weighted flow from accurate traders | Polymarket |
+| **Simmer Divergence** | Exploit price differences vs Polymarket | Simmer |
+| **Volume Spikes** | Z-score anomaly detection (2σ+ unusual activity) | Polymarket |
+| **New Markets** | Early mover on newly created markets | Polymarket |
+| **Resolution Timing** | High uncertainty markets near expiry | Polymarket |
+| **Price Alerts** | User-defined price triggers | Any |
+| **Cross-Arb** | Cross-platform arbitrage (strict/related) | Multi |
+| **Whale Activity** | Copy new positions from tracked whales | Polymarket |
+
+### Trading Engine
+- **Real-time**: Scans every 30 seconds
+- **Bayesian Confidence**: Learns from outcomes, adjusts source weights
+- **Composite Scoring**: Multiple agreeing sources = boosted confidence
+- **Auto Paper Trading**: Execute on Simmer, log Polymarket for manual
+- **Position Tracking**: Auto-resolve and update P&L
+
+### Risk Management
+- Kelly Criterion position sizing
+- Configurable min confidence threshold
+- Daily trade limits
+- Cooldown between trades
+- Max position % of bankroll
 
 ## Quick Start
 
-### Local Development
-
 ```bash
+# Start the API
 cd ~/Desktop/polyclawd
-python3 -m venv venv
 source venv/bin/activate
-pip install -r api/requirements.txt
-uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
+uvicorn api.main:app --host 127.0.0.1 --port 8000
 ```
-
-Open: **http://127.0.0.1:8000**
-
-### Production (VPS)
-
-```bash
-# Service runs on port 8420
-sudo systemctl status polyclawd-api
-```
-
-## Pages
-
-| Page | Path | Description |
-|------|------|-------------|
-| Dashboard | `/` | Portfolio summary, positions, P&L |
-| Arb Scanner | `/arb.html` | Same-platform arbitrage finder |
-| Cross-Platform | `/cross-arb.html` | Polymarket vs Kalshi arb |
-| Whales | `/whales.html` | Whale tracker with live balances |
-| Rewards | `/rewards.html` | Liquidity reward opportunities |
-| Trade | `/trade.html` | Paper trading interface |
-| Markets | `/markets.html` | Market browser & search |
 
 ## API Endpoints
 
+### Engine Control
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/engine/status` | GET | Engine status and config |
+| `/api/engine/start` | POST | Start trading engine |
+| `/api/engine/stop` | POST | Stop trading engine |
+| `/api/engine/trigger` | POST | Force one evaluation |
+| `/api/engine/config` | POST | Update thresholds |
+
+### Signals
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/signals` | GET | Aggregated signals from all sources |
+| `/api/signals/auto-trade` | POST | Execute paper trades on signals |
+| `/api/inverse-whale` | GET | Inverse whale signals |
+| `/api/smart-money` | GET | Smart money flow |
+| `/api/volume/spikes` | GET | Volume anomalies |
+| `/api/resolution/approaching` | GET | Markets near expiry |
+| `/api/markets/new` | GET | New market detection |
+
+### Confidence & Learning
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/confidence/sources` | GET | Win rates per source |
+| `/api/confidence/record` | POST | Record trade outcome |
+| `/api/positions/check` | GET | Check & resolve positions |
+| `/api/positions/{id}/resolve` | POST | Manual resolution |
+
 ### Paper Trading
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/paper/status` | GET | Paper account status |
+| `/api/paper/reset` | POST | Reset to $10,000 |
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/balance` | Portfolio balance with position values |
-| GET | `/api/positions` | Open positions with live P&L |
-| GET | `/api/trades?limit=N` | Trade history |
-| POST | `/api/trade` | Execute paper trade |
-| POST | `/api/reset` | Reset to $10,000 |
+### Simmer Integration
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/simmer/status` | GET | Simmer connection status |
+| `/api/simmer/opportunities` | GET | Price divergence opps |
+| `/api/simmer/auto-trade` | POST | Execute Simmer trades |
 
-### Markets
+### Whale Tracking
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/whales` | GET | List tracked whales |
+| `/api/whales/signals` | GET | Whale copy signals |
+| `/api/whales/activity` | GET | Position changes |
+| `/api/predictors` | GET | Predictor accuracy leaderboard |
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/markets/trending` | Trending markets by volume |
-| GET | `/api/markets/search?q=query` | Search markets |
-| GET | `/api/markets/{id}` | Market details |
-| GET | `/api/arb-scan` | Same-platform arbitrage scan |
-| GET | `/api/rewards` | Liquidity reward opportunities |
+### Cross-Platform Arb
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/cross-arb/strict` | GET | True arbitrage (identical markets) |
+| `/api/cross-arb/related` | GET | Correlated markets |
 
-### Whale Tracker
+### Utilities
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/kelly` | GET | Kelly position sizing calc |
+| `/api/alerts` | GET/POST | Price alerts |
+| `/api/webhooks` | GET/POST | Webhook subscriptions |
+| `/api/health` | GET | API health check |
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/whales` | List tracked whales with metadata |
-| GET | `/api/whales/balances` | Live USDC/POL balances (Polygon RPC) |
-| GET | `/api/whales/positions` | All whale positions (Polymarket Data API) |
-| GET | `/api/whales/{address}` | Single whale details |
-| GET | `/api/whales/{address}/positions` | Single whale positions |
-
-### Cross-Platform Arbitrage
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/cross-arb` | Fuzzy match scan (Polymarket vs Kalshi) |
-| GET | `/api/cross-arb/curated` | Curated pairs scan (more accurate) |
-| GET | `/api/cross-arb/pairs` | List configured market pairs |
-| GET | `/api/cross-arb/matches` | All matched markets |
-
-### Simmer SDK (Trade Execution)
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/simmer/status` | Agent status and balance |
-| GET | `/api/simmer/markets` | Active Simmer markets |
-| GET | `/api/simmer/positions` | Current positions |
-| POST | `/api/simmer/trade` | Execute live trade |
-
-## File Structure
+## Bayesian Confidence Formula
 
 ```
-polyclawd/
-├── api/
-│   ├── main.py              # FastAPI backend (all endpoints)
-│   └── requirements.txt     # Python dependencies
-├── config/
-│   ├── whale_config.json    # Tracked whale addresses
-│   └── cross-arb-pairs.json # Curated Polymarket-Kalshi pairs
-├── css/
-│   └── virtuoso.css         # Dark cyberpunk theme
-├── js/
-│   └── app.js               # Frontend logic
-├── index.html               # Dashboard
-├── arb.html                 # Same-platform arb
-├── cross-arb.html           # Cross-platform arb
-├── whales.html              # Whale tracker
-├── rewards.html             # Liquidity rewards
-├── trade.html               # Paper trading
-├── markets.html             # Market browser
-├── start.sh                 # Startup script
-└── README.md
+Final Confidence = Base × Bayesian_Mult × Composite_Mult
+
+Base:       Raw score normalized to 0-100
+Bayesian:   source_win_rate / 0.5 (60% = 1.2x, 40% = 0.8x)
+Composite:  1 + 0.2 per agreeing source (max 2x)
 ```
 
 ## Configuration
 
-### Whale Config (`config/whale_config.json`)
+Engine config via `/api/engine/config`:
+- `min_confidence`: Minimum score to trade (default: 20)
+- `max_per_trade`: Maximum $ per trade (default: 100)
+- `max_daily_trades`: Daily trade limit (default: 20)
+- `cooldown_minutes`: Minutes between trades (default: 5)
+- `max_position_pct`: Max % of bankroll per trade (default: 5%)
 
-```json
-{
-  "whales": [
-    {
-      "address": "0x...",
-      "name": "Theo",
-      "profit_estimate": "$8M+",
-      "win_rate": "72%"
-    }
-  ]
-}
-```
+## Deployment
 
-### Cross-Arb Pairs (`config/cross-arb-pairs.json`)
+**Local:** `http://127.0.0.1:8000`
+**Production:** `https://virtuosocrypto.com/polyclawd`
 
-```json
-{
-  "pairs": [
-    {
-      "id": "next-pope",
-      "name": "Next Pope",
-      "polymarket_keywords": ["next pope", "papal"],
-      "kalshi_tickers": ["KXNEWPOPE"]
-    }
-  ]
-}
-```
+## License
 
-## Design System
-
-| Element | Value |
-|---------|-------|
-| Theme | Dark cyberpunk terminal |
-| Primary | `#fbbf24` (neon amber) |
-| Background | `#0a0a0a` (dark) |
-| Cards | `#111111` |
-| Font (UI) | Inter |
-| Font (Data) | IBM Plex Mono |
-
-## Data Sources
-
-| Source | Purpose |
-|--------|---------|
-| Polymarket Gamma API | Market data, prices, volume |
-| Polymarket Data API | User positions, P&L |
-| Kalshi API | Cross-platform price comparison |
-| Polygon RPC | On-chain wallet balances |
-| Simmer SDK | Trade execution (optional) |
-
-## Notes
-
-- **Paper Trading** - Uses virtual money with real market data
-- **No API Keys Required** - Read-only access to public APIs
-- **Simmer Optional** - Only needed for live trade execution
-- **Data Persisted** - Trades saved in `~/.polyclawd/paper-trading/`
-
-## Links
-
-- **Dashboard:** https://virtuosocrypto.com/polyclawd
-- **Simmer SDK:** https://simmer.markets
-- **Polymarket:** https://polymarket.com
-- **Kalshi:** https://kalshi.com
-
----
-
-*Built by Virt for Virtuoso Crypto*
+Proprietary - Virtuoso Crypto
