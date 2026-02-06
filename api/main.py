@@ -1423,14 +1423,20 @@ def analyze_simmer_markets() -> dict:
                 reasoning = f"Simmer {yes_price*100:.0f}¢ vs Polymarket {external_price*100:.0f}¢ - underpriced"
         
         # Contrarian: Extreme prices often overcorrect
-        elif yes_price < 0.12:
+        # BUT skip truly extreme prices (< 2¢ or > 98¢) - likely resolved/garbage
+        elif yes_price < 0.12 and yes_price >= 0.02:
             edge_score = (0.15 - yes_price) * 100
             recommendation = "YES"  # Potential undervalued
             reasoning = f"Extreme low price ({yes_price*100:.0f}¢)"
-        elif yes_price > 0.88:
+        elif yes_price > 0.88 and yes_price <= 0.98:
             edge_score = (yes_price - 0.85) * 100
             recommendation = "NO"  # Potential overvalued
             reasoning = f"Extreme high price ({yes_price*100:.0f}¢)"
+        elif yes_price < 0.02 or yes_price > 0.98:
+            # Skip garbage prices - likely resolved or data errors
+            recommendation = "SKIP"
+            reasoning = f"Price too extreme ({yes_price*100:.0f}¢) - likely resolved"
+            edge_score = 0
         
         # Include all markets for visibility
         opportunities.append({
@@ -1450,8 +1456,8 @@ def analyze_simmer_markets() -> dict:
     # Sort by edge score
     opportunities.sort(key=lambda x: x["edge_score"], reverse=True)
     
-    # Split into actionable vs monitoring
-    actionable = [o for o in opportunities if o["recommendation"] not in ["HOLD"]]
+    # Split into actionable vs monitoring (exclude HOLD and SKIP)
+    actionable = [o for o in opportunities if o["recommendation"] not in ["HOLD", "SKIP"]]
     
     return {
         "actionable": actionable[:10],
@@ -1617,7 +1623,8 @@ def check_and_resolve_positions() -> dict:
             still_open.append(pos)
     
     # Save updated positions and balance
-    save_json(POSITIONS_FILE, still_open + [p for p in positions if p.get("status") == "resolved"])
+    # still_open already contains both open AND previously-resolved positions
+    save_json(POSITIONS_FILE, still_open)
     save_json(BALANCE_FILE, balance_data)
     
     return {
@@ -2011,7 +2018,7 @@ def aggregate_all_signals() -> dict:
     try:
         simmer_data = analyze_simmer_markets()
         for opp in simmer_data.get("actionable", [])[:10]:
-            if opp.get("recommendation") not in ["HOLD"]:
+            if opp.get("recommendation") not in ["HOLD", "SKIP"]:
                 all_signals.append({
                     "source": "simmer_divergence",
                     "platform": "simmer",
@@ -2310,7 +2317,7 @@ def load_engine_state() -> dict:
             return json.load(f)
     return {
         "enabled": False,
-        "min_confidence": 20,
+        "min_confidence": 35,
         "max_per_trade": 100,
         "max_daily_trades": 20,
         "max_position_pct": 0.05,
@@ -2344,8 +2351,10 @@ def save_traded_signal(signal_key: str):
         json.dump({"traded": traded_list, "updated": datetime.now().isoformat()}, f)
 
 def generate_signal_key(sig: dict) -> str:
-    """Generate unique key for a signal to prevent duplicate trades"""
-    return f"{sig.get('source', '')}:{sig.get('market', '')[:30]}:{sig.get('side', '')}"
+    """Generate unique key for a signal to prevent duplicate trades
+    Uses market_id only - prevents trading both sides of same market"""
+    market_id = sig.get('market_id') or sig.get('market', '')[:30]
+    return f"{market_id}"
 
 def engine_should_trade(state: dict) -> tuple:
     """Check if engine should execute a trade right now"""
@@ -2381,6 +2390,16 @@ def engine_evaluate_and_trade() -> dict:
     if not actionable:
         return {"action": "skip", "reason": "No actionable signals"}
     
+    # Find conflicting signals (different sources recommend different sides for same market)
+    from collections import defaultdict
+    market_sides = defaultdict(set)
+    for sig in actionable:
+        market_id = sig.get('market_id') or sig.get('market', '')[:30]
+        side = sig.get('side', '').upper()
+        if side in ['YES', 'NO']:
+            market_sides[market_id].add(side)
+    conflicting_markets = {mid for mid, sides in market_sides.items() if len(sides) > 1}
+    
     # Get already traded signals
     traded = load_traded_signals()
     
@@ -2389,7 +2408,7 @@ def engine_evaluate_and_trade() -> dict:
     balance_data = load_json(BALANCE_FILE)
     current_balance = balance_data.get("usdc", DEFAULT_BALANCE)
     
-    min_conf = state.get("min_confidence", 20)
+    min_conf = state.get("min_confidence", 35)
     max_per_trade = state.get("max_per_trade", 100)
     max_position_pct = state.get("max_position_pct", 0.05)
     
@@ -2405,8 +2424,18 @@ def engine_evaluate_and_trade() -> dict:
         if sig_key in traded:
             continue
         
+        # Skip if sources conflict on this market (different sources say YES vs NO)
+        if sig_key in conflicting_markets:
+            continue
+        
         # Only trade Simmer signals (can execute)
         if sig.get("platform") != "simmer":
+            continue
+        
+        # Filter garbage markets (low-alpha noise)
+        market_title = sig.get("market", "").lower()
+        garbage_keywords = ["temperature", "netflix", "spotify", "weather", "t20 world cup", "nba rookie"]
+        if any(kw in market_title for kw in garbage_keywords):
             continue
         
         # Calculate position size
@@ -2538,7 +2567,7 @@ async def get_engine_status():
         "running": _engine_running,
         "enabled": state.get("enabled", False),
         "config": {
-            "min_confidence": state.get("min_confidence", 20),
+            "min_confidence": state.get("min_confidence", 35),
             "max_per_trade": state.get("max_per_trade", 100),
             "max_daily_trades": state.get("max_daily_trades", 20),
             "cooldown_minutes": state.get("cooldown_minutes", 5)
