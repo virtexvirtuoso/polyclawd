@@ -8,7 +8,7 @@ import json
 import os
 import urllib.request
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
@@ -38,6 +38,12 @@ BALANCE_FILE = STORAGE_DIR / "balance.json"
 POSITIONS_FILE = STORAGE_DIR / "positions.json"
 TRADES_FILE = STORAGE_DIR / "trades.json"
 DEFAULT_BALANCE = 10000.0
+
+# Polymarket paper trading (separate from Simmer)
+POLY_STORAGE_DIR = Path.home() / ".openclaw" / "paper-trading-polymarket"
+POLY_BALANCE_FILE = POLY_STORAGE_DIR / "balance.json"
+POLY_POSITIONS_FILE = POLY_STORAGE_DIR / "positions.json"
+POLY_TRADES_FILE = POLY_STORAGE_DIR / "trades.json"
 
 # APIs
 GAMMA_API = "https://gamma-api.polymarket.com"
@@ -1385,7 +1391,13 @@ def execute_auto_strategy(
     return results
 
 def analyze_simmer_markets() -> dict:
-    """Analyze Simmer markets for trading opportunities"""
+    """Analyze Simmer markets for trading opportunities
+    
+    Enhanced with:
+    1. Volume confirmation - high Polymarket volume in same direction = stronger
+    2. Momentum alignment - Polymarket price moving toward our bet = stronger
+    3. Divergence persistence - gaps that persist get boosted
+    """
     result = simmer_request("/markets?status=active&limit=50")
     if not result or result.get("error"):
         return {"error": "Simmer API unavailable", "opportunities": []}
@@ -1394,7 +1406,28 @@ def analyze_simmer_markets() -> dict:
     if not isinstance(markets, list):
         return {"error": "Invalid response", "opportunities": []}
     
+    # Load divergence history for persistence tracking
+    divergence_file = Path(__file__).parent.parent / "data" / "divergence_history.json"
+    try:
+        divergence_history = json.loads(divergence_file.read_text()) if divergence_file.exists() else {}
+    except:
+        divergence_history = {}
+    
+    # Get Polymarket volume data for confirmation
+    try:
+        poly_volume_data = {}
+        volume_result = scan_volume_spikes(1.5, False)  # Get recent volume
+        for spike in volume_result.get("spikes", []):
+            poly_volume_data[spike.get("market_id", "")] = {
+                "volume": spike.get("current_volume", 0),
+                "z_score": spike.get("z_score", 0),
+                "price": spike.get("yes_price", 0.5)
+            }
+    except:
+        poly_volume_data = {}
+    
     opportunities = []
+    now = datetime.now().isoformat()
     
     for m in markets:
         # Simmer API uses 'question' and 'current_probability'
@@ -1413,6 +1446,11 @@ def analyze_simmer_markets() -> dict:
         
         # Price divergence from external (Polymarket) price
         divergence = abs(yes_price - external_price) if external_price else 0
+        volume_boost = 0
+        momentum_boost = 0
+        persistence_boost = 0
+        boosts = []
+        
         if divergence > 0.1:
             edge_score = divergence * 50
             if yes_price > external_price:
@@ -1421,6 +1459,120 @@ def analyze_simmer_markets() -> dict:
             else:
                 recommendation = "YES"  # Simmer underpriced
                 reasoning = f"Simmer {yes_price*100:.0f}¢ vs Polymarket {external_price*100:.0f}¢ - underpriced"
+            
+            market_id = m.get("id", "")
+            
+            # BOOST 1: Volume confirmation
+            # If Polymarket has high volume, it confirms price discovery
+            if market_id in poly_volume_data:
+                vol_data = poly_volume_data[market_id]
+                if vol_data.get("z_score", 0) > 1.5:  # Above average volume
+                    volume_boost = min(15, vol_data["z_score"] * 5)
+                    boosts.append(f"+{volume_boost:.0f} volume")
+            
+            # BOOST 2: Momentum alignment
+            # Check if Polymarket price movement supports our direction
+            # If we're betting YES and Poly price is rising, that's confirmation
+            poly_price = external_price
+            if poly_price and poly_price != yes_price:
+                if recommendation == "YES" and poly_price < 0.5:
+                    # Poly thinks NO but price is low - momentum could flip
+                    momentum_boost = 5
+                    boosts.append("+5 momentum")
+                elif recommendation == "NO" and poly_price > 0.5:
+                    # Poly thinks YES but price is high - momentum could flip
+                    momentum_boost = 5
+                    boosts.append("+5 momentum")
+            
+            # BOOST 3: Divergence persistence
+            # Track how long this divergence has existed
+            div_key = f"{market_id}:{recommendation}"
+            if div_key in divergence_history:
+                first_seen = divergence_history[div_key].get("first_seen", now)
+                try:
+                    first_dt = datetime.fromisoformat(first_seen)
+                    hours_persistent = (datetime.now() - first_dt).total_seconds() / 3600
+                    if hours_persistent > 1:
+                        persistence_boost = min(20, hours_persistent * 5)
+                        boosts.append(f"+{persistence_boost:.0f} persistent({hours_persistent:.1f}h)")
+                except:
+                    pass
+            else:
+                # First time seeing this divergence
+                divergence_history[div_key] = {"first_seen": now, "divergence": divergence}
+            
+            # BOOST 4: Category accuracy
+            # Some market categories have better hit rates than others
+            category_boost = 0
+            title_lower = title.lower()
+            
+            # Detect category
+            category = "other"
+            if any(kw in title_lower for kw in ["bitcoin", "btc", "ethereum", "eth", "crypto", "xrp", "solana"]):
+                category = "crypto"
+            elif any(kw in title_lower for kw in ["trump", "biden", "election", "congress", "senate", "president", "governor"]):
+                category = "politics"
+            elif any(kw in title_lower for kw in ["nba", "nfl", "mlb", "soccer", "football", "basketball", "tennis", "ufc"]):
+                category = "sports"
+            elif any(kw in title_lower for kw in ["netflix", "spotify", "movie", "album", "billboard", "grammy", "oscar"]):
+                category = "entertainment"
+            elif any(kw in title_lower for kw in ["temperature", "weather", "rain", "snow"]):
+                category = "weather"
+            elif any(kw in title_lower for kw in ["fed", "interest rate", "gdp", "inflation", "unemployment"]):
+                category = "economics"
+            
+            # Load category performance (or use priors)
+            category_file = Path(__file__).parent.parent / "data" / "category_performance.json"
+            try:
+                cat_perf = json.loads(category_file.read_text()) if category_file.exists() else {}
+            except:
+                cat_perf = {}
+            
+            # Default priors based on predictability hypothesis
+            category_priors = {
+                "crypto": 0.52,      # Slightly predictable (momentum)
+                "politics": 0.48,    # Polls often wrong
+                "sports": 0.50,      # Efficient
+                "entertainment": 0.50,
+                "weather": 0.45,     # Forecasts usually right, hard to beat
+                "economics": 0.55,   # Fed signals often readable
+                "other": 0.50
+            }
+            
+            cat_data = cat_perf.get(category, {"wins": 1, "losses": 1})
+            cat_win_rate = cat_data.get("wins", 1) / max(1, cat_data.get("wins", 1) + cat_data.get("losses", 1))
+            # Use prior if not enough data
+            if cat_data.get("wins", 0) + cat_data.get("losses", 0) < 5:
+                cat_win_rate = category_priors.get(category, 0.5)
+            
+            if cat_win_rate > 0.55:
+                category_boost = (cat_win_rate - 0.5) * 40  # 60% = +4
+                boosts.append(f"+{category_boost:.0f} {category}({cat_win_rate:.0%})")
+            elif cat_win_rate < 0.45:
+                category_boost = (cat_win_rate - 0.5) * 40  # 40% = -4
+                boosts.append(f"{category_boost:.0f} {category}({cat_win_rate:.0%})")
+            
+            # BOOST 5: Time-of-day patterns
+            # Some hours have better signal accuracy (market maker activity, news cycles)
+            time_boost = 0
+            current_hour = datetime.now().hour
+            
+            # Hypothesis: Early morning (pre-market) and late afternoon have more predictable moves
+            # Avoid midday chop (11-14 EST)
+            favorable_hours = {9: 5, 10: 3, 15: 3, 16: 5, 17: 3}  # Hour -> boost
+            unfavorable_hours = {11: -3, 12: -5, 13: -5, 14: -3, 2: -5, 3: -5}  # Overnight chop
+            
+            if current_hour in favorable_hours:
+                time_boost = favorable_hours[current_hour]
+                boosts.append(f"+{time_boost} goodHour({current_hour}:00)")
+            elif current_hour in unfavorable_hours:
+                time_boost = unfavorable_hours[current_hour]
+                boosts.append(f"{time_boost} badHour({current_hour}:00)")
+            
+            # Apply all boosts
+            edge_score += volume_boost + momentum_boost + persistence_boost + category_boost + time_boost
+            if boosts:
+                reasoning += f" [{', '.join(boosts)}]"
         
         # Contrarian: Extreme prices often overcorrect
         # BUT skip truly extreme prices (< 2¢ or > 98¢) - likely resolved/garbage
@@ -1459,12 +1611,22 @@ def analyze_simmer_markets() -> dict:
     # Split into actionable vs monitoring (exclude HOLD and SKIP)
     actionable = [o for o in opportunities if o["recommendation"] not in ["HOLD", "SKIP"]]
     
+    # Save divergence history for persistence tracking
+    try:
+        # Clean old entries (>24h)
+        cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+        divergence_history = {k: v for k, v in divergence_history.items() 
+                             if v.get("first_seen", "") > cutoff}
+        divergence_file.write_text(json.dumps(divergence_history, indent=2))
+    except:
+        pass
+    
     return {
         "actionable": actionable[:10],
         "all_markets": opportunities[:20],
         "actionable_count": len(actionable),
         "total_markets": len(markets),
-        "note": "Edge from price divergence (Simmer vs Polymarket) and extreme prices"
+        "note": "Edge from price divergence (Simmer vs Polymarket) and extreme prices + boosts"
     }
 
 @app.get("/api/simmer/opportunities")
@@ -1604,12 +1766,18 @@ def check_and_resolve_positions() -> dict:
                     
                     # Record outcome for Bayesian update
                     source = pos.get("source")
+                    market_title = pos.get("market", "")
                     if source:
-                        record_outcome(source, won)
+                        record_outcome(source, won, market_title)
+                    
+                    # Update conflict meta-learning
+                    market_id = pos.get("market_id", "")
+                    if market_id:
+                        resolve_conflict_outcome(market_id, outcome.upper())
                     
                     resolved.append({
                         "position_id": pos.get("id"),
-                        "market": pos.get("market", "")[:50],
+                        "market": market_title[:50],
                         "side": our_side,
                         "outcome": "WIN" if won else "LOSS",
                         "pnl": pnl,
@@ -1661,8 +1829,9 @@ def simulate_resolution(position_id: str, won: bool) -> dict:
             
             # Record outcome for Bayesian update
             source = pos.get("source")
+            market_title = pos.get("market", "")
             if source:
-                record_outcome(source, won)
+                record_outcome(source, won, market_title)
             
             save_json(POSITIONS_FILE, positions)
             save_json(BALANCE_FILE, balance_data)
@@ -1832,7 +2001,10 @@ def load_source_outcomes() -> dict:
         "resolution_timing": {"wins": 1, "losses": 1, "total": 2},
         "price_alert": {"wins": 1, "losses": 1, "total": 2},
         "cross_arb": {"wins": 1, "losses": 1, "total": 2},
-        "whale_new_position": {"wins": 1, "losses": 1, "total": 2}
+        "whale_new_position": {"wins": 1, "losses": 1, "total": 2},
+        "momentum_confirm": {"wins": 1, "losses": 1, "total": 2},
+        "high_divergence": {"wins": 1, "losses": 1, "total": 2},
+        "resolution_edge": {"wins": 1, "losses": 1, "total": 2}
     }
 
 def save_source_outcomes(outcomes: dict):
@@ -1840,7 +2012,7 @@ def save_source_outcomes(outcomes: dict):
     with open(SOURCE_OUTCOMES_FILE, "w") as f:
         json.dump(outcomes, f, indent=2)
 
-def record_outcome(source: str, won: bool):
+def record_outcome(source: str, won: bool, market_title: str = ""):
     """Record a trade outcome to update Bayesian priors"""
     outcomes = load_source_outcomes()
     if source not in outcomes:
@@ -1853,6 +2025,139 @@ def record_outcome(source: str, won: bool):
         outcomes[source]["losses"] += 1
     
     save_source_outcomes(outcomes)
+    
+    # Also track category performance
+    if market_title:
+        record_category_outcome(market_title, won)
+
+def record_category_outcome(market_title: str, won: bool):
+    """Track win rates by market category"""
+    category_file = Path(__file__).parent.parent / "data" / "category_performance.json"
+    try:
+        cat_perf = json.loads(category_file.read_text()) if category_file.exists() else {}
+    except:
+        cat_perf = {}
+    
+    # Detect category
+    title_lower = market_title.lower()
+    category = "other"
+    if any(kw in title_lower for kw in ["bitcoin", "btc", "ethereum", "eth", "crypto", "xrp", "solana"]):
+        category = "crypto"
+    elif any(kw in title_lower for kw in ["trump", "biden", "election", "congress", "senate", "president"]):
+        category = "politics"
+    elif any(kw in title_lower for kw in ["nba", "nfl", "mlb", "soccer", "football", "basketball"]):
+        category = "sports"
+    elif any(kw in title_lower for kw in ["netflix", "spotify", "movie", "album", "billboard"]):
+        category = "entertainment"
+    elif any(kw in title_lower for kw in ["temperature", "weather", "rain", "snow"]):
+        category = "weather"
+    elif any(kw in title_lower for kw in ["fed", "interest rate", "gdp", "inflation"]):
+        category = "economics"
+    
+    if category not in cat_perf:
+        cat_perf[category] = {"wins": 0, "losses": 0}
+    
+    if won:
+        cat_perf[category]["wins"] += 1
+    else:
+        cat_perf[category]["losses"] += 1
+    
+    try:
+        category_file.write_text(json.dumps(cat_perf, indent=2))
+    except:
+        pass
+
+# ==================== CONFLICT META-LEARNING ====================
+
+CONFLICT_HISTORY_FILE = Path(__file__).parent.parent / "data" / "conflict_history.json"
+
+def load_conflict_history() -> dict:
+    """Load conflict tracking history"""
+    try:
+        if CONFLICT_HISTORY_FILE.exists():
+            return json.loads(CONFLICT_HISTORY_FILE.read_text())
+    except:
+        pass
+    return {"conflicts": [], "source_vs_source": {}}
+
+def save_conflict_history(history: dict):
+    """Save conflict history"""
+    try:
+        CONFLICT_HISTORY_FILE.write_text(json.dumps(history, indent=2))
+    except:
+        pass
+
+def track_conflict(market_id: str, signals: list, net_confidence: float):
+    """Track a conflict for later learning when market resolves"""
+    history = load_conflict_history()
+    
+    # Record the conflict
+    conflict_record = {
+        "market_id": market_id,
+        "timestamp": datetime.now().isoformat(),
+        "signals": [
+            {"source": s["source"], "side": s["side"], "confidence": s["confidence"]}
+            for s in signals
+        ],
+        "net_confidence": net_confidence,
+        "traded_side": "YES" if net_confidence >= 30 else ("NO" if net_confidence <= -30 else None),
+        "resolved": False,
+        "outcome": None
+    }
+    
+    # Keep only last 200 conflicts
+    history["conflicts"] = history.get("conflicts", [])[-199:] + [conflict_record]
+    save_conflict_history(history)
+
+def resolve_conflict_outcome(market_id: str, winning_side: str):
+    """When a conflicted market resolves, update source-vs-source stats"""
+    history = load_conflict_history()
+    
+    for conflict in history.get("conflicts", []):
+        if conflict.get("market_id") == market_id and not conflict.get("resolved"):
+            conflict["resolved"] = True
+            conflict["outcome"] = winning_side
+            
+            # Update source-vs-source stats
+            yes_sources = [s["source"] for s in conflict["signals"] if s["side"] == "YES"]
+            no_sources = [s["source"] for s in conflict["signals"] if s["side"] == "NO"]
+            
+            winners = yes_sources if winning_side == "YES" else no_sources
+            losers = no_sources if winning_side == "YES" else yes_sources
+            
+            svs = history.get("source_vs_source", {})
+            
+            for winner in winners:
+                for loser in losers:
+                    key = f"{winner}_vs_{loser}"
+                    if key not in svs:
+                        svs[key] = {"wins": 0, "losses": 0}
+                    svs[key]["wins"] += 1
+                    
+                    # Also track reverse
+                    reverse_key = f"{loser}_vs_{winner}"
+                    if reverse_key not in svs:
+                        svs[reverse_key] = {"wins": 0, "losses": 0}
+                    svs[reverse_key]["losses"] += 1
+            
+            history["source_vs_source"] = svs
+            break
+    
+    save_conflict_history(history)
+
+def get_source_conflict_edge(source_a: str, source_b: str) -> float:
+    """Get how often source_a beats source_b in conflicts (0.5 = even)"""
+    history = load_conflict_history()
+    svs = history.get("source_vs_source", {})
+    
+    key = f"{source_a}_vs_{source_b}"
+    if key in svs:
+        data = svs[key]
+        total = data["wins"] + data["losses"]
+        if total >= 3:  # Need at least 3 data points
+            return data["wins"] / total
+    
+    return 0.5  # Default: no edge
 
 def get_source_win_rate(source: str) -> float:
     """Get Bayesian win rate for a source (with Laplace smoothing)"""
@@ -1970,6 +2275,45 @@ async def record_trade_outcome(
         "source": source,
         "outcome": "win" if won else "loss",
         "new_win_rate": round(get_source_win_rate(source) * 100, 1)
+    }
+
+@app.get("/api/conflicts/stats")
+async def get_conflict_stats():
+    """Get conflict resolution statistics and source-vs-source performance"""
+    history = load_conflict_history()
+    
+    conflicts = history.get("conflicts", [])
+    svs = history.get("source_vs_source", {})
+    
+    # Recent conflicts
+    recent = conflicts[-10:] if conflicts else []
+    
+    # Source matchups sorted by sample size
+    matchups = []
+    for key, data in svs.items():
+        total = data["wins"] + data["losses"]
+        if total >= 1:
+            matchups.append({
+                "matchup": key,
+                "wins": data["wins"],
+                "losses": data["losses"],
+                "total": total,
+                "win_rate": round(data["wins"] / total * 100, 1)
+            })
+    
+    matchups.sort(key=lambda x: x["total"], reverse=True)
+    
+    # Summary
+    resolved_conflicts = [c for c in conflicts if c.get("resolved")]
+    traded_conflicts = [c for c in conflicts if c.get("traded_side")]
+    
+    return {
+        "total_conflicts": len(conflicts),
+        "resolved_conflicts": len(resolved_conflicts),
+        "traded_conflicts": len(traded_conflicts),
+        "skipped_conflicts": len(conflicts) - len(traded_conflicts),
+        "source_matchups": matchups[:20],
+        "recent_conflicts": recent
     }
 
 
@@ -2140,6 +2484,92 @@ def aggregate_all_signals() -> dict:
                     "reasoning": f"{sig.get('whale', 'Whale')} opened ${sig.get('value_usd', 0):,.0f} {sig.get('outcome', '')} position",
                     "price": sig.get("entry_price", 0.5) or 0.5
                 })
+    except: pass
+    
+    # 10. Polymarket Momentum Confirmation for Simmer signals
+    # If Simmer divergence exists AND Polymarket shows same direction momentum, boost
+    try:
+        simmer_signals = [s for s in all_signals if s.get("source") == "simmer_divergence"]
+        poly_signals = [s for s in all_signals if s.get("platform") == "polymarket"]
+        
+        for sim in simmer_signals:
+            sim_market = sim.get("market", "").lower()
+            sim_side = sim.get("side", "").upper()
+            
+            # Look for confirming Polymarket signals
+            for poly in poly_signals:
+                poly_market = poly.get("market", "").lower()
+                poly_side = poly.get("side", "").upper()
+                
+                # Check if same market category (crypto keywords)
+                crypto_keywords = ["bitcoin", "btc", "ethereum", "eth", "xrp", "solana", "crypto"]
+                sim_is_crypto = any(kw in sim_market for kw in crypto_keywords)
+                poly_is_crypto = any(kw in poly_market for kw in crypto_keywords)
+                
+                if sim_is_crypto and poly_is_crypto and sim_side == poly_side:
+                    all_signals.append({
+                        "source": "momentum_confirm",
+                        "platform": "simmer",
+                        "market": sim.get("market", ""),
+                        "market_id": sim.get("market_id"),
+                        "side": sim_side,
+                        "confidence": 15,  # Confirmation bonus
+                        "value": 0,
+                        "reasoning": f"Polymarket {poly.get('source', '')} confirms {sim_side} direction",
+                        "price": sim.get("price", 0.5),
+                        "url": sim.get("url")
+                    })
+                    break
+    except: pass
+    
+    # 11. High Liquidity Boost - Simmer markets with good trading depth
+    try:
+        simmer_data = analyze_simmer_markets()
+        for opp in simmer_data.get("all_markets", []):
+            # Check for high-confidence divergence with good uncertainty (not settled)
+            if opp.get("divergence", 0) > 0.15 and opp.get("uncertainty", 0) > 0.3:
+                all_signals.append({
+                    "source": "high_divergence",
+                    "platform": "simmer",
+                    "market": opp.get("title", ""),
+                    "market_id": opp.get("market_id"),
+                    "side": opp.get("recommendation", ""),
+                    "confidence": opp.get("divergence", 0) * 80,  # 20% div = 16 conf
+                    "value": opp.get("divergence", 0),
+                    "reasoning": f"High divergence: {opp.get('divergence', 0)*100:.0f}% gap from Polymarket",
+                    "price": opp.get("simmer_price", 0.5),
+                    "url": opp.get("url")
+                })
+    except: pass
+    
+    # 12. Resolution Edge - Markets resolving soon with clear direction
+    try:
+        for opp in simmer_data.get("all_markets", []):
+            resolves_at = opp.get("resolves_at")
+            if resolves_at:
+                from datetime import datetime
+                try:
+                    resolve_time = datetime.fromisoformat(resolves_at.replace("Z", "+00:00"))
+                    hours_left = (resolve_time - datetime.now(resolve_time.tzinfo)).total_seconds() / 3600
+                    
+                    # If resolving within 24h and price is decisive (not 50/50)
+                    price = opp.get("simmer_price", 0.5)
+                    if 0 < hours_left < 24 and (price < 0.3 or price > 0.7):
+                        # Strong conviction near resolution
+                        side = "NO" if price > 0.7 else "YES"
+                        all_signals.append({
+                            "source": "resolution_edge",
+                            "platform": "simmer",
+                            "market": opp.get("title", ""),
+                            "market_id": opp.get("market_id"),
+                            "side": side,
+                            "confidence": 20 + (24 - hours_left),  # More confidence closer to resolution
+                            "value": hours_left,
+                            "reasoning": f"Resolves in {hours_left:.1f}h at {price*100:.0f}¢ - likely {side}",
+                            "price": price,
+                            "url": opp.get("url")
+                        })
+                except: pass
     except: pass
     
     # Apply Bayesian confidence scoring to all signals
@@ -2390,15 +2820,64 @@ def engine_evaluate_and_trade() -> dict:
     if not actionable:
         return {"action": "skip", "reason": "No actionable signals"}
     
-    # Find conflicting signals (different sources recommend different sides for same market)
+    # Analyze conflicting signals with weighted net confidence
     from collections import defaultdict
-    market_sides = defaultdict(set)
+    market_signals = defaultdict(list)
     for sig in actionable:
         market_id = sig.get('market_id') or sig.get('market', '')[:30]
         side = sig.get('side', '').upper()
         if side in ['YES', 'NO']:
-            market_sides[market_id].add(side)
-    conflicting_markets = {mid for mid, sides in market_sides.items() if len(sides) > 1}
+            market_signals[market_id].append({
+                'side': side,
+                'confidence': sig.get('confidence', 0),
+                'source': sig.get('source', 'unknown'),
+                'signal': sig
+            })
+    
+    # Calculate weighted net confidence for each market
+    conflict_resolutions = {}
+    CONFLICT_NET_THRESHOLD = 30  # Need this much edge to trade a conflict
+    
+    for market_id, signals in market_signals.items():
+        sides = set(s['side'] for s in signals)
+        if len(sides) > 1:  # This is a conflict
+            # Weight by source win rate
+            yes_total = 0
+            no_total = 0
+            for s in signals:
+                win_rate = get_source_win_rate(s['source'])
+                weight = win_rate / 0.5  # 60% win rate = 1.2x weight
+                weighted_conf = s['confidence'] * weight
+                if s['side'] == 'YES':
+                    yes_total += weighted_conf
+                else:
+                    no_total += weighted_conf
+            
+            net = yes_total - no_total
+            
+            if abs(net) >= CONFLICT_NET_THRESHOLD:
+                # Strong enough edge - trade the dominant side
+                winning_side = 'YES' if net > 0 else 'NO'
+                winning_signal = next((s['signal'] for s in signals if s['side'] == winning_side), None)
+                conflict_resolutions[market_id] = {
+                    'action': 'trade',
+                    'side': winning_side,
+                    'net': net,
+                    'signal': winning_signal,
+                    'yes_total': yes_total,
+                    'no_total': no_total
+                }
+            else:
+                # Too close - skip
+                conflict_resolutions[market_id] = {
+                    'action': 'skip',
+                    'reason': f'Net {net:.1f} below threshold {CONFLICT_NET_THRESHOLD}',
+                    'yes_total': yes_total,
+                    'no_total': no_total
+                }
+            
+            # Track conflict for meta-learning
+            track_conflict(market_id, signals, net)
     
     # Get already traded signals
     traded = load_traded_signals()
@@ -2424,25 +2903,39 @@ def engine_evaluate_and_trade() -> dict:
         if sig_key in traded:
             continue
         
-        # Skip if sources conflict on this market (different sources say YES vs NO)
-        if sig_key in conflicting_markets:
-            continue
-        
-        # Only trade Simmer signals (can execute)
-        if sig.get("platform") != "simmer":
-            continue
+        # Handle conflicting signals with weighted net confidence
+        if sig_key in conflict_resolutions:
+            resolution = conflict_resolutions[sig_key]
+            if resolution['action'] == 'skip':
+                continue  # Too close, skip
+            elif resolution['action'] == 'trade':
+                # Use the winning signal from conflict resolution
+                if sig != resolution['signal']:
+                    continue  # This isn't the winning signal, skip it
         
         # Filter garbage markets (low-alpha noise)
         market_title = sig.get("market", "").lower()
-        garbage_keywords = ["temperature", "netflix", "spotify", "weather", "t20 world cup", "nba rookie"]
+        garbage_keywords = ["temperature", "weather"]
         if any(kw in market_title for kw in garbage_keywords):
             continue
+        
+        platform = sig.get("platform", "")
+        
+        # Get appropriate balance for platform
+        if platform == "simmer":
+            trade_balance = current_balance
+        elif platform == "polymarket":
+            ensure_poly_storage()
+            poly_balance_data = load_json(POLY_BALANCE_FILE)
+            trade_balance = poly_balance_data.get("usdc", DEFAULT_BALANCE)
+        else:
+            continue  # Unknown platform
         
         # Calculate position size
         amount = min(
             max_per_trade,
-            current_balance * max_position_pct,
-            current_balance * (sig.get("confidence", 0) / 500)
+            trade_balance * max_position_pct,
+            trade_balance * (sig.get("confidence", 0) / 500)
         )
         
         if amount < 10:
@@ -2450,16 +2943,29 @@ def engine_evaluate_and_trade() -> dict:
         
         price = sig.get("price", 0.5)
         
-        # EXECUTE TRADE with source tracking for Bayesian learning
-        trade_result = execute_paper_trade(
-            sig.get("market_id", sig.get("market", "")[:20]),
-            sig.get("market", "")[:60],
-            sig.get("side", "YES"),
-            amount,
-            price,
-            f"[ENGINE:{sig.get('source')}] {sig.get('reasoning', '')}",
-            source=sig.get("source")
-        )
+        # EXECUTE TRADE based on platform
+        if platform == "simmer":
+            trade_result = execute_paper_trade(
+                sig.get("market_id", sig.get("market", "")[:20]),
+                sig.get("market", "")[:60],
+                sig.get("side", "YES"),
+                amount,
+                price,
+                f"[ENGINE:{sig.get('source')}] {sig.get('reasoning', '')}",
+                source=sig.get("source")
+            )
+        elif platform == "polymarket":
+            trade_result = execute_poly_paper_trade(
+                sig.get("market_id", sig.get("market", "")[:20]),
+                sig.get("market", "")[:60],
+                sig.get("side", "YES"),
+                amount,
+                price,
+                f"[ENGINE:{sig.get('source')}] {sig.get('reasoning', '')}",
+                source=sig.get("source")
+            )
+        else:
+            continue
         
         if trade_result.get("success"):
             # Mark as traded
@@ -2471,10 +2977,13 @@ def engine_evaluate_and_trade() -> dict:
             state["last_trade_time"] = datetime.now().isoformat()
             save_engine_state(state)
             
-            # Update balance for next iteration
-            current_balance -= amount
+            # Update balance for next iteration (track by platform)
+            if platform == "simmer":
+                current_balance -= amount
+            # Polymarket balance is tracked in its own file
             
             result["trades"].append({
+                "platform": platform,
                 "market": sig.get("market", "")[:50],
                 "side": sig.get("side"),
                 "amount": round(amount, 2),
@@ -2513,7 +3022,8 @@ def engine_loop():
                 # Every 10 scans (~5 min), check for resolved positions
                 scan_count += 1
                 if scan_count % 10 == 0:
-                    check_and_resolve_positions()
+                    check_and_resolve_positions()  # Simmer positions
+                    check_poly_positions()  # Polymarket positions
             
             # Sleep between scans (30 seconds)
             time.sleep(30)
@@ -2662,6 +3172,195 @@ async def reset_paper_trading():
     save_json(POSITIONS_FILE, [])
     save_json(TRADES_FILE, [])
     return {"success": True, "balance": DEFAULT_BALANCE, "message": "Paper trading reset to $10,000"}
+
+# ==================== POLYMARKET PAPER TRADING ====================
+
+def ensure_poly_storage():
+    """Ensure Polymarket paper trading storage exists"""
+    POLY_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    if not POLY_BALANCE_FILE.exists():
+        save_json(POLY_BALANCE_FILE, {"usdc": DEFAULT_BALANCE, "created_at": datetime.now().isoformat()})
+    if not POLY_POSITIONS_FILE.exists():
+        save_json(POLY_POSITIONS_FILE, [])
+    if not POLY_TRADES_FILE.exists():
+        save_json(POLY_TRADES_FILE, [])
+
+def execute_poly_paper_trade(market_id: str, market_title: str, side: str, amount: float, price: float, reasoning: str, source: str = None) -> dict:
+    """Execute a paper trade on Polymarket (tracking only)"""
+    ensure_poly_storage()
+    
+    balance_data = load_json(POLY_BALANCE_FILE)
+    positions = load_json(POLY_POSITIONS_FILE)
+    trades = load_json(POLY_TRADES_FILE)
+    
+    current_balance = balance_data.get("usdc", DEFAULT_BALANCE)
+    
+    if amount > current_balance:
+        return {"success": False, "error": "Insufficient balance", "balance": current_balance}
+    
+    # Calculate shares
+    shares = amount / price if price > 0 else 0
+    
+    # Deduct from balance
+    balance_data["usdc"] = current_balance - amount
+    
+    # Create position
+    position = {
+        "id": f"poly_{int(datetime.now().timestamp())}_{len(positions)}",
+        "market_id": market_id,
+        "market": market_title,
+        "side": side.upper(),
+        "shares": shares,
+        "entry_price": price,
+        "cost_basis": amount,
+        "opened_at": datetime.now().isoformat(),
+        "strategy": "auto",
+        "source": source,
+        "status": "open",
+        "resolved_at": None,
+        "outcome": None,
+        "pnl": None
+    }
+    positions.append(position)
+    
+    # Log trade
+    trade = {
+        "type": "BUY",
+        "mode": "PAPER_POLY",
+        "market_id": market_id,
+        "market": market_title,
+        "side": side.upper(),
+        "amount": amount,
+        "shares": shares,
+        "price": price,
+        "reasoning": reasoning,
+        "source": source,
+        "timestamp": datetime.now().isoformat()
+    }
+    trades.append(trade)
+    
+    # Save
+    save_json(POLY_BALANCE_FILE, balance_data)
+    save_json(POLY_POSITIONS_FILE, positions)
+    save_json(POLY_TRADES_FILE, trades)
+    
+    return {
+        "success": True,
+        "platform": "polymarket",
+        "shares": shares,
+        "price": price,
+        "new_balance": balance_data["usdc"],
+        "position_id": position["id"]
+    }
+
+def check_poly_positions() -> dict:
+    """Check Polymarket paper positions for resolution"""
+    ensure_poly_storage()
+    positions = load_json(POLY_POSITIONS_FILE)
+    balance_data = load_json(POLY_BALANCE_FILE)
+    
+    resolved = []
+    
+    for pos in positions:
+        if pos.get("status") == "resolved":
+            continue
+        
+        market_id = pos.get("market_id", "")
+        
+        # Try to get market status from Polymarket
+        try:
+            result = gamma_request(f"/markets/{market_id}")
+            if result and not result.get("error"):
+                # Check if market is resolved
+                closed = result.get("closed", False)
+                outcome = result.get("outcome")
+                
+                if closed and outcome:
+                    our_side = pos.get("side", "").upper()
+                    won = (outcome.upper() == our_side)
+                    
+                    cost_basis = pos.get("cost_basis", 0)
+                    shares = pos.get("shares", 0)
+                    
+                    if won:
+                        payout = shares * 1.0
+                        pnl = payout - cost_basis
+                        balance_data["usdc"] = balance_data.get("usdc", 0) + payout
+                    else:
+                        pnl = -cost_basis
+                    
+                    pos["status"] = "resolved"
+                    pos["resolved_at"] = datetime.now().isoformat()
+                    pos["outcome"] = "win" if won else "loss"
+                    pos["pnl"] = round(pnl, 2)
+                    
+                    # Record for Bayesian learning
+                    source = pos.get("source")
+                    market_title = pos.get("market", "")
+                    if source:
+                        record_outcome(source, won, market_title)
+                    
+                    resolved.append({
+                        "position_id": pos.get("id"),
+                        "market": market_title[:50],
+                        "outcome": "WIN" if won else "LOSS",
+                        "pnl": pnl
+                    })
+        except:
+            pass
+    
+    save_json(POLY_POSITIONS_FILE, positions)
+    save_json(POLY_BALANCE_FILE, balance_data)
+    
+    return {
+        "platform": "polymarket",
+        "resolved_count": len(resolved),
+        "resolved_positions": resolved,
+        "balance": balance_data.get("usdc", 0)
+    }
+
+@app.get("/api/paper/polymarket/status")
+async def get_poly_paper_status():
+    """Get Polymarket paper trading account status"""
+    ensure_poly_storage()
+    balance_data = load_json(POLY_BALANCE_FILE)
+    positions = load_json(POLY_POSITIONS_FILE)
+    trades = load_json(POLY_TRADES_FILE)
+    
+    open_positions = [p for p in positions if p.get("status") != "resolved"]
+    resolved_positions = [p for p in positions if p.get("status") == "resolved"]
+    wins = len([p for p in resolved_positions if p.get("outcome") == "win"])
+    losses = len([p for p in resolved_positions if p.get("outcome") == "loss"])
+    
+    total_pnl = sum(p.get("pnl", 0) or 0 for p in resolved_positions)
+    
+    return {
+        "platform": "polymarket",
+        "balance": balance_data.get("usdc", DEFAULT_BALANCE),
+        "total_invested": sum(p.get("cost_basis", 0) for p in open_positions),
+        "open_positions": len(open_positions),
+        "resolved": len(resolved_positions),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(wins / max(1, wins + losses) * 100, 1),
+        "total_pnl": round(total_pnl, 2),
+        "total_trades": len(trades),
+        "positions": positions[-10:]
+    }
+
+@app.post("/api/paper/polymarket/reset")
+async def reset_poly_paper_trading():
+    """Reset Polymarket paper trading account"""
+    ensure_poly_storage()
+    save_json(POLY_BALANCE_FILE, {"usdc": DEFAULT_BALANCE, "created_at": datetime.now().isoformat()})
+    save_json(POLY_POSITIONS_FILE, [])
+    save_json(POLY_TRADES_FILE, [])
+    return {"success": True, "platform": "polymarket", "balance": DEFAULT_BALANCE}
+
+@app.get("/api/paper/polymarket/check")
+async def check_poly_paper_positions():
+    """Check and resolve Polymarket paper positions"""
+    return check_poly_positions()
 
 @app.get("/api/auto/inverse-whale")
 async def auto_inverse_whale_preview():
