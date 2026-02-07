@@ -3349,16 +3349,18 @@ async def find_vegas_edge(min_edge: float = 0.05):
     if "error" in vegas_data:
         return vegas_data
     
-    # Manual mapping of known markets
-    # TODO: Auto-match in future
+    # Manual mapping of known markets with current prices
+    # TODO: Auto-fetch prices from Polymarket API
     MARKET_MAPPINGS = {
         "Seattle Seahawks": {
             "polymarket_id": "540234",
-            "polymarket_question": "Will the Seattle Seahawks win Super Bowl 2026?"
+            "polymarket_question": "Will the Seattle Seahawks win Super Bowl 2026?",
+            "polymarket_price": 0.68  # Current price
         },
         "New England Patriots": {
             "polymarket_id": "540227", 
-            "polymarket_question": "Will the New England Patriots win Super Bowl 2026?"
+            "polymarket_question": "Will the New England Patriots win Super Bowl 2026?",
+            "polymarket_price": 0.32  # Current price (~1 - Seahawks)
         }
     }
     
@@ -3375,9 +3377,8 @@ async def find_vegas_edge(min_edge: float = 0.05):
                 prob_key = "home_prob_true" if team_key == "home_team" else "away_prob_true"
                 vegas_prob = event.get(prob_key, 0)
                 
-                # Get Polymarket price (simplified - would need API call)
-                # For now, use stored/cached price
-                poly_price = 0.68  # Current approximate price
+                # Get Polymarket price from mapping
+                poly_price = mapping.get("polymarket_price", 0.50)
                 
                 edge = vegas_prob - poly_price
                 
