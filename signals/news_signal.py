@@ -284,7 +284,7 @@ MARKET_PATTERNS = {
     
     # Sports
     r"super bowl": ["super bowl", "NFL"],
-    r"nfl|patriots|seahawks|chiefs": ["NFL", "football"],
+    r"\bnfl\b|patriots|seahawks|chiefs": ["NFL", "football"],
     r"nba|lakers|celtics|warriors": ["NBA", "basketball"],
     r"world series|mlb": ["MLB", "baseball"],
     
@@ -294,16 +294,50 @@ MARKET_PATTERNS = {
     r"tesla|elon musk": ["tesla", "TSLA", "elon musk"],
     r"openai|chatgpt|gpt": ["openai", "AI", "chatgpt"],
     r"gta|rockstar": ["GTA 6", "rockstar games"],
+    r"nvidia|nvda": ["nvidia", "NVDA", "AI chips"],
+    r"microsoft|msft": ["microsoft", "MSFT"],
+    r"amazon|amzn": ["amazon", "AMZN"],
+    r"meta|facebook": ["meta", "facebook"],
+    r"spacex|starship": ["spacex", "elon musk"],
+    
+    # Economics
+    r"inflation|cpi": ["inflation", "CPI", "federal reserve"],
+    r"interest rate|fed rate|federal reserve": ["federal reserve", "interest rates"],
+    r"recession": ["recession", "economy"],
+    r"unemployment": ["unemployment", "jobs report"],
+    r"gdp": ["GDP", "economy"],
+    
+    # Entertainment
+    r"oscar|academy award": ["oscars", "academy awards"],
+    r"grammy": ["grammys", "music awards"],
+    r"netflix": ["netflix", "streaming"],
+    r"disney": ["disney", "streaming"],
+    
+    # Geopolitics
+    r"russia|ukraine|putin|zelensky": ["russia ukraine", "war"],
+    r"china|taiwan|xi jinping": ["china", "taiwan"],
+    r"iran|israel|gaza": ["israel", "middle east"],
 }
 
 def extract_keywords(market_title: str) -> List[str]:
-    """Extract relevant search keywords from market title."""
+    """
+    Extract relevant search keywords from market title.
+    
+    Uses hybrid approach:
+    1. Pattern matching for known topics (fast, reliable)
+    2. Dynamic entity extraction for unknown topics (flexible)
+    """
     title_lower = market_title.lower()
     keywords = []
     
+    # Step 1: Pattern matching for known high-value topics
     for pattern, kws in MARKET_PATTERNS.items():
         if re.search(pattern, title_lower):
             keywords.extend(kws)
+    
+    # Step 2: If no patterns matched, extract dynamically
+    if not keywords:
+        keywords = extract_dynamic_keywords(market_title)
     
     # Deduplicate while preserving order
     seen = set()
@@ -314,6 +348,118 @@ def extract_keywords(market_title: str) -> List[str]:
             unique.append(kw)
     
     return unique[:3]  # Max 3 keywords per market
+
+
+def extract_dynamic_keywords(text: str) -> List[str]:
+    """
+    Dynamically extract searchable keywords from any text.
+    
+    Uses simple NLP heuristics (no external dependencies):
+    1. Extract capitalized phrases (likely proper nouns/names)
+    2. Extract quoted phrases
+    3. Extract numbers with context (dates, prices, etc.)
+    4. Filter out common stop words
+    """
+    keywords = []
+    
+    # Common words to ignore
+    STOP_WORDS = {
+        "will", "the", "a", "an", "be", "by", "in", "on", "at", "to", "of",
+        "for", "is", "are", "was", "were", "been", "being", "have", "has",
+        "had", "do", "does", "did", "and", "or", "but", "if", "than", "then",
+        "that", "this", "these", "those", "what", "which", "who", "whom",
+        "before", "after", "during", "under", "over", "between", "into",
+        "through", "about", "against", "above", "below", "any", "each",
+        "more", "most", "other", "some", "such", "only", "own", "same",
+        "so", "can", "just", "should", "now", "yes", "no", "how", "when",
+        "where", "why", "all", "both", "few", "many", "much", "very",
+    }
+    
+    # 1. Extract capitalized multi-word phrases (e.g., "Donald Trump", "Super Bowl")
+    cap_phrases = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', text)
+    for phrase in cap_phrases:
+        if len(phrase) > 3:
+            keywords.append(phrase)
+    
+    # 2. Extract single capitalized words (proper nouns)
+    cap_words = re.findall(r'\b([A-Z][a-z]{2,})\b', text)
+    for word in cap_words:
+        word_lower = word.lower()
+        if word_lower not in STOP_WORDS and len(word) > 2:
+            # Skip if it's just start of sentence (check if preceded by . or start)
+            keywords.append(word)
+    
+    # 3. Extract quoted phrases
+    quoted = re.findall(r'"([^"]+)"', text)
+    keywords.extend(quoted)
+    
+    # 4. Extract $amount patterns (financial context)
+    money = re.findall(r'\$[\d,]+(?:\.\d+)?(?:\s*(?:million|billion|M|B|k))?', text)
+    keywords.extend(money[:1])  # Only first money reference
+    
+    # 5. Extract year patterns in context
+    years = re.findall(r'\b(20\d{2})\b', text)
+    for year in years[:1]:
+        # Find what's near the year
+        context = re.search(rf'(\w+)\s+{year}|{year}\s+(\w+)', text)
+        if context:
+            ctx_word = context.group(1) or context.group(2)
+            if ctx_word.lower() not in STOP_WORDS:
+                keywords.append(f"{ctx_word} {year}")
+    
+    # 6. Extract percentages in context
+    pcts = re.findall(r'(\d+(?:\.\d+)?%)', text)
+    keywords.extend(pcts[:1])
+    
+    # 7. Extract important uncapitalized nouns (domain-specific)
+    IMPORTANT_NOUNS = [
+        "inflation", "recession", "unemployment", "tariff", "impeachment",
+        "indictment", "verdict", "settlement", "merger", "acquisition",
+        "bankruptcy", "default", "ceasefire", "invasion", "sanctions",
+        "strike", "shutdown", "outbreak", "pandemic", "vaccine",
+    ]
+    text_lower = text.lower()
+    for noun in IMPORTANT_NOUNS:
+        if noun in text_lower:
+            keywords.append(noun)
+    
+    # Dedupe and limit
+    seen = set()
+    unique = []
+    for kw in keywords:
+        kw_lower = kw.lower()
+        if kw_lower not in seen and len(kw) > 2:
+            seen.add(kw_lower)
+            unique.append(kw)
+    
+    return unique[:5]
+
+
+def test_keyword_extraction():
+    """Test dynamic keyword extraction."""
+    test_cases = [
+        "Will Elon Musk buy TikTok by March 2026?",
+        "Will Taylor Swift announce a new album before summer?",
+        "Will the FDA approve Neuralink's brain chip?",
+        "Will inflation drop below 3% by December?",
+        "Will SpaceX land humans on Mars by 2030?",
+        "Will the Golden State Warriors win the NBA Finals?",
+        "Will OpenAI release GPT-5 before July?",
+    ]
+    
+    print("Dynamic Keyword Extraction Test:")
+    print("-" * 60)
+    for title in test_cases:
+        kws = extract_keywords(title)
+        print(f"{title[:50]:50} → {kws}")
+
+
+if __name__ == "__main__":
+    # Add test for dynamic extraction
+    test_keyword_extraction()
+    print()
+    
+    # Original tests...
 
 
 # ============================================================================
