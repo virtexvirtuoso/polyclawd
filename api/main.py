@@ -3030,6 +3030,39 @@ def aggregate_all_signals() -> dict:
                 except: pass
     except: pass
     
+    # 13. News Breaking Signals (Google News + Reddit)
+    try:
+        # Import news signal module
+        import sys
+        news_path = str(Path(__file__).parent.parent / "signals")
+        if news_path not in sys.path:
+            sys.path.insert(0, news_path)
+        from news_signal import scan_all_markets_for_news, get_trending_reddit_signals
+        
+        # Get active Polymarket markets for news scanning
+        try:
+            poly_req = urllib.request.Request(
+                "https://gamma-api.polymarket.com/markets?closed=false&limit=30",
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(poly_req, timeout=10) as resp:
+                poly_markets = json.loads(resp.read().decode())
+        except:
+            poly_markets = []
+        
+        # Scan for breaking news on active markets
+        news_signals = scan_all_markets_for_news(poly_markets[:15])
+        for sig in news_signals:
+            all_signals.append(sig)
+        
+        # Also get Reddit sentiment signals for crypto/politics
+        for category in ["crypto", "politics"]:
+            reddit_signals = get_trending_reddit_signals(category)
+            for sig in reddit_signals[:2]:  # Max 2 per category
+                all_signals.append(sig)
+    except Exception as e:
+        pass  # News source is optional enhancement
+    
     # Apply Bayesian confidence scoring to all signals
     for sig in all_signals:
         raw_conf = sig.get("confidence", 0)
@@ -3172,6 +3205,51 @@ def auto_paper_trade_signals(max_trades: int = 5, max_per_trade: float = 100, mi
 async def get_all_signals():
     """Get aggregated signals from all sources"""
     return aggregate_all_signals()
+
+
+@app.get("/api/signals/news")
+async def get_news_signals():
+    """Get signals specifically from news sources (Google News + Reddit)"""
+    try:
+        import sys
+        news_path = str(Path(__file__).parent.parent / "signals")
+        if news_path not in sys.path:
+            sys.path.insert(0, news_path)
+        from news_signal import (
+            fetch_google_news, fetch_reddit_posts, 
+            get_trending_reddit_signals, analyze_sentiment
+        )
+        
+        results = {
+            "google_news": {},
+            "reddit": {},
+            "signals": [],
+        }
+        
+        # Fetch news for key topics
+        for topic in ["bitcoin", "trump", "super bowl"]:
+            articles = fetch_google_news(topic, max_results=5)
+            results["google_news"][topic] = [
+                {
+                    "title": a.get("title", "")[:80],
+                    "source": a.get("source", ""),
+                    "age_minutes": a.get("age_minutes"),
+                    "sentiment": analyze_sentiment(a.get("title", ""))
+                }
+                for a in articles[:3]
+            ]
+        
+        # Fetch Reddit trending
+        for category in ["crypto", "politics"]:
+            signals = get_trending_reddit_signals(category)
+            results["signals"].extend(signals)
+        
+        results["generated_at"] = datetime.now().isoformat()
+        return results
+        
+    except Exception as e:
+        return {"error": str(e), "enabled": False}
+
 
 @app.post("/api/signals/auto-trade")
 async def auto_trade_on_signals(
