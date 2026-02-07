@@ -173,16 +173,14 @@ async function loadDashboard() {
   try {
     showLoading('stats-grid');
     showLoading('positions-table');
+    showLoading('recent-trades');
     
-    const [balance, positions, trades] = await Promise.all([
-      api.get('/balance'),
-      api.get('/positions'),
-      api.get('/trades?limit=10')
-    ]);
+    // Load Polymarket paper trading data (default)
+    const data = await api.get('/paper/polymarket/status');
     
-    renderStats(balance);
-    renderPositions(positions);
-    renderRecentTrades(trades);
+    renderStats(data);
+    renderPositions(data.positions || []);
+    renderRecentTrades(data.trades || []);
     
   } catch (error) {
     console.error('Dashboard load failed:', error);
@@ -190,81 +188,119 @@ async function loadDashboard() {
   }
 }
 
-function renderStats(balance) {
+function renderStats(data) {
   const statsGrid = document.getElementById('stats-grid');
   if (!statsGrid) return;
   
-  const pnl = balance.total - 10000;
-  const pnlPct = (pnl / 10000) * 100;
+  const totalValue = data.balance + data.total_invested;
+  const pnl = data.total_pnl || 0;
+  const pnlPct = data.resolved_count > 0 ? (pnl / (data.total_invested || 10000)) * 100 : 0;
+  const winRate = data.resolved_count > 0 ? ((data.wins / data.resolved_count) * 100).toFixed(0) : '-';
   
   statsGrid.innerHTML = `
     <div class="card">
       <div class="card-header">💰 Cash Balance</div>
-      <div class="card-value">${formatCurrency(balance.cash)}</div>
+      <div class="card-value">${formatCurrency(data.balance)}</div>
     </div>
     <div class="card">
-      <div class="card-header">📈 Positions Value</div>
-      <div class="card-value">${formatCurrency(balance.positions_value)}</div>
+      <div class="card-header">📈 Invested</div>
+      <div class="card-value">${formatCurrency(data.total_invested)}</div>
     </div>
     <div class="card">
-      <div class="card-header">🏦 Total Portfolio</div>
-      <div class="card-value">${formatCurrency(balance.total)}</div>
+      <div class="card-header">🎯 Positions</div>
+      <div class="card-value">${data.open_positions} open</div>
     </div>
     <div class="card">
-      <div class="card-header">${pnl >= 0 ? '📈' : '📉'} Total P&L</div>
-      <div class="card-value ${getPnLClass(pnl)}">${formatPnL(pnl)} (${formatPercent(pnlPct)})</div>
+      <div class="card-header">📊 Record</div>
+      <div class="card-value">${data.wins}W-${data.losses}L (${winRate}%)</div>
     </div>
   `;
 }
 
 function renderPositions(positions) {
-  const container = document.getElementById('positions-table');
-  if (!container) return;
+  const tableContainer = document.getElementById('positions-table');
+  const cardsContainer = document.getElementById('positions-cards');
   
   if (!positions || positions.length === 0) {
-    showEmpty('positions-table', 'No open positions');
+    if (tableContainer) showEmpty('positions-table', 'No open positions');
+    if (cardsContainer) cardsContainer.innerHTML = '<div class="empty-state"><p>No open positions</p></div>';
     return;
   }
   
-  let html = `
-    <table>
-      <thead>
-        <tr>
-          <th>Market</th>
-          <th>Side</th>
-          <th>Shares</th>
-          <th>Entry</th>
-          <th>Current</th>
-          <th>Value</th>
-          <th>P&L</th>
-          <th>Action</th>
-        </tr>
-      </thead>
-      <tbody>
-  `;
+  // Filter to only show open positions
+  const openPositions = positions.filter(p => p.status === 'open');
   
-  for (const pos of positions) {
-    const pnlClass = getPnLClass(pos.pnl);
-    html += `
-      <tr>
-        <td class="cell-mono">${truncateText(pos.market_question, 40)}</td>
-        <td><span class="badge ${pos.side === 'YES' ? 'badge-success' : 'badge-error'}">${pos.side}</span></td>
-        <td class="cell-mono">${pos.shares.toFixed(2)}</td>
-        <td class="cell-mono">${formatPrice(pos.entry_price)}</td>
-        <td class="cell-mono">${formatPrice(pos.current_price)}</td>
-        <td class="cell-mono">${formatCurrency(pos.current_value)}</td>
-        <td class="cell-mono cell-${pnlClass}">${formatPnL(pos.pnl)} (${formatPercent(pos.pnl_percent)})</td>
-        <td>
-          <button class="btn btn-sm btn-danger" onclick="sellPosition('${pos.market_id}', '${pos.side}', ${pos.current_value})">
-            Sell
-          </button>
-        </td>
-      </tr>
-    `;
+  if (openPositions.length === 0) {
+    if (tableContainer) showEmpty('positions-table', 'No open positions');
+    if (cardsContainer) cardsContainer.innerHTML = '<div class="empty-state"><p>No open positions</p></div>';
+    return;
   }
   
-  html += '</tbody></table>';
-  container.innerHTML = html;
+  // Render table (desktop)
+  if (tableContainer) {
+    let tableHtml = `
+      <table>
+        <thead>
+          <tr>
+            <th>Market</th>
+            <th>Side</th>
+            <th>Shares</th>
+            <th>Entry</th>
+            <th>Cost</th>
+            <th>Source</th>
+          </tr>
+        </thead>
+        <tbody>
+    `;
+    
+    for (const pos of openPositions) {
+      tableHtml += `
+        <tr>
+          <td class="cell-mono">${truncateText(pos.market, 40)}</td>
+          <td><span class="badge ${pos.side === 'YES' ? 'badge-success' : 'badge-error'}">${pos.side}</span></td>
+          <td class="cell-mono">${pos.shares.toFixed(0)}</td>
+          <td class="cell-mono">${formatPrice(pos.entry_price)}</td>
+          <td class="cell-mono">${formatCurrency(pos.cost_basis)}</td>
+          <td class="cell-mono text-secondary">${pos.source || 'manual'}</td>
+        </tr>
+      `;
+    }
+    
+    tableHtml += '</tbody></table>';
+    tableContainer.innerHTML = tableHtml;
+  }
+  
+  // Render cards (mobile)
+  if (cardsContainer) {
+    let cardsHtml = '';
+    
+    for (const pos of openPositions) {
+      cardsHtml += `
+        <div class="position-card">
+          <div class="position-card-header">
+            <div class="position-card-market">${pos.market}</div>
+            <span class="badge ${pos.side === 'YES' ? 'badge-success' : 'badge-error'}">${pos.side}</span>
+          </div>
+          <div class="position-card-stats">
+            <div class="position-card-stat">
+              <div class="position-card-stat-label">Shares</div>
+              <div class="position-card-stat-value">${pos.shares.toFixed(0)}</div>
+            </div>
+            <div class="position-card-stat">
+              <div class="position-card-stat-label">Entry</div>
+              <div class="position-card-stat-value">${formatPrice(pos.entry_price)}</div>
+            </div>
+            <div class="position-card-stat">
+              <div class="position-card-stat-label">Cost</div>
+              <div class="position-card-stat-value">${formatCurrency(pos.cost_basis)}</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    
+    cardsContainer.innerHTML = cardsHtml;
+  }
 }
 
 function renderRecentTrades(trades) {
@@ -278,17 +314,29 @@ function renderRecentTrades(trades) {
   
   let html = '<div class="section-header">Recent Trades</div>';
   
-  for (const trade of trades.slice(0, 5)) {
-    if (trade.type === 'RESET') continue;
-    const badgeClass = trade.type === 'BUY' ? 'badge-success' : 'badge-error';
+  // Sort by timestamp descending (most recent first)
+  const sortedTrades = [...trades].sort((a, b) => 
+    new Date(b.timestamp || b.opened_at) - new Date(a.timestamp || a.opened_at)
+  );
+  
+  for (const trade of sortedTrades.slice(0, 5)) {
+    const sideClass = trade.side === 'YES' ? 'badge-success' : 'badge-error';
+    const statusClass = trade.status === 'resolved' ? 'badge-secondary' : 'badge-success';
+    const market = trade.market || trade.market_question || 'Unknown';
+    const cost = trade.cost_basis || trade.amount || 0;
+    const tradeTime = trade.opened_at || trade.timestamp;
+    
     html += `
       <div class="flex items-center justify-between mb-1" style="padding: 0.5rem 0; border-bottom: 1px solid var(--border);">
         <div>
-          <span class="badge ${badgeClass}">${trade.type}</span>
-          <span class="text-mono ml-1">${trade.side}</span>
-          <span class="text-secondary ml-1">${truncateText(trade.market_question, 30)}</span>
+          <span class="badge ${sideClass}">${trade.side}</span>
+          <span class="text-mono ml-1">${trade.shares?.toFixed(0) || '?'} shares</span>
+          <span class="text-secondary ml-1">${truncateText(market, 30)}</span>
         </div>
-        <div class="text-mono">${formatCurrency(trade.amount)}</div>
+        <div class="text-right">
+          <div class="text-mono">${formatCurrency(cost)}</div>
+          <div class="text-secondary" style="font-size: 0.75rem;">${tradeTime ? timeAgo(tradeTime) : ''}</div>
+        </div>
       </div>
     `;
   }

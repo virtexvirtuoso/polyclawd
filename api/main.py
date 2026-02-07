@@ -56,6 +56,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def startup_event():
+    """Auto-start trading engine on server boot"""
+    start_engine()
+    print("⚡ Trading engine auto-started")
+
 # Paper trading storage
 STORAGE_DIR = Path.home() / ".openclaw" / "paper-trading"
 BALANCE_FILE = STORAGE_DIR / "balance.json"
@@ -4061,13 +4067,14 @@ async def get_poly_paper_status():
         "balance": balance_data.get("usdc", DEFAULT_BALANCE),
         "total_invested": sum(p.get("cost_basis", 0) for p in open_positions),
         "open_positions": len(open_positions),
-        "resolved": len(resolved_positions),
+        "resolved_count": len(resolved_positions),
         "wins": wins,
         "losses": losses,
         "win_rate": round(wins / max(1, wins + losses) * 100, 1),
         "total_pnl": round(total_pnl, 2),
         "total_trades": len(trades),
-        "positions": positions[-10:]
+        "positions": positions[-20:],
+        "trades": positions[-10:]  # Recent trades for dashboard
     }
 
 @app.post("/api/paper/polymarket/reset")
@@ -4083,6 +4090,33 @@ async def reset_poly_paper_trading():
 async def check_poly_paper_positions():
     """Check and resolve Polymarket paper positions"""
     return check_poly_positions()
+
+
+@app.post("/api/paper/polymarket/trade")
+async def manual_poly_paper_trade(
+    market_id: str = Query(..., description="Market ID or slug"),
+    market_title: str = Query(..., description="Market title"),
+    side: str = Query(..., description="YES or NO"),
+    amount: float = Query(..., ge=5, description="Amount in USD"),
+    price: float = Query(..., ge=0.01, le=0.99, description="Entry price"),
+    reasoning: str = Query("Manual trade", description="Trade reasoning"),
+):
+    """Execute a manual Polymarket paper trade"""
+    side = side.upper()
+    if side not in ("YES", "NO"):
+        return {"success": False, "error": "Side must be YES or NO"}
+    
+    result = execute_poly_paper_trade(
+        market_id=market_id,
+        market_title=market_title,
+        side=side,
+        amount=amount,
+        price=price,
+        reasoning=reasoning,
+        source="manual"
+    )
+    return result
+
 
 @app.get("/api/auto/inverse-whale")
 async def auto_inverse_whale_preview():

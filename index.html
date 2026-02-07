@@ -2,9 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Dashboard | Polymarket Trading Bot</title>
-  <link rel="stylesheet" href="css/virtuoso.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#fbbf24">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Polyclawd">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <title>Polyclawd | Paper Trading</title>
+  <link rel="stylesheet" href="css/virtuoso.css?v=5">
 </head>
 <body>
   <div class="grid-overlay"></div>
@@ -14,23 +20,39 @@
     <div class="container nav-inner">
       <a href="./" class="nav-brand">
         <span>⚡</span>
-        <span>Polymarket Bot</span>
+        <span>Polyclawd</span>
       </a>
       <ul class="nav-links">
         <li><a href="./" class="nav-link active">Dashboard</a></li>
         <li><a href="arb.html" class="nav-link">Arb Scanner</a></li>
         <li><a href="cross-arb.html" class="nav-link">Cross-Platform</a></li>
         <li><a href="whales.html" class="nav-link">🐋 Whales</a></li>
-        <li><a href="rewards.html" class="nav-link">Rewards</a></li>
         <li><a href="trade.html" class="nav-link">Trade</a></li>
         <li><a href="markets.html" class="nav-link">Markets</a></li>
       </ul>
       <div class="live-indicator">
         <span class="live-dot"></span>
-        <span>Paper Trading</span>
+        <span>Paper</span>
       </div>
+      <button class="nav-hamburger" onclick="toggleMobileMenu()" aria-label="Menu">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
     </div>
   </nav>
+  
+  <!-- Mobile Menu -->
+  <div class="nav-mobile" id="mobile-menu">
+    <ul class="nav-mobile-links">
+      <li><a href="./" class="nav-link active">📊 Dashboard</a></li>
+      <li><a href="arb.html" class="nav-link">🎯 Arb Scanner</a></li>
+      <li><a href="cross-arb.html" class="nav-link">🔄 Cross-Platform</a></li>
+      <li><a href="whales.html" class="nav-link">🐋 Whales</a></li>
+      <li><a href="trade.html" class="nav-link">💹 Trade</a></li>
+      <li><a href="markets.html" class="nav-link">📈 Markets</a></li>
+    </ul>
+  </div>
   
   <!-- Main Content -->
   <main class="main-content">
@@ -39,8 +61,8 @@
       <!-- Page Header -->
       <div class="page-header">
         <div>
-          <h1 class="page-title">Portfolio Dashboard</h1>
-          <p class="page-subtitle">Paper trading with real market data</p>
+          <h1 class="page-title">📈 Polymarket Paper Trading</h1>
+          <p class="page-subtitle">Paper trading with real Polymarket data</p>
         </div>
         <button class="btn btn-secondary" onclick="loadDashboard()">
           ↻ Refresh
@@ -58,10 +80,18 @@
       <!-- Open Positions -->
       <section class="section">
         <div class="section-header">Open Positions</div>
+        <!-- Desktop table -->
         <div id="positions-table" class="table-container">
           <div class="loading">
             <div class="spinner"></div>
             <span>Loading positions...</span>
+          </div>
+        </div>
+        <!-- Mobile cards -->
+        <div id="positions-cards" class="position-cards">
+          <div class="loading">
+            <div class="spinner"></div>
+            <span>Loading...</span>
           </div>
         </div>
       </section>
@@ -84,6 +114,118 @@
   <!-- Toast Container -->
   <div id="toast-container" class="toast-container"></div>
   
-  <script src="js/app.js"></script>
+  <!-- Bottom Navigation (Mobile) -->
+  <nav class="bottom-nav">
+    <div class="bottom-nav-inner">
+      <a href="./" class="bottom-nav-link active">
+        <span class="bottom-nav-icon">📊</span>
+        <span>Home</span>
+      </a>
+      <a href="whales.html" class="bottom-nav-link">
+        <span class="bottom-nav-icon">🐋</span>
+        <span>Whales</span>
+      </a>
+      <a href="trade.html" class="bottom-nav-link">
+        <span class="bottom-nav-icon">💹</span>
+        <span>Trade</span>
+      </a>
+      <a href="arb.html" class="bottom-nav-link">
+        <span class="bottom-nav-icon">🎯</span>
+        <span>Arb</span>
+      </a>
+      <a href="markets.html" class="bottom-nav-link">
+        <span class="bottom-nav-icon">📈</span>
+        <span>Markets</span>
+      </a>
+    </div>
+  </nav>
+  
+  <!-- Theme Toggle -->
+  <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle theme">
+    🌙
+  </button>
+  
+  <script src="js/app.js?v=4"></script>
+  <script>
+    // Register Service Worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js')
+        .then(() => console.log('SW registered'))
+        .catch((err) => console.log('SW error:', err));
+    }
+    
+    // Theme toggle
+    function toggleTheme() {
+      const html = document.documentElement;
+      const btn = document.querySelector('.theme-toggle');
+      
+      if (html.classList.contains('light')) {
+        html.classList.remove('light');
+        btn.textContent = '🌙';
+        localStorage.setItem('theme', 'dark');
+      } else {
+        html.classList.add('light');
+        btn.textContent = '☀️';
+        localStorage.setItem('theme', 'light');
+      }
+    }
+    
+    // Load saved theme
+    if (localStorage.getItem('theme') === 'light') {
+      document.documentElement.classList.add('light');
+      document.querySelector('.theme-toggle').textContent = '☀️';
+    }
+    
+    // Mobile menu toggle
+    function toggleMobileMenu() {
+      const hamburger = document.querySelector('.nav-hamburger');
+      const menu = document.getElementById('mobile-menu');
+      hamburger.classList.toggle('active');
+      menu.classList.toggle('active');
+    }
+    
+    // Close menu on link click
+    document.querySelectorAll('.nav-mobile-links .nav-link').forEach(link => {
+      link.addEventListener('click', () => {
+        document.querySelector('.nav-hamburger').classList.remove('active');
+        document.getElementById('mobile-menu').classList.remove('active');
+      });
+    });
+    
+    // Pull to refresh
+    let touchStart = 0;
+    let touchY = 0;
+    const pullIndicator = document.createElement('div');
+    pullIndicator.className = 'pull-indicator';
+    pullIndicator.textContent = '↓ Pull to refresh';
+    document.body.appendChild(pullIndicator);
+    
+    document.addEventListener('touchstart', (e) => {
+      touchStart = e.touches[0].clientY;
+    }, { passive: true });
+    
+    document.addEventListener('touchmove', (e) => {
+      if (window.scrollY === 0) {
+        touchY = e.touches[0].clientY - touchStart;
+        if (touchY > 50) {
+          pullIndicator.classList.add('visible');
+          pullIndicator.textContent = touchY > 100 ? '↑ Release to refresh' : '↓ Pull to refresh';
+        }
+      }
+    }, { passive: true });
+    
+    document.addEventListener('touchend', () => {
+      if (touchY > 100 && window.scrollY === 0) {
+        pullIndicator.textContent = '⟳ Refreshing...';
+        setTimeout(() => {
+          loadDashboard();
+          pullIndicator.classList.remove('visible');
+        }, 500);
+      } else {
+        pullIndicator.classList.remove('visible');
+      }
+      touchY = 0;
+    });
+  </script>
 </body>
 </html>
