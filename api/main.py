@@ -3493,6 +3493,45 @@ async def get_soccer_edges(min_edge: float = 0.01):
         return {"error": str(e), "enabled": False}
 
 
+@app.get("/api/betfair/edge")
+async def get_betfair_edges():
+    """
+    Get edges between Betfair Exchange and Polymarket
+    
+    Uses The Odds API to fetch Betfair Exchange odds and compares with Polymarket.
+    Covers: NBA, NHL, World Cup, EPL, Politics
+    """
+    try:
+        import sys
+        odds_path = str(Path(__file__).parent.parent / "odds")
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from betfair_edge import get_betfair_edge_summary
+        
+        return await get_betfair_edge_summary()
+    except Exception as e:
+        return {"error": str(e), "enabled": False}
+
+
+@app.get("/api/kalshi/markets")
+async def get_kalshi_markets():
+    """
+    Get Kalshi market summary and compare with Polymarket
+    
+    Returns overlapping markets between Kalshi and Polymarket for arbitrage detection.
+    """
+    try:
+        import sys
+        odds_path = str(Path(__file__).parent.parent / "odds")
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from kalshi_edge import get_kalshi_polymarket_comparison
+        
+        return await get_kalshi_polymarket_comparison()
+    except Exception as e:
+        return {"error": str(e), "enabled": False}
+
+
 @app.get("/api/signals")
 async def get_all_signals():
     """Get aggregated signals from all sources"""
