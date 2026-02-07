@@ -180,12 +180,14 @@ async def get_vegas_odds(force_refresh: bool = False) -> dict[str, list[VegasOdd
     save_cache(data)
     return data
 
-# Hardcoded fallback data (from VegasInsider Feb 7, 2026)
+# Hardcoded fallback data (from VegasInsider/BetMGM Feb 7, 2026)
 FALLBACK_ODDS = {
     "epl": [
-        VegasOdds("Liverpool", 187, 0.348, "VegasInsider", "EPL", "2026-02-07"),
-        VegasOdds("Man City", 225, 0.308, "VegasInsider", "EPL", "2026-02-07"),
-        VegasOdds("Arsenal", 250, 0.286, "VegasInsider", "EPL", "2026-02-07"),
+        VegasOdds("Arsenal", -550, 0.846, "BetMGM", "EPL", "2026-02-07"),
+        VegasOdds("Manchester City", 450, 0.182, "BetMGM", "EPL", "2026-02-07"),
+        VegasOdds("Aston Villa", 3300, 0.029, "BetMGM", "EPL", "2026-02-07"),
+        VegasOdds("Manchester United", 5000, 0.020, "BetMGM", "EPL", "2026-02-07"),
+        VegasOdds("Liverpool", 10000, 0.010, "BetMGM", "EPL", "2026-02-07"),
     ],
     "ucl": [
         VegasOdds("Arsenal", 350, 0.222, "VegasInsider", "UCL", "2026-02-07"),
