@@ -1664,7 +1664,7 @@ async def get_simmer_opportunities():
     """Find trading opportunities on Simmer markets"""
     return analyze_simmer_markets()
 
-def execute_paper_trade(market_id: str, market_title: str, side: str, amount: float, price: float, reasoning: str, source: str = None) -> dict:
+def execute_paper_trade(market_id: str, market_title: str, side: str, amount: float, price: float, reasoning: str, source: str = None, entry_confidence: int = 50) -> dict:
     """Execute a paper trade and update local storage"""
     ensure_storage()
     
@@ -1694,6 +1694,9 @@ def execute_paper_trade(market_id: str, market_title: str, side: str, amount: fl
     balance_data["usdc"] = current_balance - amount
     balance_data["last_trade"] = datetime.now().isoformat()
     
+    # Calculate entry EV for rotation tracking
+    entry_ev = calculate_signal_ev(entry_confidence, price)
+    
     # Add position with source tracking
     position = {
         "id": f"pos_{int(datetime.now().timestamp())}_{len(positions)}",
@@ -1706,6 +1709,8 @@ def execute_paper_trade(market_id: str, market_title: str, side: str, amount: fl
         "opened_at": datetime.now().isoformat(),
         "strategy": "auto",
         "source": source,  # Track which signal source generated this
+        "entry_confidence": entry_confidence,  # For EV tracking
+        "entry_ev": round(entry_ev, 4),  # For rotation decisions
         "status": "open",
         "resolved_at": None,
         "outcome": None,
@@ -3467,6 +3472,224 @@ def check_drawdown_halt(state: dict, current_balance: float) -> tuple:
     
     return False, None
 
+# =============================================================================
+# OPPORTUNITY COST ENGINE - Position rotation for maximum EV
+# =============================================================================
+
+ROTATION_THRESHOLD = 1.3  # New signal must be 30% better to rotate
+MIN_POSITION_AGE_MINUTES = 10  # Don't rotate positions younger than this
+EV_TIME_DECAY_HOURS = 48  # EV decays over this period (assume ~48h to resolution avg)
+
+def calculate_signal_ev(confidence: float, price: float) -> float:
+    """
+    Calculate expected value of a signal.
+    EV = (confidence/100) × potential_profit - (1-confidence/100) × potential_loss
+    
+    For binary markets:
+    - If we buy YES at price p, we profit (1-p) if right, lose p if wrong
+    - EV = (conf/100) × (1-p) - (1-conf/100) × p
+    - Simplified: EV = conf/100 - p
+    
+    Returns EV as ratio (0.15 = 15% expected profit)
+    """
+    if price <= 0 or price >= 1:
+        return 0
+    
+    conf_ratio = confidence / 100
+    ev = conf_ratio - price
+    return ev
+
+def calculate_position_current_ev(position: dict, current_price: float = None) -> dict:
+    """
+    Calculate a position's current expected value.
+    
+    Factors:
+    1. Original entry EV (confidence-based)
+    2. Price movement (reduces upside if moved in our favor)
+    3. Time decay (less time = less value)
+    4. Unrealized P&L
+    """
+    entry_price = position.get("entry_price", 0.5)
+    entry_confidence = position.get("entry_confidence", 50)
+    cost_basis = position.get("cost_basis", 0)
+    shares = position.get("shares", 0)
+    opened_at = position.get("opened_at")
+    side = position.get("side", "YES").upper()
+    
+    # Use entry price as current if not provided
+    if current_price is None:
+        current_price = entry_price
+    
+    # Calculate original entry EV
+    entry_ev = calculate_signal_ev(entry_confidence, entry_price)
+    
+    # Calculate current state
+    if side == "YES":
+        current_value = shares * current_price
+        potential_profit = shares * (1 - current_price)  # If resolves YES
+    else:
+        current_value = shares * (1 - current_price)
+        potential_profit = shares * current_price  # If resolves NO (we get $1 - current_no_price)
+    
+    unrealized_pnl = current_value - cost_basis
+    unrealized_pnl_pct = unrealized_pnl / cost_basis if cost_basis > 0 else 0
+    
+    # Time decay factor (linear decay over EV_TIME_DECAY_HOURS)
+    time_factor = 1.0
+    if opened_at:
+        try:
+            opened_dt = datetime.fromisoformat(opened_at)
+            hours_held = (datetime.now() - opened_dt).total_seconds() / 3600
+            time_factor = max(0.1, 1 - (hours_held / EV_TIME_DECAY_HOURS))
+        except:
+            pass
+    
+    # Adjust confidence based on price movement
+    # If price moved in our favor, market agrees with us (slight confidence boost)
+    # If price moved against us, market disagrees (confidence penalty)
+    price_delta = current_price - entry_price
+    if side == "NO":
+        price_delta = -price_delta  # For NO, lower price is good
+    
+    confidence_adjustment = price_delta * 20  # ±20 confidence for 100% price move
+    adjusted_confidence = max(10, min(95, entry_confidence + confidence_adjustment))
+    
+    # Current EV with adjustments
+    current_ev = calculate_signal_ev(adjusted_confidence, current_price) * time_factor
+    
+    # Calculate "remaining edge" - how much value is left in this position
+    remaining_edge = current_ev * cost_basis  # Absolute $ value
+    
+    return {
+        "position_id": position.get("id"),
+        "market_id": position.get("market_id"),
+        "market": position.get("market", "")[:40],
+        "side": side,
+        "entry_price": entry_price,
+        "current_price": current_price,
+        "entry_confidence": entry_confidence,
+        "adjusted_confidence": round(adjusted_confidence, 1),
+        "entry_ev": round(entry_ev, 4),
+        "current_ev": round(current_ev, 4),
+        "remaining_edge": round(remaining_edge, 2),
+        "cost_basis": cost_basis,
+        "shares": shares,
+        "unrealized_pnl": round(unrealized_pnl, 2),
+        "unrealized_pnl_pct": round(unrealized_pnl_pct * 100, 1),
+        "time_factor": round(time_factor, 2),
+        "age_hours": round((datetime.now() - datetime.fromisoformat(opened_at)).total_seconds() / 3600, 1) if opened_at else 0
+    }
+
+def find_rotation_candidates(positions: list, new_signal: dict) -> list:
+    """
+    Find positions that could be rotated out for a new signal.
+    
+    Returns positions where:
+    1. New signal EV > position current EV × ROTATION_THRESHOLD
+    2. Position is old enough (> MIN_POSITION_AGE_MINUTES)
+    3. Position isn't already winning big (don't cut winners)
+    """
+    new_signal_ev = calculate_signal_ev(
+        new_signal.get("confidence", 50),
+        new_signal.get("price", 0.5)
+    )
+    
+    candidates = []
+    
+    for pos in positions:
+        # Check age
+        opened_at = pos.get("opened_at")
+        if opened_at:
+            try:
+                opened_dt = datetime.fromisoformat(opened_at)
+                age_minutes = (datetime.now() - opened_dt).total_seconds() / 60
+                if age_minutes < MIN_POSITION_AGE_MINUTES:
+                    continue
+            except:
+                pass
+        
+        # Calculate position's current EV
+        pos_ev_data = calculate_position_current_ev(pos)
+        current_ev = pos_ev_data["current_ev"]
+        
+        # Don't rotate out of big winners (>20% unrealized gain)
+        if pos_ev_data["unrealized_pnl_pct"] > 20:
+            continue
+        
+        # Check if new signal beats this position
+        threshold_ev = current_ev * ROTATION_THRESHOLD
+        
+        if new_signal_ev > threshold_ev:
+            candidates.append({
+                "position": pos,
+                "position_ev": current_ev,
+                "new_signal_ev": new_signal_ev,
+                "ev_improvement": new_signal_ev - current_ev,
+                "ev_data": pos_ev_data
+            })
+    
+    # Sort by EV improvement (rotate worst positions first)
+    candidates.sort(key=lambda x: x["ev_improvement"], reverse=True)
+    
+    return candidates
+
+def execute_position_exit(position: dict, reason: str = "rotation") -> dict:
+    """
+    Exit a position (sell shares at current price).
+    Used for rotation or stop-loss.
+    """
+    ensure_storage()
+    
+    market_id = position.get("market_id")
+    side = position.get("side", "YES").upper()
+    shares = position.get("shares", 0)
+    entry_price = position.get("entry_price", 0.5)
+    cost_basis = position.get("cost_basis", 0)
+    
+    # For paper trading, assume we can exit at entry price (simplified)
+    # In reality, we'd fetch current market price
+    exit_price = entry_price
+    proceeds = shares * exit_price
+    pnl = proceeds - cost_basis
+    
+    # Update balance
+    balance_data = load_json(BALANCE_FILE)
+    balance_data["usdc"] = balance_data.get("usdc", DEFAULT_BALANCE) + proceeds
+    save_json(BALANCE_FILE, balance_data)
+    
+    # Remove position
+    positions = load_json(POSITIONS_FILE)
+    positions = [p for p in positions if p.get("id") != position.get("id")]
+    save_json(POSITIONS_FILE, positions)
+    
+    # Log the exit
+    trades = load_json(TRADES_FILE)
+    trades.append({
+        "type": "SELL",
+        "reason": reason,
+        "market_id": market_id,
+        "market": position.get("market", "")[:60],
+        "side": side,
+        "shares": shares,
+        "entry_price": entry_price,
+        "exit_price": exit_price,
+        "proceeds": proceeds,
+        "pnl": round(pnl, 2),
+        "timestamp": datetime.now().isoformat()
+    })
+    save_json(TRADES_FILE, trades)
+    
+    return {
+        "success": True,
+        "action": "exit",
+        "reason": reason,
+        "market_id": market_id,
+        "side": side,
+        "shares": shares,
+        "proceeds": round(proceeds, 2),
+        "pnl": round(pnl, 2)
+    }
+
 def save_engine_state(state: dict):
     """Save engine state"""
     with open(TRADING_ENGINE_STATE, "w") as f:
@@ -3763,6 +3986,31 @@ def engine_evaluate_and_trade() -> dict:
             continue
         
         price = sig.get("price", 0.5)
+        signal_confidence = sig.get("confidence", 50)
+        
+        # OPPORTUNITY COST CHECK - Should we rotate out of a weaker position?
+        rotation_executed = False
+        if platform == "simmer":
+            current_positions = load_json(POSITIONS_FILE)
+            rotation_candidates = find_rotation_candidates(current_positions, sig)
+            
+            if rotation_candidates:
+                # Found a position worth rotating out of
+                best_rotation = rotation_candidates[0]
+                exit_result = execute_position_exit(
+                    best_rotation["position"], 
+                    reason=f"rotation:better_ev:{sig.get('market', '')[:30]}"
+                )
+                
+                if exit_result.get("success"):
+                    rotation_executed = True
+                    result.setdefault("rotations", []).append({
+                        "exited": best_rotation["position"].get("market", "")[:40],
+                        "exited_ev": best_rotation["position_ev"],
+                        "entered": sig.get("market", "")[:40],
+                        "new_ev": best_rotation["new_signal_ev"],
+                        "ev_improvement": best_rotation["ev_improvement"]
+                    })
         
         # EXECUTE TRADE based on platform
         if platform == "simmer":
@@ -3773,7 +4021,8 @@ def engine_evaluate_and_trade() -> dict:
                 amount,
                 price,
                 f"[ENGINE:{sig.get('source')}] {sig.get('reasoning', '')}",
-                source=sig.get("source")
+                source=sig.get("source"),
+                entry_confidence=signal_confidence
             )
         elif platform == "polymarket":
             trade_result = execute_poly_paper_trade(
@@ -3783,7 +4032,8 @@ def engine_evaluate_and_trade() -> dict:
                 amount,
                 price,
                 f"[ENGINE:{sig.get('source')}] {sig.get('reasoning', '')}",
-                source=sig.get("source")
+                source=sig.get("source"),
+                entry_confidence=signal_confidence
             )
         else:
             continue
@@ -4020,6 +4270,34 @@ async def paper_trading_status():
         "recent_trades": trades[-10:]  # Last 10 trades
     }
 
+@app.get("/api/paper/positions/ev")
+async def get_positions_ev():
+    """Get all positions with current expected value analysis"""
+    ensure_storage()
+    positions = load_json(POSITIONS_FILE)
+    
+    ev_analysis = []
+    total_remaining_edge = 0
+    
+    for pos in positions:
+        ev_data = calculate_position_current_ev(pos)
+        ev_analysis.append(ev_data)
+        total_remaining_edge += ev_data.get("remaining_edge", 0)
+    
+    # Sort by current EV (worst first - rotation candidates at top)
+    ev_analysis.sort(key=lambda x: x.get("current_ev", 0))
+    
+    return {
+        "positions": ev_analysis,
+        "total_positions": len(ev_analysis),
+        "total_remaining_edge": round(total_remaining_edge, 2),
+        "rotation_config": {
+            "threshold": ROTATION_THRESHOLD,
+            "min_age_minutes": MIN_POSITION_AGE_MINUTES,
+            "ev_time_decay_hours": EV_TIME_DECAY_HOURS
+        }
+    }
+
 @app.post("/api/paper/reset")
 async def reset_paper_trading():
     """Reset paper trading account to $10,000"""
@@ -4041,7 +4319,7 @@ def ensure_poly_storage():
     if not POLY_TRADES_FILE.exists():
         save_json(POLY_TRADES_FILE, [])
 
-def execute_poly_paper_trade(market_id: str, market_title: str, side: str, amount: float, price: float, reasoning: str, source: str = None) -> dict:
+def execute_poly_paper_trade(market_id: str, market_title: str, side: str, amount: float, price: float, reasoning: str, source: str = None, entry_confidence: int = 50) -> dict:
     """Execute a paper trade on Polymarket (tracking only)"""
     ensure_poly_storage()
     
@@ -4060,6 +4338,9 @@ def execute_poly_paper_trade(market_id: str, market_title: str, side: str, amoun
     # Deduct from balance
     balance_data["usdc"] = current_balance - amount
     
+    # Calculate entry EV for rotation tracking
+    entry_ev = calculate_signal_ev(entry_confidence, price)
+    
     # Create position
     position = {
         "id": f"poly_{int(datetime.now().timestamp())}_{len(positions)}",
@@ -4072,6 +4353,8 @@ def execute_poly_paper_trade(market_id: str, market_title: str, side: str, amoun
         "opened_at": datetime.now().isoformat(),
         "strategy": "auto",
         "source": source,
+        "entry_confidence": entry_confidence,
+        "entry_ev": round(entry_ev, 4),
         "status": "open",
         "resolved_at": None,
         "outcome": None,
