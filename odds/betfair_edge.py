@@ -166,6 +166,12 @@ async def find_betfair_edges(sports: list[str] = None, min_edge: float = 0.02) -
                         if not selection or price <= 1:
                             continue
                         
+                        # Filter out bad data - prices too close to 1.0 or too high
+                        # 1.01 = 99% implied prob (usually error/placeholder)
+                        # 1.02 = 98% (still suspicious for most markets)
+                        if price < 1.05:
+                            continue
+                        
                         betfair_prob = decimal_to_prob(price)
                         
                         # Find Polymarket match
