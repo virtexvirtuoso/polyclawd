@@ -3336,73 +3336,89 @@ async def get_vegas_odds(sport: str = "americanfootball_nfl"):
 
 
 @app.get("/api/vegas/edge")
-async def find_vegas_edge(min_edge: float = 0.05):
+async def find_vegas_edge(min_edge: float = 0.05, sports: str = "americanfootball_nfl"):
     """
     Find edges between Vegas odds and Polymarket prices.
+    
+    Args:
+        min_edge: Minimum edge to return (default 5%)
+        sports: Comma-separated sport keys (default: americanfootball_nfl)
     
     Compares implied probability from sportsbooks against Polymarket prices.
     Returns opportunities where the gap exceeds min_edge.
     """
-    # Get Vegas odds
-    vegas_data = await get_vegas_odds("americanfootball_nfl")
-    
-    if "error" in vegas_data:
-        return vegas_data
-    
     # Manual mapping of known markets with current prices
     # TODO: Auto-fetch prices from Polymarket API
     MARKET_MAPPINGS = {
+        # NFL Super Bowl 2026
         "Seattle Seahawks": {
             "polymarket_id": "540234",
             "polymarket_question": "Will the Seattle Seahawks win Super Bowl 2026?",
-            "polymarket_price": 0.68  # Current price
+            "polymarket_price": 0.68,
+            "sport": "americanfootball_nfl"
         },
         "New England Patriots": {
             "polymarket_id": "540227", 
             "polymarket_question": "Will the New England Patriots win Super Bowl 2026?",
-            "polymarket_price": 0.32  # Current price (~1 - Seahawks)
-        }
+            "polymarket_price": 0.32,
+            "sport": "americanfootball_nfl"
+        },
+        # Add more mappings as discovered
     }
     
-    edges = []
+    all_edges = []
+    all_errors = []
     
-    for event in vegas_data.get("events", []):
-        for team_key in ["home_team", "away_team"]:
-            team = event.get(team_key)
-            
-            if team in MARKET_MAPPINGS:
-                mapping = MARKET_MAPPINGS[team]
+    # Scan each sport
+    for sport in sports.split(","):
+        sport = sport.strip()
+        vegas_data = await get_vegas_odds(sport)
+        
+        if "error" in vegas_data:
+            all_errors.append({"sport": sport, "error": vegas_data["error"]})
+            continue
+        
+        # Process events for this sport
+        for event in vegas_data.get("events", []):
+            for team_key in ["home_team", "away_team"]:
+                team = event.get(team_key)
                 
-                # Get true probability from Vegas
-                prob_key = "home_prob_true" if team_key == "home_team" else "away_prob_true"
-                vegas_prob = event.get(prob_key, 0)
-                
-                # Get Polymarket price from mapping
-                poly_price = mapping.get("polymarket_price", 0.50)
-                
-                edge = vegas_prob - poly_price
-                
-                if abs(edge) >= min_edge:
-                    edges.append({
-                        "team": team,
-                        "event": f"{event['away_team']} @ {event['home_team']}",
-                        "vegas_prob": round(vegas_prob, 4),
-                        "vegas_odds": event.get(f"{team_key.split('_')[0]}_odds"),
-                        "polymarket_price": poly_price,
-                        "edge": round(edge, 4),
-                        "edge_pct": round(edge * 100, 1),
-                        "signal": "BUY" if edge > 0 else "SELL",
-                        "polymarket_id": mapping["polymarket_id"],
-                        "polymarket_question": mapping["polymarket_question"],
-                        "commence_time": event.get("commence_time")
-                    })
+                if team in MARKET_MAPPINGS:
+                    mapping = MARKET_MAPPINGS[team]
+                    
+                    # Get true probability from Vegas
+                    prob_key = "home_prob_true" if team_key == "home_team" else "away_prob_true"
+                    vegas_prob = event.get(prob_key, 0)
+                    
+                    # Get Polymarket price from mapping
+                    poly_price = mapping.get("polymarket_price", 0.50)
+                    
+                    edge = vegas_prob - poly_price
+                    
+                    if abs(edge) >= min_edge:
+                        all_edges.append({
+                            "team": team,
+                            "sport": sport,
+                            "event": f"{event['away_team']} @ {event['home_team']}",
+                            "vegas_prob": round(vegas_prob, 4),
+                            "vegas_odds": event.get(f"{team_key.split('_')[0]}_odds"),
+                            "polymarket_price": poly_price,
+                            "edge": round(edge, 4),
+                            "edge_pct": round(edge * 100, 1),
+                            "signal": "BUY" if edge > 0 else "SELL",
+                            "polymarket_id": mapping["polymarket_id"],
+                            "polymarket_question": mapping["polymarket_question"],
+                            "commence_time": event.get("commence_time")
+                        })
     
     # Sort by edge size
-    edges.sort(key=lambda x: abs(x["edge"]), reverse=True)
+    all_edges.sort(key=lambda x: abs(x["edge"]), reverse=True)
     
     return {
-        "edges": edges,
-        "count": len(edges),
+        "edges": all_edges,
+        "count": len(all_edges),
+        "sports_scanned": sports.split(","),
+        "errors": all_errors if all_errors else None,
         "min_edge_filter": min_edge,
         "generated_at": datetime.now().isoformat()
     }
