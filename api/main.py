@@ -1794,8 +1794,20 @@ def check_and_resolve_positions() -> dict:
                     if source:
                         record_outcome(source, won, market_title)
                     
-                    # Update conflict meta-learning
+                    # Update keyword learner (if news-based trade)
                     market_id = pos.get("market_id", "")
+                    if source == "news_breaking" and market_id:
+                        try:
+                            import sys
+                            signals_path = str(Path(__file__).parent.parent / "signals")
+                            if signals_path not in sys.path:
+                                sys.path.insert(0, signals_path)
+                            from keyword_learner import update_keyword_outcome
+                            update_keyword_outcome(market_id, "win" if won else "loss")
+                        except:
+                            pass
+                    
+                    # Update conflict meta-learning
                     if market_id:
                         resolve_conflict_outcome(market_id, outcome.upper())
                     
@@ -3249,6 +3261,85 @@ async def get_news_signals():
         
     except Exception as e:
         return {"error": str(e), "enabled": False}
+
+
+@app.get("/api/keywords/stats")
+async def get_keyword_stats():
+    """Get learned keyword performance stats"""
+    try:
+        import sys
+        signals_path = str(Path(__file__).parent.parent / "signals")
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from keyword_learner import get_top_keywords, get_trending_entities, get_keyword_weights
+        
+        return {
+            "enabled": True,
+            "top_keywords": get_top_keywords(20),
+            "trending_entities": get_trending_entities(10),
+            "weights": get_keyword_weights(),
+            "generated_at": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        return {"enabled": False, "error": str(e)}
+
+
+@app.post("/api/keywords/learn")
+async def learn_from_market_title(
+    title: str = Query(..., description="Market title to extract keywords from"),
+    market_id: str = Query("test", description="Market ID"),
+    outcome: str = Query(None, description="Trade outcome: win, loss, or null for pending"),
+):
+    """Manually teach the keyword learner"""
+    try:
+        import sys
+        signals_path = str(Path(__file__).parent.parent / "signals")
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from keyword_learner import (
+            extract_entities, extract_searchable_terms, 
+            record_keyword_usage, get_smart_keywords
+        )
+        
+        entities = extract_entities(title)
+        terms = extract_searchable_terms(title)
+        smart_kws = get_smart_keywords(title)
+        
+        # Record if outcome provided
+        if outcome in ["win", "loss"]:
+            record_keyword_usage(terms, market_id, outcome)
+        
+        return {
+            "title": title,
+            "entities": entities,
+            "search_terms": terms,
+            "smart_keywords": smart_kws,
+            "outcome_recorded": outcome in ["win", "loss"],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/keywords/update-outcome")
+async def update_keyword_outcome_api(
+    market_id: str = Query(..., description="Market ID"),
+    outcome: str = Query(..., description="Trade outcome: win or loss"),
+):
+    """Update keyword stats when a trade resolves"""
+    try:
+        import sys
+        signals_path = str(Path(__file__).parent.parent / "signals")
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from keyword_learner import update_keyword_outcome
+        
+        if outcome not in ["win", "loss"]:
+            return {"error": "outcome must be 'win' or 'loss'"}
+        
+        update_keyword_outcome(market_id, outcome)
+        return {"success": True, "market_id": market_id, "outcome": outcome}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.post("/api/signals/auto-trade")

@@ -515,7 +515,19 @@ def check_news_for_market(market: Dict) -> Optional[Dict]:
     if not market_title:
         return None
     
-    keywords = extract_keywords(market_title)
+    # Try learned keywords first, fall back to pattern matching
+    try:
+        from keyword_learner import get_smart_keywords, record_keyword_usage, boost_confidence_by_keywords
+        smart_kws = get_smart_keywords(market_title)
+        keywords = [kw for kw, weight in smart_kws[:3]]
+        use_learner = True
+    except ImportError:
+        keywords = extract_keywords(market_title)
+        use_learner = False
+    
+    if not keywords:
+        keywords = extract_keywords(market_title)  # Fallback
+    
     if not keywords:
         return None
     
@@ -571,6 +583,14 @@ def check_news_for_market(market: Dict) -> Optional[Dict]:
     
     confidence = min(85, confidence)  # Cap at 85
     
+    # Boost/reduce confidence based on keyword historical performance
+    if use_learner:
+        try:
+            confidence = boost_confidence_by_keywords(confidence, keywords)
+            record_keyword_usage(keywords, market_id)  # Track usage
+        except:
+            pass
+    
     if confidence < MIN_CONFIDENCE:
         return None
     
@@ -580,6 +600,7 @@ def check_news_for_market(market: Dict) -> Optional[Dict]:
         "market_id": market_id,
         "side": side,
         "confidence": confidence,
+        "keywords_used": keywords,
         "reasoning": f"Breaking news ({len(fresh_articles)} articles, avg {avg_age:.0f}min old): {sentiment['sentiment']} sentiment",
         "articles": [
             {
