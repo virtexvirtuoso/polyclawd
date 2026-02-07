@@ -3086,6 +3086,17 @@ def aggregate_all_signals() -> dict:
     except Exception as e:
         pass  # News source is optional enhancement
     
+    # 14-17. Edge Signals (Vegas/Soccer/Betfair/Kalshi) - from cache for speed
+    try:
+        import sys
+        api_path = str(Path(__file__).parent)
+        if api_path not in sys.path:
+            sys.path.insert(0, api_path)
+        from edge_cache import get_edge_signals
+        edge_signals = get_edge_signals()
+        all_signals.extend(edge_signals)
+    except: pass
+    
     # Apply Bayesian confidence scoring to all signals
     for sig in all_signals:
         raw_conf = sig.get("confidence", 0)
@@ -3530,6 +3541,152 @@ async def get_kalshi_markets():
         return await get_kalshi_polymarket_comparison()
     except Exception as e:
         return {"error": str(e), "enabled": False}
+
+
+@app.get("/api/manifold/edge")
+async def get_manifold_edge(min_edge: float = Query(default=5.0)):
+    """Get Manifold vs Polymarket edges"""
+    try:
+        import sys
+        odds_path = str(Path(__file__).parent.parent / "odds")
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from manifold import get_manifold_edges
+        return await get_manifold_edges(min_edge)
+    except Exception as e:
+        return {"error": str(e), "source": "manifold"}
+
+
+@app.get("/api/manifold/markets")
+async def get_manifold_markets():
+    """Get Manifold market summary"""
+    try:
+        import sys
+        odds_path = str(Path(__file__).parent.parent / "odds")
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from manifold import get_manifold_summary
+        return get_manifold_summary()
+    except Exception as e:
+        return {"error": str(e), "source": "manifold"}
+
+
+@app.get("/api/predictit/edge")
+async def get_predictit_edge(min_edge: float = Query(default=5.0)):
+    """Get PredictIt vs Polymarket edges"""
+    try:
+        import sys
+        odds_path = str(Path(__file__).parent.parent / "odds")
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from predictit import get_predictit_edges
+        return await get_predictit_edges(min_edge)
+    except Exception as e:
+        return {"error": str(e), "source": "predictit"}
+
+
+@app.get("/api/predictit/markets")
+async def get_predictit_markets():
+    """Get PredictIt market summary"""
+    try:
+        import sys
+        odds_path = str(Path(__file__).parent.parent / "odds")
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from predictit import get_predictit_summary
+        return get_predictit_summary()
+    except Exception as e:
+        return {"error": str(e), "source": "predictit"}
+
+
+# PolyRouter - Unified API for 7 platforms
+@app.get("/api/polyrouter/markets")
+async def get_polyrouter_markets(
+    platform: str = Query(default=None, description="Filter by platform: polymarket, kalshi, manifold, limitless, prophetx, novig, sxbet"),
+    query: str = Query(default=None, description="Search query"),
+    limit: int = Query(default=50, le=100)
+):
+    """Get markets from PolyRouter (7 platforms unified)"""
+    try:
+        import sys
+        odds_path = str(Path(__file__).parent.parent / "odds")
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from polyrouter import get_markets
+        return await get_markets(platform=platform, limit=limit, query=query)
+    except Exception as e:
+        return {"error": str(e), "source": "polyrouter"}
+
+
+@app.get("/api/polyrouter/search")
+async def search_polyrouter(query: str, limit: int = Query(default=20, le=50)):
+    """Search across all 7 platforms"""
+    try:
+        import sys
+        odds_path = str(Path(__file__).parent.parent / "odds")
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from polyrouter import search_markets
+        return await search_markets(query, limit)
+    except Exception as e:
+        return {"error": str(e), "source": "polyrouter"}
+
+
+@app.get("/api/polyrouter/edge")
+async def get_polyrouter_edge(min_edge: float = Query(default=3.0)):
+    """Find cross-platform arbitrage via PolyRouter"""
+    try:
+        import sys
+        odds_path = str(Path(__file__).parent.parent / "odds")
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from polyrouter import find_cross_platform_edges
+        edges = await find_cross_platform_edges(min_edge)
+        return {"edges": edges, "count": len(edges), "min_edge_pct": min_edge}
+    except Exception as e:
+        return {"error": str(e), "source": "polyrouter"}
+
+
+@app.get("/api/polyrouter/sports/{league}")
+async def get_polyrouter_sports(league: str, limit: int = Query(default=20)):
+    """Get sports games/odds from PolyRouter (nfl, nba, mlb, nhl, epl, etc.)"""
+    try:
+        import sys
+        odds_path = str(Path(__file__).parent.parent / "odds")
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from polyrouter import list_games
+        return await list_games(league, limit)
+    except Exception as e:
+        return {"error": str(e), "source": "polyrouter"}
+
+
+@app.get("/api/polyrouter/futures/{league}")
+async def get_polyrouter_futures(league: str):
+    """Get championship futures (Super Bowl, World Series, etc.)"""
+    try:
+        import sys
+        odds_path = str(Path(__file__).parent.parent / "odds")
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from polyrouter import list_futures
+        return await list_futures(league)
+    except Exception as e:
+        return {"error": str(e), "source": "polyrouter"}
+
+
+@app.get("/api/polyrouter/platforms")
+async def get_polyrouter_platforms():
+    """List all 7 supported platforms"""
+    try:
+        import sys
+        odds_path = str(Path(__file__).parent.parent / "odds")
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from polyrouter import list_platforms
+        return {"platforms": list_platforms()}
+    except Exception as e:
+        return {"error": str(e), "source": "polyrouter"}
 
 
 @app.get("/api/signals")
@@ -4556,6 +4713,46 @@ async def reset_daily_counter():
         "drawdown_halt": False
     }
 
+
+@app.get("/api/edge/cache")
+async def get_edge_cache_status():
+    """Get edge signal cache status"""
+    try:
+        import sys
+        api_path = str(Path(__file__).parent)
+        if api_path not in sys.path:
+            sys.path.insert(0, api_path)
+        from edge_cache import get_cache_status, get_edge_signals
+        status = get_cache_status()
+        signals = get_edge_signals()
+        return {
+            **status,
+            "signals": signals[:10]  # Top 10 edge signals
+        }
+    except Exception as e:
+        return {"error": str(e), "cached_signals": 0}
+
+@app.post("/api/edge/refresh")
+async def refresh_edge_cache():
+    """Force refresh edge signal cache"""
+    try:
+        import sys
+        api_path = str(Path(__file__).parent)
+        if api_path not in sys.path:
+            sys.path.insert(0, api_path)
+        from edge_cache import refresh_edge_cache as do_refresh
+        import threading
+        
+        # Run in background
+        thread = threading.Thread(target=do_refresh, daemon=True)
+        thread.start()
+        
+        return {
+            "status": "refresh_started",
+            "note": "Edge signals refreshing in background. Check /api/edge/cache for status."
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/api/paper/status")
 async def paper_trading_status():

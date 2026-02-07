@@ -11,6 +11,11 @@ from typing import Optional, List, Dict
 from datetime import datetime
 import re
 
+try:
+    from .smart_matcher import create_signature, signatures_match, match_markets
+except ImportError:
+    from odds.smart_matcher import create_signature, signatures_match, match_markets
+
 # Kalshi API endpoints
 KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 KALSHI_DEMO_API = "https://demo-api.kalshi.co/trade-api/v2"
@@ -37,84 +42,19 @@ class KalshiEdge:
     poly_market_id: Optional[str] = None
     category: str = ""
 
-# Expanded market title mappings between Kalshi and Polymarket
-MARKET_MAPPINGS = [
-    # Politics - Fed & Economy
-    {"kalshi_search": "Fed Chair", "polymarket_search": "Fed Chair", "category": "Politics"},
-    {"kalshi_search": "Fed Chair", "polymarket_search": "Warsh", "category": "Politics"},
-    {"kalshi_search": "interest rate", "polymarket_search": "interest rate", "category": "Economics"},
-    {"kalshi_search": "recession", "polymarket_search": "recession", "category": "Economics"},
-    
-    # Politics - Elections
-    {"kalshi_search": "Democratic nominee", "polymarket_search": "Democratic", "category": "Politics"},
-    {"kalshi_search": "Republican nominee", "polymarket_search": "Republican", "category": "Politics"},
-    {"kalshi_search": "Presidential Election", "polymarket_search": "President", "category": "Politics"},
-    {"kalshi_search": "presidential election", "polymarket_search": "2028", "category": "Politics"},
-    {"kalshi_search": "House of Representatives", "polymarket_search": "House", "category": "Politics"},
-    {"kalshi_search": "control of the House", "polymarket_search": "House", "category": "Politics"},
-    {"kalshi_search": "Senate", "polymarket_search": "Senate", "category": "Politics"},
-    {"kalshi_search": "Governor", "polymarket_search": "Governor", "category": "Politics"},
-    {"kalshi_search": "Newsom", "polymarket_search": "Newsom", "category": "Politics"},
-    {"kalshi_search": "Vance", "polymarket_search": "Vance", "category": "Politics"},
-    {"kalshi_search": "DeSantis", "polymarket_search": "DeSantis", "category": "Politics"},
-    {"kalshi_search": "AOC", "polymarket_search": "AOC", "category": "Politics"},
-    {"kalshi_search": "Ocasio-Cortez", "polymarket_search": "Ocasio", "category": "Politics"},
-    
-    # Politics - International
-    {"kalshi_search": "Khamenei", "polymarket_search": "Khamenei", "category": "Politics"},
-    {"kalshi_search": "Netanyahu", "polymarket_search": "Netanyahu", "category": "Politics"},
-    {"kalshi_search": "Zelensky", "polymarket_search": "Zelensky", "category": "Politics"},
-    {"kalshi_search": "Putin", "polymarket_search": "Putin", "category": "Politics"},
-    {"kalshi_search": "Xi Jinping", "polymarket_search": "Xi", "category": "Politics"},
-    {"kalshi_search": "Ukraine", "polymarket_search": "Ukraine", "category": "Politics"},
-    {"kalshi_search": "Israel", "polymarket_search": "Israel", "category": "Politics"},
-    {"kalshi_search": "Gaza", "polymarket_search": "Gaza", "category": "Politics"},
-    {"kalshi_search": "Iran", "polymarket_search": "Iran", "category": "Politics"},
-    {"kalshi_search": "Venezuela", "polymarket_search": "Venezuela", "category": "Politics"},
-    {"kalshi_search": "Maduro", "polymarket_search": "Maduro", "category": "Politics"},
-    
-    # Politics - Trump & Policy
-    {"kalshi_search": "Trump", "polymarket_search": "Trump", "category": "Politics"},
-    {"kalshi_search": "tariff", "polymarket_search": "tariff", "category": "Politics"},
-    {"kalshi_search": "executive order", "polymarket_search": "executive order", "category": "Politics"},
-    {"kalshi_search": "government shut", "polymarket_search": "shutdown", "category": "Politics"},
-    {"kalshi_search": "SCOTUS", "polymarket_search": "Supreme Court", "category": "Politics"},
-    {"kalshi_search": "Supreme Court", "polymarket_search": "Supreme Court", "category": "Politics"},
-    {"kalshi_search": "impeach", "polymarket_search": "impeach", "category": "Politics"},
-    {"kalshi_search": "Cabinet", "polymarket_search": "Cabinet", "category": "Politics"},
-    
-    # Sports
-    {"kalshi_search": "Super Bowl", "polymarket_search": "Super Bowl", "category": "Sports"},
-    {"kalshi_search": "NBA Champion", "polymarket_search": "NBA Champion", "category": "Sports"},
-    {"kalshi_search": "World Series", "polymarket_search": "World Series", "category": "Sports"},
-    {"kalshi_search": "Stanley Cup", "polymarket_search": "Stanley Cup", "category": "Sports"},
-    {"kalshi_search": "March Madness", "polymarket_search": "NCAA", "category": "Sports"},
-    {"kalshi_search": "Premier League", "polymarket_search": "Premier League", "category": "Sports"},
-    {"kalshi_search": "Champions League", "polymarket_search": "Champions League", "category": "Sports"},
-    {"kalshi_search": "World Cup", "polymarket_search": "World Cup", "category": "Sports"},
-    
-    # Crypto
-    {"kalshi_search": "Bitcoin", "polymarket_search": "Bitcoin", "category": "Crypto"},
-    {"kalshi_search": "BTC", "polymarket_search": "BTC", "category": "Crypto"},
-    {"kalshi_search": "Ethereum", "polymarket_search": "Ethereum", "category": "Crypto"},
-    {"kalshi_search": "ETH", "polymarket_search": "ETH", "category": "Crypto"},
-    {"kalshi_search": "crypto", "polymarket_search": "crypto", "category": "Crypto"},
-    
-    # Tech & Companies
-    {"kalshi_search": "OpenAI", "polymarket_search": "OpenAI", "category": "Tech"},
-    {"kalshi_search": "Anthropic", "polymarket_search": "Anthropic", "category": "Tech"},
-    {"kalshi_search": "Tesla", "polymarket_search": "Tesla", "category": "Tech"},
-    {"kalshi_search": "Elon Musk", "polymarket_search": "Elon", "category": "Tech"},
-    {"kalshi_search": "IPO", "polymarket_search": "IPO", "category": "Tech"},
-    {"kalshi_search": "TikTok", "polymarket_search": "TikTok", "category": "Tech"},
-    
-    # Other
-    {"kalshi_search": "aliens", "polymarket_search": "alien", "category": "Science"},
-    {"kalshi_search": "UFO", "polymarket_search": "UFO", "category": "Science"},
-    {"kalshi_search": "AI", "polymarket_search": "AI", "category": "Tech"},
-    {"kalshi_search": "bird flu", "polymarket_search": "bird flu", "category": "Health"},
-    {"kalshi_search": "pandemic", "polymarket_search": "pandemic", "category": "Health"},
-]
+# Category inference from Kalshi categories
+CATEGORY_MAP = {
+    "politics": "Politics",
+    "economics": "Economics",
+    "financials": "Finance",
+    "crypto": "Crypto",
+    "tech": "Tech",
+    "sports": "Sports",
+    "climate": "Climate",
+    "culture": "Culture",
+    "science": "Science",
+    "health": "Health",
+}
 
 def _fetch_kalshi_events_sync(limit: int = 200) -> List[dict]:
     """Fetch events from Kalshi API (max limit is 200)"""
@@ -180,95 +120,52 @@ def _fetch_polymarket_sync() -> List[dict]:
         print(f"Error fetching Polymarket: {e}")
         return []
 
-def normalize_text(text: str) -> str:
-    """Normalize text for matching"""
-    text = text.lower()
-    text = re.sub(r'[^\w\s]', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
-
-def texts_match(text1: str, text2: str, threshold: float = 0.5) -> bool:
-    """Check if two texts have significant word overlap"""
-    # Filter out common stop words
-    stop_words = {'will', 'the', 'a', 'an', 'be', 'to', 'of', 'in', 'for', 'on', 'at', 'by', 'is', 'it', 'as', 'or', 'and', 'this', 'that', 'with', 'from', 'are', 'was', 'were', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'but', 'if', 'then', 'than', 'so', 'what', 'when', 'where', 'who', 'which', 'how', 'before', 'after', 'during', 'while', 'until'}
+def find_polymarket_matches(kalshi_title: str, poly_events: List[dict], kalshi_category: str = "") -> List[Dict]:
+    """
+    Find matching Polymarket markets using entity-based smart matching.
+    Returns max 2 high-confidence matches per Kalshi event.
+    """
+    # Build flat list of Polymarket markets with event context
+    poly_markets = []
+    for event in poly_events:
+        event_title = event.get("title", "")
+        for market in event.get("markets", []):
+            price = market.get("bestAsk", 0)
+            if price and 0.001 < price < 0.999:  # Filter near-certain
+                poly_markets.append({
+                    "title": event_title,  # Use event title for matching
+                    "question": market.get("question", ""),
+                    "price": float(price),
+                    "market_id": market.get("id", ""),
+                    "event_title": event_title,
+                })
     
-    words1 = set(normalize_text(text1).split()) - stop_words
-    words2 = set(normalize_text(text2).split()) - stop_words
+    # Use smart matcher
+    matches = match_markets(
+        source_title=kalshi_title,
+        candidates=poly_markets,
+        title_key="title",
+        min_entity_overlap=1,
+        min_confidence=0.4,
+        max_matches=2
+    )
     
-    if len(words1) < 2 or len(words2) < 2:
-        return False
+    # Infer category
+    cat = CATEGORY_MAP.get(kalshi_category.lower(), kalshi_category or "Other")
     
-    intersection = words1 & words2
-    
-    # Require at least 2 meaningful words in common
-    if len(intersection) < 2:
-        return False
-    
-    # Jaccard similarity on remaining words
-    union = words1 | words2
-    similarity = len(intersection) / len(union)
-    return similarity >= threshold
-
-def find_polymarket_matches(kalshi_title: str, poly_events: List[dict]) -> List[Dict]:
-    """Find matching Polymarket markets for a Kalshi event (max 3 per event)"""
-    matches = []
-    kalshi_lower = kalshi_title.lower()
-    seen_events = set()
-    
-    # First try mapping-based matching (more precise)
-    for mapping in MARKET_MAPPINGS:
-        if mapping["kalshi_search"].lower() not in kalshi_lower:
-            continue
-            
-        for event in poly_events:
-            event_title = event.get("title", "")
-            poly_title = event_title.lower()
-            
-            if mapping["polymarket_search"].lower() in poly_title:
-                if event_title in seen_events:
-                    continue
-                seen_events.add(event_title)
-                
-                # Only take the first (most relevant) market from each event
-                for market in event.get("markets", [])[:1]:
-                    price = market.get("bestAsk", 0)
-                    if price and 0.001 < price < 0.999:  # Filter out near-certain markets
-                        matches.append({
-                            "event_title": event_title,
-                            "question": market.get("question", ""),
-                            "price": float(price),
-                            "market_id": market.get("id", ""),
-                            "category": mapping["category"]
-                        })
-                        
-                if len(matches) >= 3:  # Max 3 matches per Kalshi event
-                    return matches
-    
-    # Only try direct title matching if no mapping matches found
-    if not matches:
-        for event in poly_events:
-            event_title = event.get("title", "")
-            if event_title in seen_events:
-                continue
-                
-            if texts_match(kalshi_title, event_title, 0.4):  # Higher threshold
-                seen_events.add(event_title)
-                
-                for market in event.get("markets", [])[:1]:
-                    price = market.get("bestAsk", 0)
-                    if price and 0.001 < price < 0.999:
-                        matches.append({
-                            "event_title": event_title,
-                            "question": market.get("question", ""),
-                            "price": float(price),
-                            "market_id": market.get("id", ""),
-                            "category": "Matched"
-                        })
-                        
-                if len(matches) >= 2:  # Max 2 for text matches
-                    return matches
-    
-    return matches
+    # Format results
+    return [
+        {
+            "event_title": m["event_title"],
+            "question": m.get("question", ""),
+            "price": m["price"],
+            "market_id": m["market_id"],
+            "category": cat,
+            "match_confidence": m["_match_confidence"],
+            "match_reason": m["_match_reason"],
+        }
+        for m in matches
+    ]
 
 async def get_kalshi_polymarket_comparison() -> dict:
     """Compare overlapping markets between Kalshi and Polymarket"""
@@ -286,8 +183,8 @@ async def get_kalshi_polymarket_comparison() -> dict:
         ticker = kalshi_event.get("event_ticker", "")
         category = kalshi_event.get("category", "Other")
         
-        # Find matching Polymarket markets
-        poly_matches = find_polymarket_matches(title, poly_events)
+        # Find matching Polymarket markets (pass category for inference)
+        poly_matches = find_polymarket_matches(title, poly_events, category)
         
         for match in poly_matches:
             cat = match.get("category", category)
@@ -301,7 +198,9 @@ async def get_kalshi_polymarket_comparison() -> dict:
                 "polymarket_question": match["question"][:100] if match["question"] else None,
                 "polymarket_price": round(match["price"] * 100, 1),
                 "polymarket_id": match["market_id"],
-                "match_category": cat
+                "match_category": match.get("category", cat),
+                "match_confidence": match.get("match_confidence", 0),
+                "match_reason": match.get("match_reason", "")
             })
     
     # Deduplicate by kalshi_ticker + polymarket_id
@@ -313,8 +212,8 @@ async def get_kalshi_polymarket_comparison() -> dict:
             seen.add(key)
             unique_overlaps.append(o)
     
-    # Sort by category then by title
-    unique_overlaps.sort(key=lambda x: (x["match_category"], x["kalshi_title"]))
+    # Sort by confidence (highest first), then by category
+    unique_overlaps.sort(key=lambda x: (-x.get("match_confidence", 0), x["match_category"]))
     
     return {
         "timestamp": datetime.utcnow().isoformat(),
