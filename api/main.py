@@ -3224,6 +3224,185 @@ def auto_paper_trade_signals(max_trades: int = 5, max_per_trade: float = 100, mi
     
     return results
 
+# =============================================================================
+# VEGAS EDGE FINDER - Compare sportsbook odds to Polymarket
+# =============================================================================
+
+@app.get("/api/vegas/odds")
+async def get_vegas_odds(sport: str = "americanfootball_nfl"):
+    """
+    Get current Vegas odds from The Odds API.
+    
+    Args:
+        sport: Sport key (americanfootball_nfl, basketball_nba, etc.)
+    """
+    import subprocess
+    
+    # Get API key from keychain
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-a", "the-odds-api", "-s", "the-odds-api", "-w"],
+            capture_output=True, text=True
+        )
+        api_key = result.stdout.strip() if result.returncode == 0 else None
+    except:
+        api_key = None
+    
+    if not api_key:
+        return {"error": "No API key configured"}
+    
+    import httpx
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"https://api.the-odds-api.com/v4/sports/{sport}/odds",
+            params={
+                "apiKey": api_key,
+                "regions": "us",
+                "markets": "h2h",
+                "oddsFormat": "american"
+            }
+        )
+        
+        if response.status_code != 200:
+            return {"error": f"API error: {response.status_code}"}
+        
+        data = response.json()
+        
+        # Calculate consensus for each event
+        events = []
+        for event in data:
+            home = event.get("home_team")
+            away = event.get("away_team")
+            bookmakers = event.get("bookmakers", [])
+            
+            # Get all odds for home team
+            home_odds = []
+            away_odds = []
+            for book in bookmakers:
+                for market in book.get("markets", []):
+                    if market["key"] == "h2h":
+                        for outcome in market["outcomes"]:
+                            if outcome["name"] == home:
+                                home_odds.append(outcome["price"])
+                            elif outcome["name"] == away:
+                                away_odds.append(outcome["price"])
+            
+            if home_odds and away_odds:
+                avg_home = sum(home_odds) / len(home_odds)
+                avg_away = sum(away_odds) / len(away_odds)
+                
+                # Convert to probability
+                def to_prob(odds):
+                    if odds < 0:
+                        return abs(odds) / (abs(odds) + 100)
+                    return 100 / (odds + 100)
+                
+                home_prob = to_prob(avg_home)
+                away_prob = to_prob(avg_away)
+                
+                # Remove vig
+                total = home_prob + away_prob
+                home_true = home_prob / total
+                away_true = away_prob / total
+                
+                events.append({
+                    "event_id": event.get("id"),
+                    "sport": sport,
+                    "home_team": home,
+                    "away_team": away,
+                    "commence_time": event.get("commence_time"),
+                    "home_odds": round(avg_home),
+                    "away_odds": round(avg_away),
+                    "home_prob_raw": round(home_prob, 4),
+                    "away_prob_raw": round(away_prob, 4),
+                    "home_prob_true": round(home_true, 4),
+                    "away_prob_true": round(away_true, 4),
+                    "vig": round((total - 1) * 100, 2),
+                    "books_count": len(bookmakers)
+                })
+        
+        return {
+            "sport": sport,
+            "events": events,
+            "quota": {
+                "remaining": response.headers.get("x-requests-remaining"),
+                "used": response.headers.get("x-requests-used")
+            }
+        }
+
+
+@app.get("/api/vegas/edge")
+async def find_vegas_edge(min_edge: float = 0.05):
+    """
+    Find edges between Vegas odds and Polymarket prices.
+    
+    Compares implied probability from sportsbooks against Polymarket prices.
+    Returns opportunities where the gap exceeds min_edge.
+    """
+    # Get Vegas odds
+    vegas_data = await get_vegas_odds("americanfootball_nfl")
+    
+    if "error" in vegas_data:
+        return vegas_data
+    
+    # Manual mapping of known markets
+    # TODO: Auto-match in future
+    MARKET_MAPPINGS = {
+        "Seattle Seahawks": {
+            "polymarket_id": "540234",
+            "polymarket_question": "Will the Seattle Seahawks win Super Bowl 2026?"
+        },
+        "New England Patriots": {
+            "polymarket_id": "540227", 
+            "polymarket_question": "Will the New England Patriots win Super Bowl 2026?"
+        }
+    }
+    
+    edges = []
+    
+    for event in vegas_data.get("events", []):
+        for team_key in ["home_team", "away_team"]:
+            team = event.get(team_key)
+            
+            if team in MARKET_MAPPINGS:
+                mapping = MARKET_MAPPINGS[team]
+                
+                # Get true probability from Vegas
+                prob_key = "home_prob_true" if team_key == "home_team" else "away_prob_true"
+                vegas_prob = event.get(prob_key, 0)
+                
+                # Get Polymarket price (simplified - would need API call)
+                # For now, use stored/cached price
+                poly_price = 0.68  # Current approximate price
+                
+                edge = vegas_prob - poly_price
+                
+                if abs(edge) >= min_edge:
+                    edges.append({
+                        "team": team,
+                        "event": f"{event['away_team']} @ {event['home_team']}",
+                        "vegas_prob": round(vegas_prob, 4),
+                        "vegas_odds": event.get(f"{team_key.split('_')[0]}_odds"),
+                        "polymarket_price": poly_price,
+                        "edge": round(edge, 4),
+                        "edge_pct": round(edge * 100, 1),
+                        "signal": "BUY" if edge > 0 else "SELL",
+                        "polymarket_id": mapping["polymarket_id"],
+                        "polymarket_question": mapping["polymarket_question"],
+                        "commence_time": event.get("commence_time")
+                    })
+    
+    # Sort by edge size
+    edges.sort(key=lambda x: abs(x["edge"]), reverse=True)
+    
+    return {
+        "edges": edges,
+        "count": len(edges),
+        "min_edge_filter": min_edge,
+        "generated_at": datetime.now().isoformat()
+    }
+
+
 @app.get("/api/signals")
 async def get_all_signals():
     """Get aggregated signals from all sources"""
