@@ -3377,7 +3377,13 @@ def load_engine_state() -> dict:
     TRADING_ENGINE_STATE.parent.mkdir(parents=True, exist_ok=True)
     if TRADING_ENGINE_STATE.exists():
         with open(TRADING_ENGINE_STATE) as f:
-            return json.load(f)
+            state = json.load(f)
+            # Ensure new fields exist
+            state.setdefault("adaptive_boost", 0)
+            state.setdefault("last_boost_decay", None)
+            state.setdefault("daily_pnl", 0)
+            state.setdefault("drawdown_halt", False)
+            return state
     return {
         "enabled": False,
         "min_confidence": 35,
@@ -3388,8 +3394,78 @@ def load_engine_state() -> dict:
         "trades_today": 0,
         "last_trade_time": None,
         "last_scan_time": None,
-        "total_trades": 0
+        "total_trades": 0,
+        # Adaptive confidence
+        "adaptive_boost": 0,           # Current boost to min_confidence
+        "last_boost_decay": None,      # Last time we decayed the boost
+        # Drawdown protection
+        "daily_pnl": 0,
+        "drawdown_halt": False         # Circuit breaker tripped
     }
+
+# Adaptive confidence config
+ADAPTIVE_CONF_INCREMENT = 3      # Add this to min_conf after each trade
+ADAPTIVE_CONF_MAX = 40           # Max boost (so 35 + 40 = 75 max)
+ADAPTIVE_CONF_DECAY_RATE = 1     # Decay this much per decay interval
+ADAPTIVE_CONF_DECAY_MINUTES = 30 # Decay every N minutes
+DRAWDOWN_HALT_PCT = 0.05         # Halt trading if down 5% on the day
+
+def get_effective_min_confidence(state: dict) -> int:
+    """Calculate effective min_confidence with adaptive boost"""
+    base = state.get("min_confidence", 35)
+    boost = state.get("adaptive_boost", 0)
+    return base + boost
+
+def decay_adaptive_boost(state: dict) -> dict:
+    """Decay adaptive boost over time"""
+    now = datetime.now()
+    last_decay = state.get("last_boost_decay")
+    
+    if last_decay:
+        last_decay_dt = datetime.fromisoformat(last_decay)
+        minutes_elapsed = (now - last_decay_dt).total_seconds() / 60
+        
+        if minutes_elapsed >= ADAPTIVE_CONF_DECAY_MINUTES:
+            # Calculate how many decay periods passed
+            periods = int(minutes_elapsed / ADAPTIVE_CONF_DECAY_MINUTES)
+            decay_amount = periods * ADAPTIVE_CONF_DECAY_RATE
+            
+            current_boost = state.get("adaptive_boost", 0)
+            new_boost = max(0, current_boost - decay_amount)
+            
+            if new_boost != current_boost:
+                state["adaptive_boost"] = new_boost
+                state["last_boost_decay"] = now.isoformat()
+    else:
+        state["last_boost_decay"] = now.isoformat()
+    
+    return state
+
+def increment_adaptive_boost(state: dict) -> dict:
+    """Increment adaptive boost after a trade"""
+    current = state.get("adaptive_boost", 0)
+    state["adaptive_boost"] = min(ADAPTIVE_CONF_MAX, current + ADAPTIVE_CONF_INCREMENT)
+    return state
+
+def check_drawdown_halt(state: dict, current_balance: float) -> tuple:
+    """Check if drawdown circuit breaker should trip"""
+    daily_pnl = state.get("daily_pnl", 0)
+    
+    if daily_pnl >= 0:
+        return False, None
+    
+    # Calculate drawdown percentage
+    # Use starting balance (current + losses) as denominator
+    starting_balance = current_balance - daily_pnl  # If pnl is -50, starting was current+50
+    if starting_balance <= 0:
+        return False, None
+    
+    drawdown_pct = abs(daily_pnl) / starting_balance
+    
+    if drawdown_pct >= DRAWDOWN_HALT_PCT:
+        return True, f"Drawdown halt: {drawdown_pct:.1%} loss today (threshold: {DRAWDOWN_HALT_PCT:.0%})"
+    
+    return False, None
 
 def save_engine_state(state: dict):
     """Save engine state"""
@@ -3424,11 +3500,22 @@ def engine_should_trade(state: dict) -> tuple:
     if not state.get("enabled", False):
         return False, "Engine disabled"
     
+    # DRAWDOWN CIRCUIT BREAKER (always active)
+    if state.get("drawdown_halt", False):
+        return False, "Drawdown circuit breaker active - trading halted"
+    
+    ensure_storage()
+    balance_data = load_json(BALANCE_FILE)
+    current_balance = balance_data.get("usdc", DEFAULT_BALANCE)
+    
+    halt, halt_reason = check_drawdown_halt(state, current_balance)
+    if halt:
+        state["drawdown_halt"] = True
+        save_engine_state(state)
+        return False, halt_reason
+    
     # Use phase-based limits if enabled
     if PHASE_SCALING_ENABLED:
-        ensure_storage()
-        balance_data = load_json(BALANCE_FILE)
-        current_balance = balance_data.get("usdc", DEFAULT_BALANCE)
         phase_config = get_phase_config(current_balance)
         
         # Check daily trade limit (phase-aware)
@@ -3559,11 +3646,21 @@ def engine_evaluate_and_trade() -> dict:
     balance_data = load_json(BALANCE_FILE)
     current_balance = balance_data.get("usdc", DEFAULT_BALANCE)
     
-    min_conf = state.get("min_confidence", 35)
+    # ADAPTIVE CONFIDENCE - gets stricter as we trade more
+    min_conf = get_effective_min_confidence(state)
+    base_min_conf = state.get("min_confidence", 35)
+    adaptive_boost = state.get("adaptive_boost", 0)
+    
     max_per_trade = state.get("max_per_trade", 100)
     max_position_pct = state.get("max_position_pct", 0.05)
     
-    result = {"action": "evaluated", "signals_checked": len(actionable), "trades": []}
+    result = {
+        "action": "evaluated", 
+        "signals_checked": len(actionable), 
+        "trades": [],
+        "effective_min_confidence": min_conf,
+        "adaptive_boost": adaptive_boost
+    }
     
     for sig in actionable:
         # Check confidence threshold
@@ -3699,6 +3796,10 @@ def engine_evaluate_and_trade() -> dict:
             state["trades_today"] = state.get("trades_today", 0) + 1
             state["total_trades"] = state.get("total_trades", 0) + 1
             state["last_trade_time"] = datetime.now().isoformat()
+            
+            # ADAPTIVE CONFIDENCE - require higher confidence for next trade
+            state = increment_adaptive_boost(state)
+            
             save_engine_state(state)
             
             # Update balance for next iteration (track by platform)
@@ -3739,6 +3840,11 @@ def engine_loop():
     while _engine_running:
         try:
             state = load_engine_state()
+            
+            # ADAPTIVE CONFIDENCE DECAY - relax threshold over time
+            state = decay_adaptive_boost(state)
+            save_engine_state(state)
+            
             if state.get("enabled", False):
                 result = engine_evaluate_and_trade()
                 
@@ -3801,6 +3907,8 @@ async def get_engine_status():
     balance_data = load_json(BALANCE_FILE)
     positions = load_json(POSITIONS_FILE)
     
+    effective_min_conf = get_effective_min_confidence(state)
+    
     return {
         "running": _engine_running,
         "enabled": state.get("enabled", False),
@@ -3809,6 +3917,18 @@ async def get_engine_status():
             "max_per_trade": state.get("max_per_trade", 100),
             "max_daily_trades": state.get("max_daily_trades", 20),
             "cooldown_minutes": state.get("cooldown_minutes", 5)
+        },
+        "adaptive": {
+            "boost": state.get("adaptive_boost", 0),
+            "effective_min_confidence": effective_min_conf,
+            "max_boost": ADAPTIVE_CONF_MAX,
+            "increment_per_trade": ADAPTIVE_CONF_INCREMENT,
+            "decay_rate": f"{ADAPTIVE_CONF_DECAY_RATE} per {ADAPTIVE_CONF_DECAY_MINUTES}min"
+        },
+        "protection": {
+            "drawdown_halt": state.get("drawdown_halt", False),
+            "drawdown_threshold": f"{DRAWDOWN_HALT_PCT:.0%}",
+            "daily_pnl": state.get("daily_pnl", 0)
         },
         "stats": {
             "trades_today": state.get("trades_today", 0),
@@ -3864,11 +3984,19 @@ async def trigger_engine_evaluation():
 
 @app.post("/api/engine/reset-daily")
 async def reset_daily_counter():
-    """Reset daily trade counter"""
+    """Reset daily trade counter and adaptive/drawdown state"""
     state = load_engine_state()
     state["trades_today"] = 0
+    state["daily_pnl"] = 0
+    state["adaptive_boost"] = 0
+    state["drawdown_halt"] = False
     save_engine_state(state)
-    return {"reset": True, "trades_today": 0}
+    return {
+        "reset": True, 
+        "trades_today": 0,
+        "adaptive_boost": 0,
+        "drawdown_halt": False
+    }
 
 
 @app.get("/api/paper/status")
