@@ -3480,6 +3480,43 @@ async def find_vegas_edge(min_edge: float = 0.05, sports: str = "auto"):
     }
 
 
+@app.get("/api/espn/odds")
+async def get_espn_odds():
+    """
+    Get current odds from ESPN (DraftKings source)
+    
+    Free API, no key required. Covers: NFL, NBA, NHL, MLB, NCAAF, NCAAB
+    """
+    try:
+        import sys
+        odds_path = str(Path(__file__).parent.parent / "odds")
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from espn_odds import get_espn_summary
+        return get_espn_summary()
+    except Exception as e:
+        return {"error": str(e), "source": "espn"}
+
+
+@app.get("/api/espn/edge")
+async def get_espn_edges(min_edge: float = Query(default=5.0)):
+    """
+    Find edges between ESPN/DraftKings odds and Polymarket
+    
+    Free API, no key required. Compares spread-implied probabilities
+    against Polymarket prices. Covers all major US sports.
+    """
+    try:
+        import sys
+        odds_path = str(Path(__file__).parent.parent / "odds")
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from espn_odds import get_espn_edges as espn_edge_fn
+        return await espn_edge_fn(min_edge)
+    except Exception as e:
+        return {"error": str(e), "source": "espn"}
+
+
 @app.get("/api/vegas/soccer")
 async def get_soccer_edges(min_edge: float = 0.01):
     """
