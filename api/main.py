@@ -2,6 +2,12 @@
 """
 Polymarket Trading Bot - FastAPI Backend
 Paper trading + Simmer SDK live trading integration.
+
+Enhanced with:
+- LLM-driven signal validation (Claude/OpenAI)
+- Dynamic Kelly sizing
+- Weighted conflict resolution
+- Meta-learning for source performance
 """
 
 import json
@@ -18,11 +24,29 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+# Import phase-based scaling
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent / "config"))
+try:
+    from scaling_phases import (
+        get_phase, get_phase_config, calculate_position_size, 
+        check_daily_limits, Phase, PHASES
+    )
+    PHASE_SCALING_ENABLED = True
+except ImportError:
+    PHASE_SCALING_ENABLED = False
+
 # ============================================================================
 # Configuration
 # ============================================================================
 
-app = FastAPI(title="Polyclawd Trading API", version="2.0.0")
+app = FastAPI(title="Polyclawd Trading API", version="2.1.0")
+
+# LLM Configuration
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+LLM_VALIDATION_ENABLED = bool(ANTHROPIC_API_KEY or OPENAI_API_KEY)
+LLM_PROVIDER = "anthropic" if ANTHROPIC_API_KEY else ("openai" if OPENAI_API_KEY else None)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1775,6 +1799,9 @@ def check_and_resolve_positions() -> dict:
                     if market_id:
                         resolve_conflict_outcome(market_id, outcome.upper())
                     
+                    # Update recent performance for Dynamic Kelly
+                    update_recent_performance(won)
+                    
                     resolved.append({
                         "position_id": pos.get("id"),
                         "market": market_title[:50],
@@ -1832,6 +1859,9 @@ def simulate_resolution(position_id: str, won: bool) -> dict:
             market_title = pos.get("market", "")
             if source:
                 record_outcome(source, won, market_title)
+            
+            # Update recent performance for Dynamic Kelly
+            update_recent_performance(won)
             
             save_json(POSITIONS_FILE, positions)
             save_json(BALANCE_FILE, balance_data)
@@ -2168,6 +2198,434 @@ def get_source_win_rate(source: str) -> float:
     data = outcomes[source]
     # Bayesian estimate with Beta prior (Laplace smoothing)
     return data["wins"] / data["total"] if data["total"] > 0 else 0.5
+
+
+# ==================== LLM VALIDATION LAYER ====================
+
+LLM_VALIDATION_CACHE = {}  # Cache to avoid repeated API calls
+LLM_CACHE_TTL = 300  # 5 minutes
+
+def llm_validate_signal(signal: dict) -> dict:
+    """
+    Send signal to LLM for contextual validation.
+    Returns confidence adjustment and reasoning.
+    
+    Uses Claude (Anthropic) or GPT (OpenAI) based on available API key.
+    Falls back to no adjustment if no LLM configured.
+    """
+    if not LLM_VALIDATION_ENABLED:
+        return {"adjustment": 0, "reasoning": "LLM validation disabled", "veto": False}
+    
+    # Check cache
+    cache_key = f"{signal.get('market_id', '')}:{signal.get('side', '')}"
+    if cache_key in LLM_VALIDATION_CACHE:
+        cached = LLM_VALIDATION_CACHE[cache_key]
+        if (datetime.now() - cached["timestamp"]).seconds < LLM_CACHE_TTL:
+            return cached["result"]
+    
+    market = signal.get("market", "")[:200]
+    side = signal.get("side", "")
+    confidence = signal.get("confidence", 0)
+    source = signal.get("source", "")
+    reasoning = signal.get("reasoning", "")[:200]
+    
+    prompt = f"""You are a prediction market trading validator. Evaluate this signal:
+
+Market: {market}
+Bet: {side}
+Confidence: {confidence}/100
+Source: {source}
+Signal Reasoning: {reasoning}
+
+Evaluate for:
+1. Is there recent news that strongly contradicts this bet?
+2. Is the timing risky (too close to resolution, potential manipulation)?
+3. Does the market have ambiguous resolution criteria?
+4. Is this a low-quality market (weather, obscure sports)?
+
+Respond with ONLY valid JSON (no markdown):
+{{"adjustment": <-20 to +20>, "reasoning": "<brief 1-sentence explanation>", "veto": <true or false>}}
+
+If uncertain, use adjustment=0 and veto=false."""
+
+    try:
+        if LLM_PROVIDER == "anthropic":
+            result = _call_anthropic(prompt)
+        elif LLM_PROVIDER == "openai":
+            result = _call_openai(prompt)
+        else:
+            result = {"adjustment": 0, "reasoning": "No LLM provider", "veto": False}
+        
+        # Cache result
+        LLM_VALIDATION_CACHE[cache_key] = {
+            "timestamp": datetime.now(),
+            "result": result
+        }
+        
+        return result
+    except Exception as e:
+        return {"adjustment": 0, "reasoning": f"LLM error: {str(e)[:50]}", "veto": False}
+
+
+def _call_anthropic(prompt: str) -> dict:
+    """Call Anthropic Claude API"""
+    import urllib.request
+    import urllib.error
+    
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01"
+    }
+    data = json.dumps({
+        "model": "claude-3-haiku-20240307",  # Fast and cheap
+        "max_tokens": 150,
+        "messages": [{"role": "user", "content": prompt}]
+    }).encode()
+    
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            result = json.loads(response.read().decode())
+            text = result.get("content", [{}])[0].get("text", "{}")
+            # Parse JSON from response
+            return json.loads(text)
+    except Exception as e:
+        return {"adjustment": 0, "reasoning": f"API error: {str(e)[:30]}", "veto": False}
+
+
+def _call_openai(prompt: str) -> dict:
+    """Call OpenAI GPT API"""
+    import urllib.request
+    
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENAI_API_KEY}"
+    }
+    data = json.dumps({
+        "model": "gpt-4o-mini",  # Fast and cheap
+        "max_tokens": 150,
+        "messages": [{"role": "user", "content": prompt}]
+    }).encode()
+    
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            result = json.loads(response.read().decode())
+            text = result.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+            return json.loads(text)
+    except Exception as e:
+        return {"adjustment": 0, "reasoning": f"API error: {str(e)[:30]}", "veto": False}
+
+
+# ==================== DYNAMIC KELLY SIZING ====================
+
+RECENT_TRADES_FILE = Path(__file__).parent.parent / "data" / "recent_trades.json"
+
+def load_recent_performance() -> dict:
+    """Load recent trade performance for dynamic sizing"""
+    try:
+        if RECENT_TRADES_FILE.exists():
+            data = json.loads(RECENT_TRADES_FILE.read_text())
+            return data
+    except:
+        pass
+    return {"trades": [], "last_5_wins": 0, "last_5_total": 0}
+
+
+def update_recent_performance(won: bool):
+    """Update recent trade performance tracking"""
+    perf = load_recent_performance()
+    
+    trades = perf.get("trades", [])
+    trades.append({"won": won, "timestamp": datetime.now().isoformat()})
+    
+    # Keep only last 20 trades
+    trades = trades[-20:]
+    
+    # Calculate last 5 performance
+    last_5 = trades[-5:] if len(trades) >= 5 else trades
+    last_5_wins = sum(1 for t in last_5 if t["won"])
+    
+    perf = {
+        "trades": trades,
+        "last_5_wins": last_5_wins,
+        "last_5_total": len(last_5),
+        "last_5_win_rate": last_5_wins / len(last_5) if last_5 else 0.5,
+        "overall_wins": sum(1 for t in trades if t["won"]),
+        "overall_total": len(trades),
+        "updated": datetime.now().isoformat()
+    }
+    
+    try:
+        RECENT_TRADES_FILE.write_text(json.dumps(perf, indent=2))
+    except:
+        pass
+    
+    return perf
+
+
+def calculate_dynamic_kelly(signal: dict, base_kelly: float = 0.25) -> float:
+    """
+    Calculate dynamic Kelly fraction based on:
+    - Recent win rate (reduce on losing streaks)
+    - Source agreement (increase when multiple sources agree)
+    - Signal confidence (scale with confidence)
+    
+    Returns: Adjusted Kelly fraction (0.1 to 0.5)
+    """
+    perf = load_recent_performance()
+    
+    kelly = base_kelly
+    adjustments = []
+    
+    # 1. Recent performance adjustment
+    last_5_win_rate = perf.get("last_5_win_rate", 0.5)
+    if last_5_win_rate < 0.3:
+        # On a losing streak - reduce sizing significantly
+        kelly *= 0.4
+        adjustments.append(f"losing_streak({last_5_win_rate:.0%})")
+    elif last_5_win_rate < 0.5:
+        # Slightly losing - reduce sizing
+        kelly *= 0.7
+        adjustments.append(f"cold({last_5_win_rate:.0%})")
+    elif last_5_win_rate > 0.7:
+        # Hot streak - slightly increase
+        kelly *= 1.2
+        adjustments.append(f"hot({last_5_win_rate:.0%})")
+    
+    # 2. Source agreement boost
+    agreement_count = signal.get("confidence_breakdown", {}).get("agreement", 0)
+    if agreement_count >= 2:
+        kelly *= 1.3
+        adjustments.append(f"agreement({agreement_count})")
+    elif agreement_count >= 1:
+        kelly *= 1.1
+        adjustments.append(f"confirmed({agreement_count})")
+    
+    # 3. Confidence scaling
+    confidence = signal.get("confidence", 50)
+    if confidence >= 80:
+        kelly *= 1.2
+        adjustments.append("high_conf")
+    elif confidence < 40:
+        kelly *= 0.7
+        adjustments.append("low_conf")
+    
+    # 4. Source reliability
+    source = signal.get("source", "")
+    source_win_rate = get_source_win_rate(source)
+    if source_win_rate > 0.6:
+        kelly *= 1.15
+        adjustments.append(f"reliable_source({source_win_rate:.0%})")
+    elif source_win_rate < 0.4:
+        kelly *= 0.75
+        adjustments.append(f"weak_source({source_win_rate:.0%})")
+    
+    # Clamp to safe range
+    kelly = max(0.1, min(0.5, kelly))
+    
+    return {
+        "kelly": round(kelly, 3),
+        "base_kelly": base_kelly,
+        "adjustments": adjustments,
+        "last_5_win_rate": last_5_win_rate
+    }
+
+
+@app.get("/api/llm/status")
+async def get_llm_status():
+    """Get LLM validation status and configuration"""
+    return {
+        "enabled": LLM_VALIDATION_ENABLED,
+        "provider": LLM_PROVIDER,
+        "cache_size": len(LLM_VALIDATION_CACHE),
+        "cache_ttl_seconds": LLM_CACHE_TTL
+    }
+
+
+@app.post("/api/llm/test")
+async def test_llm_validation(
+    market: str = Query(..., description="Market title"),
+    side: str = Query("YES", description="Bet side"),
+    confidence: float = Query(50, description="Signal confidence")
+):
+    """Test LLM validation on a sample signal"""
+    test_signal = {
+        "market": market,
+        "side": side,
+        "confidence": confidence,
+        "source": "test",
+        "reasoning": "Manual test signal"
+    }
+    
+    result = llm_validate_signal(test_signal)
+    return {
+        "signal": test_signal,
+        "llm_result": result,
+        "would_trade": not result.get("veto", False) and (confidence + result.get("adjustment", 0)) >= 35
+    }
+
+
+@app.get("/api/kelly/status")
+async def get_kelly_status():
+    """Get Dynamic Kelly status and recent performance"""
+    perf = load_recent_performance()
+    
+    # Calculate current Kelly for a sample signal
+    sample_signal = {"confidence": 50, "source": "simmer_divergence"}
+    kelly_result = calculate_dynamic_kelly(sample_signal)
+    
+    return {
+        "recent_performance": perf,
+        "sample_kelly": kelly_result,
+        "base_kelly": 0.25,
+        "kelly_range": [0.1, 0.5]
+    }
+
+
+# ============================================================================
+# Phase-Based Scaling Endpoints
+# ============================================================================
+
+@app.get("/api/phase/current")
+async def get_current_phase():
+    """Get current scaling phase based on balance"""
+    if not PHASE_SCALING_ENABLED:
+        return {"enabled": False, "error": "Phase scaling module not loaded"}
+    
+    # Get balances for both platforms
+    ensure_storage()
+    ensure_poly_storage()
+    
+    simmer_balance = load_json(BALANCE_FILE).get("usdc", DEFAULT_BALANCE)
+    poly_balance = load_json(POLY_BALANCE_FILE).get("usdc", DEFAULT_BALANCE)
+    total_balance = simmer_balance + poly_balance
+    
+    phase_config = get_phase_config(total_balance)
+    
+    return {
+        "enabled": True,
+        "balances": {
+            "simmer": round(simmer_balance, 2),
+            "polymarket": round(poly_balance, 2),
+            "total": round(total_balance, 2),
+        },
+        "phase": phase_config.name,
+        "config": phase_config.to_dict(),
+        "next_phase": _get_next_phase_info(total_balance),
+    }
+
+
+def _get_next_phase_info(current_balance: float) -> dict:
+    """Get info about next phase transition"""
+    if not PHASE_SCALING_ENABLED:
+        return {}
+    
+    current_phase = get_phase(current_balance)
+    
+    thresholds = {
+        Phase.SEED: (1000, "growth"),
+        Phase.GROWTH: (10000, "acceleration"),
+        Phase.ACCELERATION: (100000, "preservation"),
+        Phase.PRESERVATION: (None, None),
+    }
+    
+    next_threshold, next_name = thresholds.get(current_phase, (None, None))
+    
+    if next_threshold is None:
+        return {"at_max": True}
+    
+    return {
+        "next_phase": next_name,
+        "threshold": next_threshold,
+        "remaining": round(next_threshold - current_balance, 2),
+        "progress_pct": round((current_balance / next_threshold) * 100, 1),
+    }
+
+
+@app.get("/api/phase/config")
+async def get_phase_config_all():
+    """Get all phase configurations"""
+    if not PHASE_SCALING_ENABLED:
+        return {"enabled": False, "error": "Phase scaling module not loaded"}
+    
+    return {
+        "enabled": True,
+        "phases": {phase.value: config.to_dict() for phase, config in PHASES.items()},
+    }
+
+
+@app.post("/api/phase/simulate")
+async def simulate_position_size(
+    balance: float = Query(..., description="Simulated balance"),
+    confidence: float = Query(50, description="Signal confidence 0-100"),
+    win_rate: float = Query(0.55, description="Recent win rate 0-1"),
+    win_streak: int = Query(0, description="Current win streak"),
+    source_agreement: int = Query(1, description="Number of agreeing sources"),
+):
+    """Simulate position sizing for given parameters"""
+    if not PHASE_SCALING_ENABLED:
+        return {"enabled": False, "error": "Phase scaling module not loaded"}
+    
+    result = calculate_position_size(
+        balance=balance,
+        confidence=confidence,
+        win_rate=win_rate,
+        win_streak=win_streak,
+        source_agreement=source_agreement,
+    )
+    
+    return {
+        "input": {
+            "balance": balance,
+            "confidence": confidence,
+            "win_rate": win_rate,
+            "win_streak": win_streak,
+            "source_agreement": source_agreement,
+        },
+        "result": result,
+    }
+
+
+@app.get("/api/phase/limits")
+async def check_phase_limits():
+    """Check if trading should be paused based on phase limits"""
+    if not PHASE_SCALING_ENABLED:
+        return {"enabled": False, "error": "Phase scaling module not loaded"}
+    
+    ensure_storage()
+    balance_data = load_json(BALANCE_FILE)
+    current_balance = balance_data.get("usdc", DEFAULT_BALANCE)
+    
+    # Get daily PnL
+    state = load_engine_state()
+    daily_pnl = state.get("daily_pnl", 0)
+    daily_trades = state.get("trades_today", 0)
+    
+    # Calculate current exposure
+    positions = load_json(POSITIONS_FILE)
+    current_exposure = sum(p.get("amount", 0) for p in positions)
+    
+    limit_check = check_daily_limits(
+        balance=current_balance,
+        daily_pnl=daily_pnl,
+        daily_trades=daily_trades,
+        current_exposure=current_exposure,
+    )
+    
+    return {
+        "balance": round(current_balance, 2),
+        "daily_pnl": round(daily_pnl, 2),
+        "daily_trades": daily_trades,
+        "current_exposure": round(current_exposure, 2),
+        "limit_check": limit_check,
+    }
+
 
 def normalize_confidence(raw_score: float, source: str) -> float:
     """Normalize raw signal scores to 0-100 scale based on source type"""
@@ -2791,17 +3249,56 @@ def engine_should_trade(state: dict) -> tuple:
     if not state.get("enabled", False):
         return False, "Engine disabled"
     
-    # Check daily limit
-    if state.get("trades_today", 0) >= state.get("max_daily_trades", 20):
-        return False, "Daily trade limit reached"
-    
-    # Check cooldown
-    last_trade = state.get("last_trade_time")
-    if last_trade:
-        last_trade_dt = datetime.fromisoformat(last_trade)
-        cooldown_min = state.get("cooldown_minutes", 5)
-        if (datetime.now() - last_trade_dt).total_seconds() < cooldown_min * 60:
-            return False, f"Cooldown active ({cooldown_min}min)"
+    # Use phase-based limits if enabled
+    if PHASE_SCALING_ENABLED:
+        ensure_storage()
+        balance_data = load_json(BALANCE_FILE)
+        current_balance = balance_data.get("usdc", DEFAULT_BALANCE)
+        phase_config = get_phase_config(current_balance)
+        
+        # Check daily trade limit (phase-aware)
+        max_daily = phase_config.max_daily_trades
+        if state.get("trades_today", 0) >= max_daily:
+            return False, f"Daily trade limit reached ({max_daily} for {phase_config.name} phase)"
+        
+        # Check daily loss limit
+        daily_pnl = state.get("daily_pnl", 0)
+        if daily_pnl < 0:
+            daily_loss_pct = abs(daily_pnl) / current_balance if current_balance > 0 else 0
+            if daily_loss_pct >= phase_config.max_daily_loss_pct:
+                return False, f"Daily loss limit reached ({daily_loss_pct:.1%} >= {phase_config.max_daily_loss_pct:.1%})"
+        
+        # Check exposure limit
+        positions = load_json(POSITIONS_FILE)
+        current_exposure = sum(p.get("amount", 0) for p in positions)
+        exposure_pct = current_exposure / current_balance if current_balance > 0 else 0
+        if exposure_pct >= phase_config.max_exposure_pct:
+            return False, f"Max exposure reached ({exposure_pct:.1%} >= {phase_config.max_exposure_pct:.1%})"
+        
+        # Check cooldown (phase-aware - use cooldown_after_loss if last trade was a loss)
+        last_trade = state.get("last_trade_time")
+        if last_trade:
+            last_trade_dt = datetime.fromisoformat(last_trade)
+            # Use longer cooldown if we're on a losing streak
+            perf = load_recent_performance()
+            if perf.get("streak", 0) < 0:
+                cooldown_sec = phase_config.cooldown_after_loss
+            else:
+                cooldown_sec = state.get("cooldown_minutes", 5) * 60
+            
+            if (datetime.now() - last_trade_dt).total_seconds() < cooldown_sec:
+                return False, f"Cooldown active ({cooldown_sec//60}min)"
+    else:
+        # Legacy checks
+        if state.get("trades_today", 0) >= state.get("max_daily_trades", 20):
+            return False, "Daily trade limit reached"
+        
+        last_trade = state.get("last_trade_time")
+        if last_trade:
+            last_trade_dt = datetime.fromisoformat(last_trade)
+            cooldown_min = state.get("cooldown_minutes", 5)
+            if (datetime.now() - last_trade_dt).total_seconds() < cooldown_min * 60:
+                return False, f"Cooldown active ({cooldown_min}min)"
     
     return True, "Ready"
 
@@ -2931,12 +3428,64 @@ def engine_evaluate_and_trade() -> dict:
         else:
             continue  # Unknown platform
         
-        # Calculate position size
-        amount = min(
-            max_per_trade,
-            trade_balance * max_position_pct,
-            trade_balance * (sig.get("confidence", 0) / 500)
-        )
+        # LLM VALIDATION (Phase 1 enhancement)
+        llm_result = llm_validate_signal(sig)
+        if llm_result.get("veto"):
+            # LLM vetoed this trade
+            result.setdefault("vetoed", []).append({
+                "market": sig.get("market", "")[:40],
+                "reason": llm_result.get("reasoning", "LLM veto")
+            })
+            continue
+        
+        # Apply LLM confidence adjustment
+        adjusted_confidence = sig.get("confidence", 0) + llm_result.get("adjustment", 0)
+        if adjusted_confidence < min_conf:
+            continue
+        
+        # PHASE-BASED POSITION SIZING (replaces old Kelly)
+        if PHASE_SCALING_ENABLED:
+            # Get recent performance for adjustments
+            perf = load_recent_performance()
+            win_rate = perf.get("win_rate", 0.55) if perf.get("total_trades", 0) > 5 else 0.55
+            win_streak = perf.get("streak", 0)
+            
+            # Count agreeing sources for this market
+            market_id = sig.get("market_id") or sig.get("market", "")[:30]
+            agreeing_sources = len([s for s in actionable if 
+                (s.get("market_id") or s.get("market", "")[:30]) == market_id and
+                s.get("side") == sig.get("side")])
+            
+            phase_sizing = calculate_position_size(
+                balance=trade_balance,
+                confidence=adjusted_confidence,
+                win_rate=win_rate,
+                win_streak=win_streak,
+                source_agreement=agreeing_sources,
+            )
+            
+            amount = phase_sizing["position_usd"]
+            phase_info = {
+                "phase": phase_sizing["phase"],
+                "kelly_raw": phase_sizing["kelly_raw"],
+                "kelly_adjusted": phase_sizing["kelly_adjusted"],
+                "multipliers": phase_sizing["multipliers"],
+            }
+            
+            # Use phase min_confidence if stricter
+            phase_config = get_phase_config(trade_balance)
+            if adjusted_confidence < phase_config.min_confidence:
+                continue
+        else:
+            # Fallback to old Kelly sizing
+            kelly_result = calculate_dynamic_kelly(sig, base_kelly=0.25)
+            dynamic_kelly = kelly_result["kelly"]
+            amount = min(
+                max_per_trade,
+                trade_balance * dynamic_kelly,
+                trade_balance * (adjusted_confidence / 400)
+            )
+            phase_info = {"phase": "legacy", "kelly": dynamic_kelly}
         
         if amount < 10:
             continue
@@ -2988,6 +3537,10 @@ def engine_evaluate_and_trade() -> dict:
                 "side": sig.get("side"),
                 "amount": round(amount, 2),
                 "confidence": sig.get("confidence"),
+                "adjusted_confidence": adjusted_confidence,
+                "llm_adjustment": llm_result.get("adjustment", 0),
+                "llm_reasoning": llm_result.get("reasoning", "")[:50],
+                "phase_info": phase_info,
                 "source": sig.get("source"),
                 "executed_at": datetime.now().isoformat()
             })
