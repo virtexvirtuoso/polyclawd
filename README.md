@@ -191,15 +191,6 @@ Example:
 
 ---
 
-## Current Edges (Live)
-
-As of 2026-02-07:
-- 🔥 **Real Madrid La Liga**: Vegas 84% vs Poly 65% = **+19% edge**
-- **Vance 2028 GOP**: PredictIt 55¢ (cross-ref with Poly)
-- **Newsom 2028 DEM**: PredictIt 26¢, Betfair shows -9.8% vs Poly
-
----
-
 ## Quick Start
 
 ```bash
