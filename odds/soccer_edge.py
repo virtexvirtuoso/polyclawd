@@ -12,8 +12,10 @@ from datetime import datetime
 # Import from same directory
 try:
     from .vegas_scraper import get_vegas_odds_with_fallback, VegasOdds
+    from .client import devig_multiway
 except ImportError:
     from vegas_scraper import get_vegas_odds_with_fallback, VegasOdds
+    from client import devig_multiway
 
 @dataclass
 class SoccerEdge:
@@ -142,8 +144,19 @@ async def find_soccer_edges(min_edge: float = 0.01) -> list[SoccerEdge]:
     for league, vegas_odds_list in vegas_data.items():
         poly_markets = poly_data.get(league, {})
         
-        if not poly_markets:
+        if not poly_markets or not vegas_odds_list:
             continue
+        
+        # DEVIG: Remove vig from Vegas odds for this league
+        # Sum implied probs and normalize to get true probabilities
+        raw_probs = [v.implied_prob for v in vegas_odds_list]
+        devigged_probs = devig_multiway(raw_probs)
+        
+        # Create mapping of team -> devigged prob
+        team_to_devigged = {
+            vegas_odds_list[i].team: devigged_probs[i] 
+            for i in range(len(vegas_odds_list))
+        }
             
         for vegas in vegas_odds_list:
             match = match_team(vegas.team, poly_markets)
@@ -151,15 +164,18 @@ async def find_soccer_edges(min_edge: float = 0.01) -> list[SoccerEdge]:
             if match:
                 poly_team, poly_price, market_id = match
                 
-                # Calculate edge
+                # Use DEVIGGED probability for comparison
+                true_vegas_prob = team_to_devigged.get(vegas.team, vegas.implied_prob)
+                
+                # Calculate edge using devigged prob
                 # Positive edge = Vegas prob > Polymarket price (underpriced on Poly)
-                edge = vegas.implied_prob - poly_price
+                edge = true_vegas_prob - poly_price
                 
                 if abs(edge) >= min_edge:
                     edges.append(SoccerEdge(
                         team=vegas.team,
                         league=league.upper(),
-                        vegas_prob=vegas.implied_prob,
+                        vegas_prob=true_vegas_prob,  # Now using devigged prob
                         vegas_odds=vegas.american_odds,
                         polymarket_price=poly_price,
                         edge_pct=edge,

@@ -120,9 +120,25 @@ def american_to_prob(odds: int) -> float:
 
 
 def remove_vig(prob_a: float, prob_b: float) -> tuple[float, float]:
-    """Remove vig to get true probabilities"""
+    """Remove vig to get true probabilities (two-way markets)"""
     total = prob_a + prob_b
     return prob_a / total, prob_b / total
+
+
+def devig_multiway(probs: list[float]) -> list[float]:
+    """
+    Remove vig from multi-way market (futures, outrights)
+    
+    Args:
+        probs: List of implied probabilities (with vig baked in)
+    
+    Returns:
+        List of true probabilities (summing to 1.0)
+    """
+    total = sum(probs)
+    if total == 0:
+        return probs
+    return [p / total for p in probs]
 
 
 def calculate_consensus(bookmakers: list[dict], team: str) -> dict:

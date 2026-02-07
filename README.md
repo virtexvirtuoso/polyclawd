@@ -49,9 +49,9 @@ Production: `https://virtuosocrypto.com/polyclawd`
 | 4 | **Volume Spikes** | Technical | LOW | Z-score anomaly (2σ+ activity) |
 | 5 | **New Markets** | Calendar | LOW | Early mover on new markets |
 | 6 | **Resolution Timing** | Calendar | LOW | High uncertainty near expiry |
-| 7 | **Vegas Edge** | Sharp odds | HIGH | Sports lines vs Polymarket |
-| 8 | **Soccer Edge** | Sharp odds | HIGH | Futures vs Polymarket |
-| 9 | **Betfair Edge** | Sharp odds | HIGH | Exchange odds vs Polymarket |
+| 7 | **Vegas Edge** | Sharp odds | HIGH | Sports lines vs Polymarket (devigged) |
+| 8 | **Soccer Edge** | Sharp odds | HIGH | Futures vs Polymarket (devigged) |
+| 9 | **Betfair Edge** | Sharp odds | HIGH | Exchange odds vs Polymarket (no vig) |
 | 10 | **Manifold Edge** | Leading indicator | MEDIUM | Play money signals |
 | 11 | **PredictIt Edge** | Cross-platform | MEDIUM | Politics price gaps |
 | 12 | **Kalshi Overlap** | Cross-platform | MEDIUM | Market matching |
@@ -65,6 +65,12 @@ Production: `https://virtuosocrypto.com/polyclawd`
 Sharp (Betfair/Vegas) = True probability (professional bettors)
 Soft (Polymarket) = Retail sentiment (crypto degens)
 EDGE: Trade Poly toward sharp price when gap > 5%
+
+DEVIGGING: Vegas odds include ~4% vig (house edge).
+We remove vig before comparing to get TRUE probabilities:
+  - Two-way: prob_true = prob_raw / (prob_a + prob_b)
+  - Multi-way: prob_true = prob_raw / sum(all_probs)
+This makes edge detection ~2-4% more accurate.
 ```
 
 ### 2. Manifold → Polymarket Flow
