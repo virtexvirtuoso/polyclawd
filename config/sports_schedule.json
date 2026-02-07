@@ -1,0 +1,28 @@
+{
+  "sports_calendar": {
+    "january": ["basketball_nba", "basketball_ncaab", "icehockey_nhl", "americanfootball_nfl", "soccer_epl", "mma_mixed_martial_arts"],
+    "february": ["basketball_nba", "basketball_ncaab", "icehockey_nhl", "americanfootball_nfl", "soccer_epl", "mma_mixed_martial_arts"],
+    "march": ["basketball_nba", "basketball_ncaab", "icehockey_nhl", "soccer_epl", "mma_mixed_martial_arts", "baseball_mlb_world_series_winner"],
+    "april": ["basketball_nba", "icehockey_nhl", "soccer_epl", "mma_mixed_martial_arts", "golf_masters_tournament_winner"],
+    "may": ["basketball_nba", "icehockey_nhl", "soccer_epl", "mma_mixed_martial_arts", "golf_pga_championship_winner"],
+    "june": ["basketball_nba", "icehockey_nhl", "soccer_epl", "mma_mixed_martial_arts", "golf_us_open_winner"],
+    "july": ["mma_mixed_martial_arts", "golf_the_open_championship_winner", "soccer_epl"],
+    "august": ["mma_mixed_martial_arts", "americanfootball_ncaaf", "soccer_epl"],
+    "september": ["americanfootball_nfl", "americanfootball_ncaaf", "mma_mixed_martial_arts", "soccer_epl"],
+    "october": ["americanfootball_nfl", "americanfootball_ncaaf", "basketball_nba", "icehockey_nhl", "mma_mixed_martial_arts", "soccer_epl"],
+    "november": ["americanfootball_nfl", "americanfootball_ncaaf", "basketball_nba", "icehockey_nhl", "mma_mixed_martial_arts", "soccer_epl"],
+    "december": ["americanfootball_nfl", "basketball_nba", "icehockey_nhl", "mma_mixed_martial_arts", "soccer_epl"]
+  },
+  "polymarket_priority": {
+    "high": ["americanfootball_nfl", "basketball_nba", "politics_us_presidential_election_winner", "mma_mixed_martial_arts"],
+    "medium": ["basketball_ncaab", "icehockey_nhl", "soccer_epl", "soccer_uefa_champs_league"],
+    "low": ["golf_masters_tournament_winner", "boxing_boxing", "tennis_wta_qatar_open"]
+  },
+  "always_scan": ["mma_mixed_martial_arts", "politics_us_presidential_election_winner"],
+  "notes": {
+    "WBC": "World Baseball Classic usually March - add baseball_wbc when available",
+    "March_Madness": "basketball_ncaab peaks mid-March to early April",
+    "Super_Bowl": "NFL ends after Super Bowl (early Feb), resumes September",
+    "NBA_Playoffs": "April-June, highest edge potential"
+  }
+}

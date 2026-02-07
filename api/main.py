@@ -3228,6 +3228,46 @@ def auto_paper_trade_signals(max_trades: int = 5, max_per_trade: float = 100, mi
 # VEGAS EDGE FINDER - Compare sportsbook odds to Polymarket
 # =============================================================================
 
+# Dynamic sports calendar
+SPORTS_CALENDAR = {
+    1: ["basketball_nba", "basketball_ncaab", "icehockey_nhl", "americanfootball_nfl", "mma_mixed_martial_arts"],
+    2: ["basketball_nba", "basketball_ncaab", "icehockey_nhl", "americanfootball_nfl", "mma_mixed_martial_arts"],  # Super Bowl in Feb
+    3: ["basketball_nba", "basketball_ncaab", "icehockey_nhl", "mma_mixed_martial_arts"],  # March Madness!
+    4: ["basketball_nba", "icehockey_nhl", "mma_mixed_martial_arts"],  # NBA playoffs start
+    5: ["basketball_nba", "icehockey_nhl", "mma_mixed_martial_arts"],
+    6: ["basketball_nba", "icehockey_nhl", "mma_mixed_martial_arts"],  # NBA Finals, Stanley Cup
+    7: ["mma_mixed_martial_arts"],  # Summer lull
+    8: ["mma_mixed_martial_arts", "americanfootball_ncaaf"],  # College FB starts
+    9: ["americanfootball_nfl", "americanfootball_ncaaf", "mma_mixed_martial_arts"],  # NFL returns!
+    10: ["americanfootball_nfl", "basketball_nba", "icehockey_nhl", "mma_mixed_martial_arts"],
+    11: ["americanfootball_nfl", "basketball_nba", "icehockey_nhl", "mma_mixed_martial_arts"],
+    12: ["americanfootball_nfl", "basketball_nba", "icehockey_nhl", "mma_mixed_martial_arts"]
+}
+
+# Always include these regardless of season
+ALWAYS_SCAN = ["politics_us_presidential_election_winner"]
+
+
+@app.get("/api/vegas/sports")
+async def get_active_sports():
+    """Get sports to scan based on current month"""
+    current_month = datetime.now().month
+    seasonal_sports = SPORTS_CALENDAR.get(current_month, [])
+    all_sports = list(set(seasonal_sports + ALWAYS_SCAN))
+    
+    return {
+        "month": current_month,
+        "month_name": datetime.now().strftime("%B"),
+        "sports": all_sports,
+        "count": len(all_sports),
+        "notes": {
+            2: "Super Bowl month - NFL ends after game",
+            3: "March Madness - NCAAB peak",
+            9: "NFL returns!"
+        }.get(current_month, None)
+    }
+
+
 @app.get("/api/vegas/odds")
 async def get_vegas_odds(sport: str = "americanfootball_nfl"):
     """
@@ -3336,17 +3376,22 @@ async def get_vegas_odds(sport: str = "americanfootball_nfl"):
 
 
 @app.get("/api/vegas/edge")
-async def find_vegas_edge(min_edge: float = 0.05, sports: str = "americanfootball_nfl"):
+async def find_vegas_edge(min_edge: float = 0.05, sports: str = "auto"):
     """
     Find edges between Vegas odds and Polymarket prices.
     
     Args:
         min_edge: Minimum edge to return (default 5%)
-        sports: Comma-separated sport keys (default: americanfootball_nfl)
+        sports: Comma-separated sport keys, or "auto" to use seasonal calendar
     
     Compares implied probability from sportsbooks against Polymarket prices.
     Returns opportunities where the gap exceeds min_edge.
     """
+    # Use dynamic sports calendar if "auto"
+    if sports == "auto":
+        current_month = datetime.now().month
+        sports_list = SPORTS_CALENDAR.get(current_month, ["basketball_nba", "mma_mixed_martial_arts"])
+        sports = ",".join(sports_list[:3])  # Limit to 3 to conserve API calls
     # Manual mapping of known markets with current prices
     # TODO: Auto-fetch prices from Polymarket API
     MARKET_MAPPINGS = {
