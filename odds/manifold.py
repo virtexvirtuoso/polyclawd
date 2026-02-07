@@ -63,7 +63,10 @@ def get_market(market_id: str) -> Optional[Dict]:
 
 def find_polymarket_overlaps(poly_events: List[Dict], min_liquidity: float = 1000) -> List[Dict]:
     """Find Manifold markets that match Polymarket events"""
-    from smart_matcher import match_markets
+    try:
+        from smart_matcher import match_markets
+    except ImportError:
+        from odds.smart_matcher import match_markets
     
     # Get top Manifold markets
     manifold_markets = fetch_markets(limit=200)
@@ -106,7 +109,15 @@ def find_polymarket_overlaps(poly_events: List[Dict], min_liquidity: float = 100
         for match in matches:
             poly_price = None
             for mkt in poly.get("markets", []):
-                poly_price = mkt.get("bestAsk", mkt.get("outcomePrices", {}).get("Yes"))
+                # Handle outcomePrices which might be a JSON string
+                outcome_prices = mkt.get("outcomePrices", {})
+                if isinstance(outcome_prices, str):
+                    try:
+                        import json
+                        outcome_prices = json.loads(outcome_prices)
+                    except:
+                        outcome_prices = {}
+                poly_price = mkt.get("bestAsk") or (outcome_prices.get("Yes") if isinstance(outcome_prices, dict) else None)
                 break
             
             if poly_price:
