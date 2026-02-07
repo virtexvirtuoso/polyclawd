@@ -3238,18 +3238,22 @@ async def get_vegas_odds(sport: str = "americanfootball_nfl"):
     """
     import subprocess
     
-    # Get API key from keychain
-    try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-a", "the-odds-api", "-s", "the-odds-api", "-w"],
-            capture_output=True, text=True
-        )
-        api_key = result.stdout.strip() if result.returncode == 0 else None
-    except:
-        api_key = None
+    # Get API key - try environment first, then keychain
+    api_key = os.getenv("ODDS_API_KEY")
     
     if not api_key:
-        return {"error": "No API key configured"}
+        # Try macOS keychain as fallback
+        try:
+            result = subprocess.run(
+                ["security", "find-generic-password", "-a", "the-odds-api", "-s", "the-odds-api", "-w"],
+                capture_output=True, text=True
+            )
+            api_key = result.stdout.strip() if result.returncode == 0 else None
+        except:
+            pass
+    
+    if not api_key:
+        return {"error": "No API key configured. Set ODDS_API_KEY environment variable."}
     
     import httpx
     async with httpx.AsyncClient() as client:
