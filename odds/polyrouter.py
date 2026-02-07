@@ -151,8 +151,8 @@ async def find_cross_platform_edges(min_edge_pct: float = 3.0) -> list:
     
     edges = []
     
-    # Get markets from each platform
-    platforms = ["polymarket", "kalshi", "manifold", "limitless"]
+    # Get markets from each live platform
+    platforms = LIVE_PLATFORMS
     all_markets = {}
     
     for platform in platforms:
@@ -197,16 +197,19 @@ async def find_cross_platform_edges(min_edge_pct: float = 3.0) -> list:
     
     return sorted(edges, key=lambda x: x["edge_pct"], reverse=True)
 
-# Platforms info
+# Platforms info (currently live)
 PLATFORMS = {
-    "polymarket": {"name": "Polymarket", "type": "crypto", "region": "global"},
-    "kalshi": {"name": "Kalshi", "type": "regulated", "region": "US"},
-    "manifold": {"name": "Manifold", "type": "play-money", "region": "global"},
-    "limitless": {"name": "Limitless", "type": "crypto", "region": "global"},
-    "prophetx": {"name": "ProphetX", "type": "prediction", "region": "global"},
-    "novig": {"name": "Novig", "type": "sports", "region": "US"},
-    "sxbet": {"name": "SX.bet", "type": "crypto-sports", "region": "global"},
+    "polymarket": {"name": "Polymarket", "type": "crypto", "region": "global", "live": True},
+    "kalshi": {"name": "Kalshi", "type": "regulated", "region": "US", "live": True},
+    "manifold": {"name": "Manifold", "type": "play-money", "region": "global", "live": True},
+    "limitless": {"name": "Limitless", "type": "crypto", "region": "global", "live": True},
+    # Coming soon per API validation:
+    "prophetx": {"name": "ProphetX", "type": "prediction", "region": "global", "live": False},
+    "novig": {"name": "Novig", "type": "sports", "region": "US", "live": False},
+    "sxbet": {"name": "SX.bet", "type": "crypto-sports", "region": "global", "live": False},
 }
+
+LIVE_PLATFORMS = ["polymarket", "kalshi", "manifold", "limitless"]
 
 def list_platforms():
     """List all supported platforms."""
