@@ -1,6 +1,8 @@
 """
 Kalshi Edge Finder
 Compares Kalshi prediction market prices with Polymarket
+
+Supports RSA-256 JWT authentication for prod API
 """
 
 import requests
@@ -8,8 +10,11 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional, List, Dict
-from datetime import datetime
+from datetime import datetime, timezone
 import re
+import os
+import base64
+import time
 
 try:
     from .smart_matcher import create_signature, signatures_match, match_markets
@@ -19,6 +24,69 @@ except ImportError:
 # Kalshi API endpoints
 KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 KALSHI_DEMO_API = "https://demo-api.kalshi.co/trade-api/v2"
+
+# Auth config
+KALSHI_KEY_ID = os.getenv("KALSHI_KEY_ID", "")
+KALSHI_PRIVATE_KEY_PATH = os.path.expanduser("~/.kalshi/private_key.pem")
+
+# Cached token
+_auth_token = None
+_token_expiry = 0
+
+
+def _load_private_key():
+    """Load RSA private key from file"""
+    if os.path.exists(KALSHI_PRIVATE_KEY_PATH):
+        with open(KALSHI_PRIVATE_KEY_PATH, 'r') as f:
+            return f.read()
+    return None
+
+
+def _get_auth_headers() -> dict:
+    """
+    Get authentication headers for Kalshi API
+    Uses RSA-256 JWT signing if key is available
+    """
+    global _auth_token, _token_expiry
+    
+    if not KALSHI_KEY_ID:
+        return {"Accept": "application/json"}
+    
+    # Check if we have a valid cached token
+    if _auth_token and time.time() < _token_expiry - 60:
+        return {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {_auth_token}"
+        }
+    
+    private_key = _load_private_key()
+    if not private_key:
+        return {"Accept": "application/json"}
+    
+    try:
+        import jwt
+        
+        now = int(time.time())
+        payload = {
+            "sub": KALSHI_KEY_ID,
+            "iat": now,
+            "exp": now + 3600,  # 1 hour expiry
+        }
+        
+        token = jwt.encode(payload, private_key, algorithm="RS256")
+        _auth_token = token
+        _token_expiry = now + 3600
+        
+        return {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}"
+        }
+    except ImportError:
+        # jwt library not installed
+        return {"Accept": "application/json"}
+    except Exception as e:
+        print(f"Kalshi auth error: {e}")
+        return {"Accept": "application/json"}
 
 @dataclass
 class KalshiMarket:
@@ -61,12 +129,13 @@ def _fetch_kalshi_events_sync(limit: int = 200) -> List[dict]:
     # Kalshi API has max limit of 200
     limit = min(limit, 200)
     params = {"limit": limit, "status": "open"}
+    headers = _get_auth_headers()
     
     try:
         resp = requests.get(
             f"{KALSHI_API_BASE}/events",
             params=params,
-            headers={"Accept": "application/json"},
+            headers=headers,
             timeout=30
         )
         if resp.status_code == 200:
