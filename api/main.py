@@ -4298,6 +4298,40 @@ async def get_positions_ev():
         }
     }
 
+@app.get("/api/rotations")
+async def get_recent_rotations(hours: int = 24):
+    """Get recent position rotations"""
+    ensure_storage()
+    trades = load_json(TRADES_FILE)
+    
+    # Filter for rotation exits
+    cutoff = datetime.now() - timedelta(hours=hours)
+    rotations = []
+    
+    for trade in trades:
+        if trade.get("type") == "SELL" and trade.get("reason", "").startswith("rotation:"):
+            try:
+                trade_time = datetime.fromisoformat(trade.get("timestamp", ""))
+                if trade_time > cutoff:
+                    rotations.append({
+                        "exited_market": trade.get("market", "")[:50],
+                        "exited_side": trade.get("side"),
+                        "pnl": trade.get("pnl", 0),
+                        "reason": trade.get("reason"),
+                        "timestamp": trade.get("timestamp")
+                    })
+            except:
+                pass
+    
+    # Sort by most recent first
+    rotations.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    
+    return {
+        "rotations": rotations,
+        "count": len(rotations),
+        "hours": hours
+    }
+
 @app.post("/api/paper/reset")
 async def reset_paper_trading():
     """Reset paper trading account to $10,000"""
