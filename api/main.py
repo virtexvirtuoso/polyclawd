@@ -3469,6 +3469,30 @@ async def find_vegas_edge(min_edge: float = 0.05, sports: str = "auto"):
     }
 
 
+@app.get("/api/vegas/soccer")
+async def get_soccer_edges(min_edge: float = 0.01):
+    """
+    Get soccer futures edges between Vegas odds and Polymarket
+    
+    Compares odds from VegasInsider with Polymarket prices for:
+    - EPL (English Premier League)
+    - UCL (Champions League)
+    - World Cup 2026
+    - La Liga
+    - Bundesliga
+    """
+    try:
+        import sys
+        odds_path = str(Path(__file__).parent.parent / "odds")
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from soccer_edge import get_soccer_edge_summary
+        
+        return await get_soccer_edge_summary()
+    except Exception as e:
+        return {"error": str(e), "enabled": False}
+
+
 @app.get("/api/signals")
 async def get_all_signals():
     """Get aggregated signals from all sources"""
