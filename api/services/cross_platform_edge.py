@@ -536,14 +536,13 @@ class CrossPlatformEdgeScanner:
             if cached:
                 return cached
         
-        # Fetch all platforms
+        # Fetch all platforms (Metaculus disabled - hides predictions in API)
         poly_prices = self.fetch_polymarket()
         kalshi_prices = self.fetch_kalshi()
-        meta_prices = self.fetch_metaculus()
         predictit_prices = self.fetch_predictit()
         manifold_prices = self.fetch_manifold()
         
-        all_prices = poly_prices + kalshi_prices + meta_prices + predictit_prices + manifold_prices
+        all_prices = poly_prices + kalshi_prices + predictit_prices + manifold_prices
         
         # Smart matching: find cross-platform matches using entity extraction
         matched_groups = self.find_cross_platform_matches(all_prices)
@@ -572,7 +571,6 @@ class CrossPlatformEdgeScanner:
             "platforms": {
                 "polymarket": len(poly_prices),
                 "kalshi": len(kalshi_prices),
-                "metaculus": len(meta_prices),
                 "predictit": len(predictit_prices),
                 "manifold": len(manifold_prices),
             },
