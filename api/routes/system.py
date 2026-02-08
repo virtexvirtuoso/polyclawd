@@ -1,0 +1,66 @@
+"""System routes for health, readiness, and metrics."""
+from datetime import datetime
+from fastapi import APIRouter
+
+from api.deps import get_storage_service
+from api.models import HealthResponse, ReadyResponse, MetricsResponse
+
+router = APIRouter()
+
+# Track startup time for uptime calculation
+_startup_time = datetime.now()
+
+
+@router.get("/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    """Health check endpoint.
+
+    Returns basic health status for load balancers and monitoring.
+    """
+    return HealthResponse(
+        status="healthy",
+        timestamp=datetime.now(),
+        version="2.0.0"
+    )
+
+
+@router.get("/ready", response_model=ReadyResponse)
+async def ready() -> ReadyResponse:
+    """Readiness check endpoint.
+
+    Verifies that required services are available:
+    - Storage: Can load balance.json
+
+    Returns 200 if all checks pass, data indicates individual check status.
+    """
+    checks = {}
+
+    # Check storage availability
+    try:
+        storage = get_storage_service()
+        await storage.load("balance.json", default={"balance": 0})
+        checks["storage"] = True
+    except Exception:
+        checks["storage"] = False
+
+    all_ready = all(checks.values())
+
+    return ReadyResponse(
+        ready=all_ready,
+        checks=checks
+    )
+
+
+@router.get("/metrics", response_model=MetricsResponse)
+async def metrics() -> MetricsResponse:
+    """Basic metrics endpoint.
+
+    Returns uptime and request count placeholder.
+    """
+    uptime = (datetime.now() - _startup_time).total_seconds()
+
+    return MetricsResponse(
+        uptime_seconds=uptime,
+        request_count=0,  # Placeholder - would need middleware to track
+        version="2.0.0"
+    )
