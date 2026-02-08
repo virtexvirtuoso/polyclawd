@@ -1,27 +1,82 @@
 """
 Cross-Platform Edge Scanner
 Compares Polymarket, Kalshi, and Metaculus to find probability discrepancies.
+
+Features:
+- 6-hour result caching
+- Expanded topic matching (40+ topics)
 """
 
 import asyncio
 import json
+import os
 import urllib.request
 from typing import Optional
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-# Topic matching keywords
+# Cache file path
+CACHE_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "data", "edge_cache.json")
+CACHE_TTL_HOURS = 6
+
+# Topic matching keywords - expanded coverage
 TOPIC_KEYWORDS = {
+    # Trump
     "trump_nobel": ["trump", "nobel", "peace prize"],
-    "trump_resign": ["trump", "resign", "leave office"],
-    "trump_indictment": ["trump", "indicted", "indictment", "charged", "criminal"],
-    "fed_chair": ["fed", "chair", "federal reserve", "warsh", "powell"],
-    "fed_rates": ["fed", "rate", "interest rate", "fomc", "cut", "hike"],
-    "scotus": ["supreme court", "scotus", "justice", "resign"],
+    "trump_resign": ["trump", "resign", "leave office", "step down"],
+    "trump_indictment": ["trump", "indicted", "indictment", "charged", "criminal", "convicted", "guilty"],
+    "trump_tariffs": ["trump", "tariff", "trade war", "china", "import", "duties"],
+    "trump_impeach": ["trump", "impeach", "impeachment", "removal"],
+    "trump_approval": ["trump", "approval", "rating", "poll", "favorability"],
+    
+    # Fed / Monetary Policy
+    "fed_chair": ["fed", "chair", "federal reserve", "warsh", "powell", "yellen"],
+    "fed_rates": ["fed", "rate", "interest rate", "fomc", "cut", "hike", "basis points"],
+    "inflation": ["inflation", "cpi", "pce", "deflation", "price", "consumer"],
+    "recession": ["recession", "gdp", "economic", "downturn", "soft landing"],
+    
+    # Crypto
     "bitcoin_pow": ["bitcoin", "proof of work", "pow", "mining"],
-    "bitcoin_price": ["bitcoin", "btc", "price", "$"],
-    "trump_tariffs": ["trump", "tariff", "trade war", "china"],
-    "election_2028": ["2028", "election", "president", "nominee"],
+    "bitcoin_price": ["bitcoin", "btc", "price", "$100k", "$150k", "$200k"],
+    "bitcoin_etf": ["bitcoin", "btc", "etf", "spot", "approval", "sec"],
+    "ethereum": ["ethereum", "eth", "price", "merge", "staking"],
+    "crypto_regulation": ["crypto", "regulation", "sec", "cftc", "gensler"],
+    
+    # Supreme Court
+    "scotus": ["supreme court", "scotus", "justice", "resign", "retire"],
+    "scotus_ruling": ["supreme court", "ruling", "decision", "overturn"],
+    
+    # Elections
+    "election_2028": ["2028", "election", "president", "nominee", "primary"],
+    "election_2026": ["2026", "midterm", "senate", "house", "congress"],
+    "dem_nominee": ["democrat", "democratic", "nominee", "primary", "biden", "harris"],
+    "gop_nominee": ["republican", "gop", "nominee", "primary", "trump", "desantis", "haley"],
+    
+    # Geopolitics
+    "ukraine_war": ["ukraine", "russia", "war", "ceasefire", "peace", "zelensky", "putin"],
+    "china_taiwan": ["china", "taiwan", "invasion", "strait", "xi", "reunification"],
+    "middle_east": ["israel", "gaza", "hamas", "iran", "hezbollah", "ceasefire"],
+    "north_korea": ["north korea", "kim", "nuclear", "missile", "test"],
+    
+    # Tech / AI
+    "ai_regulation": ["ai", "artificial intelligence", "regulation", "openai", "anthropic"],
+    "tech_antitrust": ["google", "apple", "amazon", "meta", "antitrust", "monopoly", "breakup"],
+    
+    # Markets / Finance
+    "sp500": ["s&p", "spy", "stock", "market", "rally", "crash"],
+    "treasury": ["treasury", "bond", "yield", "10-year", "debt ceiling"],
+    "dollar": ["dollar", "usd", "dxy", "currency", "forex"],
+    
+    # Sports (for Kalshi overlap)
+    "super_bowl": ["super bowl", "nfl", "champion", "chiefs", "eagles"],
+    "world_series": ["world series", "mlb", "baseball", "champion"],
+    "nba_finals": ["nba", "finals", "basketball", "champion"],
+    "world_cup": ["world cup", "fifa", "soccer", "football"],
+    
+    # Other
+    "pandemic": ["pandemic", "covid", "virus", "outbreak", "who", "lockdown"],
+    "climate": ["climate", "carbon", "emissions", "paris", "net zero"],
+    "space": ["spacex", "nasa", "mars", "moon", "starship", "artemis"],
 }
 
 
@@ -48,7 +103,56 @@ class EdgeOpportunity:
 class CrossPlatformEdgeScanner:
     def __init__(self):
         self.cache = {}
-        self.cache_ttl = timedelta(hours=6)
+        self.cache_ttl = timedelta(hours=CACHE_TTL_HOURS)
+        self._load_cache()
+    
+    def _load_cache(self):
+        """Load cached results from disk."""
+        try:
+            if os.path.exists(CACHE_FILE):
+                with open(CACHE_FILE, 'r') as f:
+                    data = json.load(f)
+                    cached_at = datetime.fromisoformat(data.get("cached_at", "2000-01-01"))
+                    if datetime.utcnow() - cached_at < self.cache_ttl:
+                        self.cache = data
+                        print(f"Loaded cache from {cached_at.isoformat()}")
+                    else:
+                        print(f"Cache expired (from {cached_at.isoformat()})")
+        except Exception as e:
+            print(f"Cache load error: {e}")
+    
+    def _save_cache(self, results: dict):
+        """Save results to disk cache."""
+        try:
+            os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+            cache_data = {
+                "cached_at": datetime.utcnow().isoformat(),
+                "results": results
+            }
+            with open(CACHE_FILE, 'w') as f:
+                json.dump(cache_data, f, indent=2)
+            self.cache = cache_data
+            print(f"Saved cache at {cache_data['cached_at']}")
+        except Exception as e:
+            print(f"Cache save error: {e}")
+    
+    def _get_cached_results(self) -> Optional[dict]:
+        """Get cached results if still valid."""
+        if not self.cache:
+            return None
+        cached_at = self.cache.get("cached_at")
+        if not cached_at:
+            return None
+        try:
+            cached_time = datetime.fromisoformat(cached_at)
+            if datetime.utcnow() - cached_time < self.cache_ttl:
+                results = self.cache.get("results", {}).copy()
+                results["from_cache"] = True
+                results["cache_age_minutes"] = int((datetime.utcnow() - cached_time).total_seconds() / 60)
+                return results
+        except:
+            pass
+        return None
     
     def _fetch_url(self, url: str, timeout: int = 30) -> Optional[dict]:
         """Sync URL fetch with error handling."""
@@ -225,8 +329,18 @@ class CrossPlatformEdgeScanner:
             recommendation=recommendation
         )
     
-    def scan(self) -> dict:
-        """Run full cross-platform scan (sync version)."""
+    def scan(self, force_refresh: bool = False) -> dict:
+        """Run full cross-platform scan (sync version).
+        
+        Args:
+            force_refresh: If True, bypass cache and fetch fresh data
+        """
+        # Check cache first
+        if not force_refresh:
+            cached = self._get_cached_results()
+            if cached:
+                return cached
+        
         # Fetch all platforms
         poly_prices = self.fetch_polymarket()
         kalshi_prices = self.fetch_kalshi()
@@ -261,8 +375,9 @@ class CrossPlatformEdgeScanner:
         
         edges.sort(key=lambda e: e.spread, reverse=True)
         
-        return {
+        results = {
             "scan_time": datetime.utcnow().isoformat(),
+            "from_cache": False,
             "platforms": {
                 "polymarket": len(poly_prices),
                 "kalshi": len(kalshi_prices),
@@ -298,14 +413,19 @@ class CrossPlatformEdgeScanner:
                 for topic, markets in topic_markets.items()
             }
         }
+        
+        # Save to cache
+        self._save_cache(results)
+        
+        return results
 
 
 # Singleton
 scanner = CrossPlatformEdgeScanner()
 
 
-async def scan_edges() -> dict:
+async def scan_edges(force_refresh: bool = False) -> dict:
     """Async wrapper for edge scanning."""
     import asyncio
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, scanner.scan)
+    return await loop.run_in_executor(None, lambda: scanner.scan(force_refresh=force_refresh))

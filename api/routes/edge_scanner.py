@@ -2,14 +2,16 @@
 Cross-Platform Edge Scanner Routes
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from api.services.cross_platform_edge import scan_edges
 
 router = APIRouter(prefix="/api/edge", tags=["Edge Scanner"])
 
 
 @router.get("/scan")
-async def get_cross_platform_edges():
+async def get_cross_platform_edges(
+    refresh: bool = Query(False, description="Force refresh, bypass 6h cache")
+):
     """
     Scan all platforms for probability discrepancies.
     
@@ -19,8 +21,9 @@ async def get_cross_platform_edges():
     - Metaculus (crowd forecasts)
     
     Returns edges where platforms disagree by >5%.
+    Results are cached for 6 hours. Use ?refresh=true to force fresh data.
     """
-    return await scan_edges()
+    return await scan_edges(force_refresh=refresh)
 
 
 @router.get("/topics")
