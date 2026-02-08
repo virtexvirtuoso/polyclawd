@@ -37,7 +37,8 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     # Only add HSTS in production
-    if "virtuosocrypto.com" in request.url.host:
+    host = getattr(request.url, 'host', '') or ''
+    if "virtuosocrypto.com" in str(host):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
