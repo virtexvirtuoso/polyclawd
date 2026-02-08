@@ -1,18 +1,24 @@
 """System routes for health, readiness, and metrics."""
 from datetime import datetime
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from api.deps import get_storage_service
 from api.models import HealthResponse, ReadyResponse, MetricsResponse
 
 router = APIRouter()
 
+# Rate limiter (will use app.state.limiter at runtime)
+limiter = Limiter(key_func=get_remote_address)
+
 # Track startup time for uptime calculation
 _startup_time = datetime.now()
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health() -> HealthResponse:
+@limiter.limit("60/minute")
+async def health(request: Request) -> HealthResponse:
     """Health check endpoint.
 
     Returns basic health status for load balancers and monitoring.
@@ -25,7 +31,8 @@ async def health() -> HealthResponse:
 
 
 @router.get("/ready", response_model=ReadyResponse)
-async def ready() -> ReadyResponse:
+@limiter.limit("30/minute")
+async def ready(request: Request) -> ReadyResponse:
     """Readiness check endpoint.
 
     Verifies that required services are available:
@@ -52,7 +59,8 @@ async def ready() -> ReadyResponse:
 
 
 @router.get("/metrics", response_model=MetricsResponse)
-async def metrics() -> MetricsResponse:
+@limiter.limit("30/minute")
+async def metrics(request: Request) -> MetricsResponse:
     """Basic metrics endpoint.
 
     Returns uptime and request count placeholder.

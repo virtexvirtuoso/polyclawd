@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Optional
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from api.deps import get_settings, get_storage_service
 from api.middleware import verify_api_key
@@ -24,6 +26,9 @@ from api.services.storage import StorageService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# Rate limiter (will use app.state.limiter at runtime)
+limiter = Limiter(key_func=get_remote_address)
 
 # Constants
 GAMMA_API = "https://gamma-api.polymarket.com"
@@ -199,18 +204,19 @@ async def get_trades(limit: int = Query(default=20, ge=1, le=100)):
 
 
 @router.post("/trade", response_model=TradeResponse, dependencies=[Depends(verify_api_key)])
-async def execute_trade(request: TradeRequest):
+@limiter.limit("5/minute")
+async def execute_trade(request: Request, trade_request: TradeRequest):
     """Execute a paper trade - requires API key authentication."""
     storage = get_storage_service()
     settings = get_settings()
 
-    side = request.side.upper()
-    amount = float(request.amount)
+    side = trade_request.side.upper()
+    amount = float(trade_request.amount)
 
     # Validate market
-    market = _get_market(request.market_id)
+    market = _get_market(trade_request.market_id)
     if not market:
-        raise HTTPException(status_code=404, detail=f"Market not found: {request.market_id}")
+        raise HTTPException(status_code=404, detail=f"Market not found: {trade_request.market_id}")
     if market.get("closed"):
         raise HTTPException(status_code=400, detail="Market is closed")
 
@@ -272,12 +278,12 @@ async def execute_trade(request: TradeRequest):
         "amount": amount,
         "shares": shares,
         "price": price,
-        "reasoning": request.reasoning,
+        "reasoning": trade_request.reasoning,
         "timestamp": datetime.now().isoformat()
     }
     await storage.append_to_list("trades.json", trade_record)
 
-    logger.info(f"Trade executed: {request.market_id} {side} ${amount:.2f} @ {price:.4f}")
+    logger.info(f"Trade executed: {trade_request.market_id} {side} ${amount:.2f} @ {price:.4f}")
 
     return TradeResponse(
         success=True,
@@ -288,7 +294,8 @@ async def execute_trade(request: TradeRequest):
 
 
 @router.post("/reset", dependencies=[Depends(verify_api_key)])
-async def reset_paper_trading():
+@limiter.limit("2/minute")
+async def reset_paper_trading(request: Request):
     """Reset paper trading account - requires API key."""
     storage = get_storage_service()
     settings = get_settings()
@@ -444,7 +451,9 @@ async def get_simmer_trades(limit: int = Query(default=20, ge=1, le=100)):
 
 
 @router.post("/simmer/trade", dependencies=[Depends(verify_api_key)])
+@limiter.limit("5/minute")
 async def execute_simmer_trade(
+    request: Request,
     market_id: str = Query(..., description="Market ID"),
     side: str = Query(..., description="YES or NO"),
     amount: float = Query(..., gt=0, le=SIMMER_MAX_TRADE, description="Amount in USD"),
@@ -543,7 +552,9 @@ async def get_paper_positions():
 
 
 @router.post("/paper/trade", dependencies=[Depends(verify_api_key)])
+@limiter.limit("5/minute")
 async def execute_paper_trade_manual(
+    request: Request,
     market_id: str = Query(..., description="Market ID or slug"),
     market_title: str = Query(..., description="Market title"),
     side: str = Query(..., description="YES or NO"),

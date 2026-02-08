@@ -4,12 +4,16 @@ Caches edge signals from Vegas/Soccer/Betfair/Kalshi with background refresh
 """
 
 import json
+import logging
 import time
 import threading
+import urllib.error
 import urllib.request
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict
+
+logger = logging.getLogger(__name__)
 
 # Cache file
 CACHE_FILE = Path.home() / ".openclaw" / "edge_cache.json"
@@ -31,8 +35,9 @@ def load_cache() -> List[Dict]:
                 _cached_signals = data.get("signals", [])
                 _last_refresh = data.get("timestamp", 0)
                 return _cached_signals
-        except:
-            pass
+        except (json.JSONDecodeError, IOError, KeyError) as e:
+            # Log cache load failure but don't crash - just use empty cache
+            logger.warning(f"Failed to load edge cache: {e}")
     return []
 
 def save_cache(signals: List[Dict]):
@@ -75,8 +80,10 @@ def fetch_vegas_edges() -> List[Dict]:
                     "price": edge.get("poly_price", 0.5),
                     "url": edge.get("poly_url")
                 })
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
+        logger.debug(f"Vegas edge fetch failed (expected if service down): {e}")
     except Exception as e:
-        pass
+        logger.exception(f"Unexpected error fetching Vegas edges: {e}")
     return signals
 
 def fetch_soccer_edges() -> List[Dict]:
@@ -104,8 +111,10 @@ def fetch_soccer_edges() -> List[Dict]:
                     "price": edge.get("poly_prob", 50) / 100,
                     "url": edge.get("poly_url")
                 })
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
+        logger.debug(f"Soccer edge fetch failed (expected if service down): {e}")
     except Exception as e:
-        pass
+        logger.exception(f"Unexpected error fetching soccer edges: {e}")
     return signals
 
 def fetch_betfair_edges() -> List[Dict]:
@@ -134,8 +143,10 @@ def fetch_betfair_edges() -> List[Dict]:
                     "price": edge.get("poly_prob", 50) / 100,
                     "url": edge.get("poly_url")
                 })
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
+        logger.debug(f"Betfair edge fetch failed (expected if service down): {e}")
     except Exception as e:
-        pass
+        logger.exception(f"Unexpected error fetching Betfair edges: {e}")
     return signals
 
 def fetch_kalshi_overlaps() -> List[Dict]:
@@ -163,8 +174,10 @@ def fetch_kalshi_overlaps() -> List[Dict]:
                     "reasoning": f"Kalshi match: {overlap.get('kalshi_title', '')[:40]} (conf: {match_conf:.0%})",
                     "price": poly_price / 100 if poly_price else 0.5
                 })
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
+        logger.debug(f"Kalshi overlap fetch failed (expected if service down): {e}")
     except Exception as e:
-        pass
+        logger.exception(f"Unexpected error fetching Kalshi overlaps: {e}")
     return signals
 
 def fetch_manifold_edges() -> List[Dict]:
@@ -191,8 +204,10 @@ def fetch_manifold_edges() -> List[Dict]:
                     "price": edge.get("polymarket_price", 50) / 100,
                     "url": edge.get("manifold_url")
                 })
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
+        logger.debug(f"Manifold edge fetch failed (expected if service down): {e}")
     except Exception as e:
-        pass
+        logger.exception(f"Unexpected error fetching Manifold edges: {e}")
     return signals
 
 def fetch_predictit_edges() -> List[Dict]:
@@ -219,8 +234,10 @@ def fetch_predictit_edges() -> List[Dict]:
                     "price": edge.get("polymarket_price", 50) / 100,
                     "url": edge.get("predictit_url")
                 })
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
+        logger.debug(f"PredictIt edge fetch failed (expected if service down): {e}")
     except Exception as e:
-        pass
+        logger.exception(f"Unexpected error fetching PredictIt edges: {e}")
     return signals
 
 def refresh_edge_cache() -> List[Dict]:

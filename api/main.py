@@ -10,10 +10,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from api.deps import get_settings
 from api.middleware import add_security_headers, global_exception_handler
@@ -29,6 +32,18 @@ logger = logging.getLogger(__name__)
 
 # Shared HTTP client for async requests
 http_client: httpx.AsyncClient = None
+
+# Rate limiter setup
+limiter = Limiter(key_func=get_remote_address)
+
+
+def _rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
+    """Custom handler for rate limit exceeded errors."""
+    logger.warning(f"Rate limit exceeded for {get_remote_address(request)}: {exc.detail}")
+    return JSONResponse(
+        status_code=429,
+        content={"error": "Rate limit exceeded", "detail": str(exc.detail)},
+    )
 
 
 @asynccontextmanager
@@ -79,6 +94,10 @@ app.middleware("http")(add_security_headers)
 
 # Global exception handler
 app.exception_handler(Exception)(global_exception_handler)
+
+# Rate limiting
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ============================================================================
 # Router Registration

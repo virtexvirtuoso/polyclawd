@@ -18,12 +18,17 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from api.models import EngineStatus
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# Rate limiter (will use app.state.limiter at runtime)
+limiter = Limiter(key_func=get_remote_address)
 
 # ============================================================================
 # Configuration & Constants
@@ -625,7 +630,8 @@ async def update_engine_config(
 
 
 @router.post("/engine/trigger")
-async def trigger_engine_endpoint():
+@limiter.limit("5/minute")
+async def trigger_engine_endpoint(request: Request):
     """Manually trigger one evaluation cycle."""
     logger.info("Engine trigger requested")
     return engine_evaluate_and_trade()
