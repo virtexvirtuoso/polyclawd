@@ -279,16 +279,27 @@ class CrossPlatformEdgeScanner:
         return prices
     
     def fetch_predictit(self) -> list:
-        """Fetch active PredictIt markets (politics focused)."""
+        """Fetch active PredictIt markets from local cache (proxied from Mac)."""
         prices = []
         try:
-            url = "https://www.predictit.org/api/marketdata/all/"
-            data = self._fetch_url(url, timeout=30)
-            if not data:
-                print("PredictIt: No data returned")
+            # Read from cache file (synced from Mac to bypass Cloudflare)
+            cache_file = os.path.join(os.path.dirname(__file__), "..", "..", "data", "predictit_cache.json")
+            if not os.path.exists(cache_file):
+                print("PredictIt: No cache file (run predictit_proxy.py on Mac)")
                 return prices
             
-            markets = data.get("markets", [])
+            with open(cache_file, 'r') as f:
+                cache_data = json.load(f)
+            
+            # Check cache freshness (max 2 hours)
+            fetched_at = cache_data.get("fetched_at", "")
+            if fetched_at:
+                cache_age = datetime.utcnow() - datetime.fromisoformat(fetched_at)
+                if cache_age > timedelta(hours=2):
+                    print(f"PredictIt: Cache stale ({cache_age})")
+                    return prices
+            
+            markets = cache_data.get("markets", [])
             for market in markets:
                 market_name = market.get("name", "")
                 
