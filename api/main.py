@@ -126,24 +126,37 @@ app.include_router(edge_scanner_router, tags=["Edge Scanner"])
 # Static Files & Frontend
 # ============================================================================
 
-frontend_dir = Path(__file__).parent.parent
-app.mount("/css", StaticFiles(directory=str(frontend_dir / "css")), name="css")
-app.mount("/js", StaticFiles(directory=str(frontend_dir / "js")), name="js")
+static_dir = Path(__file__).parent.parent / "static"
+app.mount("/css", StaticFiles(directory=str(static_dir / "css")), name="css")
+app.mount("/js", StaticFiles(directory=str(static_dir / "js")), name="js")
+app.mount("/icons", StaticFiles(directory=str(static_dir / "icons")), name="icons")
 
 
 @app.get("/")
 async def serve_index():
     """Serve the main dashboard page."""
-    return FileResponse(str(frontend_dir / "index.html"))
+    return FileResponse(str(static_dir / "index.html"))
 
 
 @app.get("/{page}.html")
 async def serve_page(page: str):
     """Serve additional HTML pages."""
-    file_path = frontend_dir / f"{page}.html"
+    file_path = static_dir / f"{page}.html"
     if file_path.exists():
         return FileResponse(str(file_path))
     raise HTTPException(status_code=404, detail="Page not found")
+
+
+@app.get("/manifest.json")
+async def serve_manifest():
+    """Serve PWA manifest."""
+    return FileResponse(str(static_dir / "manifest.json"))
+
+
+@app.get("/sw.js")
+async def serve_sw():
+    """Serve service worker."""
+    return FileResponse(str(static_dir / "sw.js"), media_type="application/javascript")
 
 
 # ============================================================================

@@ -11,7 +11,7 @@ fi
 
 # Activate and install deps
 source venv/bin/activate
-pip install -q -r api/requirements.txt 2>/dev/null
+pip install -q -r requirements.txt 2>/dev/null
 
 # Start server
 echo ""
