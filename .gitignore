@@ -44,3 +44,16 @@ CLAUDE.md
 .coverage
 htmlcov/
 *.pyc
+tests/load/results_*.csv
+tests/baseline_snapshots/
+
+# Backups
+*.backup
+*.bak
+
+# Cache files
+odds/vegas_cache.json
+*_cache.json
+
+# Submodules/binaries
+mcp/polyrouter
