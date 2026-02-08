@@ -21,6 +21,7 @@ from slowapi.util import get_remote_address
 from api.deps import get_settings
 from api.middleware import add_security_headers, global_exception_handler
 from api.routes import (
+    edge_scanner_router,
     engine_router,
     markets_router,
     signals_router,
@@ -117,6 +118,9 @@ app.include_router(signals_router, prefix="/api", tags=["Signals"])
 
 # Engine routes: /api/engine/*, /api/alerts/*, /api/kelly/*, /api/phase/*, etc.
 app.include_router(engine_router, prefix="/api", tags=["Engine"])
+
+# Edge scanner routes: /api/edge/scan, /api/edge/topics
+app.include_router(edge_scanner_router, tags=["Edge Scanner"])
 
 # ============================================================================
 # Static Files & Frontend

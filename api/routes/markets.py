@@ -619,6 +619,86 @@ async def get_soccer_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
     return await handle_edge_request("soccer", _get_soccer())
 
 
+# ----------------------------------------------------------------------------
+# Individual Vegas League Endpoints
+# ----------------------------------------------------------------------------
+
+async def _get_league_edges(league: str, min_edge: float = 0.01):
+    """Helper to get edges for a specific soccer league."""
+    import sys
+    odds_path = _get_odds_modules_path()
+    if odds_path not in sys.path:
+        sys.path.insert(0, odds_path)
+    from soccer_edge import find_soccer_edges
+
+    all_edges = await find_soccer_edges(min_edge)
+    # Filter to specific league
+    league_edges = [e for e in all_edges if e.league.lower() == league.lower()]
+
+    return {
+        "league": league.upper(),
+        "timestamp": datetime.now().isoformat(),
+        "total_edges": len(league_edges),
+        "edges": [
+            {
+                "team": e.team,
+                "vegas_prob": round(e.vegas_prob, 4),
+                "vegas_odds": e.vegas_odds,
+                "polymarket_price": round(e.polymarket_price, 4),
+                "edge_pct": round(e.edge_pct * 100, 2),
+                "direction": e.direction,
+                "market_id": e.poly_market_id
+            }
+            for e in league_edges
+        ]
+    }
+
+
+@router.get("/vegas/epl")
+async def get_epl_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
+    """Get English Premier League futures edges.
+
+    Compares Vegas odds with Polymarket for EPL Winner market.
+    """
+    return await handle_edge_request("epl", _get_league_edges("epl", min_edge))
+
+
+@router.get("/vegas/ucl")
+async def get_ucl_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
+    """Get UEFA Champions League futures edges.
+
+    Compares Vegas odds with Polymarket for UCL Winner market.
+    """
+    return await handle_edge_request("ucl", _get_league_edges("ucl", min_edge))
+
+
+@router.get("/vegas/bundesliga")
+async def get_bundesliga_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
+    """Get Bundesliga futures edges.
+
+    Compares Vegas odds with Polymarket for Bundesliga Winner market.
+    """
+    return await handle_edge_request("bundesliga", _get_league_edges("bundesliga", min_edge))
+
+
+@router.get("/vegas/laliga")
+async def get_laliga_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
+    """Get La Liga futures edges.
+
+    Compares Vegas odds with Polymarket for La Liga Winner market.
+    """
+    return await handle_edge_request("laliga", _get_league_edges("la_liga", min_edge))
+
+
+@router.get("/vegas/worldcup")
+async def get_worldcup_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
+    """Get World Cup 2026 futures edges.
+
+    Compares Vegas odds with Polymarket for World Cup Winner market.
+    """
+    return await handle_edge_request("worldcup", _get_league_edges("world_cup", min_edge))
+
+
 # ============================================================================
 # ESPN Odds Edge Detection
 # ============================================================================
@@ -660,6 +740,105 @@ async def get_espn_edge(min_edge: float = Query(default=5.0, ge=0, le=100)):
         return await espn_edge_fn(min_edge)
 
     return await handle_edge_request("espn", _get_espn_edges())
+
+
+# ----------------------------------------------------------------------------
+# Individual ESPN Sport Endpoints
+# ----------------------------------------------------------------------------
+
+def _format_espn_games(games, sport: str):
+    """Format ESPN games for API response."""
+    return {
+        "sport": sport.upper(),
+        "timestamp": datetime.now().isoformat(),
+        "total_games": len(games),
+        "provider": "DraftKings (via ESPN)",
+        "games": [
+            {
+                "game_id": g.game_id,
+                "matchup": f"{g.away_team} @ {g.home_team}",
+                "home_team": g.home_team,
+                "away_team": g.away_team,
+                "spread": g.spread,
+                "favorite": g.favorite,
+                "over_under": g.over_under,
+                "start_time": g.start_time,
+            }
+            for g in games
+        ]
+    }
+
+
+async def _get_sport_odds(sport: str):
+    """Helper to get odds for a specific sport."""
+    import sys
+    odds_path = _get_odds_modules_path()
+    if odds_path not in sys.path:
+        sys.path.insert(0, odds_path)
+    from espn_odds import fetch_odds
+
+    games = fetch_odds(sport)
+    return _format_espn_games(games, sport)
+
+
+@router.get("/espn/nfl")
+async def get_espn_nfl():
+    """Get NFL spreads and totals from ESPN (DraftKings source).
+
+    Free API, no key required. Returns current week's games with
+    point spreads, over/unders, and implied favorites.
+    """
+    return await handle_edge_request("espn-nfl", _get_sport_odds("nfl"))
+
+
+@router.get("/espn/nba")
+async def get_espn_nba():
+    """Get NBA spreads and totals from ESPN (DraftKings source).
+
+    Free API, no key required. Returns today's games with
+    point spreads, over/unders, and implied favorites.
+    """
+    return await handle_edge_request("espn-nba", _get_sport_odds("nba"))
+
+
+@router.get("/espn/nhl")
+async def get_espn_nhl():
+    """Get NHL spreads and totals from ESPN (DraftKings source).
+
+    Free API, no key required. Returns today's games with
+    puck lines, over/unders, and implied favorites.
+    """
+    return await handle_edge_request("espn-nhl", _get_sport_odds("nhl"))
+
+
+@router.get("/espn/mlb")
+async def get_espn_mlb():
+    """Get MLB spreads and totals from ESPN (DraftKings source).
+
+    Free API, no key required. Returns today's games with
+    run lines, over/unders, and implied favorites.
+    """
+    return await handle_edge_request("espn-mlb", _get_sport_odds("mlb"))
+
+
+@router.get("/espn/ncaaf")
+async def get_espn_ncaaf():
+    """Get College Football spreads and totals from ESPN (DraftKings source).
+
+    Free API, no key required. Returns this week's games with
+    point spreads, over/unders, and implied favorites.
+    """
+    return await handle_edge_request("espn-ncaaf", _get_sport_odds("ncaaf"))
+
+
+@router.get("/espn/ncaab")
+async def get_espn_ncaab():
+    """Get College Basketball spreads and totals from ESPN (DraftKings source).
+
+    Free API, no key required. Returns today's games with
+    point spreads, over/unders, and implied favorites.
+    """
+    return await handle_edge_request("espn-ncaab", _get_sport_odds("ncaab"))
 
 
 # ============================================================================
@@ -878,3 +1057,93 @@ async def get_polyrouter_platforms():
     except Exception as e:
         logger.exception("PolyRouter platforms error")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ============================================================================
+# Metaculus API endpoints
+# ============================================================================
+
+@router.get("/metaculus/questions")
+async def get_metaculus_questions(
+    limit: int = Query(default=50, ge=1, le=200),
+    min_forecasters: int = Query(default=30, ge=1)
+):
+    """Fetch Metaculus forecasts - free crowd predictions for politics, economics, etc."""
+    try:
+        import sys
+        odds_path = _get_odds_modules_path()
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from metaculus import fetch_questions
+        questions = fetch_questions(limit=limit)
+        # Filter by minimum forecasters
+        filtered = [q for q in questions if q.get("forecasters", 0) >= min_forecasters]
+        return {"questions": filtered, "count": len(filtered), "total_fetched": len(questions)}
+    except ImportError as e:
+        logger.exception("Metaculus module import failed")
+        raise HTTPException(status_code=503, detail="Metaculus service unavailable")
+    except Exception as e:
+        logger.exception("Metaculus questions error")
+        raise HTTPException(status_code=500, detail=f"Metaculus error: {str(e)}")
+
+
+@router.get("/metaculus/edge")
+async def get_metaculus_edge(
+    min_edge: float = Query(default=0.1, ge=0.01, le=1.0)
+):
+    """Find edge between Metaculus forecasts and Polymarket prices."""
+    try:
+        import sys
+        odds_path = _get_odds_modules_path()
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from metaculus import find_edges
+        edges = find_edges(min_edge_pct=min_edge * 100)
+        return {"edges": edges, "count": len(edges), "min_edge_pct": min_edge * 100}
+    except ImportError as e:
+        logger.exception("Metaculus module import failed")
+        raise HTTPException(status_code=503, detail="Metaculus service unavailable")
+    except Exception as e:
+        logger.exception("Metaculus edge error")
+        raise HTTPException(status_code=500, detail=f"Metaculus error: {str(e)}")
+
+
+# ============================================================================
+# Polymarket direct endpoints (supplement to PolyRouter)
+# ============================================================================
+
+@router.get("/polymarket/events")
+async def get_polymarket_events(
+    limit: int = Query(default=100, ge=1, le=500)
+):
+    """Fetch active Polymarket events directly from Gamma API."""
+    try:
+        url = f"{GAMMA_API}/events?active=true&closed=false&limit={limit}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            events = json.loads(resp.read().decode())
+        
+        # Parse and normalize events
+        normalized = []
+        for event in events:
+            markets = event.get("markets", [])
+            for market in markets:
+                try:
+                    prices = json.loads(market.get("outcomePrices", "[]"))
+                    yes_price = float(prices[0]) if prices else None
+                except:
+                    yes_price = None
+                
+                normalized.append({
+                    "id": market.get("conditionId"),
+                    "slug": event.get("slug", ""),
+                    "title": market.get("question", event.get("title", "")),
+                    "yes_price": yes_price,
+                    "volume": market.get("volumeNum", 0),
+                    "liquidity": market.get("liquidityNum", 0),
+                })
+        
+        return {"events": normalized, "count": len(normalized)}
+    except Exception as e:
+        logger.exception("Polymarket events error")
+        raise HTTPException(status_code=500, detail=f"Polymarket error: {str(e)}")
