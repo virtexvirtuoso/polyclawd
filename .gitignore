@@ -5,11 +5,11 @@ __pycache__/
 venv/
 .venv/
 env/
-.env
 
 # Environment files with secrets
-config/polymarket.env
+.env
 *.env
+config/polymarket.env
 
 # IDE
 .idea/
@@ -28,3 +28,19 @@ logs/
 # Local data
 data/
 *.json.bak
+
+# AI Workflow Tools
+.claude/
+.ralph-tui/
+CLAUDE.md
+.cursorrules
+.aider*
+.continue/
+.codeium/
+.copilot/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+*.pyc
