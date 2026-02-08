@@ -76,11 +76,14 @@ ENTITY_ALIASES = {
 }
 
 EVENT_TYPE_PATTERNS = {
+    'win_election': r'\bwin\b.*\b(election|presidency|presidential)\b|\bpresident(?:ial)?\s+election\b.*\bwin\b',
+    'win_nomination': r'\b(nomination|nominate[d]?|nominee)\b.*\bwin\b|\bwin\b.*\b(nomination|nominee)\b',
     'win': r'\bwin(?:s|ning)?\b|\bchampion\b|\bvictory\b',
+    'nominate': r'\bnominate[ds]?\b|\bnomination\b|\bnominee\b',
+    'leave_office': r'\bleave[s]?\s+(the\s+)?office\b|\bstep(?:s)?\s+down\b|\bresign[s]?\b|\bdepart\b',
     'reach': r'\breach(?:es|ing)?\b|\bhit(?:s|ting)?\b|\bexceed\b',
     'pass': r'\bpass(?:es|ed)?\b|\bapprove[ds]?\b|\benact\b',
     'announce': r'\bannounce[ds]?\b|\breveal\b|\bconfirm\b',
-    'resign': r'\bresign[s]?\b|\bstep(?:s)? down\b|\bleave[s]? office\b',
     'ban': r'\bban(?:s|ned)?\b|\bblock\b|\bprohibit\b',
     'launch': r'\blaunch(?:es)?\b|\brelease[ds]?\b|\broll out\b',
     'default': r'\bdefault\b|\bbankrupt\b',
@@ -89,7 +92,9 @@ EVENT_TYPE_PATTERNS = {
 }
 
 TARGET_PATTERNS = {
-    'presidency': r'\bpresident\b|\bpresidency\b|\bwhite house\b|\b2024 election\b|\b2028 election\b',
+    'presidential_election': r'\bpresidential\s+election\b|\bwin\s+the\s+\d{4}\b.*\bpresident\b',
+    'presidential_nomination': r'\bpresidential\s+nomination\b|\brepublican\s+nomin\b|\bdemocratic\s+nomin\b|\bgop\s+nomin\b',
+    'presidency': r'\bpresident\b|\bpresidency\b|\bwhite house\b',
     'championship': r'\bchampion(?:ship)?\b|\btitle\b|\btrophy\b',
     'super_bowl': r'\bsuper bowl\b',
     'world_series': r'\bworld series\b',

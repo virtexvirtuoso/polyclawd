@@ -374,6 +374,114 @@ class CrossPlatformEdgeScanner:
                 return topic
         return None
     
+    def find_cross_platform_matches(self, all_prices: list) -> list:
+        """Find matching markets across platforms using smart entity matching."""
+        # Import smart matcher
+        try:
+            import sys
+            odds_path = os.path.join(os.path.dirname(__file__), "..", "..", "odds")
+            if odds_path not in sys.path:
+                sys.path.insert(0, odds_path)
+            from smart_matcher import create_signature, signatures_match, extract_entities
+        except ImportError as e:
+            print(f"Smart matcher import failed: {e}")
+            return []
+        
+        # Pre-compute signatures and index by entity (O(n) prefilter)
+        print("Building entity index...")
+        market_sigs = {}  # market_id -> (market, signature)
+        entity_index = {}  # entity -> set of market_ids
+        
+        for p in all_prices:
+            sig = create_signature(p.title)
+            if not sig.entities:
+                continue
+            market_sigs[p.market_id] = (p, sig)
+            for entity in sig.entities:
+                if entity not in entity_index:
+                    entity_index[entity] = set()
+                entity_index[entity].add(p.market_id)
+        
+        # Group by platform
+        by_platform = {}
+        for p in all_prices:
+            if p.market_id not in market_sigs:
+                continue
+            if p.platform not in by_platform:
+                by_platform[p.platform] = []
+            by_platform[p.platform].append(p)
+        
+        platforms = list(by_platform.keys())
+        if len(platforms) < 2:
+            return []
+        
+        # Use Polymarket as anchor (largest, most liquid)
+        anchor_platform = "polymarket" if "polymarket" in by_platform else platforms[0]
+        anchor_markets = by_platform.get(anchor_platform, [])
+        other_platforms = [p for p in platforms if p != anchor_platform]
+        
+        # Limit anchor markets to top 200 by volume for speed
+        anchor_markets = sorted(anchor_markets, key=lambda m: m.volume or 0, reverse=True)[:200]
+        
+        matched_groups = []
+        seen_ids = set()
+        comparisons = 0
+        
+        print(f"Matching {len(anchor_markets)} anchor markets against {len(other_platforms)} platforms...")
+        
+        for anchor in anchor_markets:
+            if anchor.market_id in seen_ids:
+                continue
+            
+            anchor_market, anchor_sig = market_sigs.get(anchor.market_id, (None, None))
+            if not anchor_sig:
+                continue
+            
+            group = [anchor]
+            seen_ids.add(anchor.market_id)
+            
+            # Find candidate markets that share at least one entity (prefilter)
+            candidate_ids = set()
+            for entity in anchor_sig.entities:
+                candidate_ids.update(entity_index.get(entity, set()))
+            candidate_ids.discard(anchor.market_id)
+            
+            # Find matches on other platforms
+            for other_plat in other_platforms:
+                best_match = None
+                best_conf = 0.0
+                
+                for candidate in by_platform[other_plat]:
+                    if candidate.market_id not in candidate_ids:
+                        continue  # Skip - no entity overlap (prefiltered)
+                    if candidate.market_id in seen_ids:
+                        continue
+                    
+                    cand_market, cand_sig = market_sigs.get(candidate.market_id, (None, None))
+                    if not cand_sig:
+                        continue
+                    
+                    comparisons += 1
+                    # Require 2 entity overlap if anchor has 2+ entities
+                    min_overlap = 2 if len(anchor_sig.entities) >= 2 else 1
+                    is_match, confidence, reason = signatures_match(anchor_sig, cand_sig, min_entity_overlap=min_overlap)
+                    
+                    # Require high confidence (0.6+) for real matches
+                    if is_match and confidence > best_conf and confidence >= 0.6:
+                        best_match = candidate
+                        best_conf = confidence
+                
+                if best_match:
+                    group.append(best_match)
+                    seen_ids.add(best_match.market_id)
+            
+            # Only keep groups with 2+ platforms
+            if len(group) >= 2:
+                matched_groups.append(group)
+        
+        print(f"Smart matching: {comparisons} comparisons, {len(matched_groups)} matches")
+        return matched_groups
+    
     def calculate_edge(self, markets: list) -> Optional[EdgeOpportunity]:
         """Calculate edge opportunity from matched markets."""
         if len(markets) < 2:
@@ -437,7 +545,17 @@ class CrossPlatformEdgeScanner:
         
         all_prices = poly_prices + kalshi_prices + meta_prices + predictit_prices + manifold_prices
         
-        # Group by topic
+        # Smart matching: find cross-platform matches using entity extraction
+        matched_groups = self.find_cross_platform_matches(all_prices)
+        
+        # Calculate edges from matched groups
+        edges = []
+        for group in matched_groups:
+            edge = self.calculate_edge(group)
+            if edge:
+                edges.append(edge)
+        
+        # Also do topic-based matching as fallback (lower priority)
         topic_markets: dict = {}
         for price in all_prices:
             topic = self.match_topic(price.title)
@@ -445,22 +563,6 @@ class CrossPlatformEdgeScanner:
                 if topic not in topic_markets:
                     topic_markets[topic] = []
                 topic_markets[topic].append(price)
-        
-        # Find edges
-        edges = []
-        for topic, markets in topic_markets.items():
-            # Dedupe by platform
-            platform_best: dict = {}
-            for m in markets:
-                key = m.platform
-                if key not in platform_best or (m.volume or 0) > (platform_best[key].volume or 0):
-                    platform_best[key] = m
-            
-            deduped = list(platform_best.values())
-            if len(deduped) >= 2:
-                edge = self.calculate_edge(deduped)
-                if edge:
-                    edges.append(edge)
         
         edges.sort(key=lambda e: e.spread, reverse=True)
         
@@ -474,6 +576,7 @@ class CrossPlatformEdgeScanner:
                 "predictit": len(predictit_prices),
                 "manifold": len(manifold_prices),
             },
+            "smart_matches": len(matched_groups),
             "topics_found": len(topic_markets),
             "edges": [
                 {
