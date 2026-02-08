@@ -237,41 +237,59 @@ class CrossPlatformEdgeScanner:
         return prices
     
     def fetch_metaculus(self) -> list:
-        """Fetch Metaculus forecasts (limited due to rate limiting)."""
+        """Fetch Metaculus forecasts (individual fetches required - list API hides predictions)."""
         prices = []
         try:
-            # Fetch top binary questions with good forecast coverage
-            url = "https://www.metaculus.com/api/posts/?forecast_type=binary&order_by=-activity&limit=50"
-            data = self._fetch_url(url, timeout=45)
-            if not data:
-                print("Metaculus: No data returned")
+            # Step 1: Get top question IDs by forecaster count
+            list_url = "https://www.metaculus.com/api/posts/?forecast_type=binary&status=open&order_by=-forecasters_count&limit=30"
+            list_data = self._fetch_url(list_url, timeout=30)
+            if not list_data:
+                print("Metaculus: No list data returned")
                 return prices
             
-            results = data.get("results", [])
+            results = list_data.get("results", [])
+            question_ids = []
             for q in results:
-                question = q.get("question", {})
-                if not question or question.get("type") != "binary":
-                    continue
-                
-                title = q.get("title", "")
+                qid = q.get("id")
                 forecasters = q.get("nr_forecasters", 0) or 0
-                
-                # Get prediction from aggregations
-                aggregations = question.get("aggregations", {})
-                recency = aggregations.get("recency_weighted", {})
-                latest = recency.get("latest", {})
-                centers = latest.get("centers", []) if isinstance(latest, dict) else []
-                prob = centers[0] if centers else None
-                
-                if prob is not None and title and forecasters >= 30:
-                    prices.append(PlatformPrice(
-                        platform="metaculus",
-                        market_id=str(q.get("id", "")),
-                        title=title,
-                        probability=prob,
-                        forecasters=forecasters,
-                        url=f"https://metaculus.com/questions/{q.get('id')}/"
-                    ))
+                if qid and forecasters >= 100:  # Only high-forecaster questions
+                    question_ids.append((qid, q.get("title", ""), forecasters))
+            
+            print(f"Metaculus: Fetching {len(question_ids)} questions individually...")
+            
+            # Step 2: Fetch each question to get predictions (API hides them in list)
+            for qid, title, forecasters in question_ids[:20]:  # Limit to 20 to avoid rate limits
+                try:
+                    detail_url = f"https://www.metaculus.com/api/posts/{qid}/"
+                    detail = self._fetch_url(detail_url, timeout=15)
+                    if not detail:
+                        continue
+                    
+                    question = detail.get("question", {})
+                    if not question or question.get("type") != "binary":
+                        continue
+                    
+                    # Get prediction from individual question
+                    aggregations = question.get("aggregations", {})
+                    recency = aggregations.get("recency_weighted", {})
+                    latest = recency.get("latest", {})
+                    centers = latest.get("centers", []) if isinstance(latest, dict) else []
+                    prob = centers[0] if centers else None
+                    
+                    if prob is not None and title:
+                        prices.append(PlatformPrice(
+                            platform="metaculus",
+                            market_id=str(qid),
+                            title=title,
+                            probability=prob,
+                            forecasters=forecasters,
+                            url=f"https://metaculus.com/questions/{qid}/"
+                        ))
+                except Exception as e:
+                    print(f"Metaculus question {qid} error: {e}")
+                    continue
+                    
+            print(f"Metaculus: Got {len(prices)} questions with predictions")
         except Exception as e:
             print(f"Metaculus fetch error: {e}")
             import traceback
@@ -536,13 +554,14 @@ class CrossPlatformEdgeScanner:
             if cached:
                 return cached
         
-        # Fetch all platforms (Metaculus disabled - hides predictions in API)
+        # Fetch all platforms
         poly_prices = self.fetch_polymarket()
         kalshi_prices = self.fetch_kalshi()
         predictit_prices = self.fetch_predictit()
         manifold_prices = self.fetch_manifold()
+        meta_prices = self.fetch_metaculus()
         
-        all_prices = poly_prices + kalshi_prices + predictit_prices + manifold_prices
+        all_prices = poly_prices + kalshi_prices + predictit_prices + manifold_prices + meta_prices
         
         # Smart matching: find cross-platform matches using entity extraction
         matched_groups = self.find_cross_platform_matches(all_prices)
@@ -573,6 +592,7 @@ class CrossPlatformEdgeScanner:
                 "kalshi": len(kalshi_prices),
                 "predictit": len(predictit_prices),
                 "manifold": len(manifold_prices),
+                "metaculus": len(meta_prices),
             },
             "smart_matches": len(matched_groups),
             "topics_found": len(topic_markets),
