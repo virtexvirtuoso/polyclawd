@@ -278,6 +278,82 @@ class CrossPlatformEdgeScanner:
             traceback.print_exc()
         return prices
     
+    def fetch_predictit(self) -> list:
+        """Fetch active PredictIt markets (politics focused)."""
+        prices = []
+        try:
+            url = "https://www.predictit.org/api/marketdata/all/"
+            data = self._fetch_url(url, timeout=30)
+            if not data:
+                print("PredictIt: No data returned")
+                return prices
+            
+            markets = data.get("markets", [])
+            for market in markets:
+                market_name = market.get("name", "")
+                
+                for contract in market.get("contracts", []):
+                    title = f"{market_name}: {contract.get('name', '')}"
+                    price = contract.get("lastTradePrice")
+                    
+                    if price is not None and price > 0:
+                        prices.append(PlatformPrice(
+                            platform="predictit",
+                            market_id=str(contract.get("id", "")),
+                            title=title,
+                            probability=price,  # PredictIt prices are already 0-1
+                            volume=None,
+                            url=f"https://www.predictit.org/markets/detail/{market.get('id', '')}"
+                        ))
+        except Exception as e:
+            print(f"PredictIt fetch error: {e}")
+            import traceback
+            traceback.print_exc()
+        return prices
+    
+    def fetch_manifold(self) -> list:
+        """Fetch active Manifold markets (play money, moves fast)."""
+        prices = []
+        try:
+            # Get top markets by liquidity
+            url = "https://api.manifold.markets/v0/markets?limit=200"
+            data = self._fetch_url(url, timeout=30)
+            if not data:
+                print("Manifold: No data returned")
+                return prices
+            
+            # API returns array directly
+            markets = data if isinstance(data, list) else []
+            
+            for market in markets:
+                # Only binary markets
+                if market.get("outcomeType") != "BINARY":
+                    continue
+                
+                # Skip closed/resolved
+                if market.get("isResolved") or market.get("closeTime", float('inf')) < datetime.utcnow().timestamp() * 1000:
+                    continue
+                
+                title = market.get("question", "")
+                prob = market.get("probability")
+                liquidity = market.get("totalLiquidity", 0)
+                
+                # Only markets with decent liquidity
+                if prob is not None and title and liquidity >= 100:
+                    prices.append(PlatformPrice(
+                        platform="manifold",
+                        market_id=market.get("id", ""),
+                        title=title,
+                        probability=prob,
+                        volume=liquidity,
+                        url=market.get("url", f"https://manifold.markets/{market.get('creatorUsername', '')}/{market.get('slug', '')}")
+                    ))
+        except Exception as e:
+            print(f"Manifold fetch error: {e}")
+            import traceback
+            traceback.print_exc()
+        return prices
+    
     def match_topic(self, title: str) -> Optional[str]:
         """Match a market title to a topic category."""
         title_lower = title.lower()
@@ -345,8 +421,10 @@ class CrossPlatformEdgeScanner:
         poly_prices = self.fetch_polymarket()
         kalshi_prices = self.fetch_kalshi()
         meta_prices = self.fetch_metaculus()
+        predictit_prices = self.fetch_predictit()
+        manifold_prices = self.fetch_manifold()
         
-        all_prices = poly_prices + kalshi_prices + meta_prices
+        all_prices = poly_prices + kalshi_prices + meta_prices + predictit_prices + manifold_prices
         
         # Group by topic
         topic_markets: dict = {}
@@ -382,6 +460,8 @@ class CrossPlatformEdgeScanner:
                 "polymarket": len(poly_prices),
                 "kalshi": len(kalshi_prices),
                 "metaculus": len(meta_prices),
+                "predictit": len(predictit_prices),
+                "manifold": len(manifold_prices),
             },
             "topics_found": len(topic_markets),
             "edges": [
