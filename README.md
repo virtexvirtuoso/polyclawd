@@ -208,6 +208,45 @@ sudo systemctl status polyclawd-api
 
 ## Architecture
 
+### API Structure (v2.1.0)
+
+The API uses a modular router architecture with domain-specific modules:
+
+```
+api/
+├── main.py              # App factory, lifespan, router registration (~150 LOC)
+├── routes/
+│   ├── system.py        # /health, /ready, /metrics
+│   ├── trading.py       # /api/balance, /api/positions, /api/trade, /api/simmer/*
+│   ├── markets.py       # /api/markets/*, /api/vegas/*, /api/betfair/*, etc.
+│   ├── signals.py       # /api/signals, /api/whales/*, /api/confidence/*
+│   └── engine.py        # /api/engine/*, /api/alerts/*, /api/kelly/*
+├── deps.py              # Dependency injection (settings, services)
+├── middleware.py        # Security headers, rate limiting, auth
+└── services/            # Business logic layer
+```
+
+### Router Organization
+
+| Router | Prefix | Endpoints | Purpose |
+|--------|--------|-----------|---------|
+| `system_router` | (none) | 3 | Health, readiness, metrics |
+| `trading_router` | `/api` | 16 | Paper trading, Simmer SDK |
+| `markets_router` | `/api` | 25 | Market data, edge detection |
+| `signals_router` | `/api` | 19 | Signal aggregation, whales |
+| `engine_router` | `/api` | 20 | Engine control, alerts, Kelly |
+
+**Total: 83 endpoints**
+
+### Security
+
+- **API Key Authentication**: Protected endpoints require `X-API-Key` header
+- **Rate Limiting**: SlowAPI with per-endpoint limits
+- **Security Headers**: X-Content-Type-Options, X-Frame-Options, CSP
+- **CORS**: Restricted origins with explicit allow list
+
+### Data Flow
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     DATA SOURCES                            │
@@ -248,6 +287,13 @@ sudo systemctl status polyclawd-api
                  │  → Telegram         │
                  └─────────────────────┘
 ```
+
+### Performance
+
+Load tested with Locust (50 concurrent users):
+- **Local endpoints**: p95 < 20ms, ~65 req/s
+- **External API endpoints**: Depends on upstream latency
+- **Memory**: ~15MB RSS under load
 
 ---
 
