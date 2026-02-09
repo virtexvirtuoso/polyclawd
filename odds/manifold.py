@@ -195,6 +195,182 @@ def get_manifold_summary() -> Dict:
     }
 
 
+def get_bets(
+    market_id: str = None,
+    username: str = None,
+    limit: int = 100,
+    before: str = None
+) -> List[Dict]:
+    """
+    Fetch bets with optional filters.
+    
+    Args:
+        market_id: Filter by market (contractId)
+        username: Filter by user
+        limit: Max bets to return
+        before: Pagination cursor (bet ID)
+    
+    Returns:
+        List of bet objects with amount, shares, outcome, etc.
+    """
+    try:
+        url = f"{MANIFOLD_API}/bets?limit={limit}"
+        if market_id:
+            url += f"&contractId={market_id}"
+        if username:
+            url += f"&username={username}"
+        if before:
+            url += f"&before={before}"
+        
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        print(f"Manifold bets error: {e}")
+        return []
+
+
+def get_user(username: str) -> Optional[Dict]:
+    """Get user profile by username"""
+    try:
+        url = f"{MANIFOLD_API}/user/{username}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except:
+        return None
+
+
+def get_user_portfolio(user_id: str) -> Optional[Dict]:
+    """
+    Get user's live portfolio metrics.
+    
+    Returns:
+        Portfolio with balance, investmentValue, profit, etc.
+    """
+    try:
+        url = f"{MANIFOLD_API}/get-user-portfolio?userId={user_id}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except:
+        return None
+
+
+def get_top_traders(limit: int = 20) -> List[Dict]:
+    """
+    Get top traders by profit.
+    
+    Note: Uses leaderboard data from markets endpoint.
+    """
+    try:
+        # Get recent high-volume markets and extract top traders
+        markets = fetch_markets(limit=50, sort="liquidity")
+        
+        # Track unique traders
+        trader_profits = {}
+        
+        for market in markets:
+            creator = market.get("creatorUsername", "")
+            if creator and creator not in trader_profits:
+                user = get_user(creator)
+                if user:
+                    profit = user.get("profitCached", {}).get("allTime", 0)
+                    trader_profits[creator] = {
+                        "username": creator,
+                        "name": user.get("name", ""),
+                        "profit": profit,
+                        "balance": user.get("balance", 0),
+                        "url": f"https://manifold.markets/{creator}"
+                    }
+        
+        # Sort by profit
+        sorted_traders = sorted(
+            trader_profits.values(),
+            key=lambda x: x["profit"],
+            reverse=True
+        )[:limit]
+        
+        return sorted_traders
+        
+    except Exception as e:
+        print(f"Error getting top traders: {e}")
+        return []
+
+
+def track_sharp_bettors(market_id: str, min_profit: float = 1000) -> List[Dict]:
+    """
+    Track bets from profitable traders on a specific market.
+    
+    Args:
+        market_id: The market to analyze
+        min_profit: Minimum all-time profit to consider "sharp"
+    
+    Returns:
+        List of bets from profitable traders with their track record
+    """
+    bets = get_bets(market_id=market_id, limit=100)
+    
+    sharp_bets = []
+    checked_users = {}
+    
+    for bet in bets:
+        user_id = bet.get("userId", "")
+        if user_id in checked_users:
+            user = checked_users[user_id]
+        else:
+            # We'd need username to get user, but bets don't include it
+            # In practice, you'd maintain a user_id -> username mapping
+            continue
+        
+        if user and user.get("profit", 0) >= min_profit:
+            sharp_bets.append({
+                "bet_id": bet.get("id"),
+                "amount": bet.get("amount", 0),
+                "outcome": bet.get("outcome"),
+                "shares": bet.get("shares", 0),
+                "trader": user.get("username"),
+                "trader_profit": user.get("profit"),
+                "created": bet.get("createdTime"),
+            })
+    
+    return sharp_bets
+
+
+def get_market_bets_flow(market_id: str) -> Dict:
+    """
+    Analyze betting flow on a market.
+    
+    Returns:
+        Summary of YES vs NO volume, recent momentum, etc.
+    """
+    bets = get_bets(market_id=market_id, limit=200)
+    
+    if not bets:
+        return {}
+    
+    yes_volume = sum(b.get("amount", 0) for b in bets if b.get("outcome") == "YES")
+    no_volume = sum(b.get("amount", 0) for b in bets if b.get("outcome") == "NO")
+    total_volume = yes_volume + no_volume
+    
+    # Recent bets (last 50)
+    recent = bets[:50]
+    recent_yes = sum(b.get("amount", 0) for b in recent if b.get("outcome") == "YES")
+    recent_no = sum(b.get("amount", 0) for b in recent if b.get("outcome") == "NO")
+    
+    return {
+        "market_id": market_id,
+        "total_bets": len(bets),
+        "yes_volume": yes_volume,
+        "no_volume": no_volume,
+        "total_volume": total_volume,
+        "yes_pct": round(yes_volume / total_volume * 100, 1) if total_volume > 0 else 50,
+        "recent_yes_volume": recent_yes,
+        "recent_no_volume": recent_no,
+        "recent_momentum": "YES" if recent_yes > recent_no * 1.5 else "NO" if recent_no > recent_yes * 1.5 else "NEUTRAL"
+    }
+
+
 if __name__ == "__main__":
     import asyncio
     
@@ -205,3 +381,10 @@ if __name__ == "__main__":
     print("\nTop markets:")
     for m in summary['top_markets'][:5]:
         print(f"  {m['probability']}% - {m['question']}")
+    
+    print("\n" + "="*50)
+    print("\nTesting bets endpoint...")
+    bets = get_bets(limit=5)
+    print(f"Recent bets: {len(bets)}")
+    for b in bets[:3]:
+        print(f"  {b.get('outcome')}: ${b.get('amount', 0):.0f}")

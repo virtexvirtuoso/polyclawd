@@ -17,8 +17,16 @@ import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
+# Import OpenClaw alerting
+try:
+    from openclaw_alerts import alert_openclaw, format_signal_alert, alert_high_edge_signal
+    ALERTS_ENABLED = True
+except ImportError:
+    ALERTS_ENABLED = False
+
 # Configuration
 POLYCLAWD_API = "http://localhost:8420"
+MIN_EDGE_ALERT = 5.0  # Alert via OpenClaw when edge >= this
 OLLAMA_API = "http://localhost:11434"
 POLL_INTERVAL = 30  # seconds
 MIN_CONFIDENCE = 45  # Only analyze signals >= this confidence
@@ -179,6 +187,7 @@ def main():
     log("=" * 60)
     log("Polyclawd Signal Monitor + Ollama LLM")
     log(f"Model: {OLLAMA_MODEL} | Poll: {POLL_INTERVAL}s | Min conf: {MIN_CONFIDENCE}")
+    log(f"OpenClaw Alerts: {'✅ Enabled' if ALERTS_ENABLED else '❌ Disabled'} | Min edge: {MIN_EDGE_ALERT}%")
     log("=" * 60)
     
     # Check Ollama is running
@@ -213,6 +222,21 @@ def main():
                 
                 if action == "TRADE":
                     log(f"   ✅ TRADE: {reason}")
+                    
+                    # Send alert via OpenClaw for high-edge signals
+                    if ALERTS_ENABLED and sig.get("confidence", 0) >= 60:
+                        edge_pct = (sig["confidence"] - 50) * 0.2  # Rough edge estimate
+                        if edge_pct >= MIN_EDGE_ALERT:
+                            alert_msg = format_signal_alert(
+                                market=sig["market"],
+                                side=sig["side"],
+                                price=sig.get("price", 0.5),
+                                edge=edge_pct,
+                                confidence=sig["confidence"],
+                                source=sig.get("source")
+                            )
+                            if alert_openclaw(alert_msg):
+                                log(f"   📤 Alert sent to OpenClaw")
                     
                     # Execute the trade
                     result = api_post("/api/engine/trigger")

@@ -155,15 +155,31 @@ def get_question_detail(question_id: int) -> Optional[Dict]:
         with urllib.request.urlopen(req, timeout=10) as resp:
             q = json.loads(resp.read().decode())
         
-        # Extract prediction data
+        question_data = q.get("question", {})
+        
+        # Extract community prediction
         community_prediction = None
-        aggregations = q.get("aggregations", {})
+        metaculus_prediction = None
+        
+        aggregations = question_data.get("aggregations", {})
         if aggregations:
+            # Community (recency weighted)
             recency = aggregations.get("recency_weighted", {})
             if recency:
-                centers = recency.get("centers", [])
-                if centers:
-                    community_prediction = centers[0]
+                latest = recency.get("latest", {})
+                if latest and isinstance(latest, dict):
+                    centers = latest.get("centers", [])
+                    if centers:
+                        community_prediction = centers[0]
+            
+            # Metaculus prediction (their own model)
+            metaculus = aggregations.get("metaculus_prediction", {})
+            if metaculus:
+                latest = metaculus.get("latest", {})
+                if latest and isinstance(latest, dict):
+                    centers = latest.get("centers", [])
+                    if centers:
+                        metaculus_prediction = centers[0]
         
         return {
             "id": q.get("id"),
@@ -173,12 +189,126 @@ def get_question_detail(question_id: int) -> Optional[Dict]:
             "status": q.get("status"),
             "forecasters": q.get("nr_forecasters", 0),
             "community_prediction": community_prediction,
-            "close_time": q.get("scheduled_close_time"),
-            "resolve_time": q.get("scheduled_resolve_time"),
+            "metaculus_prediction": metaculus_prediction,
+            "prediction_divergence": abs(community_prediction - metaculus_prediction) if community_prediction and metaculus_prediction else None,
+            "close_time": question_data.get("scheduled_close_time"),
+            "resolve_time": question_data.get("scheduled_resolve_time"),
             "resolution": q.get("resolution"),
         }
     except:
         return None
+
+
+def get_prediction_history(question_id: int) -> List[Dict]:
+    """
+    Get historical predictions for a question.
+    
+    Returns:
+        List of prediction snapshots over time
+    """
+    try:
+        url = f"https://www.metaculus.com/api/posts/{question_id}/"
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
+        
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        
+        question_data = data.get("question", {})
+        aggregations = question_data.get("aggregations", {})
+        
+        history = []
+        
+        # Get recency weighted history
+        recency = aggregations.get("recency_weighted", {})
+        if recency:
+            hist = recency.get("history", [])
+            for h in hist:
+                if h and isinstance(h, dict):
+                    centers = h.get("centers", [])
+                    if centers:
+                        history.append({
+                            "timestamp": h.get("start_time"),
+                            "community_prediction": centers[0],
+                            "forecaster_count": h.get("forecaster_count", 0),
+                        })
+        
+        return history
+        
+    except Exception as e:
+        print(f"Error getting prediction history: {e}")
+        return []
+
+
+def get_prediction_momentum(question_id: int) -> Dict:
+    """
+    Analyze prediction momentum for trading signals.
+    
+    Returns:
+        Momentum analysis including direction, velocity, and signal
+    """
+    history = get_prediction_history(question_id)
+    
+    if len(history) < 2:
+        return {"signal": "INSUFFICIENT_DATA"}
+    
+    # Get recent predictions
+    recent = history[-5:] if len(history) >= 5 else history
+    
+    if not recent:
+        return {"signal": "INSUFFICIENT_DATA"}
+    
+    first_pred = recent[0].get("community_prediction", 0.5)
+    last_pred = recent[-1].get("community_prediction", 0.5)
+    
+    change = (last_pred - first_pred) * 100  # in percentage points
+    
+    # Daily velocity
+    days = len(recent)
+    velocity = change / days if days > 0 else 0
+    
+    return {
+        "question_id": question_id,
+        "current_prediction": round(last_pred * 100, 1),
+        "change_pct": round(change, 2),
+        "velocity_per_day": round(velocity, 2),
+        "data_points": len(recent),
+        "signal": "BUY" if velocity > 2 else "SELL" if velocity < -2 else "HOLD",
+        "strength": "STRONG" if abs(velocity) > 5 else "MODERATE" if abs(velocity) > 2 else "WEAK"
+    }
+
+
+def compare_predictions(question_id: int) -> Dict:
+    """
+    Compare community vs Metaculus predictions for edge detection.
+    
+    When they diverge significantly, one may be "right".
+    """
+    detail = get_question_detail(question_id)
+    
+    if not detail:
+        return {}
+    
+    community = detail.get("community_prediction")
+    metaculus = detail.get("metaculus_prediction")
+    
+    if community is None:
+        return {"error": "No community prediction"}
+    
+    result = {
+        "question_id": question_id,
+        "title": detail.get("title", "")[:60],
+        "community_prediction": round(community * 100, 1) if community else None,
+        "metaculus_prediction": round(metaculus * 100, 1) if metaculus else None,
+        "forecasters": detail.get("forecasters", 0),
+    }
+    
+    if community and metaculus:
+        divergence = (metaculus - community) * 100
+        result["divergence_pct"] = round(divergence, 1)
+        result["signal"] = "BUY" if divergence > 5 else "SELL" if divergence < -5 else "HOLD"
+        result["signal_strength"] = abs(divergence)
+    
+    return result
 
 
 def find_polymarket_overlaps(poly_events: List[Dict], min_forecasters: int = 20) -> List[Dict]:

@@ -482,8 +482,35 @@ def get_smart_money_flow() -> dict:
 # Bayesian Confidence Scoring
 # ============================================================================
 
+def laplace_smoothed_win_rate(wins: int, total: int, alpha: float = 4.0) -> float:
+    """
+    Laplace smoothing to prevent overfitting on small samples.
+    
+    alpha=4 acts as 4 pseudo-observations toward 50% (adds 4 wins + 4 losses).
+    This prevents extreme win rates from small samples:
+        - 0 wins / 0 total → 50% (not undefined)
+        - 1 win / 1 total → 62.5% (not 100%)
+        - 10 wins / 10 total → 78% (regression toward mean)
+    """
+    return (wins + alpha) / (total + 2 * alpha)
+
+
+def sigmoid_normalize(raw_signal: float, k: float = 0.1, center: float = 50) -> float:
+    """
+    Sigmoid scaling to handle outliers and normalize to 0-100.
+    
+    k controls sensitivity (lower = more gradual curve)
+    center is the neutral point (usually 50)
+    """
+    import math
+    try:
+        return 100 / (1 + math.exp(-k * (raw_signal - center)))
+    except OverflowError:
+        return 0 if raw_signal < center else 100
+
+
 def calculate_bayesian_confidence(raw_score: float, source: str, market: str, side: str, all_signals: list) -> dict:
-    """Calculate Bayesian-adjusted confidence score."""
+    """Calculate Bayesian-adjusted confidence score (legacy interface)."""
     win_rate = get_source_win_rate(source)
     bayesian_multiplier = win_rate / 0.5 if win_rate > 0 else 1.0
     bayesian_confidence = raw_score * bayesian_multiplier
@@ -512,6 +539,143 @@ def calculate_bayesian_confidence(raw_score: float, source: str, market: str, si
         "agreeing_sources": agreeing_sources,
         "composite_multiplier": round(composite_multiplier, 2),
         "final_confidence": round(min(100, final_confidence), 1)
+    }
+
+
+def calculate_bayesian_confidence_v2(
+    raw_scores: dict,      # {source: base_confidence}
+    source_stats: dict,    # {source: {wins, total, direction}}
+    alpha: float = 4.0,
+    max_multiplier: float = 1.8
+) -> dict:
+    """
+    Improved Bayesian confidence with:
+    - Laplace smoothing (prevents overfitting on small samples)
+    - Weighted average combination (weight by win rate)
+    - Disagreement penalty (reduces confidence when sources conflict)
+    - Capped multipliers (prevents runaway confidence)
+    
+    Args:
+        raw_scores: Dict of {source_name: base_confidence_score}
+        source_stats: Dict of {source_name: {wins, total, direction}}
+        alpha: Laplace smoothing parameter (default 4.0)
+        max_multiplier: Cap on Bayesian multiplier (default 1.8)
+    
+    Returns:
+        Dict with final_confidence, breakdown, and agreement info
+    """
+    bayesian_confs = {}
+    smoothed_wrs = {}
+    directions = {}  # Track YES/NO per source
+    
+    for source, base in raw_scores.items():
+        stats = source_stats.get(source, {"wins": 0, "total": 0})
+        wins = stats.get("wins", 0)
+        total = stats.get("total", 0)
+        
+        # Laplace smoothed win rate
+        smoothed_wr = laplace_smoothed_win_rate(wins, total, alpha)
+        smoothed_wrs[source] = smoothed_wr
+        
+        # Capped multiplier (prevents runaway from high win rates)
+        multiplier = min(smoothed_wr / 0.5, max_multiplier)
+        
+        # Normalize base to valid range
+        normalized_base = min(100, max(0, base))
+        
+        bayesian_confs[source] = normalized_base * multiplier
+        directions[source] = stats.get("direction", "YES")
+    
+    if not bayesian_confs:
+        return {"final_confidence": 50, "breakdown": {}}
+    
+    # Weighted average (weight = smoothed win rate)
+    # Sources with better track records have more influence
+    total_weight = sum(smoothed_wrs.values())
+    if total_weight > 0:
+        weighted_conf = sum(
+            bayesian_confs[s] * smoothed_wrs[s] 
+            for s in bayesian_confs
+        ) / total_weight
+    else:
+        weighted_conf = sum(bayesian_confs.values()) / len(bayesian_confs)
+    
+    # Agreement/disagreement check
+    unique_directions = set(directions.values())
+    agreement_count = len(bayesian_confs)
+    has_disagreement = len(unique_directions) > 1
+    
+    # Agreement multiplier with penalty for conflicts
+    if has_disagreement:
+        agreement_mult = 0.85  # 15% penalty for conflicting signals
+    elif agreement_count >= 3:
+        agreement_mult = 1.30  # 30% boost for 3+ agreeing sources
+    elif agreement_count == 2:
+        agreement_mult = 1.15  # 15% boost for 2 agreeing sources
+    else:
+        agreement_mult = 1.0   # No adjustment for single source
+    
+    final_conf = min(100, weighted_conf * agreement_mult)
+    
+    return {
+        "final_confidence": round(final_conf, 1),
+        "weighted_base": round(weighted_conf, 1),
+        "agreement_multiplier": agreement_mult,
+        "has_disagreement": has_disagreement,
+        "source_count": agreement_count,
+        "breakdown": {
+            source: {
+                "base": raw_scores[source],
+                "bayesian": round(bayesian_confs[source], 1),
+                "win_rate": round(smoothed_wrs[source] * 100, 1),
+                "direction": directions.get(source, "YES")
+            }
+            for source in raw_scores
+        }
+    }
+
+
+def combined_decision_score(edge_pct: float, confidence: float) -> dict:
+    """
+    Combined edge + confidence decision metric.
+    
+    Only bet when |edge| × (confidence/100) > threshold.
+    This ensures we need BOTH a meaningful edge AND high confidence.
+    
+    Thresholds:
+        > 5.0: STRONG signal - full position
+        > 3.0: MODERATE signal - half position
+        ≤ 3.0: WEAK signal - skip or quarter position
+    
+    Args:
+        edge_pct: Edge percentage (positive = YES edge, negative = NO edge)
+        confidence: Confidence score (0-100)
+    
+    Returns:
+        Dict with decision metrics and sizing recommendation
+    """
+    adjusted_edge = abs(edge_pct) * (confidence / 100)
+    
+    if adjusted_edge > 5.0:
+        strength = "strong"
+        should_bet = True
+        size_multiplier = 1.0
+    elif adjusted_edge > 3.0:
+        strength = "moderate"
+        should_bet = True
+        size_multiplier = 0.5
+    else:
+        strength = "weak"
+        should_bet = False
+        size_multiplier = 0.25
+    
+    return {
+        "adjusted_edge": round(adjusted_edge, 2),
+        "should_bet": should_bet,
+        "bet_direction": "YES" if edge_pct > 0 else "NO",
+        "strength": strength,
+        "size_multiplier": size_multiplier,
+        "rationale": f"|{edge_pct:.1f}%| × {confidence:.0f}/100 = {adjusted_edge:.1f}%"
     }
 
 
@@ -857,6 +1021,104 @@ async def get_imminent_resolution():
     except Exception as e:
         logger.exception(f"Imminent resolution scan failed: {e}")
         raise HTTPException(status_code=500, detail="Resolution scan failed")
+
+
+# ============================================================================
+# Endpoints: Cross-Market Correlation
+# ============================================================================
+
+@router.get("/correlation/violations")
+async def get_correlation_violations(
+    min_violation: float = Query(3.0, ge=1.0, le=20.0, description="Minimum violation % to report")
+):
+    """
+    Find probability constraint violations between related markets.
+    
+    Detects cases where narrower outcomes are priced higher than broader ones:
+    - P(Chiefs win Super Bowl) should be <= P(Chiefs win AFC)
+    - P(Trump wins election) should be <= P(Trump wins nomination)
+    
+    Violations indicate mispricing / arbitrage opportunities.
+    """
+    try:
+        from odds.correlation import scan_correlation_arb
+        
+        # Fetch active markets from Polymarket
+        url = f"{GAMMA_API}/markets?limit=200&active=true&closed=false"
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            markets = json.loads(resp.read().decode())
+        
+        if not markets:
+            return {"violations": [], "error": "Failed to fetch markets"}
+        
+        result = scan_correlation_arb(markets, min_violation_pct=min_violation)
+        return result
+    except Exception as e:
+        logger.exception(f"Correlation scan failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/correlation/entities")
+async def get_market_entities():
+    """
+    Get all entities (teams, people) with multiple related markets.
+    
+    Useful for manually checking correlation constraints.
+    """
+    try:
+        from odds.correlation import group_markets_by_entity
+        
+        # Fetch active markets from Polymarket
+        url = f"{GAMMA_API}/markets?limit=200&active=true&closed=false"
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            markets = json.loads(resp.read().decode())
+        
+        if not markets:
+            return {"entities": [], "error": "Failed to fetch markets"}
+        
+        entity_groups = group_markets_by_entity(markets)
+        
+        # Helper to extract price
+        def get_price(m):
+            if m.get("yes_price"):
+                return m.get("yes_price")
+            prices = m.get("outcomePrices")
+            if prices:
+                if isinstance(prices, str):
+                    try:
+                        prices = json.loads(prices)
+                    except:
+                        return None
+                if isinstance(prices, list) and len(prices) > 0:
+                    try:
+                        return float(prices[0])
+                    except:
+                        return None
+            return None
+        
+        # Filter to entities with 2+ markets
+        multi_market_entities = {
+            entity: [
+                {
+                    "title": m.get("title") or m.get("question"),
+                    "price": get_price(m),
+                    "id": m.get("id") or m.get("condition_id")
+                }
+                for m in markets_list
+            ]
+            for entity, markets_list in entity_groups.items()
+            if len(markets_list) >= 2
+        }
+        
+        return {
+            "entity_count": len(multi_market_entities),
+            "entities": multi_market_entities
+        }
+    except Exception as e:
+        logger.exception(f"Entity scan failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================

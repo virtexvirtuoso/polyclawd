@@ -373,6 +373,49 @@ async def get_market_details(market_id: str):
 
 
 # ============================================================================
+# Vegas Odds API Rate Limiting
+# ============================================================================
+
+@router.get("/vegas/quota")
+async def get_odds_api_quota():
+    """Check The Odds API usage and remaining quota.
+    
+    Free tier: 500 calls/month
+    Tracks usage to prevent exhaustion.
+    """
+    try:
+        from odds.rate_limiter import get_usage, get_scan_schedule, can_make_call
+        
+        usage = get_usage()
+        schedule = get_scan_schedule()
+        can_normal, reason_normal = can_make_call("normal")
+        can_critical, reason_critical = can_make_call("critical")
+        
+        return {
+            **usage,
+            "schedule": schedule,
+            "can_call_normal": can_normal,
+            "can_call_critical": can_critical,
+            "reason": reason_normal if not can_normal else None
+        }
+    except Exception as e:
+        return {"error": str(e), "calls_remaining": "unknown"}
+
+
+@router.post("/vegas/quota/reset")
+async def reset_odds_api_quota():
+    """Reset quota tracking (use after switching API keys)."""
+    try:
+        from odds.rate_limiter import RATE_FILE
+        import os
+        if RATE_FILE.exists():
+            os.remove(RATE_FILE)
+        return {"status": "reset", "message": "Quota tracking reset. Will sync with API on next call."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ============================================================================
 # Vegas Odds Edge Detection
 # ============================================================================
 
@@ -397,12 +440,27 @@ async def get_active_sports():
 
 
 @router.get("/vegas/odds")
-async def get_vegas_odds(sport: str = Query(default="americanfootball_nfl")):
+async def get_vegas_odds(
+    sport: str = Query(default="americanfootball_nfl"),
+    priority: str = Query(default="normal", description="Priority: critical, high, normal, low")
+):
     """Get current Vegas odds from The Odds API.
 
     Args:
         sport: Sport key (americanfootball_nfl, basketball_nba, etc.)
+        priority: Call priority for rate limiting
+    
+    Rate limited: 500 calls/month on free tier.
     """
+    # Check rate limit first
+    try:
+        from odds.rate_limiter import can_make_call, record_call, update_from_headers
+        can_call, reason = can_make_call(priority)
+        if not can_call:
+            return {"error": f"Rate limited: {reason}", "rate_limited": True}
+    except ImportError:
+        pass  # Rate limiter not available, continue anyway
+    
     # Get API key - try environment first, then keychain
     api_key = os.getenv("ODDS_API_KEY")
 
@@ -490,6 +548,14 @@ async def get_vegas_odds(sport: str = Query(default="americanfootball_nfl")):
                         "books_count": len(bookmakers)
                     })
 
+            # Record the call and update quota from headers
+            try:
+                from odds.rate_limiter import record_call, update_from_headers
+                record_call(1, f"vegas/odds/{sport}")
+                update_from_headers(dict(response.headers))
+            except:
+                pass
+            
             return {
                 "sport": sport,
                 "events": events,
@@ -699,6 +765,104 @@ async def get_worldcup_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
     return await handle_edge_request("worldcup", _get_league_edges("world_cup", min_edge))
 
 
+# ----------------------------------------------------------------------------
+# NFL Futures Endpoints
+# ----------------------------------------------------------------------------
+
+@router.get("/vegas/nfl")
+async def get_nfl_futures():
+    """Get NFL futures odds from VegasInsider.
+    
+    Returns Super Bowl winner odds, AFC/NFC conference winner odds.
+    Data is cached for 12 hours.
+    """
+    async def _get_nfl():
+        import sys
+        odds_path = _get_odds_modules_path()
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from vegas_scraper import get_nfl_odds_with_fallback
+        
+        data = await get_nfl_odds_with_fallback()
+        
+        return {
+            "source": "VegasInsider",
+            "timestamp": datetime.now().isoformat(),
+            "markets": {
+                "super_bowl": {
+                    "name": "Super Bowl Winner",
+                    "teams": [
+                        {
+                            "team": o.team,
+                            "american_odds": o.american_odds,
+                            "implied_prob": round(o.implied_prob, 4),
+                        }
+                        for o in data.get("super_bowl", [])
+                    ]
+                },
+                "afc_winner": {
+                    "name": "AFC Conference Winner",
+                    "teams": [
+                        {
+                            "team": o.team,
+                            "american_odds": o.american_odds,
+                            "implied_prob": round(o.implied_prob, 4),
+                        }
+                        for o in data.get("afc_winner", [])
+                    ]
+                },
+                "nfc_winner": {
+                    "name": "NFC Conference Winner",
+                    "teams": [
+                        {
+                            "team": o.team,
+                            "american_odds": o.american_odds,
+                            "implied_prob": round(o.implied_prob, 4),
+                        }
+                        for o in data.get("nfc_winner", [])
+                    ]
+                },
+            },
+            "total_teams": sum(len(v) for v in data.values()),
+        }
+    
+    return await handle_edge_request("nfl", _get_nfl())
+
+
+@router.get("/vegas/nfl/superbowl")
+async def get_superbowl_odds():
+    """Get Super Bowl winner odds specifically.
+    
+    Focuses on Super Bowl futures with Polymarket comparison ready.
+    """
+    async def _get_sb():
+        import sys
+        odds_path = _get_odds_modules_path()
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from vegas_scraper import get_nfl_odds_with_fallback
+        
+        data = await get_nfl_odds_with_fallback()
+        sb_odds = data.get("super_bowl", [])
+        
+        return {
+            "market": "Super Bowl LX Winner",
+            "source": "VegasInsider",
+            "timestamp": datetime.now().isoformat(),
+            "favorites": [
+                {
+                    "team": o.team,
+                    "american_odds": o.american_odds,
+                    "implied_prob_pct": round(o.implied_prob * 100, 1),
+                }
+                for o in sb_odds[:10]  # Top 10
+            ],
+            "total_teams": len(sb_odds),
+        }
+    
+    return await handle_edge_request("superbowl", _get_sb())
+
+
 # ============================================================================
 # ESPN Odds Edge Detection
 # ============================================================================
@@ -841,6 +1005,72 @@ async def get_espn_ncaab():
     return await handle_edge_request("espn-ncaab", _get_sport_odds("ncaab"))
 
 
+# ----------------------------------------------------------------------------
+# ESPN Moneyline Endpoints
+# ----------------------------------------------------------------------------
+
+@router.get("/espn/moneyline/{sport}")
+async def get_espn_moneyline(sport: str):
+    """Get moneyline odds for a specific sport from ESPN (DraftKings source).
+    
+    Returns true probabilities after removing vig, line movement from open.
+    Free API, no key required.
+    
+    Args:
+        sport: One of nfl, nba, nhl, mlb, ncaaf, ncaab
+    """
+    async def _get_ml():
+        import sys
+        odds_path = _get_odds_modules_path()
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from espn_odds import get_moneyline
+        
+        games = get_moneyline(sport)
+        return {
+            "sport": sport.upper(),
+            "source": "ESPN (DraftKings)",
+            "timestamp": datetime.now().isoformat(),
+            "total_games": len(games),
+            "games": games,
+        }
+    
+    return await handle_edge_request(f"espn-ml-{sport}", _get_ml())
+
+
+@router.get("/espn/moneylines")
+async def get_all_espn_moneylines():
+    """Get moneyline odds for all sports from ESPN (DraftKings source).
+    
+    Aggregates moneyline data across NFL, NBA, NHL, MLB, NCAAF, NCAAB.
+    Free API, no key required.
+    """
+    async def _get_all_ml():
+        import sys
+        odds_path = _get_odds_modules_path()
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from espn_odds import get_all_moneylines
+        
+        all_ml = get_all_moneylines()
+        total = sum(len(v) for v in all_ml.values())
+        
+        return {
+            "source": "ESPN (DraftKings)",
+            "timestamp": datetime.now().isoformat(),
+            "total_games": total,
+            "sports": {
+                sport.upper(): {
+                    "games": len(games),
+                    "matchups": games[:10]  # Limit to 10 per sport
+                }
+                for sport, games in all_ml.items()
+            },
+        }
+    
+    return await handle_edge_request("espn-ml-all", _get_all_ml())
+
+
 # ============================================================================
 # Betfair Edge Detection
 # ============================================================================
@@ -872,6 +1102,7 @@ async def get_kalshi_markets():
     """Get Kalshi market summary and compare with Polymarket.
 
     Returns overlapping markets between Kalshi and Polymarket for arbitrage detection.
+    Uses comprehensive fetching (all events, markets, and series with pagination).
     """
     async def _get_kalshi():
         import sys
@@ -882,6 +1113,50 @@ async def get_kalshi_markets():
         return await get_kalshi_polymarket_comparison()
 
     return await handle_edge_request("kalshi", _get_kalshi())
+
+
+@router.get("/kalshi/entertainment")
+async def get_kalshi_entertainment():
+    """Get entertainment and sports prop markets from Kalshi.
+
+    Discovers markets for:
+    - Super Bowl halftime (KXFIRSTSUPERBOWLSONG, KXSBSETLISTS, KXHALFTIMESHOW)
+    - Grammy/Oscar/Emmy awards
+    - Celebrity props
+    - NFL/NBA/MLB/NHL sports props
+    
+    Returns structured data with odds for betting opportunities.
+    """
+    async def _get_entertainment():
+        import sys
+        odds_path = _get_odds_modules_path()
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from kalshi_edge import get_kalshi_entertainment_props
+        return await get_kalshi_entertainment_props()
+
+    return await handle_edge_request("kalshi-entertainment", _get_entertainment())
+
+
+@router.get("/kalshi/all")
+async def get_all_kalshi_markets():
+    """Get ALL Kalshi markets with comprehensive pagination.
+    
+    Returns full market data including:
+    - All open markets (paginated through entire catalog)
+    - All series
+    - Category breakdown
+    - Top markets by volume
+    """
+    async def _get_all():
+        import sys
+        odds_path = _get_odds_modules_path()
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from kalshi_edge import get_kalshi_all_markets
+        return await get_kalshi_all_markets()
+
+    return await handle_edge_request("kalshi-all", _get_all())
 
 
 # ============================================================================
@@ -1147,3 +1422,191 @@ async def get_polymarket_events(
     except Exception as e:
         logger.exception("Polymarket events error")
         raise HTTPException(status_code=500, detail=f"Polymarket error: {str(e)}")
+
+
+# ============================================================================
+# NEW: Polymarket CLOB (orderbook depth)
+# ============================================================================
+
+@router.get("/polymarket/orderbook/{slug}")
+async def get_polymarket_orderbook(
+    slug: str,
+    outcome: str = Query(default="Yes")
+):
+    """Get Polymarket orderbook for a market."""
+    try:
+        from odds.polymarket_clob import get_orderbook_for_market
+        orderbook = get_orderbook_for_market(slug, outcome)
+        if orderbook:
+            return {
+                "market_slug": slug,
+                "outcome": outcome,
+                "bids": [{"price": b.price, "size": b.size} for b in orderbook.bids[:10]],
+                "asks": [{"price": a.price, "size": a.size} for a in orderbook.asks[:10]],
+                "spread": orderbook.spread,
+                "mid_price": orderbook.mid_price
+            }
+        return {"error": "Orderbook not found"}
+    except Exception as e:
+        logger.exception("Orderbook error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/polymarket/microstructure/{slug}")
+async def get_polymarket_microstructure(slug: str):
+    """Get market microstructure analysis."""
+    try:
+        from odds.polymarket_clob import get_market_microstructure
+        return get_market_microstructure(slug)
+    except Exception as e:
+        logger.exception("Microstructure error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# NEW: Manifold Markets
+# ============================================================================
+
+@router.get("/manifold/bets")
+async def get_manifold_bets(limit: int = Query(default=50, ge=1, le=200)):
+    """Get recent bets on Manifold."""
+    try:
+        from odds.manifold import get_bets
+        bets = get_bets(limit=limit)
+        return {"bets": bets, "count": len(bets)}
+    except Exception as e:
+        logger.exception("Manifold bets error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/manifold/top-traders")
+async def get_manifold_top_traders():
+    """Get top Manifold traders."""
+    try:
+        from odds.manifold import get_top_traders
+        return get_top_traders()
+    except Exception as e:
+        logger.exception("Manifold top traders error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# NEW: Metaculus divergence
+# ============================================================================
+
+@router.get("/metaculus/divergence")
+async def get_metaculus_divergence():
+    """Get Metaculus vs community prediction divergence."""
+    try:
+        from odds.metaculus import get_divergence_signals
+        return get_divergence_signals()
+    except Exception as e:
+        logger.exception("Metaculus divergence error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# NEW: ESPN injuries and standings
+# ============================================================================
+
+@router.get("/espn/injuries/{sport}")
+async def get_espn_injuries(sport: str):
+    """Get injury report for a sport."""
+    try:
+        from odds.espn_odds import get_injuries
+        return get_injuries(sport)
+    except Exception as e:
+        logger.exception("ESPN injuries error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/espn/standings/{sport}")
+async def get_espn_standings(sport: str):
+    """Get standings for a sport."""
+    try:
+        from odds.espn_odds import get_standings
+        return get_standings(sport)
+    except Exception as e:
+        logger.exception("ESPN standings error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# NEW: Vegas futures (NBA, MLB, NHL)
+# ============================================================================
+
+@router.get("/vegas/nba")
+async def get_vegas_nba():
+    """Get NBA championship futures."""
+    try:
+        from odds.vegas_scraper import scrape_vegasinsider_nba
+        return scrape_vegasinsider_nba()
+    except Exception as e:
+        logger.exception("Vegas NBA error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/vegas/mlb")
+async def get_vegas_mlb():
+    """Get MLB World Series futures."""
+    try:
+        from odds.vegas_scraper import scrape_vegasinsider_mlb
+        return scrape_vegasinsider_mlb()
+    except Exception as e:
+        logger.exception("Vegas MLB error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/vegas/nhl")
+async def get_vegas_nhl():
+    """Get NHL Stanley Cup futures."""
+    try:
+        from odds.vegas_scraper import scrape_vegasinsider_nhl
+        return scrape_vegasinsider_nhl()
+    except Exception as e:
+        logger.exception("Vegas NHL error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# NEW: PolyRouter arbitrage and props
+# ============================================================================
+
+@router.get("/polyrouter/arbitrage")
+async def get_polyrouter_arbitrage():
+    """Find cross-platform arbitrage opportunities."""
+    try:
+        from odds.polyrouter import find_arbitrage_opportunities
+        import asyncio
+        return asyncio.get_event_loop().run_until_complete(find_arbitrage_opportunities())
+    except Exception as e:
+        logger.exception("PolyRouter arbitrage error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/polyrouter/props/{league}")
+async def get_polyrouter_props(league: str):
+    """Get player props from PolyRouter."""
+    try:
+        from odds.polyrouter import get_player_props
+        import asyncio
+        return asyncio.get_event_loop().run_until_complete(get_player_props(league))
+    except Exception as e:
+        logger.exception("PolyRouter props error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# NEW: Kalshi entertainment props
+# ============================================================================
+
+@router.get("/kalshi/entertainment")
+async def get_kalshi_entertainment():
+    """Get Kalshi entertainment/sports props (Super Bowl, Grammys, Oscars)."""
+    try:
+        from odds.kalshi_edge import get_kalshi_entertainment_props
+        import asyncio
+        return asyncio.get_event_loop().run_until_complete(get_kalshi_entertainment_props())
+    except Exception as e:
+        logger.exception("Kalshi entertainment error")
+        raise HTTPException(status_code=500, detail=str(e))
