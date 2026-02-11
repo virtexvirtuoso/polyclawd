@@ -249,10 +249,11 @@ def scan_kalshi_signals() -> List[Dict]:
         
         # Dynamic category detection: entertainment, pop culture, and novelty markets
         # tend to be mispriced (from backtest: non-sports categories avg 15%+ error)
-        is_dynamic_mispriced = event_cat in (
+        is_dynamic_mispriced = any(kw in event_cat for kw in (
             "entertainment", "culture", "music", "tv", "movies", 
-            "science", "technology", "world", "climate"
-        )
+            "science", "tech", "world", "climate", "weather",
+            "crypto", "financial", "economics", "pop",
+        ))
         
         if not cat_info and not is_dynamic_mispriced:
             continue
@@ -274,14 +275,14 @@ def scan_kalshi_signals() -> List[Dict]:
         if price < CONTESTED_LOW or price > CONTESTED_HIGH:
             continue
         
-        # Duration filter
+        # Duration calculation (don't filter out long-dated — just score lower theta)
         try:
             close_time = datetime.fromisoformat(close_time_str.replace('Z', '+00:00'))
             days_to_close = (close_time - datetime.now(close_time.tzinfo)).total_seconds() / 86400
-            if days_to_close <= 0 or days_to_close > MAX_DAYS_TO_CLOSE:
+            if days_to_close <= 0:
                 continue
         except Exception:
-            days_to_close = 15  # Default if can't parse
+            days_to_close = 365  # Default if can't parse — long-dated
         
         # Calculate confidence
         conf = calculate_signal_confidence(
