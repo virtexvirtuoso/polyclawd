@@ -243,7 +243,7 @@ def fetch_predictit_edges() -> List[Dict]:
 def refresh_edge_cache() -> List[Dict]:
     """Refresh all edge signals (called in background)"""
     all_signals = []
-    
+
     # Fetch all sources (order by speed)
     all_signals.extend(fetch_vegas_edges())
     all_signals.extend(fetch_betfair_edges())
@@ -251,11 +251,48 @@ def refresh_edge_cache() -> List[Dict]:
     all_signals.extend(fetch_manifold_edges())
     all_signals.extend(fetch_predictit_edges())
     all_signals.extend(fetch_kalshi_overlaps())
-    
+
     # Save to cache
     with _cache_lock:
         save_cache(all_signals)
-    
+
+    return all_signals
+
+
+async def refresh_edge_cache_async() -> List[Dict]:
+    """Enhancement #1: Parallel async refresh of all edge sources.
+
+    Fires all 6 edge fetchers concurrently in a thread pool.
+    Total time = max(individual latencies) instead of sum.
+    """
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    _pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="edge")
+    loop = asyncio.get_event_loop()
+
+    futures = [
+        loop.run_in_executor(_pool, fetch_vegas_edges),
+        loop.run_in_executor(_pool, fetch_betfair_edges),
+        loop.run_in_executor(_pool, fetch_soccer_edges),
+        loop.run_in_executor(_pool, fetch_manifold_edges),
+        loop.run_in_executor(_pool, fetch_predictit_edges),
+        loop.run_in_executor(_pool, fetch_kalshi_overlaps),
+    ]
+
+    results = await asyncio.gather(*futures, return_exceptions=True)
+
+    all_signals = []
+    for result in results:
+        if isinstance(result, list):
+            all_signals.extend(result)
+        elif isinstance(result, Exception):
+            logger.debug(f"Edge source failed during parallel refresh: {result}")
+
+    with _cache_lock:
+        save_cache(all_signals)
+
+    _pool.shutdown(wait=False)
     return all_signals
 
 def get_edge_signals(force_refresh: bool = False) -> List[Dict]:

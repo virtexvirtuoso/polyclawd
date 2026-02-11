@@ -4,6 +4,7 @@ pydantic==2.5.3
 aiofiles
 slowapi
 httpx
+websockets
 pytest
 pytest-asyncio
 locust
