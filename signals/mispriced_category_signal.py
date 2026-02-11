@@ -234,41 +234,47 @@ def calculate_signal_confidence(
 
 
 def _log_shadow_trade(signal: Dict):
-    """Log signal as a shadow/paper trade for later P&L tracking."""
+    """Log signal as a shadow/paper trade via SQLite tracker."""
     try:
-        SHADOW_LOG.parent.mkdir(parents=True, exist_ok=True)
-        trades = []
-        if SHADOW_LOG.exists():
-            try:
-                with open(SHADOW_LOG) as f:
-                    trades = json.load(f)
-            except Exception:
-                trades = []
+        from shadow_tracker import log_shadow_trade, save_signal_snapshot
+        log_shadow_trade(signal)
+    except ImportError:
+        # Fallback: basic JSON logging if tracker not available
+        try:
+            SHADOW_LOG.parent.mkdir(parents=True, exist_ok=True)
+            trades = []
+            if SHADOW_LOG.exists():
+                try:
+                    with open(SHADOW_LOG) as f:
+                        trades = json.load(f)
+                except Exception:
+                    trades = []
 
-        trades.append({
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "market_id": signal.get("market_id"),
-            "market": signal.get("market", "")[:80],
-            "category": signal.get("category"),
-            "side": signal.get("side"),
-            "entry_price": signal.get("price"),
-            "confidence": signal.get("confidence"),
-            "confirmations": signal.get("confirmations"),
-            "days_to_close": signal.get("days_to_close"),
-            "volume": signal.get("volume"),
-            "resolved": False,
-            "outcome": None,
-            "pnl": None,
-        })
+            trades.append({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "market_id": signal.get("market_id"),
+                "market": signal.get("market", "")[:80],
+                "category": signal.get("category"),
+                "side": signal.get("side"),
+                "entry_price": signal.get("price"),
+                "confidence": signal.get("confidence"),
+                "confirmations": signal.get("confirmations"),
+                "days_to_close": signal.get("days_to_close"),
+                "volume": signal.get("volume"),
+                "resolved": False,
+                "outcome": None,
+                "pnl": None,
+            })
 
-        # Keep last 500 shadow trades
-        if len(trades) > 500:
-            trades = trades[-500:]
+            if len(trades) > 500:
+                trades = trades[-500:]
 
-        with open(SHADOW_LOG, "w") as f:
-            json.dump(trades, f, indent=2)
+            with open(SHADOW_LOG, "w") as f:
+                json.dump(trades, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Shadow trade log failed: {e}")
     except Exception as e:
-        logger.warning(f"Shadow trade log failed: {e}")
+        logger.warning(f"Shadow tracker log failed: {e}")
 
 
 def scan_kalshi_signals() -> List[Dict]:
@@ -391,6 +397,13 @@ def scan_kalshi_signals() -> List[Dict]:
     # Shadow-log top signals (paper trade tracking)
     for sig in signals[:5]:
         _log_shadow_trade(sig)
+
+    # Save full signal snapshot for historical tracking
+    try:
+        from shadow_tracker import save_signal_snapshot
+        save_signal_snapshot(signals, "mispriced_category")
+    except Exception:
+        pass
 
     return signals
 
