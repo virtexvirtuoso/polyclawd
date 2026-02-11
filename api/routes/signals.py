@@ -896,10 +896,11 @@ async def aggregate_all_signals_async() -> dict:
     Total time = max(individual latencies) instead of sum.
     This drops scan cycle from 15-30s to 2-5s.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
-    # Fire all signal sources concurrently in thread pool
-    # Each is a sync function that makes HTTP calls
+    # Fire all signal sources concurrently in thread pool.
+    # Each is a sync function that makes blocking HTTP calls, so they
+    # must run in threads to avoid blocking the event loop.
     futures = [
         loop.run_in_executor(_signal_executor, _fetch_inverse_whale_signals),
         loop.run_in_executor(_signal_executor, _fetch_smart_money_signals),
@@ -924,15 +925,20 @@ async def aggregate_all_signals_async() -> dict:
         elif isinstance(result, list):
             all_signals.extend(result)
 
-    # Enhancement #11: Apply $10K volume floor pre-filter
-    # Don't waste compute evaluating signals on illiquid markets
+    # Enhancement #11: Apply $10K volume floor pre-filter.
+    # Only filter signals that carry explicit volume data (volume_spike source).
+    # Other signal types (whale, smart_money, edge, news) don't carry market
+    # volume in their "value" field — that field means position size, flow
+    # weight, edge %, etc. Filtering those by $10K would incorrectly discard
+    # valid signals. The volume floor is properly enforced at trade execution
+    # time via the MarketStateStore.is_liquid check.
     pre_filter_count = len(all_signals)
-    all_signals = [
-        s for s in all_signals
-        if s.get("value", 0) >= VOLUME_FLOOR_USD  # Direct volume check
-        or s.get("source") in ("resolution_timing", "news_google", "news_reddit")  # Non-volume sources pass through
-        or s.get("side") in ("RESEARCH", "ARB")  # Research/arb always pass
-    ]
+    filtered_signals = []
+    for s in all_signals:
+        if s.get("source") == "volume_spike" and s.get("value", 0) < VOLUME_FLOOR_USD:
+            continue  # Skip low-volume spike signals
+        filtered_signals.append(s)
+    all_signals = filtered_signals
     filtered_count = pre_filter_count - len(all_signals)
 
     # Apply Bayesian confidence scoring + category multipliers to all signals
@@ -990,21 +996,68 @@ async def aggregate_all_signals_async() -> dict:
 
 
 def aggregate_all_signals() -> dict:
-    """Synchronous wrapper for backward compatibility.
+    """Synchronous wrapper — preserves backward compatibility.
 
-    Calls the async version via asyncio.run() if no event loop is running,
-    or schedules it on the existing loop.
+    Called by: engine_evaluate_and_trade() (sync), /signals/auto-trade,
+    /confidence/market/{id}, /conflicts/active.
+    The async FastAPI endpoint calls aggregate_all_signals_async() directly.
     """
-    try:
-        loop = asyncio.get_running_loop()
-        # We're already in an async context — this shouldn't happen in normal use
-        # Fall back to creating a new loop in a thread
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(lambda: asyncio.run(aggregate_all_signals_async())).result(timeout=60)
-    except RuntimeError:
-        # No event loop running — safe to use asyncio.run()
-        return asyncio.run(aggregate_all_signals_async())
+    # All signal fetchers are sync (urllib), so calling them directly
+    # in a sync context is the original behavior — no async overhead.
+    all_signals = []
+    for fetcher in [_fetch_inverse_whale_signals, _fetch_smart_money_signals,
+                    _fetch_volume_spike_signals, _fetch_resolution_timing_signals,
+                    _fetch_news_signals, _fetch_edge_cache_signals]:
+        try:
+            all_signals.extend(fetcher())
+        except Exception:
+            pass
+
+    # Apply same Bayesian + category scoring as async path
+    for sig in all_signals:
+        raw_conf = sig.get("confidence", 0)
+        bayesian_result = calculate_bayesian_confidence(
+            raw_conf,
+            sig.get("source", "unknown"),
+            sig.get("market", ""),
+            sig.get("side", ""),
+            all_signals
+        )
+        cat_mult = _get_category_multiplier(sig.get("market", ""))
+        sig["raw_confidence"] = raw_conf
+        sig["confidence"] = round(min(100, bayesian_result["final_confidence"] * cat_mult), 1)
+        sig["category"] = _detect_category(sig.get("market", ""))
+        sig["category_multiplier"] = cat_mult
+        sig["confidence_breakdown"] = {
+            "base": bayesian_result["base_confidence"],
+            "source_win_rate": bayesian_result["win_rate"],
+            "bayesian_mult": bayesian_result["bayesian_multiplier"],
+            "agreement": bayesian_result["agreement_count"],
+            "composite_mult": bayesian_result["composite_multiplier"],
+            "category_mult": cat_mult,
+        }
+
+    all_signals.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+
+    actionable = [s for s in all_signals if s.get("side") not in ["NEUTRAL", "RESEARCH", "ARB", ""]]
+    research = [s for s in all_signals if s.get("side") == "RESEARCH"]
+    arb = [s for s in all_signals if s.get("side") == "ARB"]
+
+    source_counts = {}
+    for s in all_signals:
+        src = s.get("source", "unknown")
+        source_counts[src] = source_counts.get(src, 0) + 1
+
+    return {
+        "actionable_signals": actionable,
+        "research_signals": research,
+        "arb_signals": arb,
+        "total_signals": len(all_signals),
+        "actionable_count": len(actionable),
+        "sources": source_counts,
+        "scoring_method": "bayesian_composite_v2",
+        "generated_at": datetime.now().isoformat()
+    }
 
 
 # ============================================================================

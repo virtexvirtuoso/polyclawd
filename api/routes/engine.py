@@ -483,25 +483,32 @@ def engine_loop():
 
 
 def start_engine() -> dict:
-    """Start the trading engine with dual fast/slow paths."""
+    """Start the trading engine with dual fast/slow paths.
+
+    When called from a FastAPI async endpoint (normal case), schedules
+    async fast/slow path loops on the running event loop.
+    When called outside an async context, falls back to the legacy
+    synchronous 30-second polling thread.
+    """
     global _engine_running, _engine_thread, _fast_path_task, _slow_path_task
 
     if _engine_running:
         return {"status": "already_running"}
 
     _engine_running = True
+    engine_mode = "sync_legacy"
 
-    # Try to start async engine (fast/slow paths)
+    # Try to start async engine (fast/slow paths) if we're inside
+    # an async context (i.e., called from a FastAPI endpoint).
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            _fast_path_task = asyncio.ensure_future(fast_path_loop())
-            _slow_path_task = asyncio.ensure_future(slow_path_loop())
-            logger.info("Async engine started (fast + slow paths)")
-        else:
-            raise RuntimeError("No running event loop")
+        loop = asyncio.get_running_loop()
+        # We have a running loop — schedule async tasks
+        _fast_path_task = loop.create_task(fast_path_loop())
+        _slow_path_task = loop.create_task(slow_path_loop())
+        engine_mode = "async_dual_path"
+        logger.info("Async engine started (fast + slow paths)")
     except RuntimeError:
-        # Fallback to synchronous thread
+        # No running event loop — use synchronous fallback
         _engine_thread = threading.Thread(target=engine_loop, daemon=True)
         _engine_thread.start()
         logger.info("Sync engine started (legacy mode)")
@@ -509,7 +516,7 @@ def start_engine() -> dict:
     state = load_engine_state()
     state["enabled"] = True
     state["started_at"] = datetime.now().isoformat()
-    state["engine_mode"] = "async_dual_path" if _fast_path_task else "sync_legacy"
+    state["engine_mode"] = engine_mode
     save_engine_state(state)
 
     logger.info("Trading engine started")
@@ -928,10 +935,21 @@ async def update_engine_config(
 @router.post("/engine/trigger")
 @limiter.limit("5/minute")
 async def trigger_engine_endpoint(request: Request):
-    """Manually trigger one async evaluation cycle."""
+    """Manually trigger one evaluation cycle.
+
+    Tries the async path first (uses in-memory state + priority queue).
+    Falls back to the original sync evaluate if async services aren't
+    initialized yet (e.g., no signals in MarketStateStore).
+    """
     logger.info("Engine trigger requested")
     try:
-        return await engine_evaluate_and_trade_async()
+        result = await engine_evaluate_and_trade_async()
+        # If async path found no signals (store empty), also run sync scan
+        if result.get("signals_evaluated", 0) == 0:
+            sync_result = engine_evaluate_and_trade()
+            sync_result["note"] = "MarketStateStore empty, used sync fallback"
+            return sync_result
+        return result
     except Exception as e:
         logger.warning(f"Async trigger failed, using sync fallback: {e}")
         return engine_evaluate_and_trade()

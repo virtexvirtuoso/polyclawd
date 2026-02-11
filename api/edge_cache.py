@@ -266,18 +266,17 @@ async def refresh_edge_cache_async() -> List[Dict]:
     Total time = max(individual latencies) instead of sum.
     """
     import asyncio
-    from concurrent.futures import ThreadPoolExecutor
 
-    _pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="edge")
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
+    # Use None executor = default thread pool (managed by asyncio, no leak)
     futures = [
-        loop.run_in_executor(_pool, fetch_vegas_edges),
-        loop.run_in_executor(_pool, fetch_betfair_edges),
-        loop.run_in_executor(_pool, fetch_soccer_edges),
-        loop.run_in_executor(_pool, fetch_manifold_edges),
-        loop.run_in_executor(_pool, fetch_predictit_edges),
-        loop.run_in_executor(_pool, fetch_kalshi_overlaps),
+        loop.run_in_executor(None, fetch_vegas_edges),
+        loop.run_in_executor(None, fetch_betfair_edges),
+        loop.run_in_executor(None, fetch_soccer_edges),
+        loop.run_in_executor(None, fetch_manifold_edges),
+        loop.run_in_executor(None, fetch_predictit_edges),
+        loop.run_in_executor(None, fetch_kalshi_overlaps),
     ]
 
     results = await asyncio.gather(*futures, return_exceptions=True)
@@ -292,7 +291,6 @@ async def refresh_edge_cache_async() -> List[Dict]:
     with _cache_lock:
         save_cache(all_signals)
 
-    _pool.shutdown(wait=False)
     return all_signals
 
 def get_edge_signals(force_refresh: bool = False) -> List[Dict]:
