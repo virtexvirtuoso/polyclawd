@@ -74,14 +74,14 @@ POLYMARKET_EFFICIENT_TAGS = {
 }
 
 # Thresholds
-MIN_VOLUME_KALSHI = 1000        # Contracts
-MIN_VOLUME_POLYMARKET = 10000   # Dollars (Polymarket volume is in USD)
+MIN_VOLUME_KALSHI = 5000        # Contracts
+MIN_VOLUME_POLYMARKET = 50000   # Dollars (Polymarket volume is in USD)
 WHALE_VOLUME_KALSHI = 10000     # Contracts
 WHALE_VOLUME_POLYMARKET = 100000 # Dollars
 CONTESTED_LOW = 15              # Cents/pct
 CONTESTED_HIGH = 85
 MAX_DAYS_TO_CLOSE = 30
-MIN_EDGE_PCT = 3
+MIN_EDGE_PCT = 5
 
 # Confidence scoring weights
 WEIGHT_CATEGORY_EDGE = 0.35
