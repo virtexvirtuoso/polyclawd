@@ -12,7 +12,7 @@ KALSHI_API_HOST = "https://api.elections.kalshi.com/trade-api/v2"
 class KalshiClient:
     def __init__(self, host: str = KALSHI_API_HOST):
         self.host = host
-        self.client = httpx.Client(base_url=host, timeout=30.0)
+        self.client = httpx.Client(base_url=host, timeout=httpx.Timeout(60.0, read=120.0))
 
     def __enter__(self):
         return self
