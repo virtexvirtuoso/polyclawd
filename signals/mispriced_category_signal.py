@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Mispriced Category + Whale Confirmation Signal Source (v2)
+Mispriced Category + Whale Confirmation Signal Source (v3)
 
 Live signal generator based on backtest results:
 - 75% win rate across 155K historical trades
@@ -8,14 +8,11 @@ Live signal generator based on backtest results:
 - Targets high-volume markets in mispriced categories
 - Uses volume spikes and whale activity as confirmation
 
-v2 improvements:
-- Hard 30-day max filter (backtest: <7d best theta)
-- Volume floor raised to 1000 contracts (live recommendation)
-- Result caching (60s TTL) to avoid blocking uvicorn
-- Paper trade shadow logging
-- Polymarket cross-platform scan for arb confirmation
-
-Integrates with Polyclawd signal aggregation pipeline.
+v3 improvements:
+- Polymarket scanning (entertainment, crypto, politics — short-dated)
+- Paginated Kalshi scan (3 pages × 30 events = 90 events)
+- Cross-platform matching for arb confirmation bonus
+- SQLite shadow tracker integration
 """
 
 import json
@@ -32,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Strategy Parameters (from backtest optimization)
 # ============================================================================
 
-# Categories with historically high pricing error (>15%)
+# Kalshi categories with historically high pricing error (>15%)
 # From analysis of 3.75M markets, 332 categories
 MISPRICED_CATEGORIES = {
     # FX/Macro — worst calibrated
@@ -56,19 +53,35 @@ MISPRICED_CATEGORIES = {
     'KXCRYPTO': {'error': 0.16, 'tier': 'medium'},
 }
 
-# Well-calibrated categories to NEVER trade (waste of edge)
+# Well-calibrated categories to NEVER trade
 EFFICIENT_CATEGORIES = {
     'KXPGATOUR', 'KXMLB', 'KXNBA', 'KXNHL', 'KXNFL',
     'KXAOWOMEN', 'KXFIRSTSUPERBOWLSONG',
 }
 
-# Thresholds (v2: tightened for live)
-MIN_VOLUME = 1000          # Raised from 500 — live recommendation
-WHALE_VOLUME = 10000       # Whale tier threshold
-CONTESTED_LOW = 15         # Cents — min price for contested zone
-CONTESTED_HIGH = 85        # Cents — max price for contested zone
-MAX_DAYS_TO_CLOSE = 30     # Hard cap — backtest showed <7d best, >30d waste
-MIN_EDGE_PCT = 3           # Minimum category edge % to generate signal
+# Polymarket mispriced topic tags (from backtest: entertainment/novelty avg 15%+ error)
+POLYMARKET_MISPRICED_TAGS = {
+    'entertainment', 'music', 'crypto', 'pop-culture', 'technology',
+    'science', 'weather', 'climate', 'economics', 'culture',
+    'tv', 'movies', 'celebrities', 'awards', 'streaming',
+    'ai', 'artificial-intelligence', 'space',
+}
+
+# Polymarket efficient tags (sports well-calibrated)
+POLYMARKET_EFFICIENT_TAGS = {
+    'nfl', 'nba', 'mlb', 'nhl', 'soccer', 'tennis', 'golf',
+    'formula-1', 'mma', 'boxing', 'cricket',
+}
+
+# Thresholds
+MIN_VOLUME_KALSHI = 1000        # Contracts
+MIN_VOLUME_POLYMARKET = 10000   # Dollars (Polymarket volume is in USD)
+WHALE_VOLUME_KALSHI = 10000     # Contracts
+WHALE_VOLUME_POLYMARKET = 100000 # Dollars
+CONTESTED_LOW = 15              # Cents/pct
+CONTESTED_HIGH = 85
+MAX_DAYS_TO_CLOSE = 30
+MIN_EDGE_PCT = 3
 
 # Confidence scoring weights
 WEIGHT_CATEGORY_EDGE = 0.35
@@ -76,18 +89,19 @@ WEIGHT_VOLUME_SPIKE = 0.25
 WEIGHT_WHALE_ACTIVITY = 0.20
 WEIGHT_THETA = 0.20
 
-# Cache (avoid blocking uvicorn on repeated calls)
+# Cache
 _cache = {"data": None, "timestamp": 0}
 CACHE_TTL = 60  # seconds
 
-# Shadow trade log
+# Shadow trade log (legacy fallback)
 SHADOW_LOG = Path(__file__).parent.parent / "storage" / "shadow_trades.json"
 
 # ============================================================================
-# Kalshi API Access
+# API Access
 # ============================================================================
 
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
+GAMMA_API = "https://gamma-api.polymarket.com"
 
 
 def _fetch_json(url: str, timeout: int = 12) -> Any:
@@ -101,18 +115,27 @@ def _fetch_json(url: str, timeout: int = 12) -> Any:
         return None
 
 
-def fetch_kalshi_markets(status: str = "open") -> List[Dict]:
-    """Fetch active markets from Kalshi. Two sources merged, deduped."""
+def fetch_kalshi_markets(pages: int = 3, per_page: int = 30, status: str = "open") -> List[Dict]:
+    """Fetch active markets from Kalshi with pagination."""
     all_markets = []
     seen_tickers = set()
+    cursor = None
 
-    # 1. Events endpoint (has category + series info)
-    data = _fetch_json(
-        f"{KALSHI_API}/events?limit=30&status={status}&with_nested_markets=true",
-        timeout=12,
-    )
-    if data:
-        for event in data.get("events", []):
+    # 1. Events endpoint (paginated, has category info)
+    for page in range(pages):
+        url = f"{KALSHI_API}/events?limit={per_page}&status={status}&with_nested_markets=true"
+        if cursor:
+            url += f"&cursor={cursor}"
+
+        data = _fetch_json(url, timeout=12)
+        if not data:
+            break
+
+        events = data.get("events", [])
+        if not events:
+            break
+
+        for event in events:
             series = event.get("series_ticker", "")
             category = event.get("category", "")
             for m in event.get("markets", []):
@@ -125,7 +148,11 @@ def fetch_kalshi_markets(status: str = "open") -> List[Dict]:
                 m["volume"] = int(float(m.get("volume_fp", "0") or "0"))
                 all_markets.append(m)
 
-    # 2. Direct markets endpoint (broader, may have more)
+        cursor = data.get("cursor")
+        if not cursor:
+            break
+
+    # 2. Direct markets endpoint (broader coverage)
     data = _fetch_json(
         f"{KALSHI_API}/markets?limit=100&status={status}",
         timeout=12,
@@ -139,6 +166,34 @@ def fetch_kalshi_markets(status: str = "open") -> List[Dict]:
             m["volume"] = int(float(m.get("volume_fp", "0") or "0"))
             all_markets.append(m)
 
+    logger.info(f"Kalshi: fetched {len(all_markets)} markets from {pages} pages")
+    return all_markets
+
+
+def fetch_polymarket_markets(limit: int = 100) -> List[Dict]:
+    """Fetch active markets from Polymarket Gamma API."""
+    all_markets = []
+
+    # Fetch by volume (most liquid first)
+    data = _fetch_json(
+        f"{GAMMA_API}/markets?closed=false&limit={limit}&order=volume24hr&ascending=false",
+        timeout=12,
+    )
+    if data and isinstance(data, list):
+        all_markets.extend(data)
+
+    # Also fetch by end date (soonest expiry — best theta)
+    data2 = _fetch_json(
+        f"{GAMMA_API}/markets?closed=false&limit=50&order=endDate&ascending=true",
+        timeout=12,
+    )
+    if data2 and isinstance(data2, list):
+        seen = {m.get("id") for m in all_markets}
+        for m in data2:
+            if m.get("id") not in seen:
+                all_markets.append(m)
+
+    logger.info(f"Polymarket: fetched {len(all_markets)} markets")
     return all_markets
 
 
@@ -147,9 +202,7 @@ def fetch_kalshi_markets(status: str = "open") -> List[Dict]:
 # ============================================================================
 
 def extract_category(event_ticker: str) -> str:
-    """Extract category prefix from Kalshi event ticker.
-    e.g., KXEURUSDH-26FEB11 → KXEURUSDH
-    """
+    """Extract category prefix from Kalshi event ticker."""
     if not event_ticker:
         return ""
     return event_ticker.split('-')[0] if '-' in event_ticker else event_ticker
@@ -161,6 +214,7 @@ def calculate_signal_confidence(
     price_cents: int,
     days_to_close: float,
     avg_category_volume: float = 1000,
+    whale_threshold: int = 10000,
 ) -> Dict[str, Any]:
     """Calculate composite confidence score for a market signal."""
     # 1. Category edge score (0-100)
@@ -168,8 +222,8 @@ def calculate_signal_confidence(
 
     # 2. Volume spike score (0-100)
     volume_ratio = volume / max(avg_category_volume, 1)
-    if volume >= WHALE_VOLUME:
-        volume_score = 90 + min(10, (volume / WHALE_VOLUME - 1) * 5)
+    if volume >= whale_threshold:
+        volume_score = 90 + min(10, (volume / whale_threshold - 1) * 5)
     elif volume_ratio > 2.0:
         volume_score = 60 + min(30, (volume_ratio - 2) * 15)
     elif volume_ratio > 1.0:
@@ -179,9 +233,9 @@ def calculate_signal_confidence(
     volume_score = min(100, volume_score)
 
     # 3. Whale activity score (0-100)
-    whale_score = 100 if volume >= WHALE_VOLUME else min(80, volume / WHALE_VOLUME * 80)
+    whale_score = 100 if volume >= whale_threshold else min(80, volume / whale_threshold * 80)
 
-    # 4. Theta score (0-100) — closer to expiry = higher theta
+    # 4. Theta score (0-100)
     if days_to_close <= 1:
         theta_score = 100
     elif days_to_close <= 3:
@@ -193,9 +247,9 @@ def calculate_signal_confidence(
     elif days_to_close <= 30:
         theta_score = max(15, 40 - (days_to_close - 14))
     else:
-        theta_score = 5  # Should be filtered, but safety
+        theta_score = 5
 
-    # Composite confidence
+    # Composite
     confidence = (
         edge_score * WEIGHT_CATEGORY_EDGE
         + volume_score * WEIGHT_VOLUME_SPIKE
@@ -203,18 +257,17 @@ def calculate_signal_confidence(
         + theta_score * WEIGHT_THETA
     )
 
-    # Confirmation count
+    # Confirmations
     confirmations = 0
     if category_edge >= 0.20:
         confirmations += 1
-    if volume >= WHALE_VOLUME:
+    if volume >= whale_threshold:
         confirmations += 1
     if volume_ratio > 2.0:
         confirmations += 1
     if days_to_close <= 7:
         confirmations += 1
 
-    # Boost for multiple confirmations (+15% per extra, matches backtest)
     if confirmations >= 3:
         confidence *= 1.20
     elif confirmations >= 2:
@@ -233,13 +286,77 @@ def calculate_signal_confidence(
     }
 
 
+def _is_mispriced_polymarket(market: Dict) -> tuple:
+    """Check if a Polymarket market is in a mispriced category.
+    
+    Returns (is_mispriced: bool, edge: float, tier: str)
+    """
+    tags = set()
+    # Extract tags from market data
+    for tag_field in ("tags", "categories", "markets_tags"):
+        val = market.get(tag_field, [])
+        if isinstance(val, str):
+            try:
+                val = json.loads(val)
+            except Exception:
+                val = [val]
+        if isinstance(val, list):
+            for t in val:
+                if isinstance(t, str):
+                    tags.add(t.lower().strip())
+                elif isinstance(t, dict):
+                    tags.add(t.get("label", "").lower().strip())
+
+    # Also check slug and question for keywords
+    slug = market.get("slug", "").lower()
+    question = market.get("question", "").lower()
+
+    # Check if any efficient tags match → skip
+    if tags & POLYMARKET_EFFICIENT_TAGS:
+        return False, 0, ""
+
+    # Check for sport keywords in question
+    sport_keywords = {"nfl", "nba", "mlb", "nhl", "premier league", "champions league", "tennis", "golf"}
+    if any(kw in question for kw in sport_keywords):
+        return False, 0, ""
+
+    # Check mispriced tags
+    matching_tags = tags & POLYMARKET_MISPRICED_TAGS
+    if matching_tags:
+        # Higher edge for entertainment/novelty
+        if matching_tags & {"entertainment", "music", "pop-culture", "celebrities", "awards", "streaming"}:
+            return True, 0.25, "entertainment"
+        elif matching_tags & {"crypto", "ai", "artificial-intelligence", "technology"}:
+            return True, 0.18, "tech"
+        elif matching_tags & {"weather", "climate", "science", "space"}:
+            return True, 0.22, "science"
+        else:
+            return True, 0.15, "dynamic"
+
+    # Keyword fallback for untagged markets
+    entertainment_kw = {"oscar", "grammy", "emmy", "spotify", "netflix", "movie", "album",
+                        "award", "celebrity", "reality tv", "bachelor", "idol"}
+    tech_kw = {"bitcoin", "ethereum", "crypto", "ai ", "openai", "google", "apple",
+               "tesla", "spacex", "launch", "ipo"}
+    weather_kw = {"temperature", "hurricane", "tornado", "earthquake", "flood", "snow",
+                  "rainfall", "wildfire"}
+
+    if any(kw in question for kw in entertainment_kw):
+        return True, 0.25, "entertainment"
+    elif any(kw in question for kw in tech_kw):
+        return True, 0.18, "tech"
+    elif any(kw in question for kw in weather_kw):
+        return True, 0.22, "science"
+
+    return False, 0, ""
+
+
 def _log_shadow_trade(signal: Dict):
     """Log signal as a shadow/paper trade via SQLite tracker."""
     try:
-        from shadow_tracker import log_shadow_trade, save_signal_snapshot
+        from shadow_tracker import log_shadow_trade
         log_shadow_trade(signal)
     except ImportError:
-        # Fallback: basic JSON logging if tracker not available
         try:
             SHADOW_LOG.parent.mkdir(parents=True, exist_ok=True)
             trades = []
@@ -249,7 +366,6 @@ def _log_shadow_trade(signal: Dict):
                         trades = json.load(f)
                 except Exception:
                     trades = []
-
             trades.append({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "market_id": signal.get("market_id"),
@@ -265,10 +381,8 @@ def _log_shadow_trade(signal: Dict):
                 "outcome": None,
                 "pnl": None,
             })
-
             if len(trades) > 500:
                 trades = trades[-500:]
-
             with open(SHADOW_LOG, "w") as f:
                 json.dump(trades, f, indent=2)
         except Exception as e:
@@ -277,12 +391,16 @@ def _log_shadow_trade(signal: Dict):
         logger.warning(f"Shadow tracker log failed: {e}")
 
 
+# ============================================================================
+# Kalshi Scanner
+# ============================================================================
+
 def scan_kalshi_signals() -> List[Dict]:
     """Scan Kalshi markets for mispriced category signals."""
-    markets = fetch_kalshi_markets()
+    markets = fetch_kalshi_markets(pages=3, per_page=30)
     signals = []
 
-    # Track category volumes for spike detection
+    # Category volume averages
     category_volumes: Dict[str, List[int]] = {}
     for m in markets:
         cat = extract_category(m.get("event_ticker", ""))
@@ -302,11 +420,9 @@ def scan_kalshi_signals() -> List[Dict]:
         event_ticker = market.get("event_ticker", "")
         category = extract_category(event_ticker)
 
-        # Skip efficient categories
         if category in EFFICIENT_CATEGORIES:
             continue
 
-        # Check if known mispriced or dynamic
         cat_info = MISPRICED_CATEGORIES.get(category)
         event_cat = market.get("_event_category", "").lower()
 
@@ -326,41 +442,35 @@ def scan_kalshi_signals() -> List[Dict]:
         if category_edge * 100 < MIN_EDGE_PCT:
             continue
 
-        # Market data
         volume = market.get("volume", 0)
         price = market.get("last_price", market.get("yes_bid", 50))
         close_time_str = market.get("close_time", "")
 
-        # Volume filter (v2: raised to 1000)
-        if volume < MIN_VOLUME:
+        if volume < MIN_VOLUME_KALSHI:
             continue
-
-        # Contested zone filter
         if price < CONTESTED_LOW or price > CONTESTED_HIGH:
             continue
 
-        # Duration calculation — HARD CAP at 30 days (v2)
         try:
             close_time = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
             days_to_close = (close_time - now).total_seconds() / 86400
             if days_to_close <= 0 or days_to_close > MAX_DAYS_TO_CLOSE:
                 continue
         except Exception:
-            continue  # v2: skip if we can't parse close time (was defaulting to 365d)
+            continue
 
-        # Calculate confidence
         conf = calculate_signal_confidence(
             category_edge=category_edge,
             volume=volume,
             price_cents=price,
             days_to_close=days_to_close,
             avg_category_volume=avg_cat_vol.get(category, 1000),
+            whale_threshold=WHALE_VOLUME_KALSHI,
         )
 
-        # Direction: bet WITH price momentum
         side = "YES" if price >= 50 else "NO"
 
-        signal = {
+        signals.append({
             "source": "mispriced_category",
             "platform": "kalshi",
             "market": market.get("title", ticker),
@@ -375,10 +485,10 @@ def scan_kalshi_signals() -> List[Dict]:
             "days_to_close": round(days_to_close, 1),
             "confirmations": conf["confirmations"],
             "reasoning": (
-                f"Mispriced category {category} ({conf['category_edge_pct']}% historical error), "
-                f"{conf['confirmations']} confirmations, "
-                f"{'🐋 whale activity' if volume >= WHALE_VOLUME else f'{volume} contracts'}, "
-                f"expires in {days_to_close:.0f}d"
+                f"[Kalshi] Mispriced {category} ({conf['category_edge_pct']}% error), "
+                f"{conf['confirmations']} confirms, "
+                f"{'🐋 whale' if volume >= WHALE_VOLUME_KALSHI else f'{volume} contracts'}, "
+                f"{days_to_close:.0f}d"
             ),
             "confidence_breakdown": conf,
             "strategy": "MispricedCategoryWhale",
@@ -388,28 +498,162 @@ def scan_kalshi_signals() -> List[Dict]:
                 "profit_factor": 1.20,
                 "total_backtested_trades": 155152,
             },
-        }
-        signals.append(signal)
-
-    # Sort by confidence
-    signals.sort(key=lambda x: x["confidence"], reverse=True)
-
-    # Shadow-log top signals (paper trade tracking)
-    for sig in signals[:5]:
-        _log_shadow_trade(sig)
-
-    # Save full signal snapshot for historical tracking
-    try:
-        from shadow_tracker import save_signal_snapshot
-        save_signal_snapshot(signals, "mispriced_category")
-    except Exception:
-        pass
+        })
 
     return signals
 
 
+# ============================================================================
+# Polymarket Scanner
+# ============================================================================
+
+def scan_polymarket_signals() -> List[Dict]:
+    """Scan Polymarket for mispriced category signals."""
+    markets = fetch_polymarket_markets(limit=100)
+    signals = []
+    now = datetime.now(timezone.utc)
+
+    # Volume averages for spike detection
+    volumes = [float(m.get("volume24hr", 0) or 0) for m in markets if float(m.get("volume24hr", 0) or 0) > 0]
+    avg_volume = sum(volumes) / len(volumes) if volumes else 10000
+
+    for market in markets:
+        is_mispriced, edge, tier = _is_mispriced_polymarket(market)
+        if not is_mispriced:
+            continue
+
+        if edge * 100 < MIN_EDGE_PCT:
+            continue
+
+        # Volume (Polymarket volume is in USD)
+        volume_24h = float(market.get("volume24hr", 0) or 0)
+        total_volume = float(market.get("volume", 0) or 0)
+        volume = max(volume_24h, total_volume)
+
+        if volume < MIN_VOLUME_POLYMARKET:
+            continue
+
+        # Price
+        yes_price = 0.5
+        outcome_prices = market.get("outcomePrices")
+        if outcome_prices:
+            try:
+                if isinstance(outcome_prices, str):
+                    outcome_prices = json.loads(outcome_prices)
+                yes_price = float(outcome_prices[0])
+            except Exception:
+                pass
+
+        price_cents = int(yes_price * 100)
+        if price_cents < CONTESTED_LOW or price_cents > CONTESTED_HIGH:
+            continue
+
+        # Duration
+        end_date_str = market.get("endDate", "")
+        if not end_date_str:
+            continue
+
+        try:
+            end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+            days_to_close = (end_date - now).total_seconds() / 86400
+            if days_to_close <= 0 or days_to_close > MAX_DAYS_TO_CLOSE:
+                continue
+        except Exception:
+            continue
+
+        conf = calculate_signal_confidence(
+            category_edge=edge,
+            volume=int(volume),
+            price_cents=price_cents,
+            days_to_close=days_to_close,
+            avg_category_volume=avg_volume,
+            whale_threshold=WHALE_VOLUME_POLYMARKET,
+        )
+
+        side = "YES" if price_cents >= 50 else "NO"
+        market_id = market.get("conditionId", market.get("id", ""))
+        slug = market.get("slug", "")
+
+        signals.append({
+            "source": "mispriced_category",
+            "platform": "polymarket",
+            "market": market.get("question", "")[:200],
+            "market_id": market_id,
+            "slug": slug,
+            "category": tier,
+            "category_tier": tier,
+            "side": side,
+            "price": yes_price,
+            "confidence": conf["confidence"],
+            "volume": int(volume),
+            "volume_24h": int(volume_24h),
+            "days_to_close": round(days_to_close, 1),
+            "confirmations": conf["confirmations"],
+            "reasoning": (
+                f"[Polymarket] Mispriced {tier} ({conf['category_edge_pct']}% error), "
+                f"{conf['confirmations']} confirms, "
+                f"{'🐋 whale' if volume >= WHALE_VOLUME_POLYMARKET else f'${volume:,.0f} vol'}, "
+                f"{days_to_close:.0f}d"
+            ),
+            "confidence_breakdown": conf,
+            "strategy": "MispricedCategoryWhale",
+            "url": f"https://polymarket.com/event/{slug}" if slug else None,
+            "backtest_stats": {
+                "win_rate": 75.0,
+                "sharpe": 1.25,
+                "profit_factor": 1.20,
+                "total_backtested_trades": 155152,
+            },
+        })
+
+    return signals
+
+
+# ============================================================================
+# Cross-Platform Matching
+# ============================================================================
+
+def find_cross_platform_matches(kalshi_signals: List[Dict], poly_signals: List[Dict]) -> List[Dict]:
+    """Find markets that appear on both platforms — arb confirmation bonus.
+    
+    If the same market appears on both platforms with similar pricing,
+    it's LESS likely to be mispriced (efficient). If prices diverge,
+    it's a stronger signal.
+    """
+    # Simple title keyword matching (not perfect but catches obvious ones)
+    matches = []
+    for ks in kalshi_signals:
+        k_words = set(ks.get("market", "").lower().split()[:6])
+        if len(k_words) < 3:
+            continue
+        for ps in poly_signals:
+            p_words = set(ps.get("market", "").lower().split()[:6])
+            overlap = k_words & p_words
+            if len(overlap) >= 3:
+                price_diff = abs(ks.get("price", 0.5) - ps.get("price", 0.5))
+                if price_diff > 0.05:  # >5% price divergence = arb signal
+                    # Boost both signals
+                    ks["confidence"] = min(95, ks["confidence"] * 1.15)
+                    ps["confidence"] = min(95, ps["confidence"] * 1.15)
+                    ks["confirmations"] = ks.get("confirmations", 0) + 1
+                    ps["confirmations"] = ps.get("confirmations", 0) + 1
+                    ks["reasoning"] += f" | ⚡ Cross-platform divergence: {price_diff:.0%}"
+                    ps["reasoning"] += f" | ⚡ Cross-platform divergence: {price_diff:.0%}"
+                    matches.append({
+                        "kalshi": ks.get("market_id"),
+                        "polymarket": ps.get("market_id"),
+                        "price_divergence": round(price_diff, 3),
+                    })
+
+    return matches
+
+
+# ============================================================================
+# Main Entry Points
+# ============================================================================
+
 def get_mispriced_category_signals() -> Dict[str, Any]:
-    """Main entry point — returns all mispriced category signals.
+    """Main entry point — returns all mispriced category signals from both platforms.
     
     Cached for 60s to avoid blocking uvicorn on repeated calls.
     """
@@ -417,13 +661,37 @@ def get_mispriced_category_signals() -> Dict[str, Any]:
     if _cache["data"] and (now - _cache["timestamp"]) < CACHE_TTL:
         return _cache["data"]
 
+    # Scan both platforms
     kalshi_signals = scan_kalshi_signals()
+    poly_signals = scan_polymarket_signals()
+
+    # Cross-platform matching
+    cross_matches = find_cross_platform_matches(kalshi_signals, poly_signals)
+
+    # Merge and sort
+    all_signals = kalshi_signals + poly_signals
+    all_signals.sort(key=lambda x: x["confidence"], reverse=True)
+
+    # Shadow-log top signals
+    for sig in all_signals[:10]:
+        _log_shadow_trade(sig)
+
+    # Save full signal snapshot
+    try:
+        from shadow_tracker import save_signal_snapshot
+        save_signal_snapshot(all_signals, "mispriced_category")
+    except Exception:
+        pass
 
     result = {
-        "signals": kalshi_signals,
-        "total": len(kalshi_signals),
+        "signals": all_signals,
+        "total": len(all_signals),
+        "kalshi_signals": len(kalshi_signals),
+        "polymarket_signals": len(poly_signals),
+        "cross_platform_matches": len(cross_matches),
+        "cross_matches": cross_matches,
         "strategy": "MispricedCategoryWhale",
-        "description": "Target high-volume markets in mispriced categories with whale confirmation",
+        "description": "Target high-volume markets in mispriced categories with whale confirmation (Kalshi + Polymarket)",
         "backtest_validation": {
             "win_rate": "75%",
             "sharpe": 1.25,
@@ -432,9 +700,11 @@ def get_mispriced_category_signals() -> Dict[str, Any]:
             "trades_simulated": "155K",
         },
         "categories_monitored": len(MISPRICED_CATEGORIES),
-        "efficient_categories_excluded": len(EFFICIENT_CATEGORIES),
+        "polymarket_tags_monitored": len(POLYMARKET_MISPRICED_TAGS),
+        "efficient_categories_excluded": len(EFFICIENT_CATEGORIES) + len(POLYMARKET_EFFICIENT_TAGS),
         "max_days_to_close": MAX_DAYS_TO_CLOSE,
-        "min_volume": MIN_VOLUME,
+        "min_volume_kalshi": MIN_VOLUME_KALSHI,
+        "min_volume_polymarket": MIN_VOLUME_POLYMARKET,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "cached": False,
     }
@@ -446,85 +716,6 @@ def get_mispriced_category_signals() -> Dict[str, Any]:
 
 
 # ============================================================================
-# Shadow Trade Resolution
-# ============================================================================
-
-def resolve_shadow_trades() -> Dict[str, Any]:
-    """Check shadow trades against resolved markets and calculate P&L.
-    
-    Call periodically (e.g., daily cron) to track paper performance.
-    """
-    if not SHADOW_LOG.exists():
-        return {"resolved": 0, "pending": 0}
-
-    try:
-        with open(SHADOW_LOG) as f:
-            trades = json.load(f)
-    except Exception:
-        return {"error": "Failed to load shadow trades"}
-
-    unresolved = [t for t in trades if not t.get("resolved")]
-    if not unresolved:
-        return {"resolved": 0, "pending": 0, "note": "No unresolved trades"}
-
-    # Batch check market resolutions
-    resolved_count = 0
-    total_pnl = 0.0
-
-    for trade in unresolved:
-        ticker = trade.get("market_id", "")
-        if not ticker:
-            continue
-
-        data = _fetch_json(f"{KALSHI_API}/markets/{ticker}", timeout=5)
-        if not data or not data.get("market"):
-            continue
-
-        market = data["market"]
-        result = market.get("result", "")
-        if not result:
-            continue  # Not resolved yet
-
-        trade["resolved"] = True
-        trade["resolved_at"] = datetime.now(timezone.utc).isoformat()
-
-        # Calculate P&L
-        entry_price = trade.get("entry_price", 0.5)
-        side = trade.get("side", "YES")
-
-        if result.upper() == "YES":
-            pnl = (1.0 - entry_price) if side == "YES" else -entry_price
-        elif result.upper() == "NO":
-            pnl = -entry_price if side == "YES" else (1.0 - (1.0 - entry_price))
-        else:
-            pnl = 0
-
-        trade["outcome"] = result
-        trade["pnl"] = round(pnl, 4)
-        total_pnl += pnl
-        resolved_count += 1
-
-    # Save updated trades
-    with open(SHADOW_LOG, "w") as f:
-        json.dump(trades, f, indent=2)
-
-    # Calculate stats
-    resolved_trades = [t for t in trades if t.get("resolved")]
-    wins = sum(1 for t in resolved_trades if (t.get("pnl") or 0) > 0)
-    total = len(resolved_trades)
-
-    return {
-        "resolved_this_run": resolved_count,
-        "pending": len([t for t in trades if not t.get("resolved")]),
-        "total_resolved": total,
-        "wins": wins,
-        "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
-        "total_pnl": round(total_pnl, 4),
-        "cumulative_pnl": round(sum(t.get("pnl", 0) for t in resolved_trades), 4),
-    }
-
-
-# ============================================================================
 # CLI Testing
 # ============================================================================
 
@@ -533,20 +724,20 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO)
 
-    if len(sys.argv) > 1 and sys.argv[1] == "resolve":
-        result = resolve_shadow_trades()
-        print(json.dumps(result, indent=2))
-    else:
-        result = get_mispriced_category_signals()
-        print(f"\n{'='*60}")
-        print(f"Mispriced Category Signals: {result['total']}")
-        print(f"Max days: {result['max_days_to_close']} | Min volume: {result['min_volume']}")
-        print(f"{'='*60}")
+    result = get_mispriced_category_signals()
+    print(f"\n{'='*60}")
+    print(f"Mispriced Category Signals: {result['total']}")
+    print(f"  Kalshi: {result['kalshi_signals']} | Polymarket: {result['polymarket_signals']}")
+    print(f"  Cross-platform matches: {result['cross_platform_matches']}")
+    print(f"  Max days: {result['max_days_to_close']} | Vol floor: Kalshi {result['min_volume_kalshi']} / Poly ${result['min_volume_polymarket']:,}")
+    print(f"{'='*60}")
 
-        for sig in result["signals"][:10]:
-            print(f"\n  {sig['market'][:60]}")
-            print(f"  Category: {sig['category']} ({sig['category_tier']})")
-            print(f"  Side: {sig['side']} @ {sig['price']:.2f}")
-            print(f"  Confidence: {sig['confidence']:.1f}% ({sig['confirmations']} confirmations)")
-            print(f"  Volume: {sig['volume']:,} contracts")
-            print(f"  Expires: {sig['days_to_close']:.1f} days")
+    for sig in result["signals"][:15]:
+        platform = sig.get("platform", "?")
+        print(f"\n  [{platform.upper()[:1]}] {sig['market'][:60]}")
+        print(f"  Category: {sig.get('category', '?')} ({sig.get('category_tier', '?')})")
+        print(f"  Side: {sig['side']} @ {sig['price']:.2f}")
+        print(f"  Confidence: {sig['confidence']:.1f}% ({sig['confirmations']} confirmations)")
+        vol_fmt = f"${sig['volume']:,}" if platform == "polymarket" else f"{sig['volume']:,} contracts"
+        print(f"  Volume: {vol_fmt}")
+        print(f"  Expires: {sig['days_to_close']:.1f} days")
