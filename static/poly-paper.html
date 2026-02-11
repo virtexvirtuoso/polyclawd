@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Polymarket Paper Trading | Polyclawd</title>
+  <link rel="stylesheet" href="css/virtuoso.css">
+</head>
+<body>
+  <div class="grid-overlay"></div>
+  
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="./" class="nav-brand">
+        <span>⚡</span>
+        <span>Polyclawd</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="./" class="nav-link">Dashboard</a></li>
+        <li><a href="arb.html" class="nav-link">Arb Scanner</a></li>
+        <li><a href="cross-arb.html" class="nav-link">Cross-Platform</a></li>
+        <li><a href="whales.html" class="nav-link">🐋 Whales</a></li>
+        <li><a href="trade.html" class="nav-link">Trade</a></li>
+        <li><a href="poly-paper.html" class="nav-link active">📈 Poly Paper</a></li>
+      </ul>
+      <div class="live-indicator">
+        <span class="live-dot"></span>
+        <span>Polymarket Paper</span>
+      </div>
+    </div>
+  </nav>
+  
+  <!-- Main Content -->
+  <main class="main-content">
+    <div class="container">
+      
+      <!-- Page Header -->
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">📈 Polymarket Paper Trading</h1>
+          <p class="page-subtitle">Paper trading on Polymarket markets</p>
+        </div>
+        <button class="btn btn-secondary" onclick="loadPolyPaper()">
+          ↻ Refresh
+        </button>
+      </div>
+      
+      <!-- Stats Grid -->
+      <div id="stats-grid" class="stats-grid">
+        <div class="loading">
+          <div class="spinner"></div>
+          <span>Loading...</span>
+        </div>
+      </div>
+      
+      <!-- Open Positions -->
+      <section class="section">
+        <div class="section-header">Open Positions</div>
+        <div id="positions-table" class="table-container">
+          <div class="loading">
+            <div class="spinner"></div>
+            <span>Loading positions...</span>
+          </div>
+        </div>
+      </section>
+      
+      <!-- Trade Form -->
+      <section class="section">
+        <div class="card">
+          <div class="section-header">Quick Trade</div>
+          <div class="grid-2 gap-2 mt-2">
+            <div>
+              <label class="text-secondary text-sm">Market ID</label>
+              <input type="text" id="market-id" class="input" placeholder="e.g. bad-bunny-dress-skirt">
+            </div>
+            <div>
+              <label class="text-secondary text-sm">Market Title</label>
+              <input type="text" id="market-title" class="input" placeholder="Market description">
+            </div>
+            <div>
+              <label class="text-secondary text-sm">Side</label>
+              <select id="trade-side" class="input">
+                <option value="YES">YES</option>
+                <option value="NO">NO</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-secondary text-sm">Amount ($)</label>
+              <input type="number" id="trade-amount" class="input" placeholder="100" min="5" max="1000">
+            </div>
+            <div>
+              <label class="text-secondary text-sm">Price (0.01-0.99)</label>
+              <input type="number" id="trade-price" class="input" placeholder="0.50" min="0.01" max="0.99" step="0.01">
+            </div>
+            <div class="flex items-end">
+              <button class="btn btn-primary" onclick="executePolyTrade()">Buy Position</button>
+            </div>
+          </div>
+        </div>
+      </section>
+      
+    </div>
+  </main>
+  
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+  
+  <script src="js/app.js"></script>
+  <script>
+    // Polymarket Paper Trading Functions
+    const POLY_API = getBasePath();
+    
+    async function loadPolyPaper() {
+      try {
+        showLoading('stats-grid');
+        showLoading('positions-table');
+        
+        const data = await api.get('/paper/polymarket/status');
+        renderPolyStats(data);
+        renderPolyPositions(data.positions || []);
+        
+      } catch (error) {
+        console.error('Poly paper load failed:', error);
+        showError('stats-grid', 'Failed to load Polymarket paper data');
+      }
+    }
+    
+    function renderPolyStats(data) {
+      const statsGrid = document.getElementById('stats-grid');
+      if (!statsGrid) return;
+      
+      const pnl = data.total_pnl || 0;
+      const pnlPct = ((data.balance + data.total_invested) / 10000 - 1) * 100;
+      
+      statsGrid.innerHTML = `
+        <div class="card">
+          <div class="card-header">💰 Cash Balance</div>
+          <div class="card-value">${formatCurrency(data.balance)}</div>
+        </div>
+        <div class="card">
+          <div class="card-header">📈 Invested</div>
+          <div class="card-value">${formatCurrency(data.total_invested)}</div>
+        </div>
+        <div class="card">
+          <div class="card-header">🎯 Open Positions</div>
+          <div class="card-value">${data.open_positions}</div>
+        </div>
+        <div class="card">
+          <div class="card-header">📊 Win Rate</div>
+          <div class="card-value">${data.wins}W / ${data.losses}L</div>
+        </div>
+      `;
+    }
+    
+    function renderPolyPositions(positions) {
+      const container = document.getElementById('positions-table');
+      if (!container) return;
+      
+      if (!positions || positions.length === 0) {
+        showEmpty('positions-table', 'No open positions');
+        return;
+      }
+      
+      let html = `
+        <table>
+          <thead>
+            <tr>
+              <th>Market</th>
+              <th>Side</th>
+              <th>Shares</th>
+              <th>Entry</th>
+              <th>Cost</th>
+              <th>Source</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+      `;
+      
+      for (const pos of positions) {
+        const sideClass = pos.side === 'YES' ? 'badge-success' : 'badge-error';
+        const statusClass = pos.status === 'open' ? 'badge-success' : 'badge-secondary';
+        
+        html += `
+          <tr>
+            <td class="cell-mono">${truncateText(pos.market, 40)}</td>
+            <td><span class="badge ${sideClass}">${pos.side}</span></td>
+            <td class="cell-mono">${pos.shares.toFixed(2)}</td>
+            <td class="cell-mono">${formatPrice(pos.entry_price)}</td>
+            <td class="cell-mono">${formatCurrency(pos.cost_basis)}</td>
+            <td class="cell-mono text-secondary">${pos.source || 'manual'}</td>
+            <td><span class="badge ${statusClass}">${pos.status}</span></td>
+          </tr>
+        `;
+      }
+      
+      html += '</tbody></table>';
+      container.innerHTML = html;
+    }
+    
+    async function executePolyTrade() {
+      const marketId = document.getElementById('market-id')?.value;
+      const marketTitle = document.getElementById('market-title')?.value;
+      const side = document.getElementById('trade-side')?.value;
+      const amount = parseFloat(document.getElementById('trade-amount')?.value);
+      const price = parseFloat(document.getElementById('trade-price')?.value);
+      
+      if (!marketId || !marketTitle || !side || !amount || !price) {
+        showToast('Please fill in all fields', 'error');
+        return;
+      }
+      
+      if (price < 0.01 || price > 0.99) {
+        showToast('Price must be between 0.01 and 0.99', 'error');
+        return;
+      }
+      
+      try {
+        const params = new URLSearchParams({
+          market_id: marketId,
+          market_title: marketTitle,
+          side: side,
+          amount: amount,
+          price: price,
+          reasoning: 'Manual trade from dashboard'
+        });
+        
+        const res = await fetch(`${POLY_API}/paper/polymarket/trade?${params}`, {
+          method: 'POST'
+        });
+        
+        const data = await res.json();
+        
+        if (data.success) {
+          showToast(`Bought ${data.shares.toFixed(0)} ${side} shares!`, 'success');
+          loadPolyPaper();
+          
+          // Clear form
+          document.getElementById('market-id').value = '';
+          document.getElementById('market-title').value = '';
+          document.getElementById('trade-amount').value = '';
+          document.getElementById('trade-price').value = '';
+        } else {
+          showToast(data.error || 'Trade failed', 'error');
+        }
+        
+      } catch (error) {
+        showToast('Trade failed: ' + error.message, 'error');
+      }
+    }
+    
+    // Initialize on load
+    document.addEventListener('DOMContentLoaded', () => {
+      loadPolyPaper();
+    });
+  </script>
+</body>
+</html>

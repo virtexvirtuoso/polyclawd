@@ -1,0 +1,107 @@
+{
+  "servers": {
+    "polyclawd": {
+      "type": "http",
+      "url": "https://virtuosocrypto.com/polyclawd",
+      "description": "Polyclawd Prediction Market Trading API",
+      "tools": [
+        {
+          "name": "get_phase",
+          "description": "Get current scaling phase and balance",
+          "method": "GET",
+          "path": "/api/phase/current"
+        },
+        {
+          "name": "get_signals",
+          "description": "Get all aggregated trading signals",
+          "method": "GET",
+          "path": "/api/signals"
+        },
+        {
+          "name": "get_news_signals",
+          "description": "Get news-based signals from Google News and Reddit",
+          "method": "GET",
+          "path": "/api/signals/news"
+        },
+        {
+          "name": "get_keyword_stats",
+          "description": "Get learned keyword performance statistics",
+          "method": "GET",
+          "path": "/api/keywords/stats"
+        },
+        {
+          "name": "get_positions",
+          "description": "Get current paper trading positions",
+          "method": "GET",
+          "path": "/api/paper/positions"
+        },
+        {
+          "name": "get_balance",
+          "description": "Get paper trading balance",
+          "method": "GET",
+          "path": "/api/paper/balance"
+        },
+        {
+          "name": "get_engine_status",
+          "description": "Get trading engine status",
+          "method": "GET",
+          "path": "/api/engine/status"
+        },
+        {
+          "name": "get_conflicts",
+          "description": "Get signal conflict statistics",
+          "method": "GET",
+          "path": "/api/conflicts/stats"
+        },
+        {
+          "name": "get_kelly_status",
+          "description": "Get Dynamic Kelly sizing status",
+          "method": "GET",
+          "path": "/api/kelly/status"
+        },
+        {
+          "name": "get_phase_limits",
+          "description": "Check if trading is paused due to phase limits",
+          "method": "GET",
+          "path": "/api/phase/limits"
+        },
+        {
+          "name": "simulate_position",
+          "description": "Simulate position sizing for given parameters",
+          "method": "POST",
+          "path": "/api/phase/simulate",
+          "parameters": {
+            "balance": {"type": "number", "description": "Account balance"},
+            "confidence": {"type": "number", "description": "Signal confidence 0-100"},
+            "win_rate": {"type": "number", "description": "Recent win rate 0-1"},
+            "win_streak": {"type": "integer", "description": "Current win streak"},
+            "source_agreement": {"type": "integer", "description": "Number of agreeing sources"}
+          }
+        },
+        {
+          "name": "learn_keywords",
+          "description": "Teach the keyword learner from a market title",
+          "method": "POST",
+          "path": "/api/keywords/learn",
+          "parameters": {
+            "title": {"type": "string", "description": "Market title"},
+            "market_id": {"type": "string", "description": "Market ID"},
+            "outcome": {"type": "string", "description": "win, loss, or null"}
+          }
+        },
+        {
+          "name": "engine_start",
+          "description": "Start the trading engine",
+          "method": "POST",
+          "path": "/api/engine/start"
+        },
+        {
+          "name": "engine_stop",
+          "description": "Stop the trading engine",
+          "method": "POST",
+          "path": "/api/engine/stop"
+        }
+      ]
+    }
+  }
+}

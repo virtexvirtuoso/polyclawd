@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Markets | Polymarket Trading Bot</title>
+  <link rel="stylesheet" href="css/virtuoso.css">
+</head>
+<body>
+  <div class="grid-overlay"></div>
+  
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="./" class="nav-brand">
+        <span>⚡</span>
+        <span>Polymarket Bot</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="./" class="nav-link">Dashboard</a></li>
+        <li><a href="arb.html" class="nav-link">Arb Scanner</a></li>
+        <li><a href="cross-arb.html" class="nav-link">Cross-Platform</a></li>
+        <li><a href="whales.html" class="nav-link">🐋 Whales</a></li>
+        <li><a href="rewards.html" class="nav-link">Rewards</a></li>
+        <li><a href="trade.html" class="nav-link">Trade</a></li>
+        <li><a href="markets.html" class="nav-link active">Markets</a></li>
+      </ul>
+      <div class="live-indicator">
+        <span class="live-dot"></span>
+        <span>Live Prices</span>
+      </div>
+    </div>
+  </nav>
+  
+  <!-- Main Content -->
+  <main class="main-content">
+    <div class="container">
+      
+      <!-- Page Header -->
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Market Browser</h1>
+          <p class="page-subtitle">Explore trending and active prediction markets</p>
+        </div>
+      </div>
+      
+      <!-- Search Bar -->
+      <div class="card mb-2">
+        <div class="flex gap-1">
+          <input 
+            type="text" 
+            id="markets-search" 
+            class="form-input" 
+            placeholder="Search markets (e.g., 'trump', 'fed', 'crypto')..."
+            style="flex: 1;"
+          >
+          <button class="btn btn-primary" onclick="searchAllMarkets()">
+            🔍 Search
+          </button>
+          <button class="btn btn-secondary" onclick="loadMarkets()">
+            📈 Trending
+          </button>
+        </div>
+      </div>
+      
+      <!-- Markets Grid -->
+      <div id="markets-grid">
+        <div class="loading">
+          <div class="spinner"></div>
+          <span>Loading trending markets...</span>
+        </div>
+      </div>
+      
+    </div>
+  </main>
+  
+  <!-- Market Detail Modal -->
+  <div id="market-modal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 class="modal-title">Market Details</h3>
+        <button class="modal-close" onclick="closeMarketModal()">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-content">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+  </div>
+  
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+  
+  <script src="js/app.js"></script>
+  <script>
+    // Modal helpers
+    function closeMarketModal() {
+      document.getElementById('market-modal').classList.remove('active');
+    }
+    
+    // Close modal on overlay click
+    document.getElementById('market-modal').addEventListener('click', (e) => {
+      if (e.target.classList.contains('modal-overlay')) {
+        closeMarketModal();
+      }
+    });
+    
+    // Close modal on escape key
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeMarketModal();
+    });
+  </script>
+</body>
+</html>

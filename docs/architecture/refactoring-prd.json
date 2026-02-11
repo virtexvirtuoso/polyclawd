@@ -1,0 +1,664 @@
+{
+  "name": "Polyclawd - Monolith Refactoring Sprint",
+  "branchName": "refactor/modular-architecture",
+  "userStories": [
+    {
+      "id": "TR-POLY-PHASE0",
+      "title": "Phase 0: Pre-Implementation Setup & Baseline Capture",
+      "description": "[Infrastructure][Blocking] Complete all pre-implementation requirements before any code changes. Capture baseline snapshots of all 109 endpoints, install dependencies, configure environment, and create safety backups. This phase BLOCKS all subsequent phases.",
+      "acceptanceCriteria": [
+        "PRE-FLIGHT 1: mkdir -p api/routes api/services tests scripts - create ALL target directories FIRST",
+        "PRE-FLIGHT 2: touch api/__init__.py api/routes/__init__.py api/services/__init__.py - create package init files",
+        "PRE-FLIGHT 3: pip install aiofiles slowapi httpx pytest pytest-asyncio locust --quiet",
+        "PRE-FLIGHT 4: python -c 'import aiofiles, slowapi, httpx, pytest, locust; print(\"DEPS OK\")' - MUST print DEPS OK",
+        "PHASE 0 - REQUIREMENTS: Read requirements.txt, add aiofiles slowapi httpx pytest pytest-asyncio locust if not present",
+        "PHASE 0 - LOG_DIR: mkdir -p ~/.polyclawd/logs - create log directory (use home dir, not /var/log)",
+        "PHASE 0 - ENV: Create .env file with POLYCLAWD_API_KEYS=dev-test-key,admin-key if not exists",
+        "PHASE 0 - TEST_DIRS: mkdir -p tests/baseline_snapshots tests/unit tests/contract tests/integration tests/security tests/load",
+        "PHASE 0 - PYTEST_INI: Create pytest.ini with [pytest] testpaths=tests, asyncio_mode=auto, python_files=test_*.py",
+        "PHASE 0 - CONFTEST: Create tests/conftest.py with @pytest.fixture for tmp_path storage, mock httpx client, async event loop",
+        "PHASE 0 - CHECK_API: curl -s http://localhost:8420/api/balance && echo 'API already running' || echo 'API needs start'",
+        "PHASE 0 - START_API: If API not running: nohup uvicorn api.main:app --host 0.0.0.0 --port 8420 > ~/.polyclawd/logs/api.log 2>&1 & disown",
+        "PHASE 0 - WAIT_API: sleep 8 && curl -sf http://localhost:8420/api/balance || (echo 'API FAILED TO START - check ~/.polyclawd/logs/api.log' && exit 1)",
+        "PHASE 0 - BASELINE_SCRIPT: Create scripts/capture_baseline.sh that curls /health, /api/balance, /api/positions, /api/trades, /api/signals, /api/engine/status and saves to tests/baseline_snapshots/",
+        "PHASE 0 - VERIFY_SCRIPT: Create scripts/verify_responses.sh that compares current vs baseline using jq keys comparison",
+        "PHASE 0 - ENDPOINTS_SCRIPT: Create scripts/verify_endpoints.sh that tests all endpoints return HTTP 2xx",
+        "PHASE 0 - CAPTURE: chmod +x scripts/*.sh && bash scripts/capture_baseline.sh",
+        "PHASE 0 - VERIFY_CAPTURE: test $(ls tests/baseline_snapshots/*.json 2>/dev/null | wc -l) -ge 5 || echo 'WARNING: Less than 5 baselines captured'",
+        "PHASE 0 - GIT_TAG: git tag -f pre-refactor-$(date +%Y%m%d) || true",
+        "PHASE 0 - BRANCH: git checkout -b refactor/modular-architecture 2>/dev/null || git checkout refactor/modular-architecture",
+        "PHASE 0 - COMMIT_BASELINE: git add -A tests/ scripts/ requirements.txt pytest.ini api/__init__.py api/routes/__init__.py api/services/__init__.py .env 2>/dev/null; git commit -m 'chore: setup test infrastructure and capture baseline snapshots' || echo 'Nothing to commit'",
+        "VALIDATE: Run 'curl -s http://localhost:8420/health' returns healthy, tests/baseline_snapshots/ has 5+ files, all directories exist"
+      ],
+      "priority": 1,
+      "passes": true,
+      "dependsOn": [],
+      "trelloCardId": null,
+      "trelloList": "to-dos",
+      "labels": [
+        "Infrastructure"
+      ],
+      "context": {
+        "affectedFiles": [
+          "api/__init__.py",
+          "api/routes/__init__.py",
+          "api/services/__init__.py",
+          "scripts/capture_baseline.sh",
+          "scripts/verify_responses.sh",
+          "scripts/verify_endpoints.sh",
+          "tests/baseline_snapshots/",
+          "tests/conftest.py",
+          "pytest.ini",
+          "requirements.txt",
+          ".env"
+        ],
+        "verifyCommands": {
+          "deps": "python -c 'import aiofiles, slowapi, httpx, pytest, locust; print(\"OK\")'",
+          "dirs": "ls -d api/routes api/services tests/baseline_snapshots",
+          "baseline": "ls tests/baseline_snapshots/*.json | wc -l",
+          "api_running": "curl -sf http://localhost:8420/health && echo OK"
+        },
+        "referenceFiles": [
+          "api/main.py - 6500-line monolith to refactor",
+          "docs/REFACTORING_PLAN.md - contains exact code samples to implement"
+        ],
+        "criticalNote": "API MUST be running before baseline capture. If API fails to start, check ~/.polyclawd/logs/api.log for errors."
+      },
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "TR-POLY-PHASE1",
+      "title": "Phase 1: Infrastructure - deps.py, middleware.py, services/",
+      "description": "[Infrastructure][Core] Create foundational infrastructure files: deps.py (settings, singletons), middleware.py (auth, security headers), services/storage.py (async JSON with asyncio.Lock), services/http_client.py (singleton with connection pooling). These are the building blocks for all other phases.",
+      "acceptanceCriteria": [
+        "PHASE 1 - READ_PLAN: Read docs/REFACTORING_PLAN.md sections 2.2, 4.1, 4.2 for EXACT code samples to implement - DO NOT deviate from the plan's code",
+        "PHASE 1 - DEPS_FILE: Create api/deps.py with Settings class containing STORAGE_DIR, POLY_STORAGE_DIR, DATA_DIR, DEFAULT_BALANCE, API_KEYS set, ALLOWED_ORIGINS list, GAMMA_API, SIMMER_API, MAX_TRADE_AMOUNT=100.0, TRADES_PER_MINUTE=5",
+        "PHASE 1 - DEPS_SETTINGS: Add @lru_cache() decorator to get_settings() function that loads API_KEYS from POLYCLAWD_API_KEYS env var",
+        "PHASE 1 - DEPS_SINGLETON: Add get_storage_service() function with global _storage_service singleton pattern (NOT recreating per request)",
+        "PHASE 1 - MIDDLEWARE: Create api/middleware.py with verify_api_key(x_api_key: str = Header(...)) that checks against settings.API_KEYS",
+        "PHASE 1 - MIDDLEWARE_HEADERS: Add add_security_headers() middleware function adding X-Content-Type-Options, X-Frame-Options, X-XSS-Protection, Referrer-Policy, and HSTS for virtuosocrypto.com",
+        "PHASE 1 - MIDDLEWARE_ERROR: Add global_exception_handler() that logs full error but returns sanitized 'Internal server error' to client",
+        "PHASE 1 - SERVICES_INIT: Update api/services/__init__.py with: from .storage import StorageService; from .http_client import http_client, AsyncHTTPClient",
+        "PHASE 1 - STORAGE: Create api/services/storage.py with StorageService class using asyncio.Lock (NOT threading.Lock), aiofiles for async I/O",
+        "PHASE 1 - STORAGE_VALIDATE: Add _validate_filename() method that blocks path traversal (.. or / in filename)",
+        "PHASE 1 - STORAGE_LOAD: Implement async load() method with lock protection, JSON error handling, default value support",
+        "PHASE 1 - STORAGE_SAVE: Implement async save() method with atomic write (temp file + rename), lock protection",
+        "PHASE 1 - STORAGE_APPEND: Implement async append_to_list() method with max_items truncation",
+        "PHASE 1 - STORAGE_SYNC: Add load_sync() method for startup/shutdown contexts only",
+        "PHASE 1 - HTTP_CLIENT: Create api/services/http_client.py with AsyncHTTPClient class using singleton pattern",
+        "PHASE 1 - HTTP_LAZY: Implement _get_client() with lazy initialization of httpx.AsyncClient with connection pooling (max_connections=20, max_keepalive_connections=10)",
+        "PHASE 1 - HTTP_GET: Implement async get() method using shared client with proper error logging",
+        "PHASE 1 - HTTP_POST: Implement async post() method using shared client",
+        "PHASE 1 - HTTP_CLOSE: Implement async close() method for application shutdown cleanup",
+        "PHASE 1 - HTTP_SINGLETON: Create module-level http_client = AsyncHTTPClient() singleton instance",
+        "PHASE 1 - SYNTAX_CHECK: python -m py_compile api/deps.py api/middleware.py api/services/storage.py api/services/http_client.py - all must pass",
+        "PHASE 1 - UNIT_TEST_STORAGE: Create tests/unit/test_storage_service.py with tests for load, save, append, path traversal blocking, concurrent writes",
+        "PHASE 1 - UNIT_TEST_HTTP: Create tests/unit/test_http_client.py with tests for singleton behavior, client reuse",
+        "PHASE 1 - RUN_TESTS: pytest tests/unit/ -v - all unit tests must pass",
+        "PHASE 1 - COMMIT: git add api/deps.py api/middleware.py api/services/ tests/unit/ && git commit -m 'feat(infra): add deps, middleware, async storage and HTTP client'",
+        "VALIDATE: All infrastructure files created, unit tests pass, no syntax errors"
+      ],
+      "priority": 2,
+      "passes": true,
+      "dependsOn": [
+        "TR-POLY-PHASE0"
+      ],
+      "trelloCardId": null,
+      "trelloList": "to-dos",
+      "labels": [
+        "Infrastructure",
+        "Feature"
+      ],
+      "context": {
+        "affectedFiles": [
+          "api/deps.py",
+          "api/middleware.py",
+          "api/services/__init__.py",
+          "api/services/storage.py",
+          "api/services/http_client.py",
+          "tests/unit/test_storage_service.py",
+          "tests/unit/test_http_client.py"
+        ],
+        "verifyCommands": {
+          "syntax": "python -m py_compile api/deps.py api/middleware.py api/services/storage.py api/services/http_client.py",
+          "tests": "pytest tests/unit/ -v"
+        }
+      },
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "TR-POLY-PHASE2",
+      "title": "Phase 2: Models & System Routes (health, ready, metrics)",
+      "description": "[Feature][Core] Create consolidated Pydantic models with proper validation (Literal, Field, Decimal) and system routes (health, ready, metrics). Models use Literal['YES','NO'] for side, Field(gt=0, le=100) for amounts, and Decimal for money.",
+      "acceptanceCriteria": [
+        "PHASE 2 - MODELS: Create api/models.py with all Pydantic models in single file",
+        "PHASE 2 - TRADE_REQUEST: TradeRequest with market_id (min_length=1, max_length=100), side (Literal['YES','NO']), amount (Decimal, gt=0, le=100), reasoning (max_length=500)",
+        "PHASE 2 - TRADE_REQUEST_VALIDATOR: Add @field_validator for market_id that blocks path traversal characters",
+        "PHASE 2 - TRADE_RESPONSE: TradeResponse with success, trade_id (Optional), message, balance (Optional[Decimal]), error_code (Optional)",
+        "PHASE 2 - SIGNAL_SOURCE: SignalSource with source (str), direction (Literal), confidence (float ge=0 le=1), reasoning (Optional)",
+        "PHASE 2 - AGGREGATED_SIGNAL: AggregatedSignal with market_id, direction, score (ge=0 le=100), sources (list), conflicts (int)",
+        "PHASE 2 - ENGINE_STATUS: EngineStatus with running (bool), mode (Literal['paper','live','disabled']), phase (int ge=1 le=10), daily_trades, daily_limit, last_run",
+        "PHASE 2 - MODEL_CONFIG: Add model_config with json_encoders for Decimal to str conversion",
+        "PHASE 2 - ROUTES_INIT: Update api/routes/__init__.py with: from .system import router as system_router (will add more routers in later phases)",
+        "PHASE 2 - SYSTEM_ROUTER: Create api/routes/system.py with router = APIRouter()",
+        "PHASE 2 - HEALTH: Add GET /health endpoint returning status='healthy', timestamp, version='2.0.0'",
+        "PHASE 2 - READY: Add GET /ready endpoint with real checks for storage (try load balance.json) and return 200 if all pass, 503 if any fail",
+        "PHASE 2 - METRICS: Add GET /metrics endpoint returning basic stats (uptime, request count placeholder)",
+        "PHASE 2 - SYNTAX: python -m py_compile api/models.py api/routes/system.py - must pass",
+        "PHASE 2 - CONTRACT_TEST: Create tests/contract/test_api_contracts.py with TestBalanceContract, TestPositionsContract, TestTradeContract, TestSignalsContract classes",
+        "PHASE 2 - RUN_CONTRACTS: pytest tests/contract/ -v - all contract tests must pass",
+        "PHASE 2 - COMMIT: git add api/models.py api/routes/ tests/contract/ && git commit -m 'feat(api): add Pydantic models and system routes'",
+        "VALIDATE: Models have proper validation, system routes work, contract tests pass"
+      ],
+      "priority": 3,
+      "passes": true,
+      "dependsOn": [
+        "TR-POLY-PHASE1"
+      ],
+      "trelloCardId": null,
+      "trelloList": "to-dos",
+      "labels": [
+        "Feature"
+      ],
+      "context": {
+        "affectedFiles": [
+          "api/models.py",
+          "api/routes/__init__.py",
+          "api/routes/system.py",
+          "tests/contract/test_api_contracts.py"
+        ],
+        "verifyCommands": {
+          "syntax": "python -m py_compile api/models.py api/routes/system.py",
+          "contracts": "pytest tests/contract/ -v"
+        }
+      },
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "TR-POLY-PHASE3",
+      "title": "Phase 3: Trading Routes (paper + simmer + paper-poly)",
+      "description": "[Feature][Core] Create consolidated trading.py router handling paper trading, Simmer integration, and paper Polymarket endpoints. Uses async storage service, API key auth on write endpoints, proper error handling with HTTPException.",
+      "acceptanceCriteria": [
+        "PHASE 3 - READ_SOURCE: Read api/main.py to find existing endpoint implementations for /balance, /positions, /trades, /trade, /reset, /simmer/*, /paper/* - extract the actual logic, not just create stubs",
+        "PHASE 3 - READ_PLAN: Read docs/REFACTORING_PLAN.md section 4 (File-by-File Migration) for trading.py code samples",
+        "PHASE 3 - ROUTER: Create api/routes/trading.py with router = APIRouter()",
+        "PHASE 3 - IMPORTS: Import get_storage_service from deps, TradeRequest/TradeResponse from models, verify_api_key from middleware, HTTPException from fastapi",
+        "PHASE 3 - BALANCE: Add GET /balance endpoint using async storage.load('balance.json', {'usdc': 10000.0})",
+        "PHASE 3 - POSITIONS: Add GET /positions endpoint using async storage.load('positions.json', {'positions': []})",
+        "PHASE 3 - TRADES: Add GET /trades endpoint with limit query param (ge=1, le=100, default=20)",
+        "PHASE 3 - EXECUTE_TRADE: Add POST /trade endpoint with TradeRequest body, Depends(verify_api_key), balance check, position creation",
+        "PHASE 3 - TRADE_LOGIC: Implement trade logic - check balance, create position, update balance, log trade to trades.json",
+        "PHASE 3 - RESET: Add POST /reset endpoint with Depends(verify_api_key), resets all state files to defaults",
+        "PHASE 3 - POSITIONS_CHECK: Add GET /positions/check endpoint to verify position status",
+        "PHASE 3 - POSITION_RESOLVE: Add POST /positions/{id}/resolve endpoint to close positions",
+        "PHASE 3 - SIMMER_STATUS: Add GET /simmer/status endpoint",
+        "PHASE 3 - SIMMER_PORTFOLIO: Add GET /simmer/portfolio endpoint",
+        "PHASE 3 - SIMMER_POSITIONS: Add GET /simmer/positions endpoint",
+        "PHASE 3 - SIMMER_TRADE: Add POST /simmer/trade endpoint with auth",
+        "PHASE 3 - PAPER_POLY: Add GET /paper/status, GET /paper/positions, POST /paper/trade endpoints",
+        "PHASE 3 - ERROR_HANDLING: All endpoints use HTTPException with proper status codes (400 for bad request, 401 for auth, 500 for internal)",
+        "PHASE 3 - LOGGING: Add logger = logging.getLogger(__name__) and log all trade executions",
+        "PHASE 3 - UPDATE_ROUTES_INIT: Add 'from .trading import router as trading_router' to api/routes/__init__.py",
+        "PHASE 3 - SYNTAX: python -m py_compile api/routes/trading.py - must pass",
+        "PHASE 3 - INTEGRATION_TEST: Create tests/integration/test_trading_flow.py with TestTradingFlow class",
+        "PHASE 3 - TEST_LIFECYCLE: Add test_complete_trade_lifecycle testing balance -> trade -> position -> resolve",
+        "PHASE 3 - VERIFY_BASELINE: Run scripts/verify_responses.sh for trading endpoints - schemas must match baseline",
+        "PHASE 3 - COMMIT: git add api/routes/trading.py tests/integration/ && git commit -m 'feat(trading): add paper, simmer, and paper-poly trading routes'",
+        "VALIDATE: All trading endpoints work, integration tests pass, response schemas match baseline"
+      ],
+      "priority": 4,
+      "passes": true,
+      "dependsOn": [
+        "TR-POLY-PHASE2"
+      ],
+      "trelloCardId": null,
+      "trelloList": "to-dos",
+      "labels": [
+        "Feature"
+      ],
+      "context": {
+        "affectedFiles": [
+          "api/routes/trading.py",
+          "tests/integration/test_trading_flow.py"
+        ],
+        "verifyCommands": {
+          "syntax": "python -m py_compile api/routes/trading.py",
+          "integration": "pytest tests/integration/ -v"
+        },
+        "referenceFiles": [
+          "api/main.py - CRITICAL: search for @app.get('/api/balance'), @app.post('/api/trade'), etc. and extract the FULL implementation logic",
+          "docs/REFACTORING_PLAN.md - section 4 has trading.py code samples"
+        ],
+        "extractEndpoints": [
+          "GET /api/balance - lines ~200-220 in main.py",
+          "GET /api/positions - lines ~230-250 in main.py",
+          "GET /api/trades - lines ~260-280 in main.py",
+          "POST /api/trade - lines ~300-400 in main.py (complex logic)",
+          "POST /api/reset - lines ~420-450 in main.py",
+          "GET /api/simmer/* - search for 'simmer' in main.py",
+          "GET /api/paper/* - search for 'paper' in main.py"
+        ]
+      },
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "TR-POLY-PHASE4",
+      "title": "Phase 4: Markets & Edge Routes (all edge sources consolidated)",
+      "description": "[Feature][Core] Create consolidated markets.py router with all 15 edge detection endpoints (Vegas, ESPN, Soccer, Betfair, Kalshi, Manifold, PredictIt). Uses handle_edge_request() helper with proper HTTPException error handling (502 for upstream, 503 for import, 500 for internal).",
+      "acceptanceCriteria": [
+        "PHASE 4 - READ_SOURCE: Read api/main.py to find existing endpoint implementations for /vegas/*, /espn/*, /betfair/*, /kalshi/*, /manifold/*, /predictit/*, /markets, /arb-scan, /rewards - extract the actual logic",
+        "PHASE 4 - READ_PLAN: Read docs/REFACTORING_PLAN.md section for markets.py code samples with handle_edge_request helper",
+        "PHASE 4 - ROUTER: Create api/routes/markets.py with router = APIRouter()",
+        "PHASE 4 - IMPORTS: Import all edge modules at top level from odds/ (vegas_scraper, espn_odds, soccer_edge, betfair_edge, kalshi_edge, manifold, predictit)",
+        "PHASE 4 - HELPER: Create async handle_edge_request(source: str, coro) helper function",
+        "PHASE 4 - HELPER_ERRORS: handle_edge_request catches ImportError->503, httpx.HTTPError->502, ValueError->422, Exception->500",
+        "PHASE 4 - HELPER_LOGGING: Log all errors with logger.exception for stack traces",
+        "PHASE 4 - VEGAS_EDGE: Add GET /vegas/edge with min_edge query param (ge=0, le=1, default=0.05)",
+        "PHASE 4 - ESPN_ODDS: Add GET /espn/odds endpoint calling get_espn_summary()",
+        "PHASE 4 - ESPN_EDGE: Add GET /espn/edge with min_edge query param (ge=0, le=100, default=5.0)",
+        "PHASE 4 - VEGAS_SOCCER: Add GET /vegas/soccer endpoint calling get_soccer_edge_summary()",
+        "PHASE 4 - BETFAIR_EDGE: Add GET /betfair/edge endpoint calling get_betfair_edge_summary()",
+        "PHASE 4 - KALSHI_MARKETS: Add GET /kalshi/markets endpoint calling get_kalshi_polymarket_comparison()",
+        "PHASE 4 - MANIFOLD_EDGE: Add GET /manifold/edge with min_edge param calling get_manifold_edges()",
+        "PHASE 4 - MANIFOLD_MARKETS: Add GET /manifold/markets endpoint calling get_manifold_summary()",
+        "PHASE 4 - PREDICTIT_EDGE: Add GET /predictit/edge with min_edge param calling get_predictit_edges()",
+        "PHASE 4 - PREDICTIT_MARKETS: Add GET /predictit/markets endpoint calling get_predictit_summary()",
+        "PHASE 4 - MARKETS_LIST: Add GET /markets endpoint for market discovery",
+        "PHASE 4 - ARB_SCAN: Add GET /arb-scan endpoint for arbitrage opportunities",
+        "PHASE 4 - REWARDS: Add GET /rewards endpoint for liquidity rewards",
+        "PHASE 4 - POLYROUTER: Add GET /polyrouter/* endpoints for routing logic",
+        "PHASE 4 - ALL_USE_HELPER: Ensure all async edge endpoints use handle_edge_request helper",
+        "PHASE 4 - UPDATE_ROUTES_INIT: Add 'from .markets import router as markets_router' to api/routes/__init__.py",
+        "PHASE 4 - SYNTAX: python -m py_compile api/routes/markets.py - must pass",
+        "PHASE 4 - VERIFY_BASELINE: Run scripts/verify_responses.sh for edge endpoints - schemas must match baseline",
+        "PHASE 4 - COMMIT: git add api/routes/markets.py && git commit -m 'feat(markets): consolidate all edge detection routes with proper error handling'",
+        "VALIDATE: All 15+ edge endpoints work, proper error codes returned, schemas match baseline"
+      ],
+      "priority": 5,
+      "passes": true,
+      "dependsOn": [
+        "TR-POLY-PHASE3"
+      ],
+      "trelloCardId": null,
+      "trelloList": "to-dos",
+      "labels": [
+        "Feature"
+      ],
+      "context": {
+        "affectedFiles": [
+          "api/routes/markets.py"
+        ],
+        "verifyCommands": {
+          "syntax": "python -m py_compile api/routes/markets.py",
+          "baseline": "bash scripts/verify_responses.sh"
+        },
+        "referenceFiles": [
+          "api/main.py - search for @app.get('/api/vegas'), @app.get('/api/espn'), @app.get('/api/kalshi'), etc.",
+          "odds/*.py - these modules contain the actual edge detection logic that endpoints call",
+          "docs/REFACTORING_PLAN.md - section 4 has markets.py code with handle_edge_request helper"
+        ],
+        "extractEndpoints": [
+          "GET /api/vegas/edge - search 'vegas' in main.py",
+          "GET /api/espn/odds - search 'espn' in main.py",
+          "GET /api/espn/edge - search 'espn' in main.py",
+          "GET /api/vegas/soccer - search 'soccer' in main.py",
+          "GET /api/betfair/edge - search 'betfair' in main.py",
+          "GET /api/kalshi/markets - search 'kalshi' in main.py",
+          "GET /api/manifold/* - search 'manifold' in main.py",
+          "GET /api/predictit/* - search 'predictit' in main.py",
+          "GET /api/markets - search 'markets' in main.py",
+          "GET /api/arb-scan - search 'arb' in main.py"
+        ]
+      },
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "TR-POLY-PHASE5A",
+      "title": "Phase 5A: Signals Routes (signals, whales, confidence, rotations)",
+      "description": "[Feature][Core] Create signals.py router with signal aggregation, whale tracking, Bayesian confidence scoring, and rotation endpoints. Focus ONLY on signals - engine comes in 5B.",
+      "acceptanceCriteria": [
+        "PHASE 5A - READ_SOURCE: Read api/main.py to find implementations for /signals, /predictors, /inverse-whale, /smart-money, /confidence/*, /conflicts/*, /rotations - extract ALL logic carefully",
+        "PHASE 5A - SIGNALS_ROUTER: Create api/routes/signals.py with router = APIRouter()",
+        "PHASE 5A - IMPORTS: Import necessary modules from signals/*.py (news_signal, keyword_learner, etc.)",
+        "PHASE 5A - SIGNALS: Add GET /signals endpoint aggregating all signal sources - this is the MAIN endpoint",
+        "PHASE 5A - SIGNALS_NEWS: Add GET /signals/news endpoint for news signals",
+        "PHASE 5A - SIGNALS_AUTO: Add POST /signals/auto-trade endpoint with auth",
+        "PHASE 5A - VOLUME_SPIKES: Add GET /volume/spikes endpoint",
+        "PHASE 5A - RESOLUTION: Add GET /resolution/* endpoints for market resolution",
+        "PHASE 5A - PREDICTORS: Add GET /predictors endpoint for whale tracking",
+        "PHASE 5A - INVERSE_WHALE: Add GET /inverse-whale endpoint",
+        "PHASE 5A - SMART_MONEY: Add GET /smart-money endpoint",
+        "PHASE 5A - CONFIDENCE: Add GET /confidence/* endpoints for Bayesian scoring",
+        "PHASE 5A - CONFIDENCE_DETAIL: Include confidence/market/{id}, confidence/history, confidence/calibration",
+        "PHASE 5A - CONFLICTS: Add GET /conflicts/* endpoints for signal conflicts",
+        "PHASE 5A - ROTATIONS: Add GET /rotations, GET /rotation/* endpoints",
+        "PHASE 5A - ERROR_HANDLING: All endpoints use HTTPException with proper status codes",
+        "PHASE 5A - LOGGING: Add logger = logging.getLogger(__name__) and log signal aggregations",
+        "PHASE 5A - UPDATE_ROUTES_INIT: Add 'from .signals import router as signals_router' to api/routes/__init__.py",
+        "PHASE 5A - SYNTAX: python -m py_compile api/routes/signals.py - must pass",
+        "PHASE 5A - UNIT_TEST: Create tests/unit/test_signals.py with basic signal aggregation tests",
+        "PHASE 5A - VERIFY_BASELINE: Run scripts/verify_responses.sh for signal endpoints only",
+        "PHASE 5A - COMMIT: git add api/routes/signals.py tests/unit/test_signals.py && git commit -m 'feat(signals): add signals, whales, confidence, and rotation routes'",
+        "VALIDATE: All signal endpoints work, whale tracking preserved, Bayesian scoring correct"
+      ],
+      "priority": 6,
+      "passes": true,
+      "dependsOn": [
+        "TR-POLY-PHASE4"
+      ],
+      "trelloCardId": null,
+      "trelloList": "to-dos",
+      "labels": [
+        "Feature"
+      ],
+      "context": {
+        "affectedFiles": [
+          "api/routes/signals.py",
+          "tests/unit/test_signals.py"
+        ],
+        "verifyCommands": {
+          "syntax": "python -m py_compile api/routes/signals.py",
+          "tests": "pytest tests/unit/test_signals.py -v",
+          "baseline": "bash scripts/verify_responses.sh"
+        },
+        "referenceFiles": [
+          "api/main.py - search for @app.get('/api/signals'), @app.get('/api/predictors'), @app.get('/api/confidence')",
+          "signals/*.py - news_signal.py, keyword_learner.py, whale_tracker.py contain signal logic"
+        ],
+        "extractEndpoints": [
+          "GET /api/signals - search 'def.*signals' in main.py - MAIN aggregation endpoint",
+          "GET /api/signals/news - search 'signals/news' or 'news' in main.py",
+          "GET /api/predictors - search 'predictors' in main.py",
+          "GET /api/inverse-whale - search 'inverse' in main.py",
+          "GET /api/smart-money - search 'smart-money' or 'smart_money' in main.py",
+          "GET /api/confidence/* - search 'confidence' in main.py",
+          "GET /api/conflicts/* - search 'conflicts' in main.py",
+          "GET /api/rotations - search 'rotations' in main.py"
+        ]
+      },
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "TR-POLY-PHASE5B",
+      "title": "Phase 5B: Engine Routes (engine, alerts, LLM, Kelly, phases)",
+      "description": "[Feature][Core] Create engine.py router with engine control, alerts system, LLM integration, Kelly criterion sizing, and scaling phase endpoints. This is the orchestration layer that triggers trades based on signals.",
+      "acceptanceCriteria": [
+        "PHASE 5B - READ_SOURCE: Read api/main.py to find implementations for /engine/*, /alerts/*, /llm/*, /phase/*, /kelly/* - extract ALL orchestration logic",
+        "PHASE 5B - READ_CONFIG: Read config/scaling_phases.py for phase/Kelly calculation logic",
+        "PHASE 5B - ENGINE_ROUTER: Create api/routes/engine.py with router = APIRouter()",
+        "PHASE 5B - IMPORTS: Import EngineStatus from models, signals aggregation functions",
+        "PHASE 5B - ENGINE_STATUS: Add GET /engine/status endpoint returning EngineStatus model with running, mode, phase, daily_trades",
+        "PHASE 5B - ENGINE_TRIGGER: Add POST /engine/trigger endpoint with auth - COMPLEX: evaluates signals, executes trades",
+        "PHASE 5B - ENGINE_TRIGGER_LOGIC: Ensure trigger calls signal aggregation, applies thresholds, creates trades",
+        "PHASE 5B - ENGINE_CONFIG: Add GET /engine/config endpoint for current config",
+        "PHASE 5B - ENGINE_CONFIG_POST: Add POST /engine/config endpoint with auth to update config",
+        "PHASE 5B - PHASE_STATUS: Add GET /phase/current endpoint for current scaling phase",
+        "PHASE 5B - PHASE_HISTORY: Add GET /phase/history endpoint for phase transitions",
+        "PHASE 5B - KELLY: Add GET /kelly/current endpoint for current Kelly fraction",
+        "PHASE 5B - KELLY_SIMULATE: Add GET /kelly/simulate endpoint for Kelly simulation",
+        "PHASE 5B - ALERTS_LIST: Add GET /alerts endpoint returning all alerts",
+        "PHASE 5B - ALERTS_CREATE: Add POST /alerts endpoint with auth to create alert",
+        "PHASE 5B - ALERTS_DELETE: Add DELETE /alerts/{id} endpoint with auth",
+        "PHASE 5B - ALERTS_CHECK: Add GET /alerts/check endpoint to check triggered alerts",
+        "PHASE 5B - LLM_STATUS: Add GET /llm/status endpoint for LLM health",
+        "PHASE 5B - LLM_TEST: Add POST /llm/test endpoint to test LLM connectivity",
+        "PHASE 5B - ERROR_HANDLING: All endpoints use HTTPException with proper status codes",
+        "PHASE 5B - LOGGING: Log all engine triggers and alert checks",
+        "PHASE 5B - UPDATE_ROUTES_INIT: Add 'from .engine import router as engine_router' to api/routes/__init__.py",
+        "PHASE 5B - SYNTAX: python -m py_compile api/routes/engine.py - must pass",
+        "PHASE 5B - UNIT_TEST: Create tests/unit/test_engine.py with engine status and trigger tests",
+        "PHASE 5B - VERIFY_BASELINE: Run scripts/verify_responses.sh for engine endpoints only",
+        "PHASE 5B - COMMIT: git add api/routes/engine.py tests/unit/test_engine.py && git commit -m 'feat(engine): add engine, alerts, LLM, Kelly, and phase routes'",
+        "VALIDATE: Engine orchestration works, alerts trigger correctly, Kelly sizing accurate"
+      ],
+      "priority": 7,
+      "passes": true,
+      "dependsOn": [
+        "TR-POLY-PHASE5A"
+      ],
+      "trelloCardId": null,
+      "trelloList": "to-dos",
+      "labels": [
+        "Feature"
+      ],
+      "context": {
+        "affectedFiles": [
+          "api/routes/engine.py",
+          "tests/unit/test_engine.py"
+        ],
+        "verifyCommands": {
+          "syntax": "python -m py_compile api/routes/engine.py",
+          "tests": "pytest tests/unit/test_engine.py -v",
+          "baseline": "bash scripts/verify_responses.sh"
+        },
+        "referenceFiles": [
+          "api/main.py - search for @app.get('/api/engine'), @app.post('/api/engine/trigger'), @app.get('/api/alerts')",
+          "config/scaling_phases.py - contains phase definitions and Kelly calculation",
+          "api/routes/signals.py - engine calls signal aggregation from Phase 5A"
+        ],
+        "extractEndpoints": [
+          "GET /api/engine/status - search 'engine/status' or 'engine.*status' in main.py",
+          "POST /api/engine/trigger - search 'trigger' in main.py - MOST COMPLEX endpoint",
+          "GET /api/engine/config - search 'engine/config' in main.py",
+          "GET /api/phase/* - search 'phase' in main.py",
+          "GET /api/kelly/* - search 'kelly' in main.py",
+          "GET /api/alerts - search 'alerts' in main.py",
+          "GET /api/llm/* - search 'llm' in main.py"
+        ],
+        "warning": "POST /engine/trigger is the most complex endpoint - it orchestrates signal evaluation, threshold checking, and trade execution. Extract ALL logic from main.py."
+      },
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "TR-POLY-PHASE6",
+      "title": "Phase 6: Main.py Reduction & Router Registration",
+      "description": "[Infrastructure][Critical] Reduce main.py from 6,500 lines to ~200 lines. Remove all migrated endpoints, keep only app factory, middleware registration, and router includes. Update MCP server imports.",
+      "acceptanceCriteria": [
+        "PHASE 6 - BACKUP: cp api/main.py api/main.py.backup - create backup before reduction",
+        "PHASE 6 - LIFESPAN: Add @asynccontextmanager async def lifespan(app) with startup logging, directory creation, and http_client.close() on shutdown",
+        "PHASE 6 - APP_FACTORY: Update FastAPI app creation with lifespan=lifespan parameter",
+        "PHASE 6 - CORS: Replace allow_origins=['*'] with settings.ALLOWED_ORIGINS from deps",
+        "PHASE 6 - CORS_METHODS: Change allow_methods from '*' to ['GET', 'POST', 'DELETE']",
+        "PHASE 6 - CORS_HEADERS: Change allow_headers from '*' to ['Authorization', 'Content-Type', 'X-API-Key']",
+        "PHASE 6 - SECURITY_MW: Add app.middleware('http')(add_security_headers) from middleware",
+        "PHASE 6 - EXCEPTION_HANDLER: Add app.exception_handler(Exception)(global_exception_handler)",
+        "PHASE 6 - REGISTER_SYSTEM: app.include_router(system.router, tags=['System'])",
+        "PHASE 6 - REGISTER_TRADING: app.include_router(trading.router, prefix='/api', tags=['Trading'])",
+        "PHASE 6 - REGISTER_MARKETS: app.include_router(markets.router, prefix='/api', tags=['Markets'])",
+        "PHASE 6 - REGISTER_SIGNALS: app.include_router(signals.router, prefix='/api', tags=['Signals'])",
+        "PHASE 6 - REGISTER_ENGINE: app.include_router(engine.router, prefix='/api', tags=['Engine'])",
+        "PHASE 6 - REMOVE_OLD: Remove ALL endpoint definitions that were migrated to routes/ (should remove ~6,300 lines)",
+        "PHASE 6 - KEEP_STATIC: Keep static file mounting and root route for index.html",
+        "PHASE 6 - LINE_COUNT: wc -l api/main.py - should be ~200 lines (was 6,500)",
+        "PHASE 6 - MCP_IMPORTS: Update mcp/server.py to import from new locations if needed",
+        "PHASE 6 - SYNTAX: python -m py_compile api/main.py mcp/server.py - must pass",
+        "PHASE 6 - FULL_TEST: pytest tests/ -v - all tests must still pass",
+        "PHASE 6 - ALL_ENDPOINTS: Run scripts/verify_endpoints.sh - all 109 endpoints must return 200",
+        "PHASE 6 - BASELINE_COMPARE: Run scripts/verify_responses.sh - all schemas must match baseline",
+        "PHASE 6 - COMMIT: git add api/main.py mcp/server.py && git commit -m 'refactor(main): reduce to ~200 lines with router registration'",
+        "VALIDATE: main.py reduced to ~200 lines, all 109 endpoints work, all tests pass"
+      ],
+      "priority": 8,
+      "passes": true,
+      "dependsOn": [
+        "TR-POLY-PHASE5B"
+      ],
+      "trelloCardId": null,
+      "trelloList": "to-dos",
+      "labels": [
+        "Infrastructure"
+      ],
+      "context": {
+        "affectedFiles": [
+          "api/main.py",
+          "mcp/server.py"
+        ],
+        "verifyCommands": {
+          "line_count": "wc -l api/main.py",
+          "endpoints": "bash scripts/verify_endpoints.sh",
+          "baseline": "bash scripts/verify_responses.sh",
+          "tests": "pytest tests/ -v"
+        }
+      },
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "TR-POLY-PHASE7",
+      "title": "Phase 7: Security Hardening & Rate Limiting",
+      "description": "[Security][Critical] Add authentication to write endpoints, implement rate limiting with slowapi, add security headers, replace remaining bare except blocks.",
+      "acceptanceCriteria": [
+        "PHASE 7 - AUDIT_EXCEPT: grep -rn 'except:' api/ - identify all bare except blocks",
+        "PHASE 7 - FIX_EXCEPT: Replace each bare 'except:' with specific exception types (Exception, HTTPError, ValueError, etc.)",
+        "PHASE 7 - LOG_EXCEPT: Ensure all exception handlers log with logger.exception() for stack traces",
+        "PHASE 7 - RATE_LIMIT_INIT: Add slowapi Limiter to main.py with key_func=get_remote_address",
+        "PHASE 7 - RATE_LIMIT_STATE: Add app.state.limiter = limiter",
+        "PHASE 7 - RATE_LIMIT_HANDLER: Add app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)",
+        "PHASE 7 - RATE_TRADE: Add @limiter.limit('5/minute') to POST /trade endpoint",
+        "PHASE 7 - RATE_ENGINE: Add @limiter.limit('5/minute') to POST /engine/trigger endpoint",
+        "PHASE 7 - RATE_RESET: Add @limiter.limit('2/minute') to POST /reset endpoint",
+        "PHASE 7 - RATE_READ: Add @limiter.limit('30/minute') to read endpoints as needed",
+        "PHASE 7 - VERIFY_AUTH: Test that POST /trade without X-API-Key returns 401",
+        "PHASE 7 - VERIFY_AUTH_VALID: Test that POST /trade with valid X-API-Key works",
+        "PHASE 7 - VERIFY_RATE: Test that 6 rapid POST /trade requests trigger 429 Too Many Requests",
+        "PHASE 7 - VERIFY_HEADERS: curl -I http://localhost:8420/health - verify X-Content-Type-Options, X-Frame-Options present",
+        "PHASE 7 - SYNTAX: python -m py_compile api/main.py api/routes/*.py - all must pass",
+        "PHASE 7 - SECURITY_TEST: Create tests/security/test_auth.py with auth bypass tests",
+        "PHASE 7 - RUN_SECURITY: pytest tests/security/ -v - all security tests must pass",
+        "PHASE 7 - COMMIT: git add api/ tests/security/ && git commit -m 'security: add authentication, rate limiting, and security headers'",
+        "VALIDATE: Auth required on writes, rate limiting active, security headers present, no bare excepts"
+      ],
+      "priority": 9,
+      "passes": true,
+      "dependsOn": [
+        "TR-POLY-PHASE6"
+      ],
+      "trelloCardId": null,
+      "trelloList": "to-dos",
+      "labels": [
+        "Security"
+      ],
+      "context": {
+        "affectedFiles": [
+          "api/main.py",
+          "api/routes/trading.py",
+          "api/routes/engine.py",
+          "tests/security/test_auth.py"
+        ],
+        "verifyCommands": {
+          "no_bare_except": "grep -rn 'except:' api/ | wc -l",
+          "security_tests": "pytest tests/security/ -v"
+        }
+      },
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "TR-POLY-PHASE8",
+      "title": "Phase 8: Load Testing & Documentation",
+      "description": "[Testing][Documentation] Run comprehensive load tests, update documentation, create runbook for the new architecture.",
+      "acceptanceCriteria": [
+        "PHASE 8 - LOCUST_FILE: Create tests/load/locustfile.py with PolyclawdUser class",
+        "PHASE 8 - LOCUST_TASKS: Add @task decorators for balance(10), positions(5), signals(3), edges(2), engine(1)",
+        "PHASE 8 - LOCUST_WAIT: Set wait_time = between(0.5, 2)",
+        "PHASE 8 - LOAD_RUN: locust -f tests/load/locustfile.py --host=http://localhost:8420 --headless -u 50 -r 10 -t 5m",
+        "PHASE 8 - LOAD_VERIFY: Verify 0% failure rate, p95 latency < 500ms",
+        "PHASE 8 - LOAD_COMPARE: Compare response times to baseline (should be equal or better)",
+        "PHASE 8 - AB_TEST: ab -n 1000 -c 10 http://localhost:8420/api/signals - verify throughput",
+        "PHASE 8 - MEMORY_CHECK: Monitor memory during load test - should not grow unbounded",
+        "PHASE 8 - UPDATE_README: Update README.md with new architecture section",
+        "PHASE 8 - API_DOCS: Verify FastAPI auto-docs at /docs reflect new structure",
+        "PHASE 8 - COMMIT: git add tests/load/ README.md && git commit -m 'test: add load testing, update documentation'",
+        "VALIDATE: Load tests pass, documentation updated, performance meets baseline"
+      ],
+      "priority": 10,
+      "passes": true,
+      "dependsOn": [
+        "TR-POLY-PHASE7"
+      ],
+      "trelloCardId": null,
+      "trelloList": "to-dos",
+      "labels": [
+        "Testing"
+      ],
+      "context": {
+        "affectedFiles": [
+          "tests/load/locustfile.py",
+          "README.md"
+        ],
+        "verifyCommands": {
+          "load_test": "locust -f tests/load/locustfile.py --host=http://localhost:8420 --headless -u 10 -r 2 -t 1m"
+        }
+      },
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "TR-POLY-PHASE9",
+      "title": "Phase 9: VPS Deployment & Production Validation",
+      "description": "[Deployment][Critical] Deploy to VPS with feature flag, run smoke tests, monitor for 24 hours, then enable full rollout.",
+      "acceptanceCriteria": [
+        "PHASE 9 - VPS_BACKUP: ssh vps 'cp -r /var/www/virtuosocrypto.com/polyclawd /var/www/virtuosocrypto.com/polyclawd.backup_$(date +%Y%m%d)'",
+        "PHASE 9 - CRON_PAUSE: ssh vps 'crontab -l > ~/polyclawd-cron-backup.txt' - backup cron jobs (do NOT delete with crontab -r, just document them)",
+        "PHASE 9 - GIT_PUSH: git push origin refactor/modular-architecture",
+        "PHASE 9 - VPS_PULL: ssh vps 'cd /var/www/virtuosocrypto.com/polyclawd && git fetch && git checkout refactor/modular-architecture && git pull'",
+        "PHASE 9 - VPS_DEPS: ssh vps 'cd /var/www/virtuosocrypto.com/polyclawd && pip install aiofiles slowapi'",
+        "PHASE 9 - VPS_ENV: ssh vps 'cd /var/www/virtuosocrypto.com/polyclawd && echo \"POLYCLAWD_API_KEYS=prod-key-here\" >> .env'",
+        "PHASE 9 - VPS_RESTART: ssh vps 'sudo systemctl restart polyclawd-api'",
+        "PHASE 9 - VPS_STATUS: ssh vps 'sudo systemctl status polyclawd-api' - verify active (running)",
+        "PHASE 9 - SMOKE_HEALTH: curl -s https://virtuosocrypto.com/polyclawd/health | jq - verify healthy",
+        "PHASE 9 - SMOKE_BALANCE: curl -s https://virtuosocrypto.com/polyclawd/api/balance | jq - verify returns usdc",
+        "PHASE 9 - SMOKE_SIGNALS: curl -s https://virtuosocrypto.com/polyclawd/api/signals | jq - verify returns signals",
+        "PHASE 9 - SMOKE_ENGINE: curl -s https://virtuosocrypto.com/polyclawd/api/engine/status | jq - verify returns status",
+        "PHASE 9 - LOGS_CHECK: ssh vps 'journalctl -u polyclawd-api --since \"10 minutes ago\" | grep -E \"ERROR|Exception\"' - should be empty",
+        "PHASE 9 - MONITOR_1H: Monitor for 1 hour - no errors in logs",
+        "PHASE 9 - CRON_RESTORE: ssh vps 'crontab ~/polyclawd-cron-backup.txt' - restore cron jobs",
+        "PHASE 9 - MONITOR_24H: Monitor for 24 hours - no regression in functionality",
+        "PHASE 9 - MERGE_PR: Create PR, get approval, merge to main",
+        "PHASE 9 - TAG_RELEASE: git tag v2.0.0-modular && git push --tags",
+        "PHASE 9 - CLEANUP: Remove baseline snapshots, backup files if all stable",
+        "VALIDATE: VPS running refactored code, no errors for 24h, cron jobs working, PR merged"
+      ],
+      "priority": 11,
+      "passes": true,
+      "dependsOn": [
+        "TR-POLY-PHASE8"
+      ],
+      "trelloCardId": null,
+      "trelloList": "to-dos",
+      "labels": [
+        "Deployment"
+      ],
+      "context": {
+        "affectedFiles": [],
+        "verifyCommands": {
+          "vps_status": "ssh vps 'sudo systemctl status polyclawd-api'",
+          "vps_health": "curl -s https://virtuosocrypto.com/polyclawd/health",
+          "vps_logs": "ssh vps 'journalctl -u polyclawd-api --since \"10 minutes ago\" | tail -20'"
+        }
+      },
+      "completionNotes": "Completed by agent"
+    }
+  ],
+  "metadata": {
+    "createdAt": "2026-02-07T12:00:00Z",
+    "updatedAt": "2026-02-08T01:13:58.420Z",
+    "estimatedHours": 20,
+    "sourceDocument": "docs/REFACTORING_PLAN.md",
+    "crossAgentReviewScore": "7.5/10",
+    "riskLevel": "High (mitigated)",
+    "ralphReviewApplied": true,
+    "reviewFixes": [
+      "Added verify_responses.sh and verify_endpoints.sh scripts to Phase 0",
+      "Added pytest.ini, conftest.py, api/__init__.py creation to Phase 0",
+      "Added locust to dependencies in Phase 0",
+      "Added test directory creation for security and load tests",
+      "Added READ_SOURCE instructions to Phases 3-5 to extract logic from main.py",
+      "Added extractEndpoints hints to help agent find correct code locations",
+      "Added referenceFiles to context sections",
+      "Fixed dangerous crontab -r command in Phase 9",
+      "SPLIT Phase 5 into Phase 5A (signals.py) and Phase 5B (engine.py) to reduce complexity",
+      "Phase 5A: signals, whales, confidence, rotations (~15 endpoints)",
+      "Phase 5B: engine, alerts, LLM, Kelly, phases (~12 endpoints)",
+      "Updated all subsequent phase dependencies and priorities"
+    ],
+    "totalPhases": 11
+  }
+}
