@@ -1512,3 +1512,51 @@ async def get_rotation_candidates():
     except Exception as e:
         logger.exception(f"Rotation candidates failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to get rotation candidates")
+
+
+@router.get("/signals/shadow-performance")
+async def get_shadow_performance():
+    """Get shadow trading performance stats and daily summaries."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from shadow_tracker import get_trade_stats, get_performance_history, get_open_trades
+        stats = get_trade_stats()
+        history = get_performance_history(30)
+        open_trades = get_open_trades()
+        return {
+            "stats": stats,
+            "daily_history": history[:14],
+            "open_trades_count": len(open_trades),
+            "open_trades": [
+                {
+                    "market_id": t["market_id"],
+                    "market": (t.get("market") or "")[:60],
+                    "side": t["side"],
+                    "entry_price": t["entry_price"],
+                    "confidence": t["confidence"],
+                    "category": t["category"],
+                }
+                for t in open_trades[:20]
+            ],
+        }
+    except Exception as e:
+        logger.exception(f"Shadow performance failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/signals/shadow-resolve")
+async def trigger_shadow_resolution():
+    """Manually trigger shadow trade resolution."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from shadow_tracker import resolve_trades, generate_daily_summary
+        resolve_result = resolve_trades(batch_size=20, delay=0.3)
+        summary = generate_daily_summary()
+        return {"resolution": resolve_result, "daily_summary": summary}
+    except Exception as e:
+        logger.exception(f"Shadow resolution failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
