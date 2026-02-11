@@ -4,6 +4,12 @@ Polyclawd Trading API - FastAPI Application Factory
 
 Paper trading + Simmer SDK live trading integration.
 All endpoints are defined in api/routes/ modules.
+
+Performance enhancements:
+- #9:  Per-API connection pooling with keep-alive
+- #2:  WebSocket feeds initialized at startup
+- #3:  In-memory market state store
+- #10: Event-driven engine wired to WebSocket events
 """
 import logging
 from contextlib import asynccontextmanager
@@ -49,7 +55,14 @@ def _rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan - startup and shutdown."""
+    """Application lifespan - startup and shutdown.
+
+    Initializes all performance-critical subsystems:
+    - Per-API connection pools (#9)
+    - WebSocket feeds (#2)
+    - In-memory market state (#3, #8)
+    - Event-driven engine wiring (#10)
+    """
     global http_client
 
     # Startup
@@ -61,9 +74,29 @@ async def lifespan(app: FastAPI):
     settings.POLY_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Create shared HTTP client
+    # Create shared HTTP client (legacy)
     http_client = httpx.AsyncClient(timeout=30.0)
     logger.info("HTTP client initialized")
+
+    # Enhancement #9: Initialize per-API connection pools
+    try:
+        from api.services.http_client import api_pool
+        await api_pool.initialize()
+        logger.info("Per-API connection pools initialized")
+    except Exception as e:
+        logger.warning(f"API pool init failed (non-fatal): {e}")
+
+    # Enhancement #2 + #10: Initialize WebSocket feeds with event-driven handler
+    try:
+        from api.services.ws_feeds import ws_manager, handle_polymarket_price_update
+        from api.routes.engine import event_driven_handler
+
+        ws_manager.on_event(handle_polymarket_price_update)
+        ws_manager.on_event(event_driven_handler)
+        await ws_manager.start_all()
+        logger.info("WebSocket feeds started")
+    except Exception as e:
+        logger.warning(f"WebSocket init failed (non-fatal, will use polling): {e}")
 
     yield
 
@@ -71,6 +104,22 @@ async def lifespan(app: FastAPI):
     if http_client:
         await http_client.aclose()
         logger.info("HTTP client closed")
+
+    # Close per-API pools
+    try:
+        from api.services.http_client import api_pool
+        await api_pool.close_all()
+    except Exception:
+        pass
+
+    # Stop WebSocket feeds
+    try:
+        from api.services.ws_feeds import ws_manager
+        await ws_manager.stop_all()
+    except Exception:
+        pass
+
+    logger.info("Polyclawd shutdown complete")
 
 
 # Application factory
