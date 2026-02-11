@@ -75,16 +75,40 @@ WEIGHT_THETA = 0.20
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 
 def fetch_kalshi_markets(limit: int = 200, status: str = "open") -> List[Dict]:
-    """Fetch active markets from Kalshi."""
+    """Fetch active markets from Kalshi via events endpoint (includes volume data)."""
+    all_markets = []
+    try:
+        url = f"{KALSHI_API}/events?limit=100&status={status}&with_nested_markets=true"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+            for event in data.get("events", []):
+                series = event.get("series_ticker", "")
+                category = event.get("category", "")
+                for m in event.get("markets", []):
+                    m["_series_ticker"] = series
+                    m["_event_category"] = category
+                    # Convert volume from string
+                    m["volume"] = int(float(m.get("volume_fp", "0") or "0"))
+                    all_markets.append(m)
+    except Exception as e:
+        logger.warning(f"Kalshi events API error: {e}")
+    
+    # Also try direct markets endpoint with cursor pagination
     try:
         url = f"{KALSHI_API}/markets?limit={limit}&status={status}"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
-            return data.get("markets", [])
+            seen = {m.get("ticker") for m in all_markets}
+            for m in data.get("markets", []):
+                if m.get("ticker") not in seen:
+                    m["volume"] = int(float(m.get("volume_fp", "0") or "0"))
+                    all_markets.append(m)
     except Exception as e:
-        logger.warning(f"Kalshi API error: {e}")
-        return []
+        logger.warning(f"Kalshi markets API error: {e}")
+    
+    return all_markets
 
 
 def fetch_polymarket_markets(limit: int = 50) -> List[Dict]:
@@ -218,12 +242,22 @@ def scan_kalshi_signals() -> List[Dict]:
         if category in EFFICIENT_CATEGORIES:
             continue
         
-        # Check if mispriced category
+        # Check if known mispriced category OR entertainment/pop culture (historically mispriced)
         cat_info = MISPRICED_CATEGORIES.get(category)
-        if not cat_info:
+        series = market.get("_series_ticker", "")
+        event_cat = market.get("_event_category", "").lower()
+        
+        # Dynamic category detection: entertainment, pop culture, and novelty markets
+        # tend to be mispriced (from backtest: non-sports categories avg 15%+ error)
+        is_dynamic_mispriced = event_cat in (
+            "entertainment", "culture", "music", "tv", "movies", 
+            "science", "technology", "world", "climate"
+        )
+        
+        if not cat_info and not is_dynamic_mispriced:
             continue
         
-        category_edge = cat_info['error']
+        category_edge = cat_info['error'] if cat_info else 0.15  # Default 15% for dynamic
         if category_edge * 100 < MIN_EDGE_PCT:
             continue
         
@@ -270,7 +304,7 @@ def scan_kalshi_signals() -> List[Dict]:
             "market_id": ticker,
             "event_ticker": event_ticker,
             "category": category,
-            "category_tier": cat_info['tier'],
+            "category_tier": cat_info['tier'] if cat_info else 'dynamic',
             "side": side,
             "price": price / 100.0,
             "confidence": conf["confidence"],
