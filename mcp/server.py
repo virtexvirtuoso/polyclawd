@@ -487,6 +487,23 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}, "required": []}
     },
     
+    # === MISPRICED CATEGORY STRATEGY ===
+    {
+        "name": "polyclawd_mispriced_category",
+        "description": "Get mispriced category signals from MispricedCategoryWhale strategy (Kalshi + Polymarket). Backtested: 75% WR, 1.25 Sharpe across 155K trades. Scans for mispriced entertainment, weather, crypto, tech categories with volume/whale confirmation.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "polyclawd_shadow_performance",
+        "description": "Get shadow/paper trading performance stats — win rate, Sharpe, drawdown, daily summaries, open trades. Tracks what the strategy WOULD have traded.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "polyclawd_shadow_resolve",
+        "description": "Trigger shadow trade resolution — checks Kalshi API for resolved markets, calculates P&L, generates daily summary.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
+    },
+
     # === SYSTEM ===
     {
         "name": "polyclawd_health",
@@ -694,6 +711,14 @@ def handle_tool_call(name: str, arguments: dict) -> Any:
     # New: Kalshi entertainment
     elif name == "polyclawd_kalshi_entertainment":
         return api_get("/api/kalshi/entertainment")
+    
+    # Mispriced Category Strategy
+    elif name == "polyclawd_mispriced_category":
+        return api_get("/api/signals/mispriced-category")
+    elif name == "polyclawd_shadow_performance":
+        return api_get("/api/signals/shadow-performance")
+    elif name == "polyclawd_shadow_resolve":
+        return api_post("/api/signals/shadow-resolve")
     
     # System
     elif name == "polyclawd_health":
