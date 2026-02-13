@@ -846,7 +846,14 @@ def aggregate_all_signals() -> dict:
     except Exception:
         pass  # Non-critical — IC tracking failure must not block signal generation
 
-    all_signals.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+    # Boost daily-expiry markets: they resolve fast, accelerating IC feedback loop
+    def _sort_key(s):
+        conf = s.get("confidence", 0)
+        dtc = s.get("days_to_close", 30)
+        # Daily markets get +10 confidence boost in sort order (not stored)
+        daily_boost = 10 if dtc <= 1.5 else (5 if dtc <= 3 else 0)
+        return conf + daily_boost
+    all_signals.sort(key=_sort_key, reverse=True)
 
     actionable = [s for s in all_signals if s.get("side") not in ["NEUTRAL", "RESEARCH", "ARB", ""]]
     research = [s for s in all_signals if s.get("side") == "RESEARCH"]
