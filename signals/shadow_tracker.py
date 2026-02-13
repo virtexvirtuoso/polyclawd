@@ -73,7 +73,7 @@ def _init_tables(conn: sqlite3.Connection):
             exit_price REAL,
             pnl REAL,
             snapshot_date TEXT,
-            UNIQUE(market_id, side, snapshot_date)
+            UNIQUE(market_id, snapshot_date)
         );
 
         CREATE TABLE IF NOT EXISTS daily_summaries (
@@ -244,9 +244,9 @@ def save_signal_snapshot(signals: List[Dict], source: str = "all"):
 def log_shadow_trade(signal: Dict) -> bool:
     """Log a signal as a shadow trade in SQLite.
     
-    Dedup: only one open (unresolved) trade per market_id+side.
-    If an open trade already exists for this market+side, update its
-    confidence/price/volume but don't create a duplicate.
+    Dedup: only one open (unresolved) trade per market_id (regardless of side).
+    If an open trade exists for this market, update it (including side if changed).
+    This prevents conflicting YES/NO trades on the same market.
     """
     conn = get_db()
     today = date.today().isoformat()
@@ -254,13 +254,22 @@ def log_shadow_trade(signal: Dict) -> bool:
     side = signal.get("side", "")
 
     try:
-        # Check for existing open trade on same market+side
+        # Check for existing open trade on same market (ANY side)
         existing = conn.execute(
-            "SELECT id, confidence FROM shadow_trades WHERE market_id = ? AND side = ? AND resolved = 0",
-            (market_id, side)
+            "SELECT id, side, confidence FROM shadow_trades WHERE market_id = ? AND resolved = 0",
+            (market_id,)
         ).fetchone()
 
         if existing:
+            existing_side = existing[1]
+            if existing_side != side:
+                # Side flipped — this means the signal is unstable, skip
+                logger.warning(
+                    f"Shadow trade side conflict: {market_id} was {existing_side}, "
+                    f"now {side} — keeping original, skipping new signal"
+                )
+                conn.close()
+                return False
             # Update existing trade with latest data (price, confidence, volume)
             conn.execute("""
                 UPDATE shadow_trades

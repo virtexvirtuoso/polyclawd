@@ -505,7 +505,15 @@ def scan_kalshi_signals() -> List[Dict]:
             category=category,
         )
 
-        side = "YES" if price >= 50 else "NO"
+        # Fade the market: in mispriced categories, bet AGAINST the crowd
+        # Price > 50 means market is confident YES → we bet NO (fade)
+        # Price < 50 means market is confident NO → we bet YES (fade)
+        # Near 50 (contested zone) → skip, no clear edge direction
+        if 45 <= price <= 55:
+            continue  # too close to 50/50, no directional edge
+        side = "NO" if price > 50 else "YES"
+        # fair_value is the corrected probability after category edge
+        fair_value = (price / 100.0) - category_edge if price > 50 else (price / 100.0) + category_edge
 
         signals.append({
             "source": "mispriced_category",
@@ -608,7 +616,11 @@ def scan_polymarket_signals() -> List[Dict]:
             category=tier,
         )
 
-        side = "YES" if price_cents >= 50 else "NO"
+        # Fade the market: bet AGAINST the crowd in mispriced categories
+        if 45 <= price_cents <= 55:
+            continue  # too close to 50/50, no directional edge
+        side = "NO" if price_cents > 50 else "YES"
+        fair_value = yes_price - edge if price_cents > 50 else yes_price + edge
         market_id = market.get("conditionId", market.get("id", ""))
         slug = market.get("slug", "")
 
