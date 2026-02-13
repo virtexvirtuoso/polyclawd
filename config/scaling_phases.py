@@ -132,26 +132,31 @@ def calculate_position_size(
     win_rate: float = 0.55,
     win_streak: int = 0,
     source_agreement: int = 1,
+    market_price: float = 0.50,
 ) -> Dict[str, Any]:
     """
     Calculate position size with all factors.
-    
+
     Args:
         balance: Current account balance
         confidence: Signal confidence (0-100)
         win_rate: Recent win rate (0-1)
         win_streak: Current streak (+ve = wins, -ve = losses)
         source_agreement: Number of agreeing signal sources
-    
+        market_price: Market price for payout ratio (0.01-0.99, default 0.50)
+
     Returns:
         Dict with position_usd, position_pct, kelly, phase info
     """
     phase_config = get_phase_config(balance)
-    
-    # Calculate Kelly fraction
-    # Kelly = (p * b - q) / b where p = win prob, q = 1-p, b = odds (1:1 assumed)
+
+    # Calculate Kelly fraction for variable-odds prediction markets
+    # Kelly = (b * p - q) / b where p = win prob, q = 1-p, b = payout ratio
     p = confidence / 100
-    kelly = (2 * p - 1)  # Simplified for even odds
+    q = 1.0 - p
+    mp = max(0.01, min(0.99, market_price))
+    b = (1.0 - mp) / mp  # payout ratio (e.g., price=0.25 -> b=3.0)
+    kelly = (b * p - q) / b if b > 0 else 0
     kelly = max(0, kelly)  # No negative Kelly
     
     # Adjust Kelly based on recent performance
@@ -193,6 +198,8 @@ def calculate_position_size(
         "position_pct": round(position_pct, 4),
         "kelly_raw": round(kelly, 4),
         "kelly_adjusted": round(adjusted_kelly, 4),
+        "market_price": market_price,
+        "payout_ratio": round(b, 4),
         "phase": phase_config.name,
         "phase_config": phase_config.to_dict(),
         "multipliers": {
@@ -265,10 +272,11 @@ if __name__ == "__main__":
         phase = get_phase_config(bal)
         print(f"${bal:>7,} → {phase.name:15} | Position: {phase.position_pct:.0%} | Max: {phase.max_positions} positions")
     
-    print("\nPosition Sizing Test (confidence=60, balance=$500):")
+    print("\nPosition Sizing Test (confidence=60, balance=$500, market_price=0.40):")
     print("-" * 60)
-    result = calculate_position_size(500, 60, win_rate=0.55, win_streak=2, source_agreement=2)
+    result = calculate_position_size(500, 60, win_rate=0.55, win_streak=2, source_agreement=2, market_price=0.40)
     print(f"Position: ${result['position_usd']:.2f} ({result['position_pct']:.1%})")
-    print(f"Kelly: {result['kelly_raw']:.2f} → {result['kelly_adjusted']:.2f} (adjusted)")
+    print(f"Kelly: {result['kelly_raw']:.4f} → {result['kelly_adjusted']:.4f} (adjusted)")
+    print(f"Market Price: {result['market_price']} | Payout Ratio: {result['payout_ratio']:.2f}")
     print(f"Phase: {result['phase']}")
     print(f"Multipliers: {result['multipliers']}")

@@ -770,6 +770,7 @@ async def simulate_position_size(
     win_rate: float = Query(0.55, ge=0, le=1, description="Recent win rate 0-1"),
     win_streak: int = Query(0, description="Current win streak"),
     source_agreement: int = Query(1, ge=1, description="Number of agreeing sources"),
+    market_price: float = Query(0.50, ge=0.01, le=0.99, description="Market price for payout ratio"),
 ):
     """Simulate position sizing for given parameters."""
     if not PHASE_SCALING_ENABLED:
@@ -781,6 +782,7 @@ async def simulate_position_size(
         win_rate=win_rate,
         win_streak=win_streak,
         source_agreement=source_agreement,
+        market_price=market_price,
     )
 
     return {
@@ -790,6 +792,7 @@ async def simulate_position_size(
             "win_rate": win_rate,
             "win_streak": win_streak,
             "source_agreement": source_agreement,
+            "market_price": market_price,
         },
         "result": result,
     }

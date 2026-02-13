@@ -19,9 +19,17 @@ COINGECKO_BTC = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ether
 SNAPSHOT_INTERVAL = 1800  # 30 minutes
 
 
+def _get_conn(db_path: str = None) -> sqlite3.Connection:
+    """Get SQLite connection with WAL mode and busy timeout."""
+    conn = sqlite3.connect(db_path or str(DB_PATH), timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
 def init_db(db_path: str = None):
     """Create alpha_snapshots table if not exists."""
-    conn = sqlite3.connect(db_path or str(DB_PATH))
+    conn = _get_conn(db_path)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS alpha_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,7 +96,7 @@ def snapshot_alpha_scores(db_path: str = None) -> dict:
         results["errors"].append("No signals in dashboard overview")
         return results
 
-    conn = sqlite3.connect(db_path or str(DB_PATH))
+    conn = _get_conn(db_path)
 
     for s in signals:
         symbol = s.get("symbol", "")
@@ -131,7 +139,7 @@ def snapshot_btc_eth(db_path: str = None) -> dict:
                 resp.raise_for_status()
                 data = resp.json()
 
-            conn = sqlite3.connect(db_path or str(DB_PATH))
+            conn = _get_conn(db_path)
             conn.execute("""
                 INSERT INTO price_snapshots
                 (timestamp, symbol, price, change_24h, volume_24h, 
@@ -174,7 +182,7 @@ def run_snapshot(db_path: str = None) -> dict:
 def get_score_history(symbol: str, hours: int = 24, db_path: str = None) -> list:
     """Get confluence score history for a symbol."""
     init_db(db_path)
-    conn = sqlite3.connect(db_path or str(DB_PATH))
+    conn = _get_conn(db_path)
     conn.row_factory = sqlite3.Row
     cutoff = time.time() - (hours * 3600)
 
@@ -194,7 +202,7 @@ def get_score_history(symbol: str, hours: int = 24, db_path: str = None) -> list
 def get_price_history(symbol: str, hours: int = 24, db_path: str = None) -> list:
     """Get price snapshot history for BTC/ETH."""
     init_db(db_path)
-    conn = sqlite3.connect(db_path or str(DB_PATH))
+    conn = _get_conn(db_path)
     conn.row_factory = sqlite3.Row
     cutoff = time.time() - (hours * 3600)
 
@@ -249,6 +257,53 @@ def get_btc_price_delta(hours: int = 2, db_path: str = None) -> dict:
         "delta_pct": round(pct_delta, 3),
         "hours": hours,
         "snapshots": len(history)
+    }
+
+
+def score_velocity_modifier(symbol: str, hours: int = 2, db_path: str = None) -> dict:
+    """Convert score delta into a confidence multiplier [0.7, 1.3].
+
+    Positive delta (score improving) -> multiplier > 1.0
+    Negative delta (score deteriorating) -> multiplier < 1.0
+    Insufficient data -> multiplier = 1.0 (neutral)
+
+    Args:
+        symbol: Crypto symbol (e.g., "BTCUSDT")
+        hours: Lookback period for delta calculation
+        db_path: Optional DB path override
+
+    Returns:
+        Dict with multiplier, delta, symbol, and metadata
+    """
+    delta_data = get_score_delta(symbol, hours, db_path)
+    delta = delta_data.get("delta")
+
+    if delta is None or delta_data.get("snapshots", 0) < 2:
+        return {
+            "multiplier": 1.0,
+            "delta": None,
+            "symbol": symbol,
+            "reason": "insufficient_data",
+            "hours": hours,
+        }
+
+    # Normalize delta to [-1, 1] range
+    # Typical score deltas are ±10 over 2 hours; 5.0 is the half-range
+    NORM_THRESHOLD = 5.0
+    normalized = max(-1.0, min(1.0, delta / NORM_THRESHOLD))
+
+    # Linear mapping to [0.7, 1.3]
+    multiplier = 1.0 + (normalized * 0.3)
+
+    return {
+        "multiplier": round(multiplier, 4),
+        "delta": delta,
+        "normalized": round(normalized, 4),
+        "symbol": symbol,
+        "current_score": delta_data.get("current_score"),
+        "signal_type": delta_data.get("signal_type"),
+        "snapshots": delta_data.get("snapshots"),
+        "hours": hours,
     }
 
 

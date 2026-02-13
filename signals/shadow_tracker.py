@@ -478,7 +478,7 @@ def generate_daily_summary(target_date: Optional[str] = None) -> Dict[str, Any]:
     pnl_values = list(daily_pnls.values())
     if len(pnl_values) >= 2:
         mean_pnl = sum(pnl_values) / len(pnl_values)
-        std_pnl = (sum((p - mean_pnl) ** 2 for p in pnl_values) / len(pnl_values)) ** 0.5
+        std_pnl = (sum((p - mean_pnl) ** 2 for p in pnl_values) / (len(pnl_values) - 1)) ** 0.5
         sharpe = (mean_pnl / std_pnl * math.sqrt(252)) if std_pnl > 0 else 0
     else:
         sharpe = 0

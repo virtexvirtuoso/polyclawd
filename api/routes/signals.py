@@ -12,6 +12,8 @@ This router consolidates all signal-related endpoints:
 - /confidence/* - Bayesian confidence scoring
 - /conflicts/* - Signal conflict analysis
 - /rotations - Position rotation history
+- /signals/ic-report - IC measurement across all sources
+- /signals/ic/{source} - Per-source IC measurement
 """
 import json
 import logging
@@ -831,6 +833,18 @@ def aggregate_all_signals() -> dict:
             "agreement": bayesian_result["agreement_count"],
             "composite_mult": bayesian_result["composite_multiplier"]
         }
+
+    # Record predictions for IC (Information Coefficient) tracking
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from ic_tracker import record_signal_prediction
+        for sig in all_signals:
+            if sig.get("market_id") and sig.get("side") not in ["NEUTRAL", "RESEARCH", ""]:
+                record_signal_prediction(sig)
+    except Exception:
+        pass  # Non-critical — IC tracking failure must not block signal generation
 
     all_signals.sort(key=lambda x: x.get("confidence", 0), reverse=True)
 
@@ -1668,4 +1682,36 @@ async def get_resolution_certainty():
         return get_resolution_summary()
     except Exception as e:
         logger.exception(f"Resolution certainty scan failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/signals/ic-report")
+async def get_ic_report(window_days: int = Query(30, ge=1, le=365)):
+    """IC (Information Coefficient) report across all signal sources.
+
+    Measures Spearman rank correlation between predicted confidence and outcome.
+    IC < 0.03 = KILL (noise), IC < 0.05 = WARN (marginal), IC >= 0.05 = OK (alpha).
+    """
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from ic_tracker import ic_report
+        return ic_report(window_days=window_days)
+    except Exception as e:
+        logger.exception(f"IC report failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/signals/ic/{source}")
+async def get_ic_for_source(source: str, window_days: int = Query(30, ge=1, le=365)):
+    """IC measurement for a specific signal source."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from ic_tracker import calculate_ic
+        return calculate_ic(source=source, window_days=window_days)
+    except Exception as e:
+        logger.exception(f"IC calculation for {source} failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))

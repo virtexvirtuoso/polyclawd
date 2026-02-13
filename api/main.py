@@ -77,6 +77,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Polyclawd Trading API",
     version="2.1.0",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
     lifespan=lifespan,
 )
 

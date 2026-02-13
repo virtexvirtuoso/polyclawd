@@ -89,6 +89,22 @@ WEIGHT_VOLUME_SPIKE = 0.25
 WEIGHT_WHALE_ACTIVITY = 0.20
 WEIGHT_THETA = 0.20
 
+# Category → crypto symbol mapping for velocity modifier (Strategy 1)
+CATEGORY_CRYPTO_MAP = {
+    # Polymarket tier names
+    "tech": "BTCUSDT",
+    "dynamic": "BTCUSDT",
+    # Kalshi category prefixes
+    "KXCRYPTO": "BTCUSDT",
+    "KXETF": "BTCUSDT",
+    "KXSTONKS": "BTCUSDT",
+    # Crypto keyword matches
+    "bitcoin": "BTCUSDT",
+    "ethereum": "ETHUSDT",
+    "solana": "SOLUSDT",
+    "crypto": "BTCUSDT",
+}
+
 # Cache
 _cache = {"data": None, "timestamp": 0}
 CACHE_TTL = 60  # seconds
@@ -215,6 +231,7 @@ def calculate_signal_confidence(
     days_to_close: float,
     avg_category_volume: float = 1000,
     whale_threshold: int = 10000,
+    category: str = "",
 ) -> Dict[str, Any]:
     """Calculate composite confidence score for a market signal."""
     # 1. Category edge score (0-100)
@@ -273,6 +290,24 @@ def calculate_signal_confidence(
     elif confirmations >= 2:
         confidence *= 1.10
 
+    # Strategy 1: Score velocity modifier for crypto-related categories
+    velocity_data = {"multiplier": 1.0, "applied": False}
+    crypto_symbol = CATEGORY_CRYPTO_MAP.get(category.lower() if category else "")
+    if crypto_symbol:
+        try:
+            from alpha_score_tracker import score_velocity_modifier
+            vel = score_velocity_modifier(crypto_symbol, hours=2)
+            if vel["multiplier"] != 1.0:
+                confidence *= vel["multiplier"]
+                velocity_data = {
+                    "multiplier": vel["multiplier"],
+                    "delta": vel.get("delta"),
+                    "symbol": crypto_symbol,
+                    "applied": True,
+                }
+        except Exception:
+            pass  # Graceful degradation if alpha tracker unavailable
+
     confidence = min(95, confidence)
 
     return {
@@ -283,6 +318,7 @@ def calculate_signal_confidence(
         "theta_score": round(theta_score, 1),
         "confirmations": confirmations,
         "category_edge_pct": round(category_edge * 100, 1),
+        "velocity_modifier": velocity_data,
     }
 
 
@@ -466,6 +502,7 @@ def scan_kalshi_signals() -> List[Dict]:
             days_to_close=days_to_close,
             avg_category_volume=avg_cat_vol.get(category, 1000),
             whale_threshold=WHALE_VOLUME_KALSHI,
+            category=category,
         )
 
         side = "YES" if price >= 50 else "NO"
@@ -568,6 +605,7 @@ def scan_polymarket_signals() -> List[Dict]:
             days_to_close=days_to_close,
             avg_category_volume=avg_volume,
             whale_threshold=WHALE_VOLUME_POLYMARKET,
+            category=tier,
         )
 
         side = "YES" if price_cents >= 50 else "NO"
