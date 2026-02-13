@@ -28,3 +28,16 @@ fig
 *.tar.zst
 output
 .tmp
+
+# Untracked local artifacts
+.ralph-tui/
+CLAUDE.md
+api/main.py.backup
+config/polymarket.env
+logs/
+storage/
+tests/baseline_snapshots/
+tests/load/
+odds/vegas_cache.json
+mcp/MCP_OPTIMIZATION.md
+mcp/polyrouter/
