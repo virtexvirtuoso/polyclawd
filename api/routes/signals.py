@@ -1651,3 +1651,21 @@ async def process_portfolio_signals():
     except Exception as e:
         logger.exception(f"Portfolio signal processing failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Resolution Certainty Scanner
+# ============================================================================
+
+@router.get("/signals/resolution-certainty")
+async def get_resolution_certainty():
+    """Scan open markets for near-certain outcomes using real-time data."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from resolution_scanner import get_resolution_summary
+        return get_resolution_summary()
+    except Exception as e:
+        logger.exception(f"Resolution certainty scan failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
