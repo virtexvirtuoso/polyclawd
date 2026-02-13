@@ -503,6 +503,17 @@ TOOLS = [
         "description": "Trigger shadow trade resolution — checks Kalshi API for resolved markets, calculates P&L, generates daily summary.",
         "inputSchema": {"type": "object", "properties": {}, "required": []}
     },
+    # === AI MODEL TRACKER ===
+    {
+        "name": "polyclawd_ai_model_tracker",
+        "description": "Get Arena leaderboard rankings and AI model market edge signals. Shows which company leads, score gaps, and new model detections.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "polyclawd_ai_model_trends",
+        "description": "Get Arena score trends over recent days. Track ranking changes and momentum.",
+        "inputSchema": {"type": "object", "properties": {"days": {"type": "integer", "description": "Number of days to look back (1-90)", "default": 7}}, "required": []}
+    },
 
     # === SYSTEM ===
     {
@@ -720,6 +731,13 @@ def handle_tool_call(name: str, arguments: dict) -> Any:
     elif name == "polyclawd_shadow_resolve":
         return api_post("/api/signals/shadow-resolve")
     
+    
+    # AI Model Tracker
+    elif name == "polyclawd_ai_model_tracker":
+        return api_get("/api/signals/ai-models")
+    elif name == "polyclawd_ai_model_trends":
+        days = arguments.get("days", 7)
+        return api_get(f"/api/signals/ai-models/trends?days={days}")
     # System
     elif name == "polyclawd_health":
         return api_get("/api/health")

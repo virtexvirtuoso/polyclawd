@@ -1560,3 +1560,94 @@ async def trigger_shadow_resolution():
     except Exception as e:
         logger.exception(f"Shadow resolution failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# AI Model Market Tracker
+# ============================================================================
+
+@router.get("/signals/ai-models")
+async def get_ai_model_tracker():
+    """Get Arena leaderboard rankings and AI model market signals."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from ai_model_tracker import get_arena_summary
+        return get_arena_summary()
+    except Exception as e:
+        logger.exception(f"AI model tracker failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/signals/ai-models/trends")
+async def get_ai_model_trends(days: int = Query(default=7, ge=1, le=90)):
+    """Get Arena score trends over recent days."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from ai_model_tracker import get_score_trends
+        return get_score_trends(days=days)
+    except Exception as e:
+        logger.exception(f"AI model trends failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Paper Portfolio
+# ============================================================================
+
+@router.get("/portfolio/status")
+async def get_portfolio_status():
+    """Get current paper portfolio status — bankroll, positions, P&L."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from paper_portfolio import get_portfolio_status
+        return get_portfolio_status()
+    except Exception as e:
+        logger.exception(f"Portfolio status failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/portfolio/positions")
+async def get_portfolio_positions(status: str = Query(default="all")):
+    """Get paper positions. Filter by status: all, open, closed."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from paper_portfolio import get_positions
+        return get_positions(status=status)
+    except Exception as e:
+        logger.exception(f"Portfolio positions failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/portfolio/history")
+async def get_portfolio_history(limit: int = Query(default=50)):
+    """Get closed position history with P&L."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from paper_portfolio import get_position_history
+        return get_position_history(limit=limit)
+    except Exception as e:
+        logger.exception(f"Portfolio history failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/portfolio/process-signals")
+async def process_portfolio_signals():
+    """Run signal pipeline and auto-open paper positions for qualifying signals."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from paper_portfolio import process_signals
+        from mispriced_category_signal import get_mispriced_category_signals
+        result = get_mispriced_category_signals(); signals = result.get("signals", [])
+        return process_signals(signals)
+    except Exception as e:
+        logger.exception(f"Portfolio signal processing failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

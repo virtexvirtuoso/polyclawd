@@ -242,25 +242,61 @@ def save_signal_snapshot(signals: List[Dict], source: str = "all"):
 # ============================================================================
 
 def log_shadow_trade(signal: Dict) -> bool:
-    """Log a signal as a shadow trade in SQLite."""
+    """Log a signal as a shadow trade in SQLite.
+    
+    Dedup: only one open (unresolved) trade per market_id+side.
+    If an open trade already exists for this market+side, update its
+    confidence/price/volume but don't create a duplicate.
+    """
     conn = get_db()
     today = date.today().isoformat()
+    market_id = signal.get("market_id", "")
+    side = signal.get("side", "")
 
     try:
+        # Check for existing open trade on same market+side
+        existing = conn.execute(
+            "SELECT id, confidence FROM shadow_trades WHERE market_id = ? AND side = ? AND resolved = 0",
+            (market_id, side)
+        ).fetchone()
+
+        if existing:
+            # Update existing trade with latest data (price, confidence, volume)
+            conn.execute("""
+                UPDATE shadow_trades
+                SET entry_price = ?, confidence = ?, confirmations = ?,
+                    days_to_close = ?, volume = ?, reasoning = ?,
+                    snapshot_date = ?
+                WHERE id = ?
+            """, (
+                signal.get("price"),
+                signal.get("confidence"),
+                signal.get("confirmations"),
+                signal.get("days_to_close"),
+                signal.get("volume"),
+                signal.get("reasoning", "")[:500],
+                today,
+                existing[0],
+            ))
+            conn.commit()
+            conn.close()
+            logger.info(f"Shadow trade updated (dedup): {market_id} {side}")
+            return True
+
         conn.execute("""
-            INSERT OR IGNORE INTO shadow_trades
+            INSERT INTO shadow_trades
             (timestamp, market_id, market, category, category_tier, platform,
              side, entry_price, confidence, confirmations, days_to_close,
              volume, reasoning, snapshot_date)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             datetime.now(timezone.utc).isoformat(),
-            signal.get("market_id", ""),
+            market_id,
             signal.get("market", "")[:200],
             signal.get("category", ""),
             signal.get("category_tier", ""),
             signal.get("platform", "kalshi"),
-            signal.get("side", ""),
+            side,
             signal.get("price"),
             signal.get("confidence"),
             signal.get("confirmations"),

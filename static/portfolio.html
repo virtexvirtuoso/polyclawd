@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Polyclawd — Paper Portfolio</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  :root {
+    --bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a26;--border:#2a2a3a;
+    --accent:#6c5ce7;--accent2:#a29bfe;--green:#00e676;--red:#ff5252;
+    --orange:#ffab40;--cyan:#18ffff;--text:#e8e8f0;--text2:#8888a0;--gold:#ffd700;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,sans-serif;min-height:100vh}
+  .noise{position:fixed;top:0;left:0;width:100%;height:100%;background:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");pointer-events:none;z-index:0}
+  .container{max-width:1200px;margin:0 auto;padding:40px 24px;position:relative;z-index:1}
+
+  /* Header */
+  header{text-align:center;margin-bottom:48px;position:relative}
+  header::before{content:'';position:absolute;top:-100px;left:50%;transform:translateX(-50%);width:600px;height:600px;background:radial-gradient(circle,rgba(108,92,231,0.08) 0%,transparent 70%);pointer-events:none}
+  .logo{font-size:13px;letter-spacing:6px;text-transform:uppercase;color:var(--accent2);margin-bottom:16px;font-weight:500}
+  .logo span{color:var(--gold)}
+  h1{font-size:42px;font-weight:700;letter-spacing:-1px;background:linear-gradient(135deg,var(--text) 0%,var(--accent2) 50%,var(--cyan) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:12px}
+  .subtitle{color:var(--text2);font-size:15px;font-weight:300}
+  .subtitle strong{color:var(--green);font-weight:500}
+  .timestamp{display:inline-block;margin-top:16px;padding:6px 16px;background:var(--surface);border:1px solid var(--border);border-radius:20px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text2)}
+  .live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:6px;animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+
+  /* Controls */
+  .controls{display:flex;gap:12px;align-items:center;justify-content:center;margin-bottom:40px}
+  .btn{padding:10px 24px;border-radius:10px;border:1px solid var(--border);cursor:pointer;font-family:'Inter',sans-serif;font-weight:600;font-size:13px;transition:all 0.25s;display:inline-flex;align-items:center;gap:8px}
+  .btn-primary{background:linear-gradient(135deg,var(--accent),#7c3aed);border-color:var(--accent);color:#fff}
+  .btn-primary:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(108,92,231,0.3)}
+  .btn-secondary{background:var(--surface);color:var(--text2)}
+  .btn-secondary:hover{border-color:var(--accent);color:var(--text)}
+  .btn:disabled{opacity:0.4;cursor:not-allowed;transform:none}
+  .status-msg{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text2)}
+
+  /* Stats Row */
+  .stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:48px}
+  .stat-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 20px;position:relative;overflow:hidden;transition:border-color 0.3s}
+  .stat-card:hover{border-color:var(--accent)}
+  .stat-card::after{content:'';position:absolute;top:0;left:0;right:0;height:2px}
+  .stat-card.bankroll::after{background:linear-gradient(90deg,var(--accent),var(--cyan))}
+  .stat-card.pnl-pos::after{background:var(--green)}
+  .stat-card.pnl-neg::after{background:var(--red)}
+  .stat-card.wr::after{background:var(--gold)}
+  .stat-card.sharpe::after{background:var(--accent2)}
+  .stat-card.dd::after{background:var(--orange)}
+  .stat-card.trades::after{background:var(--cyan)}
+  .stat-label{font-size:10px;text-transform:uppercase;letter-spacing:2px;color:var(--text2);margin-bottom:6px}
+  .stat-value{font-size:24px;font-weight:700;font-family:'JetBrains Mono',monospace}
+  .stat-sub{font-size:11px;color:var(--text2);margin-top:4px}
+  .green{color:var(--green)}.red{color:var(--red)}.gold{color:var(--gold)}.cyan{color:var(--cyan)}.accent{color:var(--accent2)}.orange{color:var(--orange)}
+
+  /* Section Cards */
+  .section-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;margin-bottom:32px;overflow:hidden;transition:border-color 0.3s}
+  .section-card:hover{border-color:var(--accent)}
+  .section-header{display:flex;align-items:center;justify-content:space-between;padding:20px 28px;border-bottom:1px solid var(--border);background:var(--surface2)}
+  .section-title{display:flex;align-items:center;gap:12px}
+  .section-icon{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;font-size:14px}
+  .section-icon.positions{background:rgba(0,230,118,0.15)}
+  .section-icon.signals{background:rgba(108,92,231,0.15)}
+  .section-icon.history{background:rgba(24,255,255,0.15)}
+  .section-icon.equity{background:rgba(255,215,0,0.15)}
+  .section-title h2{font-size:18px;font-weight:600}
+  .section-count{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text2);padding:4px 12px;background:var(--surface);border:1px solid var(--border);border-radius:20px}
+  .section-body{padding:24px 28px}
+
+  /* Positions Grid */
+  .positions-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
+  .pos-card{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:18px 20px;position:relative;overflow:hidden;transition:all 0.3s}
+  .pos-card:hover{border-color:var(--accent);transform:translateY(-2px)}
+  .pos-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
+  .pos-card.yes::before{background:var(--green)}
+  .pos-card.no::before{background:var(--red)}
+  .pos-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px}
+  .pos-market{font-size:14px;font-weight:500;line-height:1.4;flex:1;margin-right:12px}
+  .badge{padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;white-space:nowrap}
+  .badge-yes{background:rgba(0,230,118,0.15);color:var(--green);border:1px solid rgba(0,230,118,0.3)}
+  .badge-no{background:rgba(255,82,82,0.15);color:var(--red);border:1px solid rgba(255,82,82,0.3)}
+  .pos-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .pos-stat{background:var(--surface);border-radius:8px;padding:8px 10px}
+  .pos-stat-label{font-size:9px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text2);margin-bottom:2px}
+  .pos-stat-value{font-size:14px;font-weight:600;font-family:'JetBrains Mono',monospace}
+  .pos-platform{margin-top:12px;display:flex;justify-content:space-between;align-items:center}
+  .platform-tag{font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text2);padding:3px 8px;background:var(--surface);border-radius:4px}
+  .pos-days{font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace}
+
+  /* Signals */
+  .signal-row{display:flex;align-items:center;padding:12px 0;border-bottom:1px solid rgba(42,42,58,0.5);gap:12px}
+  .signal-row:last-child{border:none}
+  .signal-market{flex:1;font-size:13px;font-weight:500}
+  .signal-edge{font-family:'JetBrains Mono',monospace;font-size:12px;padding:3px 10px;border-radius:6px;white-space:nowrap}
+  .signal-edge.good{background:rgba(0,230,118,0.1);color:var(--green)}
+  .signal-edge.low{background:rgba(136,136,160,0.1);color:var(--text2)}
+  .signal-action{font-size:12px;font-weight:600;padding:4px 12px;border-radius:6px;white-space:nowrap}
+  .signal-action.opened{background:rgba(0,230,118,0.12);color:var(--green)}
+  .signal-action.skipped{background:rgba(136,136,160,0.08);color:var(--text2)}
+
+  /* History Table */
+  table{width:100%;border-collapse:collapse}
+  th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text2);padding:10px 14px;border-bottom:1px solid var(--border);font-weight:500}
+  td{padding:12px 14px;border-bottom:1px solid rgba(42,42,58,0.3);font-size:13px}
+  tr:hover td{background:rgba(108,92,231,0.03)}
+  .mono{font-family:'JetBrains Mono',monospace}
+  .result-won{color:var(--green);font-weight:600}
+  .result-lost{color:var(--red);font-weight:600}
+
+  /* Chart */
+  .chart-container{height:280px;position:relative}
+
+  /* Empty state */
+  .empty{color:var(--text2);text-align:center;padding:40px;font-size:14px}
+  .empty-icon{font-size:32px;margin-bottom:12px;opacity:0.5}
+
+  /* Footer */
+  footer{text-align:center;padding:40px 0 20px;border-top:1px solid var(--border);margin-top:20px}
+  footer p{font-size:12px;color:var(--text2);font-family:'JetBrains Mono',monospace}
+  footer .brand{color:var(--accent2)}
+
+  /* Nav link */
+  .nav-link{position:absolute;top:0;right:0;font-size:12px;color:var(--text2);text-decoration:none;padding:6px 14px;border:1px solid var(--border);border-radius:8px;transition:all 0.2s}
+  .nav-link:hover{border-color:var(--accent);color:var(--accent2)}
+
+  @media(max-width:768px){
+    h1{font-size:28px}
+    .stats-row{grid-template-columns:repeat(2,1fr)}
+    .positions-grid{grid-template-columns:1fr}
+    .controls{flex-wrap:wrap;justify-content:center}
+    .section-body{padding:16px}
+  }
+</style>
+</head>
+<body>
+<div class="noise"></div>
+<div class="container">
+
+<header>
+  <a href="analysis.html" class="nav-link">← Analysis Suite</a>
+  <div class="logo">Virtuoso Crypto — <span>Polyclawd</span></div>
+  <h1>Paper Portfolio</h1>
+  <p class="subtitle">Prediction market paper trading · <strong>1/8 Kelly</strong> · $500 bankroll · 3 max positions</p>
+  <div class="timestamp"><span class="live-dot"></span>live · auto-refresh 60s · <span id="lastUpdate">—</span></div>
+</header>
+
+<div class="controls">
+  <button class="btn btn-primary" id="processBtn" onclick="processSignals()">⚡ Process Signals</button>
+  <button class="btn btn-secondary" onclick="loadAll()">↻ Refresh</button>
+  <span class="status-msg" id="statusMsg"></span>
+</div>
+
+<div class="stats-row">
+  <div class="stat-card bankroll">
+    <div class="stat-label">Bankroll</div>
+    <div class="stat-value cyan" id="bankroll">$500.00</div>
+    <div class="stat-sub" id="bankrollSub">starting capital</div>
+  </div>
+  <div class="stat-card pnl-pos" id="pnlCard">
+    <div class="stat-label">Total P&L</div>
+    <div class="stat-value" id="totalPnl">$0.00</div>
+    <div class="stat-sub" id="pnlSub">0 trades resolved</div>
+  </div>
+  <div class="stat-card wr">
+    <div class="stat-label">Win Rate</div>
+    <div class="stat-value gold" id="winRate">—</div>
+    <div class="stat-sub" id="wrSub">wins / losses</div>
+  </div>
+  <div class="stat-card sharpe">
+    <div class="stat-label">Sharpe Estimate</div>
+    <div class="stat-value accent" id="sharpe">—</div>
+    <div class="stat-sub">risk-adjusted return</div>
+  </div>
+  <div class="stat-card dd">
+    <div class="stat-label">Max Drawdown</div>
+    <div class="stat-value orange" id="maxDD">0%</div>
+    <div class="stat-sub" id="ddSub">from peak bankroll</div>
+  </div>
+  <div class="stat-card trades">
+    <div class="stat-label">Positions</div>
+    <div class="stat-value cyan" id="tradeCount">0 / 0</div>
+    <div class="stat-sub">open / total</div>
+  </div>
+</div>
+
+<!-- Open Positions -->
+<div class="section-card">
+  <div class="section-header">
+    <div class="section-title">
+      <span class="section-icon positions">📈</span>
+      <h2>Open Positions</h2>
+    </div>
+    <span class="section-count" id="openCount">0 open</span>
+  </div>
+  <div class="section-body">
+    <div class="positions-grid" id="openPositions">
+      <div class="empty"><div class="empty-icon">📭</div>No open positions — process signals to start trading</div>
+    </div>
+  </div>
+</div>
+
+<!-- Recent Signals -->
+<div class="section-card">
+  <div class="section-header">
+    <div class="section-title">
+      <span class="section-icon signals">🎯</span>
+      <h2>Recent Signals</h2>
+    </div>
+    <span class="section-count" id="signalCount">—</span>
+  </div>
+  <div class="section-body" id="recentSignals">
+    <div class="empty"><div class="empty-icon">📡</div>Process signals to see evaluation results</div>
+  </div>
+</div>
+
+<!-- Trade History -->
+<div class="section-card">
+  <div class="section-header">
+    <div class="section-title">
+      <span class="section-icon history">📋</span>
+      <h2>Trade History</h2>
+    </div>
+    <span class="section-count" id="historyCount">0 trades</span>
+  </div>
+  <div class="section-body" id="tradeHistory">
+    <div class="empty"><div class="empty-icon">⏳</div>No closed trades yet — waiting for market resolutions</div>
+  </div>
+</div>
+
+<!-- Equity Curve -->
+<div class="section-card">
+  <div class="section-header">
+    <div class="section-title">
+      <span class="section-icon equity">📉</span>
+      <h2>Equity Curve</h2>
+    </div>
+  </div>
+  <div class="section-body">
+    <div class="chart-container"><canvas id="equityChart"></canvas></div>
+  </div>
+</div>
+
+<footer>
+  <p><span class="brand">Polyclawd</span> · paper portfolio · 1/8 Kelly · prediction market edge trading</p>
+  <p style="margin-top:8px;font-size:11px;color:#555">Not financial advice · For research purposes only</p>
+</footer>
+
+</div>
+
+<script>
+const API = '/polyclawd/api';
+let equityChart = null;
+
+async function loadAll() {
+  try {
+    const [statusRes, posRes, histRes] = await Promise.all([
+      fetch(`${API}/portfolio/status`).then(r => r.json()),
+      fetch(`${API}/portfolio/positions?status=open`).then(r => r.json()),
+      fetch(`${API}/portfolio/history?limit=50`).then(r => r.json()),
+    ]);
+    renderStatus(statusRes);
+    const positions = posRes.positions || statusRes.positions || [];
+    renderPositions(positions);
+    renderHistory(histRes);
+    document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+  } catch(e) {
+    console.error('Load failed:', e);
+    document.getElementById('statusMsg').textContent = '⚠️ API unreachable';
+  }
+}
+
+function renderStatus(s) {
+  const bankroll = s.bankroll || 500;
+  document.getElementById('bankroll').textContent = `$${bankroll.toFixed(2)}`;
+  const returnPct = ((bankroll - 500) / 500 * 100).toFixed(1);
+  document.getElementById('bankrollSub').textContent = bankroll !== 500 ? `${returnPct > 0 ? '+' : ''}${returnPct}% return` : 'starting capital';
+
+  const pnl = s.total_pnl || 0;
+  const pnlEl = document.getElementById('totalPnl');
+  pnlEl.textContent = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
+  pnlEl.className = `stat-value ${pnl >= 0 ? 'green' : 'red'}`;
+  const pnlCard = document.getElementById('pnlCard');
+  pnlCard.className = `stat-card ${pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}`;
+  const totalTrades = (s.wins || 0) + (s.losses || 0);
+  document.getElementById('pnlSub').textContent = `${totalTrades} trade${totalTrades !== 1 ? 's' : ''} resolved`;
+
+  const wr = s.win_rate || 0;
+  document.getElementById('winRate').textContent = totalTrades > 0 ? `${wr}%` : '—';
+  document.getElementById('wrSub').textContent = `${s.wins || 0}W / ${s.losses || 0}L`;
+
+  const sharpe = s.sharpe_estimate || 0;
+  document.getElementById('sharpe').textContent = totalTrades >= 3 ? sharpe.toFixed(2) : '—';
+
+  const dd = s.max_drawdown || 0;
+  document.getElementById('maxDD').textContent = `${dd.toFixed(1)}%`;
+
+  const open = s.open_positions || 0;
+  const total = s.total_trades || 0;
+  document.getElementById('tradeCount').textContent = `${open} / ${total}`;
+  document.getElementById('openCount').textContent = `${open} open`;
+}
+
+function renderPositions(positions) {
+  const el = document.getElementById('openPositions');
+  if (!positions.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">📭</div>No open positions — process signals to start trading</div>';
+    return;
+  }
+  el.innerHTML = positions.map(p => {
+    const days = Math.max(0, Math.floor((Date.now() - new Date(p.opened_at).getTime()) / 86400000));
+    const sideClass = (p.side || '').toLowerCase();
+    const payout = p.potential_payout || 0;
+    const roi = p.bet_size ? ((payout / p.bet_size - 1) * 100).toFixed(0) : '0';
+    return `<div class="pos-card ${sideClass}">
+      <div class="pos-top">
+        <div class="pos-market">${(p.market_title || '').substring(0, 80)}</div>
+        <span class="badge badge-${sideClass}">${p.side}</span>
+      </div>
+      <div class="pos-grid">
+        <div class="pos-stat">
+          <div class="pos-stat-label">Entry</div>
+          <div class="pos-stat-value">${((p.entry_price || 0) * 100).toFixed(0)}¢</div>
+        </div>
+        <div class="pos-stat">
+          <div class="pos-stat-label">Bet Size</div>
+          <div class="pos-stat-value">$${(p.bet_size || 0).toFixed(2)}</div>
+        </div>
+        <div class="pos-stat">
+          <div class="pos-stat-label">Payout</div>
+          <div class="pos-stat-value green">$${payout.toFixed(2)}</div>
+        </div>
+        <div class="pos-stat">
+          <div class="pos-stat-label">Confidence</div>
+          <div class="pos-stat-value">${((p.confidence || 0) * 100).toFixed(0)}%</div>
+        </div>
+        <div class="pos-stat">
+          <div class="pos-stat-label">Edge</div>
+          <div class="pos-stat-value green">${((p.edge_pct || 0) * 100).toFixed(1)}%</div>
+        </div>
+        <div class="pos-stat">
+          <div class="pos-stat-label">ROI if Win</div>
+          <div class="pos-stat-value gold">+${roi}%</div>
+        </div>
+      </div>
+      <div class="pos-platform">
+        <span class="platform-tag">${(p.platform || 'polymarket').toUpperCase()}</span>
+        <span class="pos-days">${days}d open</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderHistory(history) {
+  const el = document.getElementById('tradeHistory');
+  const items = Array.isArray(history) ? history : (history.positions || []);
+  document.getElementById('historyCount').textContent = `${items.length} trade${items.length !== 1 ? 's' : ''}`;
+  if (!items.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">⏳</div>No closed trades yet — waiting for market resolutions</div>';
+    updateEquityChart([]);
+    return;
+  }
+  el.innerHTML = `<table>
+    <thead><tr><th>Market</th><th>Side</th><th>Entry</th><th>Bet</th><th>P&L</th><th>Result</th></tr></thead>
+    <tbody>${items.map(t => {
+      const pnl = t.pnl || 0;
+      return `<tr>
+        <td>${(t.market_title || '').substring(0, 55)}</td>
+        <td><span class="badge badge-${(t.side||'').toLowerCase()}">${t.side}</span></td>
+        <td class="mono">${((t.entry_price||0)*100).toFixed(0)}¢</td>
+        <td class="mono">$${(t.bet_size||0).toFixed(2)}</td>
+        <td class="mono ${pnl >= 0 ? 'result-won' : 'result-lost'}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
+        <td>${t.status === 'won' ? '✅ Won' : '❌ Lost'}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>`;
+  updateEquityChart(items);
+}
+
+function updateEquityChart(history) {
+  const sorted = [...history].reverse();
+  let bankroll = 500;
+  const labels = ['Start'];
+  const data = [500];
+
+  sorted.forEach((t, i) => {
+    bankroll += (t.pnl || 0);
+    labels.push(`#${i + 1}`);
+    data.push(Math.round(bankroll * 100) / 100);
+  });
+
+  if (equityChart) equityChart.destroy();
+
+  const ctx = document.getElementById('equityChart').getContext('2d');
+  const gradient = ctx.createLinearGradient(0, 0, 0, 280);
+  gradient.addColorStop(0, 'rgba(108,92,231,0.2)');
+  gradient.addColorStop(1, 'rgba(108,92,231,0)');
+
+  equityChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data,
+        borderColor: '#a29bfe',
+        backgroundColor: gradient,
+        fill: true,
+        tension: 0.35,
+        pointRadius: data.length > 20 ? 0 : 4,
+        pointBackgroundColor: '#a29bfe',
+        pointBorderColor: '#0a0a0f',
+        pointBorderWidth: 2,
+        borderWidth: 2,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1a1a26',
+          borderColor: '#2a2a3a',
+          borderWidth: 1,
+          titleFont: { family: 'JetBrains Mono' },
+          bodyFont: { family: 'JetBrains Mono' },
+          callbacks: {
+            label: ctx => `$${ctx.parsed.y.toFixed(2)}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#8888a0', font: { size: 11, family: 'JetBrains Mono' } },
+          grid: { color: 'rgba(42,42,58,0.3)' },
+        },
+        y: {
+          ticks: {
+            color: '#8888a0',
+            font: { size: 11, family: 'JetBrains Mono' },
+            callback: v => '$' + v
+          },
+          grid: { color: 'rgba(42,42,58,0.3)' },
+        }
+      }
+    }
+  });
+}
+
+async function processSignals() {
+  const btn = document.getElementById('processBtn');
+  const msg = document.getElementById('statusMsg');
+  btn.disabled = true;
+  msg.textContent = '⚡ Processing signals...';
+
+  try {
+    const res = await fetch(`${API}/portfolio/process-signals`, { method: 'POST' }).then(r => r.json());
+    const opened = res.opened || 0;
+    const processed = res.processed || 0;
+    msg.textContent = `✅ ${processed} evaluated · ${opened} opened`;
+    renderSignals(res.signals || res.results || []);
+    setTimeout(loadAll, 500);
+  } catch(e) {
+    msg.textContent = '❌ Error: ' + e.message;
+  }
+  btn.disabled = false;
+}
+
+function renderSignals(signals) {
+  const el = document.getElementById('recentSignals');
+  document.getElementById('signalCount').textContent = `${signals.length} evaluated`;
+  if (!signals.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">📡</div>No signals in latest scan</div>';
+    return;
+  }
+  el.innerHTML = signals.map(s => {
+    const edge = (s.edge || s.edge_pct || 0);
+    const edgePct = (edge * 100).toFixed(1);
+    const isGood = edge >= 0.05;
+    const action = s.action || s.status || 'skipped';
+    const isOpened = action === 'opened' || action === 'traded';
+    return `<div class="signal-row">
+      <span class="badge badge-${(s.side||'no').toLowerCase()}" style="margin-right:8px">${s.side || '?'}</span>
+      <div class="signal-market">${(s.market || s.title || '').substring(0, 60)}</div>
+      <span class="signal-edge ${isGood ? 'good' : 'low'}">${edgePct}% edge</span>
+      <span class="signal-action ${isOpened ? 'opened' : 'skipped'}">
+        ${isOpened ? `✅ $${(s.bet_size || 0).toFixed(0)}` : `⊘ ${s.reason || 'skipped'}`}
+      </span>
+    </div>`;
+  }).join('');
+}
+
+// Init
+loadAll();
+setInterval(loadAll, 60000);
+</script>
+</body>
+</html>
