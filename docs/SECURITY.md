@@ -140,14 +140,39 @@ sudo rm /etc/fail2ban/jail.d/nginx.conf
 sudo systemctl restart fail2ban
 ```
 
+## Docker Isolation
+
+Docker bypasses UFW by inserting its own iptables rules. Mitigated via `DOCKER-USER` chain:
+
+```
+DOCKER-USER: RETURN if established/related
+DOCKER-USER: RETURN if from 10.66.66.0/24 (VPN)
+DOCKER-USER: DROP all external (eth0)
+```
+
+Persisted via `/etc/systemd/system/docker-firewall.service` (runs after Docker starts).
+
+Containers:
+- **QuestDB** (8812, 9000, 9009) — VPN-only
+- **RethinkDB** (8081, 28015) — VPN-only
+
+## QA Audit Results (2026-02-13)
+
+Adversarial QA agent ran 12 tests:
+- **7 PASS**: SSH, UFW, bot blocking, fail2ban (138 IPs banned), TLS, sensitive files, expected ports
+- **2 FIXED**: Docker bypass (critical — databases were public), rate limiting verified working under parallel load
+- **2 WARNING**: API endpoints unauthenticated, services bound to 0.0.0.0 (mitigated by UFW)
+- **Grade: B+** (upgraded from C+ after Docker fix)
+
 ## Remaining Considerations
 
 - [ ] 2FA on VPS hosting provider account
 - [ ] Periodic dependency audit (`pip audit`, `npm audit`)
 - [ ] nginx access log monitoring / anomaly alerting
-- [ ] API authentication for Polyclawd endpoints (currently open)
+- [ ] API authentication for Polyclawd endpoints (currently open, read-only)
 - [ ] Haiku model in OpenClaw fallback config (lower injection resistance)
 - [ ] macOS firewall (low priority, home network)
+- [ ] Bind Python services to 127.0.0.1 instead of 0.0.0.0 (defense-in-depth)
 
 ## Threat Model
 
