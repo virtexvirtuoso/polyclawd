@@ -840,8 +840,15 @@ def aggregate_all_signals() -> dict:
         if signals_path not in sys.path:
             sys.path.insert(0, signals_path)
         from ic_tracker import record_signal_prediction
+        from calibrator import calibrate_confidence
         for sig in all_signals:
             if sig.get("market_id") and sig.get("side") not in ["NEUTRAL", "RESEARCH", ""]:
+                # Auto-calibrate confidence before recording
+                raw_conf = sig.get("confidence", 0)
+                cal_conf = calibrate_confidence(sig.get("source", ""), raw_conf)
+                if cal_conf != raw_conf:
+                    sig["confidence_raw"] = raw_conf
+                    sig["confidence"] = round(cal_conf, 1)
                 record_signal_prediction(sig)
     except Exception:
         pass  # Non-critical — IC tracking failure must not block signal generation
@@ -1784,4 +1791,53 @@ async def get_btc_tracker(hours: int = Query(default=24)):
         }
     except Exception as e:
         logger.exception(f"BTC tracker failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Auto-Calibration
+# ============================================================================
+
+@router.get("/signals/calibration")
+async def get_calibration_report():
+    """Full calibration report — per-source curves, ECE, source weights."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from calibrator import full_calibration_report
+        return full_calibration_report()
+    except Exception as e:
+        logger.exception(f"Calibration report failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/signals/calibration/{source}")
+async def get_source_calibration(source: str):
+    """Calibration curve for a specific signal source."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from calibrator import build_calibration_curve, get_signal_decay
+        return {
+            "calibration": build_calibration_curve(source),
+            "decay": get_signal_decay(source),
+        }
+    except Exception as e:
+        logger.exception(f"Source calibration failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/signals/source-weights")
+async def get_source_weights():
+    """Optimal source weights based on IC-squared."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from calibrator import compute_source_weights
+        return compute_source_weights()
+    except Exception as e:
+        logger.exception(f"Source weights failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
