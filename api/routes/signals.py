@@ -1722,3 +1722,66 @@ async def get_ic_for_source(source: str, window_days: int = Query(30, ge=1, le=3
     except Exception as e:
         logger.exception(f"IC calculation for {source} failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Alpha Score Tracker
+# ============================================================================
+
+@router.get("/signals/alpha-snapshot")
+async def run_alpha_snapshot():
+    """Run and return a fresh alpha score + BTC/ETH price snapshot."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from alpha_score_tracker import run_snapshot
+        return run_snapshot()
+    except Exception as e:
+        logger.exception(f"Alpha snapshot failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/signals/alpha-history/{symbol}")
+async def get_alpha_history(symbol: str, hours: int = Query(default=24)):
+    """Get confluence score history for a symbol."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from alpha_score_tracker import get_score_history, get_score_delta
+        return {
+            "symbol": symbol,
+            "hours": hours,
+            "history": get_score_history(symbol, hours),
+            "delta_2h": get_score_delta(symbol, 2),
+            "delta_6h": get_score_delta(symbol, 6),
+            "delta_24h": get_score_delta(symbol, 24),
+        }
+    except Exception as e:
+        logger.exception(f"Alpha history failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/signals/btc-tracker")
+async def get_btc_tracker(hours: int = Query(default=24)):
+    """Get BTC/ETH price snapshot history with deltas."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from alpha_score_tracker import get_price_history, get_btc_price_delta
+        return {
+            "btc": {
+                "history": get_price_history("BTCUSDT", hours),
+                "delta_2h": get_btc_price_delta(2),
+                "delta_6h": get_btc_price_delta(6),
+                "delta_24h": get_btc_price_delta(24),
+            },
+            "eth": {
+                "history": get_price_history("ETHUSDT", hours),
+            }
+        }
+    except Exception as e:
+        logger.exception(f"BTC tracker failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
