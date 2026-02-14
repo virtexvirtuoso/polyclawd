@@ -82,18 +82,21 @@ def _fetch_json(url: str, timeout: int = 10) -> Optional[dict]:
         return None
 
 
-def get_weather_forecast(city: str, days: int = 7) -> Optional[dict]:
-    """Get weather forecast from Open-Meteo for a city."""
+def _resolve_city(city: str) -> Optional[tuple]:
+    """Resolve city name to (lat, lon, tz)."""
     city_lower = city.lower().strip()
-    
-    # Try exact match first, then partial
     coords = CITY_COORDS.get(city_lower)
     if not coords:
         for name, c in CITY_COORDS.items():
             if name in city_lower or city_lower in name:
                 coords = c
                 break
-    
+    return coords
+
+
+def get_weather_forecast(city: str, days: int = 7) -> Optional[dict]:
+    """Get daily weather forecast from Open-Meteo for a city."""
+    coords = _resolve_city(city)
     if not coords:
         logger.warning(f"Unknown city: {city}")
         return None
@@ -133,6 +136,90 @@ def get_weather_forecast(city: str, days: int = 7) -> Optional[dict]:
         "lon": lon,
         "timezone": tz,
         "forecasts": forecasts,
+    }
+
+
+def get_hourly_forecast(city: str, days: int = 2) -> Optional[dict]:
+    """Get hourly weather forecast from Open-Meteo — critical for same-day markets.
+    
+    Provides hour-by-hour temperature, precipitation, wind for next 48h.
+    Accuracy within 24h is extremely high (±1-2°F for temp).
+    """
+    coords = _resolve_city(city)
+    if not coords:
+        return None
+
+    lat, lon, tz = coords
+
+    params = (
+        f"latitude={lat}&longitude={lon}"
+        f"&hourly=temperature_2m,precipitation,wind_speed_10m,"
+        f"relative_humidity_2m,snowfall"
+        f"&temperature_unit=fahrenheit"
+        f"&timezone={tz}"
+        f"&forecast_days={days}"
+        f"&past_days=1"
+    )
+
+    data = _fetch_json(f"{METEO_URL}?{params}")
+    if not data or "hourly" not in data:
+        return None
+
+    hourly = data["hourly"]
+    # Group by date for daily max/min from hourly data
+    daily_from_hourly = {}
+    for i, ts in enumerate(hourly["time"]):
+        date_str = ts[:10]
+        if date_str not in daily_from_hourly:
+            daily_from_hourly[date_str] = {
+                "temps": [], "precip": [], "wind": [], "humidity": [], "snow": [],
+                "hourly": [],
+            }
+        entry = daily_from_hourly[date_str]
+        temp = hourly["temperature_2m"][i]
+        precip = hourly["precipitation"][i] or 0
+        wind = hourly["wind_speed_10m"][i] or 0
+        humid = hourly["relative_humidity_2m"][i] or 0
+        snow = hourly.get("snowfall", [0] * len(hourly["time"]))[i] or 0
+
+        entry["temps"].append(temp)
+        entry["precip"].append(precip)
+        entry["wind"].append(wind)
+        entry["humidity"].append(humid)
+        entry["snow"].append(snow)
+        entry["hourly"].append({
+            "time": ts,
+            "temp_f": temp,
+            "precip_mm": precip,
+            "wind_kmh": wind,
+            "humidity_pct": humid,
+        })
+
+    # Compute daily aggregates from hourly
+    result = {}
+    for date_str, d in daily_from_hourly.items():
+        temps = [t for t in d["temps"] if t is not None]
+        result[date_str] = {
+            "date": date_str,
+            "temp_max_f": max(temps) if temps else None,
+            "temp_min_f": min(temps) if temps else None,
+            "temp_current_f": temps[-1] if temps else None,
+            "temp_hours_remaining": len([t for i, t in enumerate(temps) if hourly["time"][i] > datetime.now().strftime("%Y-%m-%dT%H:00")]),
+            "precip_total_mm": sum(d["precip"]),
+            "wind_max_kmh": max(d["wind"]) if d["wind"] else None,
+            "humidity_avg": sum(d["humidity"]) / len(d["humidity"]) if d["humidity"] else None,
+            "snow_total_mm": sum(d["snow"]),
+            "confidence": "very_high" if date_str == datetime.now().strftime("%Y-%m-%d") else "high",
+            "hourly_detail": d["hourly"],
+        }
+
+    return {
+        "city": city,
+        "lat": lat,
+        "lon": lon,
+        "timezone": tz,
+        "source": "open-meteo-hourly",
+        "forecasts": result,
     }
 
 
@@ -265,20 +352,27 @@ def evaluate_weather_market(title: str, market_price: float) -> Optional[dict]:
     if not city or not target_date:
         return None
     
-    forecast_data = get_weather_forecast(city)
-    if not forecast_data:
-        return None
-    
-    forecast = forecast_data["forecasts"].get(target_date)
-    if not forecast:
-        return None
-    
     # Days until resolution
     target_dt = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     days_until = (target_dt - datetime.now(timezone.utc)).total_seconds() / 86400
     
     if days_until < -1:
         return None  # already past
+    
+    # Use hourly data for same-day/next-day (much more accurate)
+    if days_until <= 2:
+        forecast_data = get_hourly_forecast(city, days=2)
+        data_source = "hourly"
+    else:
+        forecast_data = get_weather_forecast(city)
+        data_source = "daily"
+    
+    if not forecast_data:
+        return None
+    
+    forecast = forecast_data["forecasts"].get(target_date)
+    if not forecast:
+        return None
     
     signal = None
     
@@ -437,8 +531,13 @@ def evaluate_weather_market(title: str, market_price: float) -> Optional[dict]:
     elif signal["certainty"] == "medium":
         base_conf += 10
     
-    if days_until <= 1:
-        base_conf += 10  # forecast very accurate within 24h
+    # Hourly data is dramatically more accurate
+    if data_source == "hourly" and days_until <= 0.5:
+        base_conf += 15  # same-day hourly: ±1-2°F accuracy
+    elif data_source == "hourly" and days_until <= 1:
+        base_conf += 12  # next-day hourly: ±2-3°F accuracy
+    elif days_until <= 1:
+        base_conf += 10
     elif days_until <= 3:
         base_conf += 5
     
@@ -447,18 +546,22 @@ def evaluate_weather_market(title: str, market_price: float) -> Optional[dict]:
     
     base_conf = min(95, base_conf)
     
+    # Strip hourly_detail from forecast to keep response size manageable
+    forecast_summary = {k: v for k, v in forecast.items() if k != "hourly_detail"}
+    
     return {
         "source": "weather_scanner",
         "city": city,
         "target_date": target_date,
         "days_until": round(days_until, 1),
+        "data_source": data_source,
         "market_price": market_price,
         "side": signal["side"],
         "confidence": base_conf,
         "edge_pct": round(signal["edge"] * 100, 1),
         "fair_value": signal["fair_value"],
         "weather_detail": signal,
-        "forecast": forecast,
+        "forecast": forecast_summary,
     }
 
 
