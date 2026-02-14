@@ -1841,3 +1841,21 @@ async def get_source_weights():
     except Exception as e:
         logger.exception(f"Source weights failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Weather Scanner
+# ============================================================================
+
+@router.get("/signals/weather")
+async def scan_weather():
+    """Scan weather markets on Kalshi + Polymarket against Open-Meteo forecasts."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from weather_scanner import scan_all_weather
+        return scan_all_weather()
+    except Exception as e:
+        logger.exception(f"Weather scan failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
