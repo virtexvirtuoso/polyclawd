@@ -33,7 +33,7 @@ CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
 MAX_NEWS_AGE_MINUTES = 30
 
 # Minimum confidence to generate signal
-MIN_CONFIDENCE = 35
+MIN_CONFIDENCE = 65  # Raised from 35 — news signals were 30% WR at low confidence
 
 # Rate limiting
 LAST_FETCH: Dict[str, float] = {}
@@ -582,6 +582,14 @@ def check_news_for_market(market: Dict) -> Optional[Dict]:
         confidence += 10
     
     confidence = min(85, confidence)  # Cap at 85
+
+    # Source quality gate — require at least 2 articles OR 1 from trusted source
+    TRUSTED_SOURCES = ["reuters", "ap news", "associated press", "bloomberg", "wsj", "wall street journal", "nyt", "new york times", "bbc", "cnbc", "financial times"]
+    has_trusted = any(any(t in a.get("source", "").lower() for t in TRUSTED_SOURCES) for a in fresh_articles)
+    if len(fresh_articles) < 2 and not has_trusted:
+        return None  # Single unverified source = too risky
+    if has_trusted:
+        confidence += 5  # Trusted source bonus
     
     # Boost/reduce confidence based on keyword historical performance
     if use_learner:

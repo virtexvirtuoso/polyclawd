@@ -20,6 +20,8 @@ KELLY_FRACTION = 1 / 8
 MAX_CONCURRENT = 3
 MIN_CONFIDENCE = 0.50
 MIN_EDGE = 0.05
+MIN_PRICE = 0.05  # Price floor — reject garbage contracts below 5 cents
+MAX_PRICE = 0.95  # Price ceiling — reject near-certain markets (no edge)
 MIN_BET = 5.0
 MAX_BET = 25.0
 
@@ -140,6 +142,14 @@ def evaluate_signal(signal: dict) -> dict:
     
     side = (signal.get("side") or signal.get("direction") or "YES").upper()
     
+    # Price floor/ceiling filter — reject garbage and near-certain contracts
+    # "Namibia wins World Cup" at 0.1¢ = garbage, don't buy it
+    effective_price = market_price if side == "YES" else (1 - market_price)
+    if effective_price < MIN_PRICE:
+        return {"eligible": False, "reason": f"Price {effective_price:.1%} below floor {MIN_PRICE:.0%} — garbage contract", "edge": 0, "kelly_pct": 0, "bet_size": 0}
+    if effective_price > MAX_PRICE:
+        return {"eligible": False, "reason": f"Price {effective_price:.1%} above ceiling {MAX_PRICE:.0%} — no edge", "edge": 0, "kelly_pct": 0, "bet_size": 0}
+    
     if side == "YES":
         edge = confidence - market_price
         odds = (1 / market_price) - 1 if market_price > 0 else 0
@@ -183,7 +193,21 @@ def open_position(signal: dict) -> dict:
     if isinstance(market_price, str):
         market_price = float(market_price)
     if market_price > 1:
+    
+    # Price floor/ceiling filter — reject garbage and near-certain contracts
+    effective_price = market_price if side == "YES" else (1 - market_price)
+    if effective_price < MIN_PRICE:
+        return {"eligible": False, "reason": f"Price {effective_price:.1%} below floor {MIN_PRICE:.0%}", "edge": 0, "kelly_pct": 0, "bet_size": 0}
+    if effective_price > MAX_PRICE:
+        return {"eligible": False, "reason": f"Price {effective_price:.1%} above ceiling {MAX_PRICE:.0%}", "edge": 0, "kelly_pct": 0, "bet_size": 0}
         market_price = market_price / 100
+    
+    # Price floor/ceiling filter — reject garbage and near-certain contracts
+    effective_price = market_price if side == "YES" else (1 - market_price)
+    if effective_price < MIN_PRICE:
+        return {"eligible": False, "reason": f"Price {effective_price:.1%} below floor {MIN_PRICE:.0%}", "edge": 0, "kelly_pct": 0, "bet_size": 0}
+    if effective_price > MAX_PRICE:
+        return {"eligible": False, "reason": f"Price {effective_price:.1%} above ceiling {MAX_PRICE:.0%}", "edge": 0, "kelly_pct": 0, "bet_size": 0}
     
     confidence = signal.get("confidence", 0)
     if isinstance(confidence, str):
