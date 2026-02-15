@@ -33,6 +33,8 @@ PERFORMANCE_FILE = STORAGE_DIR / "shadow_performance.json"
 LEGACY_JSON = STORAGE_DIR / "shadow_trades.json"
 
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
+POLYMARKET_CLOB = "https://clob.polymarket.com"
+GAMMA_API = "https://gamma-api.polymarket.com"
 
 
 # ============================================================================
@@ -254,11 +256,28 @@ def log_shadow_trade(signal: Dict) -> bool:
     side = signal.get("side", "")
 
     try:
-        # Check for existing open trade on same market (ANY side)
+        # Check for existing open trade on same market (ANY side, ANY platform)
         existing = conn.execute(
             "SELECT id, side, confidence FROM shadow_trades WHERE market_id = ? AND resolved = 0",
             (market_id,)
         ).fetchone()
+
+        # Also check cross-platform: same market title on different platform
+        if not existing:
+            market_title = signal.get("market", "")
+            norm_title = _normalize_market_title(market_title)
+            if norm_title and len(norm_title) > 10:
+                cross = conn.execute(
+                    "SELECT id, side, platform, market FROM shadow_trades WHERE resolved = 0"
+                ).fetchall()
+                for c in cross:
+                    if _normalize_market_title(c["market"]) == norm_title:
+                        logger.warning(
+                            f"Cross-platform dedup: '{market_title[:50]}' already tracked "
+                            f"on {c['platform']} as {c['side']} — skipping {signal.get('platform','?')}"
+                        )
+                        conn.close()
+                        return False
 
         if existing:
             existing_side = existing[1]
@@ -338,19 +357,67 @@ def _fetch_json(url: str, timeout: int = 8) -> Any:
         return None
 
 
-def resolve_trades(batch_size: int = 10, delay: float = 0.5) -> Dict[str, Any]:
-    """Resolve unresolved shadow trades against Kalshi API.
+
+
+def _normalize_market_title(title: str) -> str:
+    """Normalize market title for cross-platform dedup matching."""
+    import re
+    t = (title or "").lower().strip()
+    t = re.sub(r'\s+', ' ', t)
+    t = t.rstrip('?.! ')
+    return t
+
+
+def _check_polymarket_resolution(condition_id: str) -> str:
+    """Check if a Polymarket condition has resolved.
+    Returns 'YES' or 'NO' if resolved, None if still open.
+    """
+    # Try gamma API (has resolution info)
+    data = _fetch_json(f"{GAMMA_API}/markets?condition_id={condition_id}", timeout=10)
+    if data and isinstance(data, list) and len(data) > 0:
+        market = data[0]
+        if market.get("closed") or market.get("resolved"):
+            outcome = market.get("outcome")
+            if outcome:
+                return outcome.upper()
+            prices = market.get("outcomePrices")
+            if prices:
+                try:
+                    price_list = json.loads(prices) if isinstance(prices, str) else prices
+                    if len(price_list) >= 2:
+                        if float(price_list[0]) > 0.9:
+                            return "YES"
+                        elif float(price_list[1]) > 0.9:
+                            return "NO"
+                except Exception:
+                    pass
     
-    Rate-limit aware: processes batch_size per run with delay between calls.
+    # Try CLOB API
+    data = _fetch_json(f"{POLYMARKET_CLOB}/markets/{condition_id}", timeout=10)
+    if data:
+        if data.get("closed") or data.get("resolved"):
+            tokens = data.get("tokens", [])
+            for token in tokens:
+                if token.get("outcome") == "Yes" and token.get("price", 0) > 0.9:
+                    return "YES"
+                elif token.get("outcome") == "No" and token.get("price", 0) > 0.9:
+                    return "NO"
+    
+    return None
+
+
+def resolve_trades(batch_size: int = 15, delay: float = 0.3) -> Dict[str, Any]:
+    """Resolve unresolved shadow trades against Kalshi + Polymarket APIs.
+    
+    Handles both platforms:
+    - Kalshi: market_id is a ticker
+    - Polymarket: market_id starts with 0x (condition_id)
     """
     conn = get_db()
-
-    # Migrate legacy JSON if exists
     _migrate_legacy_json(conn)
 
-    # Get unresolved trades (oldest first, limit batch)
     rows = conn.execute("""
-        SELECT id, market_id, side, entry_price, market
+        SELECT id, market_id, side, entry_price, market, platform
         FROM shadow_trades
         WHERE resolved = 0
         ORDER BY timestamp ASC
@@ -367,31 +434,42 @@ def resolve_trades(batch_size: int = 10, delay: float = 0.5) -> Dict[str, Any]:
 
     for row in rows:
         market_id = row["market_id"]
+        platform = row["platform"] or "kalshi"
         if not market_id:
             continue
 
-        data = _fetch_json(f"{KALSHI_API}/markets/{market_id}", timeout=8)
-        if not data:
-            errors += 1
-            time.sleep(delay)
-            continue
+        result = None
 
-        market = data.get("market", data)
-        result = market.get("result", "")
-        if not result:
-            time.sleep(delay * 0.5)  # Not resolved yet, shorter delay
-            continue
+        if platform == "polymarket" or market_id.startswith("0x"):
+            # Polymarket resolution
+            result = _check_polymarket_resolution(market_id)
+            if result is None:
+                time.sleep(delay * 0.3)
+                continue
+        else:
+            # Kalshi resolution
+            data = _fetch_json(f"{KALSHI_API}/markets/{market_id}", timeout=8)
+            if not data:
+                errors += 1
+                time.sleep(delay)
+                continue
+            market = data.get("market", data)
+            result = market.get("result", "")
+            if not result:
+                time.sleep(delay * 0.5)
+                continue
+            result = result.upper()
 
         entry_price = row["entry_price"] or 0.5
         side = row["side"] or "YES"
 
-        # P&L calculation (Kalshi binary: win = 1.00, lose = 0.00)
-        if result.upper() == "YES":
+        # P&L calculation (binary: win = 1.00, lose = 0.00)
+        if result == "YES":
             pnl = (1.0 - entry_price) if side == "YES" else -entry_price
-        elif result.upper() == "NO":
-            pnl = -entry_price if side == "YES" else (entry_price)
+        elif result == "NO":
+            pnl = -entry_price if side == "YES" else entry_price
         else:
-            pnl = 0
+            continue
 
         conn.execute("""
             UPDATE shadow_trades
@@ -399,9 +477,9 @@ def resolve_trades(batch_size: int = 10, delay: float = 0.5) -> Dict[str, Any]:
             WHERE id = ?
         """, (
             datetime.now(timezone.utc).isoformat(),
-            result.upper(),
+            result,
             round(pnl, 4),
-            1.0 if result.upper() == side else 0.0,
+            1.0 if result == side else 0.0,
             row["id"],
         ))
 
