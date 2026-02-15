@@ -193,13 +193,6 @@ def open_position(signal: dict) -> dict:
     if isinstance(market_price, str):
         market_price = float(market_price)
     if market_price > 1:
-    
-    # Price floor/ceiling filter — reject garbage and near-certain contracts
-    effective_price = market_price if side == "YES" else (1 - market_price)
-    if effective_price < MIN_PRICE:
-        return {"eligible": False, "reason": f"Price {effective_price:.1%} below floor {MIN_PRICE:.0%}", "edge": 0, "kelly_pct": 0, "bet_size": 0}
-    if effective_price > MAX_PRICE:
-        return {"eligible": False, "reason": f"Price {effective_price:.1%} above ceiling {MAX_PRICE:.0%}", "edge": 0, "kelly_pct": 0, "bet_size": 0}
         market_price = market_price / 100
     
     # Price floor/ceiling filter — reject garbage and near-certain contracts
@@ -378,3 +371,96 @@ def process_signals(signals: list) -> dict:
             "total_pnl": status["total_pnl"],
         }
     }
+
+
+def resolve_open_positions() -> dict:
+    """Auto-resolve expired paper positions using Polymarket/Kalshi APIs.
+    
+    Called by watchdog every 5 minutes.
+    """
+    import json
+    import urllib.request
+    
+    GAMMA_API = "https://gamma-api.polymarket.com"
+    KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
+    
+    def _fetch(url, timeout=10):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except:
+            return None
+    
+    conn = _get_db()
+    open_positions = conn.execute("SELECT * FROM paper_positions WHERE status='open'").fetchall()
+    
+    if not open_positions:
+        conn.close()
+        return {"resolved": 0, "note": "No open positions"}
+    
+    resolved = 0
+    total_pnl = 0
+    
+    for pos in open_positions:
+        market_id = pos["market_id"]
+        platform = pos["platform"] or "kalshi"
+        outcome = None
+        
+        if platform == "polymarket" or market_id.startswith("0x"):
+            data = _fetch(f"{GAMMA_API}/markets?condition_id={market_id}")
+            if data and isinstance(data, list) and len(data) > 0:
+                m = data[0]
+                if m.get("closed") or m.get("resolved"):
+                    outcome_raw = m.get("outcome")
+                    if outcome_raw:
+                        outcome = outcome_raw.upper()
+                    else:
+                        prices = m.get("outcomePrices")
+                        if prices:
+                            try:
+                                pl = json.loads(prices) if isinstance(prices, str) else prices
+                                if float(pl[0]) > 0.9: outcome = "YES"
+                                elif float(pl[1]) > 0.9: outcome = "NO"
+                            except: pass
+        else:
+            data = _fetch(f"{KALSHI_API}/markets/{market_id}")
+            if data:
+                market = data.get("market", data)
+                result = market.get("result", "")
+                if result:
+                    outcome = result.upper()
+        
+        if not outcome:
+            continue
+        
+        side = pos["side"]
+        entry_price = pos["entry_price"]
+        bet_size = pos["bet_size"]
+        won = (outcome == side)
+        
+        if won:
+            if side == "YES":
+                pnl = bet_size * (1 / entry_price - 1)
+            else:
+                pnl = bet_size * (1 / (1 - entry_price) - 1)
+            status = "won"
+        else:
+            pnl = -bet_size
+            status = "lost"
+        
+        conn.execute("""UPDATE paper_positions SET status=?, closed_at=?, exit_price=?, pnl=?, close_reason=?
+            WHERE id=?""",
+            (status, datetime.now(timezone.utc).isoformat(),
+             1.0 if won else 0.0, round(pnl, 2), f"auto-resolved: {outcome}", pos["id"]))
+        
+        resolved += 1
+        total_pnl += pnl
+    
+    if resolved > 0:
+        conn.commit()
+        bankroll = _get_bankroll(conn) + total_pnl
+        _save_state(conn, bankroll, total_pnl)
+    
+    conn.close()
+    return {"resolved": resolved, "total_pnl": round(total_pnl, 2)}
