@@ -516,6 +516,23 @@ TOOLS = [
     },
 
     # === SYSTEM ===
+    # === ALPHA SCORE TRACKER ===
+    {
+        "name": "polyclawd_alpha_snapshot",
+        "description": "Take fresh snapshot of Virtuoso confluence alpha scores + BTC/ETH prices. Returns scores for 10 monitored symbols and current crypto prices.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "polyclawd_alpha_history",
+        "description": "Get confluence alpha score history and deltas for a symbol. Shows score trajectory over time.",
+        "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string", "description": "Symbol e.g. SOLUSDT"}, "hours": {"type": "integer", "description": "Hours to look back", "default": 24}}, "required": ["symbol"]}
+    },
+    {
+        "name": "polyclawd_btc_tracker",
+        "description": "Get BTC/ETH price snapshot history with 2h/6h/24h deltas. Key input for prediction market resolution certainty.",
+        "inputSchema": {"type": "object", "properties": {"hours": {"type": "integer", "description": "Hours to look back", "default": 24}}, "required": []}
+    },
+
     {
         "name": "polyclawd_health",
         "description": "Get API health status",
@@ -739,6 +756,16 @@ def handle_tool_call(name: str, arguments: dict) -> Any:
         days = arguments.get("days", 7)
         return api_get(f"/api/signals/ai-models/trends?days={days}")
     # System
+    elif name == "polyclawd_alpha_snapshot":
+        return api_get("/api/signals/alpha-snapshot")
+    elif name == "polyclawd_alpha_history":
+        symbol = arguments.get("symbol", "SOLUSDT")
+        hours = arguments.get("hours", 24)
+        return api_get(f"/api/signals/alpha-history/{symbol}?hours={hours}")
+    elif name == "polyclawd_btc_tracker":
+        hours = arguments.get("hours", 24)
+        return api_get(f"/api/signals/btc-tracker?hours={hours}")
+
     elif name == "polyclawd_health":
         return api_get("/api/health")
     elif name == "polyclawd_metrics":
