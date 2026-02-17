@@ -139,7 +139,7 @@ def resolve_from_shadow_trades(db_path: str = None) -> dict:
         SELECT sp.id, sp.market_id, sp.side, st.outcome, st.pnl
         FROM signal_predictions sp
         JOIN shadow_trades st ON sp.market_id = st.market_id
-        WHERE sp.resolved = 0 AND st.status = 'resolved'
+        WHERE sp.resolved = 0 AND st.resolved = 1
     """).fetchall()
 
     resolved_count = 0
