@@ -23,7 +23,7 @@ MIN_EDGE = 0.05
 MIN_PRICE = 0.05  # Price floor — reject garbage contracts below 5 cents
 MAX_PRICE = 0.95  # Price ceiling — reject near-certain markets (no edge)
 MIN_BET = 5.0
-MAX_BET = 25.0
+MAX_BET = 35.0  # Raised: higher conviction NO-only strategy
 
 
 def _get_db() -> sqlite3.Connection:

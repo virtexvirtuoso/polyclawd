@@ -79,7 +79,7 @@ MIN_VOLUME_POLYMARKET = 50000   # Dollars (Polymarket volume is in USD)
 WHALE_VOLUME_KALSHI = 10000     # Contracts
 WHALE_VOLUME_POLYMARKET = 100000 # Dollars
 CONTESTED_LOW = 15              # Cents/pct
-CONTESTED_HIGH = 85
+CONTESTED_HIGH = 92  # Raised: take NO bets up to 92c (was 85)
 MAX_DAYS_TO_CLOSE = 30
 MIN_EDGE_PCT = 5
 
@@ -505,15 +505,15 @@ def scan_kalshi_signals() -> List[Dict]:
             category=category,
         )
 
-        # Fade the market: in mispriced categories, bet AGAINST the crowd
-        # Price > 50 means market is confident YES → we bet NO (fade)
-        # Price < 50 means market is confident NO → we bet YES (fade)
-        # Near 50 (contested zone) → skip, no clear edge direction
-        if 45 <= price <= 55:
-            continue  # too close to 50/50, no directional edge
-        side = "NO" if price > 50 else "YES"
+        # Asymmetric fade: ONLY bet NO on overpriced markets
+        # Data shows: NO @ 0.60-0.85 = 79% WR (+8.97 P&L)
+        #             YES @ 0.15-0.45 = 29% WR (-3.05 P&L)
+        # Skip YES longshots entirely — they bleed edge
+        if price <= 55:  # NO-only: skip YES zone + contested
+            continue  # skip cheap markets (would be YES bets) + contested zone
+        side = "NO"
         # fair_value is the corrected probability after category edge
-        fair_value = (price / 100.0) - category_edge if price > 50 else (price / 100.0) + category_edge
+        fair_value = (price / 100.0) - category_edge
 
         signals.append({
             "source": "mispriced_category",
@@ -616,11 +616,12 @@ def scan_polymarket_signals() -> List[Dict]:
             category=tier,
         )
 
-        # Fade the market: bet AGAINST the crowd in mispriced categories
-        if 45 <= price_cents <= 55:
-            continue  # too close to 50/50, no directional edge
-        side = "NO" if price_cents > 50 else "YES"
-        fair_value = yes_price - edge if price_cents > 50 else yes_price + edge
+        # Asymmetric fade: ONLY bet NO on overpriced markets
+        # YES longshots (price < 50) lose 71% — skip entirely
+        if price_cents <= 55:  # NO-only: skip YES zone + contested
+            continue  # skip cheap/contested markets
+        side = "NO"
+        fair_value = yes_price - edge
         market_id = market.get("conditionId", market.get("id", ""))
         slug = market.get("slug", "")
 
