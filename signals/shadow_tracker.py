@@ -271,7 +271,7 @@ def log_shadow_trade(signal: Dict) -> bool:
                     "SELECT id, side, platform, market FROM shadow_trades WHERE resolved = 0"
                 ).fetchall()
                 for c in cross:
-                    if _normalize_market_title(c["market"]) == norm_title:
+                    if _markets_match(market_title, c["market"]):
                         logger.warning(
                             f"Cross-platform dedup: '{market_title[:50]}' already tracked "
                             f"on {c['platform']} as {c['side']} — skipping {signal.get('platform','?')}"
@@ -366,6 +366,42 @@ def _normalize_market_title(title: str) -> str:
     t = re.sub(r'\s+', ' ', t)
     t = t.rstrip('?.! ')
     return t
+
+
+def _markets_match(title_a: str, title_b: str) -> bool:
+    """Structured cross-platform market matching.
+    
+    Uses parsed market attributes (asset, direction, timeframe, threshold)
+    instead of raw string comparison for more robust matching.
+    """
+    # Fast path: exact normalized match
+    if _normalize_market_title(title_a) == _normalize_market_title(title_b):
+        return True
+    
+    # Structured matching via browser_bridge parser
+    try:
+        from browser_bridge import _parse_market_title
+        a = _parse_market_title(title_a)
+        b = _parse_market_title(title_b)
+        
+        # Must match on: market_type + asset + direction + timeframe
+        if a["market_type"] == "unknown" or b["market_type"] == "unknown":
+            return False
+        if a["market_type"] != b["market_type"]:
+            return False
+        if a["asset"] != b["asset"]:
+            return False
+        if a["direction"] != b["direction"]:
+            return False
+        if a["timeframe"] != b["timeframe"]:
+            return False
+        # If threshold exists, must match
+        if a["threshold"] and b["threshold"] and a["threshold"] != b["threshold"]:
+            return False
+        
+        return True
+    except ImportError:
+        return False
 
 
 def _check_polymarket_resolution(condition_id: str) -> str:
