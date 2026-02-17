@@ -567,12 +567,16 @@ def generate_daily_summary(target_date: Optional[str] = None) -> Dict[str, Any]:
     conn = get_db()
     today = target_date or date.today().isoformat()
 
-    # Today's trades
+    # Today's trades (logged today)
     day_trades = conn.execute("""
         SELECT * FROM shadow_trades WHERE snapshot_date = ?
     """, (today,)).fetchall()
 
-    day_resolved = [t for t in day_trades if t["resolved"]]
+    # Trades RESOLVED today (regardless of when logged) — this is the real daily P&L
+    day_resolved = conn.execute("""
+        SELECT * FROM shadow_trades WHERE resolved = 1
+        AND substr(resolved_at, 1, 10) = ?
+    """, (today,)).fetchall()
     day_wins = sum(1 for t in day_resolved if (t["pnl"] or 0) > 0)
     day_pnl = sum(t["pnl"] or 0 for t in day_resolved)
 
@@ -583,7 +587,7 @@ def generate_daily_summary(target_date: Optional[str] = None) -> Dict[str, Any]:
 
     # All-time cumulative
     all_resolved = conn.execute("""
-        SELECT pnl, snapshot_date, market FROM shadow_trades
+        SELECT pnl, snapshot_date, market, resolved_at FROM shadow_trades
         WHERE resolved = 1 ORDER BY resolved_at
     """).fetchall()
 
@@ -594,7 +598,7 @@ def generate_daily_summary(target_date: Optional[str] = None) -> Dict[str, Any]:
     # Sharpe ratio (annualized, assuming daily returns)
     daily_pnls = {}
     for t in all_resolved:
-        d = t["snapshot_date"] or "unknown"
+        d = (t["resolved_at"] or "")[:10] or t["snapshot_date"] or "unknown"
         daily_pnls.setdefault(d, 0)
         daily_pnls[d] += (t["pnl"] or 0)
 
