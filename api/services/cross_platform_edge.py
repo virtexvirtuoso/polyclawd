@@ -71,7 +71,9 @@ TOPIC_KEYWORDS = {
     "super_bowl": ["super bowl", "nfl", "champion", "chiefs", "eagles"],
     "world_series": ["world series", "mlb", "baseball", "champion"],
     "nba_finals": ["nba", "finals", "basketball", "champion"],
-    "world_cup": ["world cup", "fifa", "soccer", "football"],
+    "world_cup_fifa": ["world cup", "fifa", "soccer"],
+    "world_cup_cricket": ["world cup", "cricket", "t20", "icc"],
+    "world_cup_rugby": ["world cup", "rugby"],
     
     # Other
     "pandemic": ["pandemic", "covid", "virus", "outbreak", "who", "lockdown"],

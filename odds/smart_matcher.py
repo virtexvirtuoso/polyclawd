@@ -32,7 +32,9 @@ ORG_PATTERNS = [
     r'\bopenai\b', r'\banthropic\b', r'\btesla\b', r'\btiktok\b', r'\bmeta\b',
     r'\bgoogle\b', r'\bapple\b', r'\bmicrosoft\b', r'\bnvidia\b',
     r'\bchampions league\b', r'\bpremier league\b', r'\bla liga\b', r'\bnba\b',
-    r'\bnfl\b', r'\bmlb\b', r'\bnhl\b', r'\bsuper bowl\b', r'\bworld cup\b',
+    r'\bnfl\b', r'\bmlb\b', r'\bnhl\b', r'\bsuper bowl\b',
+    r'\bfifa\s*world\s*cup\b', r'\bt20\s*world\s*cup\b', r'\bcricket\s*world\s*cup\b',
+    r'\brugby\s*world\s*cup\b', r'\bworld cup\b',
     # Crypto
     r'\bbitcoin\b', r'\bbtc\b', r'\bethereum\b', r'\beth\b', r'\bsolana\b', r'\bsol\b',
     r'\bdogecoin\b', r'\bdoge\b', r'\bxrp\b', r'\bcardano\b', r'\bada\b',
@@ -73,6 +75,11 @@ ENTITY_ALIASES = {
     'xi': 'xi jinping',
     'ocasio-cortez': 'aoc',
     'ocasio cortez': 'aoc',
+    # Sport-specific World Cups (prevent cross-sport false positives)
+    'fifa world cup': 'fifa world cup',
+    't20 world cup': 'cricket world cup',
+    'icc world cup': 'cricket world cup',
+    'rugby world cup': 'rugby world cup',
 }
 
 EVENT_TYPE_PATTERNS = {
