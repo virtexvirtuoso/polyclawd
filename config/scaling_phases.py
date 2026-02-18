@@ -6,6 +6,11 @@ Each phase has different risk parameters optimized for the capital level.
 """
 
 from typing import Dict, Any, Optional
+try:
+    from signals.cv_kelly import calculate_cv_kelly_haircut
+    CV_KELLY_AVAILABLE = True
+except ImportError:
+    CV_KELLY_AVAILABLE = False
 from dataclasses import dataclass
 from enum import Enum
 
@@ -179,6 +184,15 @@ def calculate_position_size(
     # Apply all multipliers to Kelly
     adjusted_kelly = kelly * performance_mult * streak_mult * agreement_mult
     
+    # Apply CV uncertainty haircut (Monte Carlo adjusted)
+    cv_result = None
+    if CV_KELLY_AVAILABLE:
+        try:
+            cv_result = calculate_cv_kelly_haircut(adjusted_kelly)
+            adjusted_kelly = cv_result["kelly_adjusted"]
+        except Exception:
+            pass  # Fall through to phase limits if CV fails
+    
     # Clamp to phase limits
     adjusted_kelly = max(phase_config.kelly_min, min(phase_config.kelly_max, adjusted_kelly))
     
@@ -198,6 +212,7 @@ def calculate_position_size(
         "position_pct": round(position_pct, 4),
         "kelly_raw": round(kelly, 4),
         "kelly_adjusted": round(adjusted_kelly, 4),
+        "cv_kelly": cv_result if cv_result else None,
         "market_price": market_price,
         "payout_ratio": round(b, 4),
         "phase": phase_config.name,
