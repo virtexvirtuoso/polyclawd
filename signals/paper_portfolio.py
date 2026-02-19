@@ -4,6 +4,11 @@ Paper Portfolio Manager — Kelly-fractional sizing with SQLite tracking.
 """
 
 import sqlite3
+try:
+    from empirical_confidence import calculate_empirical_confidence
+    HAS_EMPIRICAL = True
+except ImportError:
+    HAS_EMPIRICAL = False
 import logging
 import math
 from datetime import datetime, timezone
@@ -17,9 +22,9 @@ DB_PATH = BASE_DIR / "storage" / "shadow_trades.db"
 
 STARTING_BANKROLL = 500.0
 KELLY_FRACTION = 1 / 8
-MAX_CONCURRENT = 3
+MAX_CONCURRENT = 10
 MIN_CONFIDENCE = 0.50
-MIN_EDGE = 0.05
+MIN_EDGE = 0.15  # 15% minimum edge — was 5%, letting noise through
 MIN_PRICE = 0.05  # Price floor — reject garbage contracts below 5 cents
 MAX_PRICE = 0.95  # Price ceiling — reject near-certain markets (no edge)
 MIN_BET = 5.0
@@ -150,6 +155,18 @@ def evaluate_signal(signal: dict) -> dict:
     if effective_price > MAX_PRICE:
         return {"eligible": False, "reason": f"Price {effective_price:.1%} above ceiling {MAX_PRICE:.0%} — no edge", "edge": 0, "kelly_pct": 0, "bet_size": 0}
     
+    # ─── Phase 1: Empirical Confidence Override ─────────────
+    empirical_result = None
+    if HAS_EMPIRICAL:
+        try:
+            market_title = signal.get("market") or signal.get("market_title") or signal.get("title", "")
+            empirical_result = calculate_empirical_confidence(market_title, side or "YES", market_price)
+            if empirical_result["killed"]:
+                return {"eligible": False, "reason": f"Kill rule: {empirical_result['kill_reason']}", "edge": 0, "kelly_pct": 0, "bet_size": 0, "empirical": empirical_result}
+            confidence = empirical_result["confidence"]
+        except Exception:
+            pass  # Fallback to old confidence
+
     if side == "YES":
         edge = confidence - market_price
         odds = (1 / market_price) - 1 if market_price > 0 else 0
@@ -178,7 +195,7 @@ def evaluate_signal(signal: dict) -> dict:
     if bet_size > bankroll:
         return {"eligible": False, "reason": f"Insufficient bankroll ${bankroll:.2f}", "edge": edge, "kelly_pct": kelly_pct, "bet_size": 0}
     
-    return {"eligible": True, "bet_size": round(bet_size, 2), "edge": round(edge, 4), "kelly_pct": round(kelly_pct, 4), "reason": "Criteria met"}
+    return {"eligible": True, "bet_size": round(bet_size, 2), "edge": round(edge, 4), "kelly_pct": round(kelly_pct, 4), "reason": "Criteria met", "empirical": empirical_result}
 
 
 def open_position(signal: dict) -> dict:

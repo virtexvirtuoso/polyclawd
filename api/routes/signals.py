@@ -16,6 +16,7 @@ This router consolidates all signal-related endpoints:
 - /signals/ic/{source} - Per-source IC measurement
 """
 import json
+import os
 import logging
 import sys
 import urllib.request
@@ -1859,3 +1860,192 @@ async def scan_weather():
     except Exception as e:
         logger.exception(f"Weather scan failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Confidence Redesign: Archetype & Kill Rules ─────────────────────
+
+@router.get("/archetype/classify")
+async def classify_market_archetype(title: str = Query(...)):
+    """Classify a market title into an archetype."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from mispriced_category_signal import classify_archetype, _check_kill_rules
+        archetype = classify_archetype(title)
+        return {"title": title, "archetype": archetype}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/archetype/kill-check")
+async def check_kill_rules(title: str = Query(...), price_cents: int = Query(...)):
+    """Check if a market would be killed by archetype kill rules."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from mispriced_category_signal import classify_archetype, _check_kill_rules
+        should_kill, reason, archetype = _check_kill_rules(title, price_cents)
+        return {
+            "title": title,
+            "price_cents": price_cents,
+            "archetype": archetype,
+            "killed": should_kill,
+            "reason": reason,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/archetype/wr-buckets")
+async def get_wr_buckets():
+    """Get empirical win rates by archetype, side, and price zone from resolved trades."""
+    try:
+        import sqlite3
+        db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '..', 'storage', 'shadow_trades.db')
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from mispriced_category_signal import classify_archetype
+
+        # Shadow trades
+        shadow = db.execute("SELECT market, side, entry_price, outcome, platform FROM shadow_trades WHERE resolved=1").fetchall()
+        # Paper trades
+        paper = db.execute("SELECT market_title as market, side, entry_price, status, platform FROM paper_positions WHERE status IN ('won','lost')").fetchall()
+
+        buckets = {}
+        for t in shadow:
+            arch = classify_archetype(t['market'] or '')
+            won = t['side'] == t['outcome']
+            side = t['side'] or '?'
+            price = t['entry_price'] or 0
+            zone = 'cheap' if price < 0.45 else 'mid' if price < 0.65 else 'premium' if price < 0.85 else 'expensive'
+            
+            key = f"{arch}|{side}|{zone}"
+            buckets.setdefault(key, {"wins": 0, "total": 0, "archetype": arch, "side": side, "zone": zone})
+            buckets[key]["total"] += 1
+            if won:
+                buckets[key]["wins"] += 1
+
+        for t in paper:
+            arch = classify_archetype(t['market'] or '')
+            won = t['status'] == 'won'
+            side = t['side']
+            price = t['entry_price']
+            zone = 'cheap' if price < 0.45 else 'mid' if price < 0.65 else 'premium' if price < 0.85 else 'expensive'
+            
+            key = f"{arch}|{side}|{zone}"
+            buckets.setdefault(key, {"wins": 0, "total": 0, "archetype": arch, "side": side, "zone": zone})
+            buckets[key]["total"] += 1
+            if won:
+                buckets[key]["wins"] += 1
+
+        db.close()
+
+        result = []
+        for key, b in sorted(buckets.items(), key=lambda x: -x[1]["total"]):
+            wr = b["wins"] / b["total"] * 100 if b["total"] > 0 else 0
+            result.append({
+                "archetype": b["archetype"],
+                "side": b["side"],
+                "price_zone": b["zone"],
+                "wins": b["wins"],
+                "losses": b["total"] - b["wins"],
+                "total": b["total"],
+                "win_rate": round(wr, 1),
+            })
+
+        total_resolved = sum(b["total"] for b in buckets.values())
+        total_wins = sum(b["wins"] for b in buckets.values())
+        return {
+            "total_resolved": total_resolved,
+            "total_wr": round(total_wins / total_resolved * 100, 1) if total_resolved else 0,
+            "buckets": result,
+        }
+    except Exception as e:
+        logger.exception(f"WR buckets failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/archetype/kill-stats")
+async def get_kill_stats():
+    """Get stats on how many current signals would be killed by rules."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from mispriced_category_signal import get_mispriced_category_signals
+        result = get_mispriced_category_signals()
+        signals = result.get('signals', [])
+        
+        killed = [s for s in signals if s.get('killed')]
+        alive = [s for s in signals if not s.get('killed')]
+        
+        kill_reasons = {}
+        for s in killed:
+            r = s.get('kill_reason', 'unknown')
+            kill_reasons[r] = kill_reasons.get(r, 0) + 1
+        
+        return {
+            "total_signals": len(signals),
+            "killed": len(killed),
+            "alive": len(alive),
+            "kill_rate_pct": round(len(killed) / len(signals) * 100, 1) if signals else 0,
+            "kill_reasons": kill_reasons,
+            "alive_archetypes": {s.get('archetype', '?'): 0 for s in alive},
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/archetype/calibration")
+async def get_calibration_audit():
+    """Run calibration audit — check if predicted confidence matches actual WR."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from empirical_confidence import calibration_audit
+        return calibration_audit()
+    except Exception as e:
+        logger.exception(f"Calibration audit failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/archetype/evaluate")
+async def evaluate_with_empirical(title: str = Query(...), side: str = Query(...), price: float = Query(...)):
+    """Evaluate a market using empirical confidence engine."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from empirical_confidence import calculate_empirical_confidence
+        return calculate_empirical_confidence(title, side, price)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# === Basket Arb Endpoints ===
+
+@router.get("/basket-arb")
+async def basket_arb_signals():
+    """Get sum-to-one basket arbitrage signals."""
+    from signals.basket_arb_scanner import get_basket_arb_signals
+    return get_basket_arb_signals()
+
+
+@router.get("/basket-arb/compression")
+async def basket_arb_compression():
+    """Check if arb spreads are compressed (bot competition)."""
+    from signals.basket_arb_scanner import check_spread_compression, _fetch_events
+    import json
+    events = _fetch_events(limit=50)
+    all_markets = []
+    for ev in events:
+        all_markets.extend(ev.get("markets", []))
+    return check_spread_compression(all_markets)

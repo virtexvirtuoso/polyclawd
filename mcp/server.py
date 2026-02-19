@@ -542,7 +542,28 @@ TOOLS = [
         "name": "polyclawd_metrics",
         "description": "Get system metrics",
         "inputSchema": {"type": "object", "properties": {}, "required": []}
-    }
+    },
+
+    {
+        "name": "polyclawd_archetype_classify",
+        "description": "Classify a market title into an archetype (daily_updown, intraday_updown, price_above, price_range, directional, other)",
+        "inputSchema": {"type": "object", "properties": {"title": {"type": "string", "description": "Market title to classify"}}, "required": ["title"]},
+    },
+    {
+        "name": "polyclawd_kill_check",
+        "description": "Check if a market would be killed by archetype kill rules (K1-K6). Returns killed status, reason, and archetype.",
+        "inputSchema": {"type": "object", "properties": {"title": {"type": "string"}, "price_cents": {"type": "integer", "description": "YES price in cents 0-100"}}, "required": ["title", "price_cents"]},
+    },
+    {
+        "name": "polyclawd_wr_buckets",
+        "description": "Get empirical win rates by archetype, side, and price zone from all resolved trades. Core data for confidence redesign.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "polyclawd_kill_stats",
+        "description": "Get stats on how many current signals are killed by archetype rules and why.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
 ]
 
 def handle_tool_call(name: str, arguments: dict) -> Any:
@@ -770,6 +791,15 @@ def handle_tool_call(name: str, arguments: dict) -> Any:
         return api_get("/api/health")
     elif name == "polyclawd_metrics":
         return api_get("/api/metrics")
+
+    elif name == "polyclawd_archetype_classify":
+        return api_get("/api/archetype/classify", params)
+    elif name == "polyclawd_kill_check":
+        return api_get("/api/archetype/kill-check", params)
+    elif name == "polyclawd_wr_buckets":
+        return api_get("/api/archetype/wr-buckets")
+    elif name == "polyclawd_kill_stats":
+        return api_get("/api/archetype/kill-stats")
     
     else:
         return {"error": f"Unknown tool: {name}"}

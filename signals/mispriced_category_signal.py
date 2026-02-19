@@ -42,7 +42,7 @@ def _is_subdaily_noise(title: str) -> bool:
     if _SUBDAILY_PATTERN.search(t):
         return True
     # Also catch "X:XXPM ET" or "X:XXAM ET" patterns
-    if ('up or down' in t) and re.search(r'\d+:\d+\s*(am|pm)', t, re.IGNORECASE):
+    if ('up or down' in t) and re.search(r'\d+[:\d]*\s*(am|pm)', t, re.IGNORECASE):
         return True
     # Catch "5m" or "15m" or "1h" series
     if ('up or down' in t) and re.search(r'\b(5m|15m|30m|1h|4h)\b', t, re.IGNORECASE):
@@ -69,7 +69,7 @@ def classify_archetype(title: str) -> str:
 
     # Order matters: intraday must match before daily (both contain "up or down")
     if 'up or down' in t:
-        if re.search(r'\d+:\d+\s*(am|pm)', t, re.IGNORECASE):
+        if re.search(r'\d+[:\d]*\s*(am|pm)', t, re.IGNORECASE):
             return 'intraday_updown'
         if re.search(r'\b(5m|15m|30m|1h|4h)\b', t, re.IGNORECASE):
             return 'intraday_updown'
@@ -83,6 +83,9 @@ def classify_archetype(title: str) -> str:
         return 'price_above'
     if re.search(r'\b(dip|crash|fall|drop|plunge)\b.*\$', t):
         return 'directional'
+
+    if re.search(r'\b(best|top|leading|#1)\b.*\b(ai|model|llm)\b', t):
+        return 'ai_model'
 
     return 'other'
 
@@ -504,6 +507,16 @@ def _is_mispriced_polymarket(market: Dict) -> tuple:
     elif any(kw in question for kw in weather_kw):
         return True, 0.22, "science"
 
+    # Archetype-based pass-through: if we can classify the market and it's
+    # a type we have empirical WR data for, let it through with moderate edge
+    archetype = classify_archetype(market.get("question", ""))
+    if archetype == "daily_updown":
+        return True, 0.20, "tech"  # 72% WR empirically
+    elif archetype == "price_above":
+        return True, 0.15, "tech"  # 50% WR overall, but good with NO side
+    elif archetype == "ai_model":
+        return True, 0.15, "tech"  # New archetype, limited data
+
     return False, 0, ""
 
 
@@ -686,7 +699,32 @@ def scan_kalshi_signals() -> List[Dict]:
 
 def scan_polymarket_signals() -> List[Dict]:
     """Scan Polymarket for mispriced category signals."""
-    markets = fetch_polymarket_markets(limit=100)
+    # Fetch from both flat markets AND events (which contain nested markets)
+    flat_markets = fetch_polymarket_markets(limit=200)
+    
+    # Also fetch from events endpoint to get nested markets (Up or Down, price above, AI model)
+    event_markets = []
+    try:
+        import httpx
+        GAMMA = "https://gamma-api.polymarket.com"
+        r = httpx.get(f"{GAMMA}/events", params={
+            "active": "true", "closed": "false", "limit": 100, 
+            "order": "volume24hr", "ascending": "false"
+        }, timeout=20)
+        if r.status_code == 200:
+            events = r.json()
+            seen_ids = {m.get("conditionId") or m.get("id") for m in flat_markets}
+            for event in events:
+                for m in event.get("markets", []):
+                    mid = m.get("conditionId") or m.get("id")
+                    if mid not in seen_ids and m.get("active") and not m.get("closed"):
+                        event_markets.append(m)
+                        seen_ids.add(mid)
+            logger.info(f"Polymarket: {len(flat_markets)} flat + {len(event_markets)} from events")
+    except Exception as e:
+        logger.warning(f"Event fetch failed: {e}")
+    
+    markets = flat_markets + event_markets
     signals = []
     now = datetime.now(timezone.utc)
 
@@ -860,11 +898,20 @@ def get_mispriced_category_signals() -> Dict[str, Any]:
     kalshi_signals = scan_kalshi_signals()
     poly_signals = scan_polymarket_signals()
 
+    # Scan for sum-to-one basket arbitrage
+    basket_signals = []
+    try:
+        from signals.basket_arb_scanner import scan_basket_arb
+        basket_signals = scan_basket_arb()
+        logger.info(f"Basket arb: {len(basket_signals)} signals")
+    except Exception as e:
+        logger.warning(f"Basket arb scan failed: {e}")
+
     # Cross-platform matching
     cross_matches = find_cross_platform_matches(kalshi_signals, poly_signals)
 
     # Merge and sort
-    all_signals = kalshi_signals + poly_signals
+    all_signals = kalshi_signals + poly_signals + basket_signals
     all_signals.sort(key=lambda x: x["confidence"], reverse=True)
 
     # Shadow-log top signals
@@ -884,6 +931,7 @@ def get_mispriced_category_signals() -> Dict[str, Any]:
         "kalshi_signals": len(kalshi_signals),
         "polymarket_signals": len(poly_signals),
         "cross_platform_matches": len(cross_matches),
+        "basket_arb_signals": len(basket_signals),
         "cross_matches": cross_matches,
         "strategy": "MispricedCategoryWhale",
         "description": "Target high-volume markets in mispriced categories with whale confirmation (Kalshi + Polymarket)",

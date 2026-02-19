@@ -123,7 +123,7 @@
   footer .brand{color:var(--accent2)}
 
   /* Nav link */
-  .nav-link{position:absolute;top:0;right:0;font-size:12px;color:var(--text2);text-decoration:none;padding:6px 14px;border:1px solid var(--border);border-radius:8px;transition:all 0.2s}
+  .nav-link{display:inline-block;font-size:12px;color:var(--text2);text-decoration:none;padding:8px 16px;border:1px solid var(--border);border-radius:8px;transition:all 0.2s;margin-bottom:16px}
   .nav-link:hover{border-color:var(--accent);color:var(--accent2)}
 
   @media(max-width:768px){
@@ -139,11 +139,11 @@
 <div class="noise"></div>
 <div class="container">
 
+<nav style="text-align:right;padding:16px 24px 0"><a href="analysis.html" class="nav-link">← Analysis Suite</a></nav>
 <header>
-  <a href="analysis.html" class="nav-link">← Analysis Suite</a>
   <div class="logo">Virtuoso Crypto — <span>Polyclawd</span></div>
   <h1>Paper Portfolio</h1>
-  <p class="subtitle">Prediction market paper trading · <strong>1/8 Kelly</strong> · $500 bankroll · 3 max positions</p>
+  <p class="subtitle">Prediction market paper trading · <strong>1/8 Kelly</strong> · $500 bankroll · 10 max positions</p>
   <div class="timestamp"><span class="live-dot"></span>live · auto-refresh 60s · <span id="lastUpdate">—</span></div>
 </header>
 
