@@ -87,6 +87,35 @@ def classify_archetype(title: str) -> str:
     if re.search(r'\b(best|top|leading|#1)\b.*\b(ai|model|llm)\b', t):
         return 'ai_model'
 
+    # Geopolitical binary (will X happen by date Y)
+    # Require country/military context to avoid false positives (e.g. 'Celtics vs Warriors')
+    geo_keywords = re.search(r'(strike|invade|attack|bomb|sanction|war|ceasefire|peace)', t)
+    geo_context = re.search(r'(iran|iraq|syria|russia|ukraine|china|taiwan|us|u\.s\.|israel|nato|military|troops|missile|nuclear)', t)
+    if geo_keywords and geo_context:
+        return 'geopolitical'
+    if re.search(r'(prime minister|president|leader|supreme|chancellor|nominee|elected)', t):
+        return 'election'
+
+    # Entertainment / awards
+    if re.search(r'(oscar|grammy|emmy|academy award|best picture|golden globe|tony award|bafta)', t):
+        return 'entertainment'
+
+    # Social media count ranges (tweets, posts, etc.)
+    if re.search(r'(tweets?|posts?|truth social|# )', t) and re.search(r'\d+[-–]\d+|\d+\+', t):
+        return 'social_count'
+
+    # Deadline binary (will X happen by/before date)
+    if re.search(r'(by|before|end of|on)\s+(january|february|march|april|may|june|july|august|september|october|november|december|\d{4})', t):
+        return 'deadline_binary'
+
+    # Sports winner / championship
+    if re.search(r'(win|winner|champion|cup|league|playoffs|finals|medal)', t):
+        return 'sports_winner'
+
+    # Temperature / weather
+    if re.search(r'(temperature|highest temp|lowest temp|°[FC])', t):
+        return 'weather'
+
     return 'other'
 
 
@@ -120,7 +149,11 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     if archetype == 'price_above' and price_cents < 45:
         return True, "K2: price_above cheap entry <45c (20% WR)", archetype
 
-    # K6: Unknown archetype (hard kill — don't trade what we can't classify)
+    # K6: Kill sports (efficient) and truly unknown archetypes
+    # Allow: geopolitical, election, deadline_binary, social_count, weather, ai_model
+    ALLOWED_NEW = {'geopolitical', 'election', 'deadline_binary', 'social_count', 'weather', 'entertainment'}
+    if archetype == 'sports_winner':
+        return True, "K6: sports_winner — efficient market", archetype
     if archetype == 'other':
         return True, "K6: unclassified archetype", archetype
 
@@ -510,12 +543,20 @@ def _is_mispriced_polymarket(market: Dict) -> tuple:
     # Archetype-based pass-through: if we can classify the market and it's
     # a type we have empirical WR data for, let it through with moderate edge
     archetype = classify_archetype(market.get("question", ""))
-    if archetype == "daily_updown":
-        return True, 0.20, "tech"  # 72% WR empirically
-    elif archetype == "price_above":
-        return True, 0.15, "tech"  # 50% WR overall, but good with NO side
-    elif archetype == "ai_model":
-        return True, 0.15, "tech"  # New archetype, limited data
+    ARCHETYPE_EDGES = {
+        "daily_updown": (0.20, "tech"),       # 72% WR empirically
+        "price_above": (0.15, "tech"),         # 50% WR overall, good with NO side
+        "ai_model": (0.15, "tech"),            # New, limited data
+        "geopolitical": (0.12, "dynamic"),     # Binary deadline events — high vol
+        "election": (0.10, "dynamic"),         # Political markets
+        "deadline_binary": (0.10, "dynamic"),  # Generic "by date X"
+        "social_count": (0.12, "entertainment"),  # Tweet/post counts
+        "weather": (0.15, "science"),          # Weather markets
+        "entertainment": (0.20, "entertainment"),  # Awards/shows — historically mispriced
+    }
+    if archetype in ARCHETYPE_EDGES:
+        edge, tier = ARCHETYPE_EDGES[archetype]
+        return True, edge, tier
 
     return False, 0, ""
 
