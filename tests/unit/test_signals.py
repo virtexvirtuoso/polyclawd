@@ -262,6 +262,13 @@ class TestSignalAggregation:
         monkeypatch.setattr("api.routes.signals.PREDICTOR_STATS_FILE", tmp_path / "predictor_stats.json")
         monkeypatch.setattr("api.routes.signals.WHALE_CONFIG_FILE", tmp_path / "whale_config.json")
 
+        # Mock all HTTP calls — aggregate_all_signals hits Kalshi, Polymarket, Reddit, Google News
+        mock_response = MagicMock()
+        mock_response.read.return_value = b"[]"
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr("urllib.request.urlopen", lambda *a, **kw: mock_response)
+
         # Create minimal config files
         (tmp_path / "source_outcomes.json").write_text(json.dumps({}))
         (tmp_path / "predictor_stats.json").write_text(json.dumps({"predictors": {}}))

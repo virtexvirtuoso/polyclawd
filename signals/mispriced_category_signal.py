@@ -21,9 +21,108 @@ import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Sub-daily noise filter: BTC/ETH "Up or Down" with time ranges are coin flips
+_SUBDAILY_PATTERN = re.compile(
+    r'(bitcoin|ethereum|btc|eth)\s+up\s+or\s+down\s*[-—]\s*\w+\s+\d+,?\s*\d*:?\d*\s*(am|pm)',
+    re.IGNORECASE
+)
+
+def _is_subdaily_noise(title: str) -> bool:
+    """Reject intraday BTC/ETH up/down markets and price range binary options."""
+    if not title:
+        return False
+    t = title.lower()
+    # Match patterns like "Bitcoin Up or Down - February 17, 8:00AM-12:00PM ET"
+    # But NOT "Bitcoin Up or Down on February 17?" (daily = OK)
+    if _SUBDAILY_PATTERN.search(t):
+        return True
+    # Also catch "X:XXPM ET" or "X:XXAM ET" patterns
+    if ('up or down' in t) and re.search(r'\d+:\d+\s*(am|pm)', t, re.IGNORECASE):
+        return True
+    # Catch "5m" or "15m" or "1h" series
+    if ('up or down' in t) and re.search(r'\b(5m|15m|30m|1h|4h)\b', t, re.IGNORECASE):
+        return True
+    # Kalshi BTC/ETH "price range" / "price on" = binary options on exact strikes, no edge
+    if re.search(r'(bitcoin|ethereum|btc|eth)\s+price\s+(range|on|at)\b', t, re.IGNORECASE):
+        return True
+    return False
+
+
+# ============================================================================
+# Archetype Classification + Kill Rules (from 51-trade confidence analysis)
+# ============================================================================
+
+def classify_archetype(title: str) -> str:
+    """Classify market into archetype for kill rule evaluation.
+
+    Archetypes: daily_updown, intraday_updown, price_above,
+    price_range, directional, other.
+    """
+    if not title:
+        return "other"
+    t = title.lower()
+
+    # Order matters: intraday must match before daily (both contain "up or down")
+    if 'up or down' in t:
+        if re.search(r'\d+:\d+\s*(am|pm)', t, re.IGNORECASE):
+            return 'intraday_updown'
+        if re.search(r'\b(5m|15m|30m|1h|4h)\b', t, re.IGNORECASE):
+            return 'intraday_updown'
+        if re.search(r'(am|pm)\s*(to|-|–)\s*(am|pm)', t, re.IGNORECASE):
+            return 'intraday_updown'
+        return 'daily_updown'
+
+    if re.search(r'price\s+(range|between|on|at)\b', t):
+        return 'price_range'
+    if re.search(r'(above|below|reach|exceed|over|under)\s*\$', t):
+        return 'price_above'
+    if re.search(r'\b(dip|crash|fall|drop|plunge)\b.*\$', t):
+        return 'directional'
+
+    return 'other'
+
+
+def _check_kill_rules(title: str, price_cents: int) -> tuple:
+    """Check kill rules against market archetype and entry price.
+
+    Returns (should_kill: bool, reason: str, archetype: str).
+    price_cents: YES price in cents (0-100).
+    """
+    archetype = classify_archetype(title)
+
+    # K3: Any trade below 30c (hard kill — 20% WR, n=10)
+    if price_cents < 30:
+        return True, f"K3: entry {price_cents}c < 30c floor (20% WR)", archetype
+
+    # K1: Intraday up/down — any side (hard kill — 22% YES WR, n=9)
+    if archetype == 'intraday_updown':
+        return True, "K1: intraday_updown rejected (22% YES WR)", archetype
+
+    # K4: Price range binary option (soft kill — 0% WR, n=1)
+    if archetype == 'price_range':
+        return True, "K4: price_range binary option (0% WR, n=1)", archetype
+
+    # K5: Directional dip/crash (soft kill — 0% WR, n=1)
+    if archetype == 'directional':
+        return True, "K5: directional dip/crash (0% WR, n=1)", archetype
+
+    # K2: price_above + cheap entry (hard kill — 20% WR, n=5)
+    # Defense-in-depth: MIN_ENTRY_PRICE=55 already blocks <55c,
+    # but this catches the specific archetype for future YES-side logic
+    if archetype == 'price_above' and price_cents < 45:
+        return True, "K2: price_above cheap entry <45c (20% WR)", archetype
+
+    # K6: Unknown archetype (hard kill — don't trade what we can't classify)
+    if archetype == 'other':
+        return True, "K6: unclassified archetype", archetype
+
+    return False, "", archetype
+
 
 # ============================================================================
 # Strategy Parameters (from backtest optimization)
@@ -51,6 +150,10 @@ MISPRICED_CATEGORIES = {
     'KXETF': {'error': 0.18, 'tier': 'medium'},
     'KXSTONKS': {'error': 0.17, 'tier': 'medium'},
     'KXCRYPTO': {'error': 0.16, 'tier': 'medium'},
+    # Crypto price — high volume, cross-platform arb vs Polymarket
+    'KXBTCD': {'error': 0.20, 'tier': 'medium'},   # BTC daily price (above/below)
+    'KXBTC': {'error': 0.18, 'tier': 'medium'},     # BTC price range
+    'KXETHD': {'error': 0.20, 'tier': 'medium'},    # ETH daily price (above/below)
 }
 
 # Well-calibrated categories to NEVER trade
@@ -82,6 +185,7 @@ CONTESTED_LOW = 15              # Cents/pct
 CONTESTED_HIGH = 92  # Raised: take NO bets up to 92c (was 85)
 MAX_DAYS_TO_CLOSE = 30
 MIN_EDGE_PCT = 5
+MIN_ENTRY_PRICE = 55  # Cents — reject below this (data: <55c = 37% WR, >55c = 73% WR)
 
 # Confidence scoring weights
 WEIGHT_CATEGORY_EDGE = 0.35
@@ -182,7 +286,23 @@ def fetch_kalshi_markets(pages: int = 3, per_page: int = 30, status: str = "open
             m["volume"] = int(float(m.get("volume_fp", "0") or "0"))
             all_markets.append(m)
 
-    logger.info(f"Kalshi: fetched {len(all_markets)} markets from {pages} pages")
+    # 3. Targeted fetch for high-value mispriced categories
+    for series_ticker in MISPRICED_CATEGORIES:
+        series_url = f"{KALSHI_API}/events?series_ticker={series_ticker}&limit=10&status={status}&with_nested_markets=true"
+        series_data = _fetch_json(series_url, timeout=10)
+        if series_data:
+            for event in series_data.get("events", []):
+                for m in event.get("markets", []):
+                    t = m.get("ticker", "")
+                    if t in seen_tickers:
+                        continue
+                    seen_tickers.add(t)
+                    m["_series_ticker"] = series_ticker
+                    m["_event_category"] = event.get("category", "")
+                    m["volume"] = int(float(m.get("volume_fp", "0") or "0"))
+                    all_markets.append(m)
+
+    logger.info(f"Kalshi: fetched {len(all_markets)} markets from {pages} pages + {len(MISPRICED_CATEGORIES)} targeted series")
     return all_markets
 
 
@@ -495,6 +615,17 @@ def scan_kalshi_signals() -> List[Dict]:
         except Exception:
             continue
 
+        # Filter sub-daily noise (BTC/ETH intraday = coin flip)
+        market_title = market.get("title", ticker)
+        if _is_subdaily_noise(market_title):
+            continue
+
+        # Kill rules: reject empirically losing archetypes
+        should_kill, kill_reason, archetype = _check_kill_rules(market_title, price)
+        if should_kill:
+            logger.info(f"Kill rule: {kill_reason} — {market_title[:80]}")
+            continue
+
         conf = calculate_signal_confidence(
             category_edge=category_edge,
             volume=volume,
@@ -509,7 +640,7 @@ def scan_kalshi_signals() -> List[Dict]:
         # Data shows: NO @ 0.60-0.85 = 79% WR (+8.97 P&L)
         #             YES @ 0.15-0.45 = 29% WR (-3.05 P&L)
         # Skip YES longshots entirely — they bleed edge
-        if price <= 55:  # NO-only: skip YES zone + contested
+        if price < MIN_ENTRY_PRICE:  # NO-only: reject cheap entries (data: <55c = 37% WR)
             continue  # skip cheap markets (would be YES bets) + contested zone
         side = "NO"
         # fair_value is the corrected probability after category edge
@@ -536,6 +667,7 @@ def scan_kalshi_signals() -> List[Dict]:
                 f"{days_to_close:.0f}d"
             ),
             "confidence_breakdown": conf,
+            "archetype": archetype,
             "strategy": "MispricedCategoryWhale",
             "backtest_stats": {
                 "win_rate": 75.0,
@@ -606,6 +738,17 @@ def scan_polymarket_signals() -> List[Dict]:
         except Exception:
             continue
 
+        # Filter sub-daily noise (BTC/ETH intraday = coin flip)
+        market_question = market.get("question", "")
+        if _is_subdaily_noise(market_question):
+            continue
+
+        # Kill rules: reject empirically losing archetypes
+        should_kill, kill_reason, archetype = _check_kill_rules(market_question, price_cents)
+        if should_kill:
+            logger.info(f"Kill rule: {kill_reason} — {market_question[:80]}")
+            continue
+
         conf = calculate_signal_confidence(
             category_edge=edge,
             volume=int(volume),
@@ -618,7 +761,7 @@ def scan_polymarket_signals() -> List[Dict]:
 
         # Asymmetric fade: ONLY bet NO on overpriced markets
         # YES longshots (price < 50) lose 71% — skip entirely
-        if price_cents <= 55:  # NO-only: skip YES zone + contested
+        if price_cents < MIN_ENTRY_PRICE:  # NO-only: reject cheap entries (data: <55c = 37% WR)
             continue  # skip cheap/contested markets
         side = "NO"
         fair_value = yes_price - edge
@@ -647,6 +790,7 @@ def scan_polymarket_signals() -> List[Dict]:
                 f"{days_to_close:.0f}d"
             ),
             "confidence_breakdown": conf,
+            "archetype": archetype,
             "strategy": "MispricedCategoryWhale",
             "url": f"https://polymarket.com/event/{slug}" if slug else None,
             "backtest_stats": {

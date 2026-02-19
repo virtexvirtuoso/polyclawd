@@ -124,6 +124,13 @@ def _init_tables(conn: sqlite3.Connection):
     """)
     conn.commit()
 
+    # Migration: add archetype column for kill rule classification
+    try:
+        conn.execute("ALTER TABLE shadow_trades ADD COLUMN archetype TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
 
 def _migrate_legacy_json(conn: sqlite3.Connection):
     """Import trades from legacy JSON file into SQLite."""
@@ -186,6 +193,19 @@ def save_signal_snapshot(signals: List[Dict], source: str = "all"):
     # Save to SQLite
     for sig in signals:
         try:
+            # Dedup: skip if same market logged today with <2% price change
+            _mid = sig.get("market_id", "")
+            _price = sig.get("price", 0)
+            if _mid and _price:
+                _recent = conn.execute(
+                    "SELECT price FROM signal_snapshots WHERE market_id = ? AND snapshot_date = ? ORDER BY id DESC LIMIT 1",
+                    (_mid, today)
+                ).fetchone()
+                if _recent and _recent[0]:
+                    _last = float(_recent[0])
+                    if _last > 0 and abs(_price - _last) / _last < 0.02:
+                        continue  # Skip: price unchanged (<2%)
+
             conn.execute("""
                 INSERT INTO signal_snapshots
                 (snapshot_date, snapshot_time, source, platform, market_id,
@@ -315,8 +335,8 @@ def log_shadow_trade(signal: Dict) -> bool:
             INSERT INTO shadow_trades
             (timestamp, market_id, market, category, category_tier, platform,
              side, entry_price, confidence, confirmations, days_to_close,
-             volume, reasoning, snapshot_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             volume, reasoning, snapshot_date, archetype)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             datetime.now(timezone.utc).isoformat(),
             market_id,
@@ -332,6 +352,7 @@ def log_shadow_trade(signal: Dict) -> bool:
             signal.get("volume"),
             signal.get("reasoning", "")[:500],
             today,
+            signal.get("archetype"),
         ))
         conn.commit()
         conn.close()
@@ -360,11 +381,32 @@ def _fetch_json(url: str, timeout: int = 8) -> Any:
 
 
 def _normalize_market_title(title: str) -> str:
-    """Normalize market title for cross-platform dedup matching."""
+    """Normalize market title for cross-platform dedup matching.
+    
+    Strips platform-specific phrasing differences so the same market
+    on Kalshi vs Polymarket produces the same normalized key.
+    """
     import re
     t = (title or "").lower().strip()
     t = re.sub(r'\s+', ' ', t)
     t = t.rstrip('?.! ')
+    # Strip "will " prefix (Kalshi uses "Will X", Polymarket often doesn't)
+    t = re.sub(r'^will\s+', '', t)
+    # Normalize "the price of bitcoin" → "bitcoin"
+    t = re.sub(r'the price of\s+', '', t)
+    # Strip "be above" → "above" 
+    t = re.sub(r'\bbe above\b', 'above', t)
+    # Strip date suffixes that differ ("on February 18?" vs "in February?")
+    # Keep month but normalize preposition
+    t = re.sub(r'\b(on|in|by|before)\s+(january|february|march|april|may|june|july|august|september|october|november|december)', r'\2', t)
+    # Strip year
+    t = re.sub(r'\s*20\d{2}', '', t)
+    # Strip day number after month ("february 18" → "february")
+    t = re.sub(r'(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b', r'\1', t)
+    # Strip "at the end of"
+    t = re.sub(r'at the end of\s+', '', t)
+    # Normalize "reach $75,000" and "above $75,000" 
+    t = re.sub(r'\breach\b', 'above', t)
     return t
 
 
