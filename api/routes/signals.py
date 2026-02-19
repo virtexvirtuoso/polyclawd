@@ -2049,3 +2049,28 @@ async def basket_arb_compression():
     for ev in events:
         all_markets.extend(ev.get("markets", []))
     return check_spread_compression(all_markets)
+
+
+# === Copy-Trade Watcher Endpoints ===
+
+@router.get("/copy-trade")
+async def copy_trade_signals():
+    """Get whale overlap signals + whale-only markets."""
+    from signals.copy_trade_watcher import get_copy_trade_signals
+    return get_copy_trade_signals()
+
+
+@router.get("/copy-trade/whales")
+async def copy_trade_whales():
+    """Get discovered whale wallets from recent trades."""
+    from signals.copy_trade_watcher import discover_whales
+    whales = discover_whales()
+    return {"whales": whales, "count": len(whales)}
+
+
+@router.get("/copy-trade/positions")
+async def copy_trade_positions():
+    """Get aggregated whale positions by market."""
+    from signals.copy_trade_watcher import discover_whales, scan_whale_positions
+    whales = discover_whales()
+    return scan_whale_positions(whales[:15])
