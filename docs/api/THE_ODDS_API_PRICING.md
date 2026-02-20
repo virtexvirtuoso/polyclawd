@@ -1,3 +1,10 @@
+
+> ## ⛔ DEPRECATED (Feb 2026)
+> 
+> The Odds API is no longer used by Polyclawd. No API key was configured on VPS.
+> **Replaced by:** ActionNetwork API (`odds/sports_odds.py`) — free, no key, 18+ books.
+> This document is kept for historical reference only.
+
 # The Odds API - Pricing & Upgrade Research
 
 **Research Date:** February 8, 2026  

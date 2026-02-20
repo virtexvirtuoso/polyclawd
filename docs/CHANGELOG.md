@@ -4,6 +4,35 @@ All notable changes to Polyclawd.
 
 ---
 
+## 2026-02-20
+
+### Added
+- **ActionNetwork sports odds** (`odds/sports_odds.py`) — free API, 18+ books, NBA/NFL/NHL/MLB/Soccer/EPL
+- **Basket arb scanner** (`signals/basket_arb_scanner.py`) — sum-to-one multi-outcome arbitrage
+- **Copy-trade watcher** (`signals/copy_trade_watcher.py`) — whale position tracking via data-api.polymarket.com
+- **9 market archetypes** — daily_updown, price_above, ai_model, geopolitical, election, social_count, deadline_binary, entertainment, weather, sports_winner, sports_single_game
+- **Sports edge scanner** — sharp book odds vs Polymarket single-game markets
+- **Market scope detection** in smart_matcher.py — prevents championship vs single-game false matches
+- API endpoints: `/api/sports/odds`, `/api/sports/edges`, `/api/basket-arb`, `/api/basket-arb/compression`, `/api/copy-trade`, `/api/copy-trade/whales`, `/api/copy-trade/positions`
+
+### Deprecated
+- **ESPN odds** (`odds/espn_odds.py`) — ESPN removed odds from free API, returns 0 games
+- **The Odds API** (`odds/client.py`) — no API key configured, replaced by ActionNetwork
+- **PredictIt** — persistent HTTP 403 errors
+
+### Fixed
+- Polymarket scanner producing 0 signals → now 13-16 per scan
+- Sports single-game markets leaking through as deadline_binary
+- Edge scanner false positives: championship vs single-game matches
+- shadow_trades.json permission error
+- Geopolitical archetype false positives (Celtics vs Warriors)
+
+### Changed
+- Sports markets unblocked in K6 kill rules (lower confidence, flagged as unverified)
+- Feature flags: ENABLE_VEGAS=false, ENABLE_ESPN=false, ENABLE_PREDICTIT=false, ENABLE_MANIFOLD=false
+- Signal pipeline: 0 → 13-16 signals per scan
+
+
 ## [2.0.0] - 2026-02-08
 
 ### 🎉 Major Release - AI-Powered Prediction Market Trading

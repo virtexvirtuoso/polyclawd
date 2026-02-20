@@ -188,7 +188,12 @@ Search Polymarket markets.
 
 ---
 
-## Vegas Odds
+## Vegas Odds ⛔ DEPRECATED
+
+> **Deprecated Feb 2026.** No API key configured. Replaced by ActionNetwork.
+> Endpoints still exist but return error.
+
+## _Original Vegas Odds
 
 Sports futures from Vegas/Pinnacle (sharp lines).
 
@@ -232,7 +237,11 @@ Find edge between Vegas sharp lines and Polymarket.
 
 ---
 
-## ESPN Odds
+## ESPN Odds ⛔ DEPRECATED
+
+> **Deprecated Feb 2026.** ESPN removed odds from free API. Replaced by ActionNetwork.
+
+## _Original ESPN Odds
 
 Real-time game odds from ESPN.
 
@@ -476,3 +485,64 @@ All errors return standard format:
 | 404 | Not found |
 | 429 | Rate limit exceeded |
 | 500 | Internal server error |
+
+
+---
+
+## Sports Odds (ActionNetwork) ✅ NEW
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/sports/odds` | Odds from 18+ books (ActionNetwork) |
+| GET | `/sports/edges` | Sharp odds vs Polymarket single-game edges |
+
+### GET /sports/odds
+**Params:** `sports` (comma-separated: nba,nfl,nhl,mlb,soccer,epl)
+
+### GET /sports/edges
+**Params:** `sport` (single sport), `min_edge` (default 5.0)
+
+---
+
+## Basket Arbitrage ✅ NEW
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/basket-arb` | Sum-to-one arb signals |
+| GET | `/basket-arb/compression` | Bot-war spread compression check |
+
+---
+
+## Copy-Trade ✅ NEW
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/copy-trade` | Whale overlap with our signals |
+| GET | `/copy-trade/whales` | Discovered whale wallets |
+| GET | `/copy-trade/positions` | Aggregated whale positions by market |
+
+---
+
+## Archetype System ✅ NEW
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/archetype/classify` | Classify market archetype |
+| GET | `/archetype/kill-check` | Check kill rules for a market |
+| GET | `/archetype/wr-buckets` | Win rate by archetype × side × price |
+| GET | `/archetype/calibration` | Calibration audit |
+| GET | `/archetype/evaluate` | Full empirical confidence evaluation |
+
+---
+
+## Vegas Odds ⛔ DEPRECATED
+
+> **Deprecated Feb 2026.** No API key configured. Replaced by ActionNetwork.
+> Endpoints still exist but return `{"error": "No API key configured"}`.
+
+## ESPN Odds ⛔ DEPRECATED
+
+> **Deprecated Feb 2026.** ESPN removed odds from their free API.
+> Endpoints still exist but return 0 games with odds.
+> Replaced by ActionNetwork (`/api/sports/odds`).
+

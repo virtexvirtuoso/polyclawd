@@ -17,11 +17,14 @@ Documentation of all 13 signal sources and external integrations.
 | 7 | Manifold | Leading indicator | Manifold REST API | 5 min | MEDIUM |
 | 8 | Metaculus | Forecasting | Metaculus REST API | 1 hour | LOW |
 | 9 | PredictIt | Cross-platform | PredictIt REST API | 15 min | MEDIUM |
-| 10 | Betfair | Sharp odds | The Odds API | 30 min | HIGH |
+| 10 | Betfair | Sharp odds | ~~The Odds API~~ DEPRECATED | — | — |
 | 11 | PolyRouter | Aggregator | PolyRouter GraphQL | 10 min | HIGH |
-| 12 | Vegas | Sharp lines | The Odds API + Scraping | 30 min | HIGH |
-| 13 | ESPN | Game odds | ESPN BET API | 5 min | MEDIUM |
+| 12 | Vegas | Sharp lines | ~~The Odds API~~ DEPRECATED | — | — |
+| 13 | ESPN | Game odds | ~~ESPN BET API~~ DEPRECATED | — | — |
 | 14 | Simmer | Divergence | Simmer REST API | 5 min | MEDIUM |
+| 15 | **ActionNetwork** | Sharp odds | ActionNetwork API (free) | 5 min | HIGH |
+| 16 | **Basket Arb** | Arbitrage | Gamma API | 30s | HIGH |
+| 17 | **Copy-Trade** | Whale tracking | Polymarket Data API | 5 min | MEDIUM |
 
 ---
 
@@ -253,9 +256,12 @@ prob_true = prob_raw / (prob_a + prob_b)
 
 ---
 
-### 13. ESPN
+### 13. ESPN ⛔ DEPRECATED (Feb 2026)
 
-**Purpose:** Real-time game odds from ESPN BET integration.
+> **Status:** ESPN removed odds data from their free API. Returns 0 games with odds.
+> **Replaced by:** ActionNetwork (`odds/sports_odds.py`)
+
+**Purpose:** ~~Real-time game odds from ESPN BET integration.~~
 
 **Implementation:**
 - **Source file:** `odds/espn_odds.py`
@@ -286,6 +292,80 @@ prob_true = prob_raw / (prob_a + prob_b)
 - Divergence signals when price gap > 5%
 
 ---
+
+
+### 15. ActionNetwork ✅ NEW (Feb 2026)
+
+**Purpose:** Sharp sportsbook odds from 18+ books. Replaced both ESPN and The Odds API.
+
+**Implementation:**
+- **Source file:** `odds/sports_odds.py`
+- **API:** `https://api.actionnetwork.com/web/v1/scoreboard/{sport}`
+- **Auth:** None required (free, unlimited)
+- **Books:** DraftKings, FanDuel, BetMGM, Caesars, PointsBet, BetRivers, Bet365+
+- **Sports:** NBA, NFL, NHL, MLB, NCAAF, NCAAB, Soccer, EPL
+
+**Features:**
+- Moneyline consensus across 18+ books
+- True probability via devigging
+- Best-line tracking (which book offers best odds)
+- Cross-reference vs Polymarket single-game markets
+- Single-game date matching (filters out championship/futures false positives)
+
+**API Endpoints:**
+- `GET /api/sports/odds?sports=nba,nhl` — Odds summary
+- `GET /api/sports/edges?sport=nba&min_edge=5` — Sharp vs Polymarket edges
+
+---
+
+### 16. Basket Arb Scanner ✅ NEW (Feb 2026)
+
+**Purpose:** Sum-to-one arbitrage on multi-outcome Polymarket events.
+
+**Implementation:**
+- **Source file:** `signals/basket_arb_scanner.py`
+- **API:** Gamma API events endpoint
+- **Cache:** 30s (arb windows close fast)
+
+**Algorithm:**
+For neg-risk events with mutually exclusive outcomes:
+```
+total_cost = sum(YES price for all outcomes)
+if total_cost < 1.0:
+    guaranteed_profit = (1.0 - total_cost) / total_cost - fees
+```
+
+**Features:**
+- Multi-outcome basket arbs (buy YES on all outcomes)
+- Bot-war detector (pause when spreads < 2¢)
+- Wired into main signal pipeline
+
+**API Endpoints:**
+- `GET /api/basket-arb` — Current arb signals
+- `GET /api/basket-arb/compression` — Spread compression check
+
+---
+
+### 17. Copy-Trade Watcher ✅ NEW (Feb 2026)
+
+**Purpose:** Track top Polymarket whale wallets, find overlap with our signals.
+
+**Implementation:**
+- **Source file:** `signals/copy_trade_watcher.py`
+- **API:** `data-api.polymarket.com` (trades + positions)
+- **Cache:** 5 min
+
+**Algorithm:**
+1. Fetch 1,000 recent trades → discover active whales (by volume)
+2. Scan top 25 whale positions
+3. Aggregate by market: whale count, size, side consensus
+4. Cross-reference with our signals → confidence boost on agreement
+
+**API Endpoints:**
+- `GET /api/copy-trade` — Whale overlap signals
+- `GET /api/copy-trade/whales` — Discovered whale wallets
+- `GET /api/copy-trade/positions` — Aggregated whale positions
+
 
 ## Data Flow
 
@@ -327,7 +407,8 @@ prob_true = prob_raw / (prob_a + prob_b)
 
 | Service | Variable | Required | Free Tier |
 |---------|----------|----------|-----------|
-| The Odds API | `ODDS_API_KEY` | For Vegas/Betfair | 500 req/mo |
+| ~~The Odds API~~ | ~~`ODDS_API_KEY`~~ | ⛔ DEPRECATED | ~~500 req/mo~~ |
+| ActionNetwork | None | ✅ Free, no key | Unlimited |
 | Kalshi | `KALSHI_EMAIL/PASSWORD` | For Kalshi | Free |
 | Polymarket | `POLY_*` | For live trading | Free |
 | Betfair | `BETFAIR_API_KEY` | For Betfair direct | Free |

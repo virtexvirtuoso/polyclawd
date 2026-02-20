@@ -526,3 +526,29 @@ Build the resolution certainty scanner. Everything else follows.
 ---
 
 *Polyclawd Edge Framework v1.0 — Virtuoso Crypto*
+
+
+---
+
+## New Signal Sources (Feb 2026)
+
+### Strategy 8: Sum-to-One Basket Arbitrage
+- **Source:** `signals/basket_arb_scanner.py`
+- **Edge:** Guaranteed profit when Σ(outcome prices) < $1.00 minus fees
+- **Markets:** Multi-outcome events (weather, elections, social media counts)
+- **Risk:** Zero (mathematical arbitrage) — limited by liquidity and fees
+- **Status:** ✅ Live, 6-7 signals per scan
+
+### Strategy 9: Sharp Odds Cross-Reference
+- **Source:** `odds/sports_odds.py` (ActionNetwork)
+- **Edge:** Polymarket single-game prices diverge from 18+ sharp bookmakers
+- **Markets:** Soccer, NBA, NFL — date-specific single-game "Will X win on YYYY-MM-DD?"
+- **Risk:** Medium — soccer devig needs 3-way draw adjustment
+- **Status:** ✅ Live, 4 edges found on first scan
+
+### Strategy 10: Copy-Trade Confirmation
+- **Source:** `signals/copy_trade_watcher.py`
+- **Edge:** +10% confidence boost when top wallets agree with our signals
+- **Markets:** All Polymarket markets where whales are positioned
+- **Risk:** Low — used as confirmation layer, not standalone
+- **Status:** ✅ Live, 25 whales tracked, 397 markets

@@ -12,7 +12,7 @@ Production: `https://virtuosocrypto.com/polyclawd`
 | Platform | API | Status | Use Case |
 |----------|-----|--------|----------|
 | **Polymarket** | REST + WebSocket | ✅ Live | Main execution venue, crypto/politics |
-| **PredictIt** | REST | ⚠️ Degraded | US politics, cross-platform arb (intermittent 403s) |
+| ~~PredictIt~~ | REST | ⛔ Deprecated | Persistent 403 errors since Feb 2026 |
 | **Kalshi** | REST | ✅ Live | Market overlap detection, entertainment |
 | **Betfair** | via Odds API | ⚠️ Quota | Sharp odds reference (shares Odds API credits) |
 | **Smarkets** | REST | ✅ Live | UK/EU politics |
@@ -27,8 +27,9 @@ Production: `https://virtuosocrypto.com/polyclawd`
 ### Sports Odds (Sharp Lines)
 | Source | API | Status | Use Case |
 |--------|-----|--------|----------|
-| **Vegas/Pinnacle** | The Odds API | ⚠️ Quota | NFL, NBA, NHL, MLB true odds (500 calls/mo free tier) |
-| **ESPN** | Scraper | ✅ Live | NFL, NBA, NHL, MLB, NCAAF, NCAAB odds + injuries + standings |
+| **ActionNetwork** | REST (free) | ✅ Live | NBA, NFL, NHL, MLB, Soccer, EPL — 18+ books |
+| ~~Vegas/Pinnacle~~ | ~~The Odds API~~ | ⛔ Deprecated | No API key configured |
+| ~~ESPN~~ | ~~Scraper~~ | ⛔ Deprecated | ESPN removed odds from free API |
 | **Soccer Futures** | VegasInsider scrape | ✅ Live | EPL, UCL, La Liga, Bundesliga, World Cup |
 | **Azuro** | GraphQL | ✅ Live | DeFi sports betting |
 
@@ -56,15 +57,19 @@ Production: `https://virtuosocrypto.com/polyclawd`
 | 4 | **Volume Spikes** | Technical | LOW | Z-score anomaly (2σ+ activity) |
 | 5 | **New Markets** | Calendar | LOW | Early mover on new markets |
 | 6 | **Resolution Timing** | Calendar | LOW | High uncertainty near expiry |
-| 7 | **Vegas Edge** | Sharp odds | HIGH | Sports lines vs Polymarket (devigged) |
+| 7 | ~~Vegas Edge~~ | ~~Sharp odds~~ | ⛔ | DEPRECATED — replaced by ActionNetwork |
 | 8 | **Soccer Edge** | Sharp odds | HIGH | Futures vs Polymarket (devigged) |
-| 9 | **Betfair Edge** | Sharp odds | HIGH | Exchange odds vs Polymarket (no vig) |
+| 9 | ~~Betfair Edge~~ | ~~Sharp odds~~ | ⛔ | DEPRECATED — used The Odds API |
 | 10 | **Manifold Edge** | Leading indicator | MEDIUM | Play money signals |
 | 11 | **PredictIt Edge** | Cross-platform | MEDIUM | Politics price gaps |
 | 12 | **Kalshi Overlap** | Cross-platform | MEDIUM | Market matching |
-| 13 | **ESPN Edge** | Sharp odds | HIGH | ESPN moneylines vs Polymarket |
+| 13 | ~~ESPN Edge~~ | ~~Sharp odds~~ | ⛔ | DEPRECATED — ESPN removed odds from API |
 | 14 | **Metaculus Divergence** | Forecasting | MEDIUM | Expert forecasts vs market prices |
 | 15 | **Correlation Violations** | Math constraint | HIGH | Parent/child market price inconsistencies |
+| 16 | **ActionNetwork** | Sharp odds | HIGH | 18+ books, devigged probs vs Polymarket |
+| 17 | **Basket Arb** | Arbitrage | HIGH | Sum-to-one multi-outcome guaranteed profit |
+| 18 | **Copy-Trade** | Whale tracking | MEDIUM | Top wallet positions, signal confirmation |
+| 19 | **Empirical Confidence** | Self-improving | HIGH | Bayesian WR by archetype × side × price zone |
 
 ---
 
