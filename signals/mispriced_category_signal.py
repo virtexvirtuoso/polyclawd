@@ -159,8 +159,10 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     # K6: Kill sports (efficient) and truly unknown archetypes
     # Allow: geopolitical, election, deadline_binary, social_count, weather, ai_model
     ALLOWED_NEW = {'geopolitical', 'election', 'deadline_binary', 'social_count', 'weather', 'entertainment'}
-    if archetype in ('sports_winner', 'sports_single_game'):
-        return True, "K6: sports_winner — efficient market", archetype
+    # Sports: allow through with warning flag (unverified — no sharp odds cross-ref yet)
+    # if archetype in ('sports_winner', 'sports_single_game'):
+    #     return True, "K6: sports — efficient market", archetype
+    # UNBLOCKED: sports now pass through as 'unverified' with lower confidence
     if archetype == 'other':
         return True, "K6: unclassified archetype", archetype
 
@@ -560,6 +562,8 @@ def _is_mispriced_polymarket(market: Dict) -> tuple:
         "social_count": (0.12, "entertainment"),  # Tweet/post counts
         "weather": (0.15, "science"),          # Weather markets
         "entertainment": (0.20, "entertainment"),  # Awards/shows — historically mispriced
+        "sports_winner": (0.08, "sports"),         # Unverified — needs sharp odds cross-ref
+        "sports_single_game": (0.08, "sports"),    # Unverified — lower edge assumed
     }
     if archetype in ARCHETYPE_EDGES:
         edge, tier = ARCHETYPE_EDGES[archetype]
