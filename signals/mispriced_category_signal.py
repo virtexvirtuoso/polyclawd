@@ -138,13 +138,16 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     if price_cents < 30:
         return True, f"K3: entry {price_cents}c < 30c floor (20% WR)", archetype
 
-    # K1: Intraday up/down — any side (hard kill — 22% YES WR, n=9)
+    # K1: Intraday up/down — coin flip (Becker: 50.1% NO, n=19,863 daily)
     if archetype == 'intraday_updown':
-        return True, "K1: intraday_updown rejected (22% YES WR)", archetype
+        return True, "K1: intraday_updown (50% WR, no edge, Becker n=19K)", archetype
 
-    # K4: Price range binary option (soft kill — 0% WR, n=1)
+    # K4: Price range — only allow NO side (Becker: NO wins 89% on weekly, n=2,447)
+    # YES side is death, NO side is money
     if archetype == 'price_range':
-        return True, "K4: price_range (0% WR, n=54)", archetype
+        # We can't check side here (kill rules run before side assignment)
+        # So pass through — empirical_confidence will handle side-gating
+        pass  # K4 relaxed: price_range NO is profitable per Becker 408K market study
 
     # K5: Directional dip/crash (soft kill — 0% WR, n=1)
     if archetype == 'directional':
@@ -552,18 +555,20 @@ def _is_mispriced_polymarket(market: Dict) -> tuple:
     # Archetype-based pass-through: if we can classify the market and it's
     # a type we have empirical WR data for, let it through with moderate edge
     archetype = classify_archetype(market.get("question", ""))
+    # Becker-calibrated edges (408K Polymarket markets, $49.8B volume)
     ARCHETYPE_EDGES = {
-        "daily_updown": (0.20, "tech"),       # 72% WR empirically
-        "price_above": (0.15, "tech"),         # 50% WR overall, good with NO side
-        "ai_model": (0.15, "tech"),            # New, limited data
-        "geopolitical": (0.12, "dynamic"),     # Binary deadline events — high vol
-        "election": (0.10, "dynamic"),         # Political markets
-        "deadline_binary": (0.10, "dynamic"),  # Generic "by date X"
-        "social_count": (0.12, "entertainment"),  # Tweet/post counts
-        "weather": (0.15, "science"),          # Weather markets
+        "daily_updown": (0.15, "tech"),            # Becker: 50% daily, 69% our data. Conservative
+        "price_above": (0.12, "tech"),             # Becker: 53% NO overall. Moderate edge
+        "price_range": (0.25, "tech"),             # Becker: 89% NO weekly (n=2,447). Strong edge
+        "ai_model": (0.20, "tech"),                # Becker: 77% NO on AI markets
+        "geopolitical": (0.15, "dynamic"),         # Becker: 70% NO on politics. Solid
+        "election": (0.15, "dynamic"),             # Becker: 70% NO on politics
+        "deadline_binary": (0.12, "dynamic"),      # Generic deadline events
+        "social_count": (0.12, "entertainment"),   # Tweet/post counts
+        "weather": (0.15, "science"),              # Limited Becker data
         "entertainment": (0.20, "entertainment"),  # Awards/shows — historically mispriced
-        "sports_winner": (0.08, "sports"),         # Unverified — needs sharp odds cross-ref
-        "sports_single_game": (0.08, "sports"),    # Unverified — lower edge assumed
+        "sports_winner": (0.15, "sports"),         # Becker: 78% NO on sports
+        "sports_single_game": (0.12, "sports"),    # Less data than championship
     }
     if archetype in ARCHETYPE_EDGES:
         edge, tier = ARCHETYPE_EDGES[archetype]

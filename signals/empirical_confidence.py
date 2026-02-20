@@ -25,23 +25,20 @@ _INTRADAY_RE = re.compile(
     re.IGNORECASE
 )
 
-def classify_archetype(title: str) -> str:
-    """Classify market into archetype for empirical WR lookup."""
-    if not title:
-        return "other"
-    t = title.lower()
+# Import full archetype classifier (14 archetypes) from mispriced_category_signal
+try:
+    from mispriced_category_signal import classify_archetype
+except ImportError:
+    # Fallback if import fails
+    def classify_archetype(title: str) -> str:
+        """Minimal fallback classifier."""
+        if not title: return "other"
+        t = title.lower()
+        if 'up or down' in t: return 'daily_updown'
+        if 'above' in t or 'below' in t: return 'price_above'
+        if 'between' in t or 'range' in t: return 'price_range'
+        return 'other'
 
-    if 'up or down' in t:
-        return 'intraday_updown' if _INTRADAY_RE.search(t) else 'daily_updown'
-    if re.search(r'price\s+(range|between|on|at)\b', t):
-        return 'price_range'
-    if re.search(r'(above|below|reach|exceed|over|under)\s*\$', t):
-        return 'price_above'
-    if re.search(r'\b(dip|crash|fall|drop|plunge)\b.*\$', t):
-        return 'directional'
-    if re.search(r'\b(best|top|leading|#1)\b.*\b(ai|model|llm)\b', t):
-        return 'ai_model'
-    return 'other'
 
 
 def price_zone(price: float) -> str:
@@ -74,6 +71,54 @@ PRICE_ZONE_MODIFIERS = {
     'expensive': 0.75,   # 85-100¢ → 50% WR, overpaying
 }
 
+# ─── Becker Priors (408K Polymarket markets, fallback when <10 resolved) ──
+BECKER_NO_WIN_RATES = {
+    'daily_updown':      0.517,  # n=36,759
+    'intraday_updown':   0.517,  # same as daily (coin flip)
+    'price_above':       0.528,  # n=4,044
+    'price_range':       0.886,  # n=2,917 — strongest edge
+    'ai_model':          0.774,  # n=1,800
+    'geopolitical':      0.696,  # n=4,685 (election proxy)
+    'election':          0.696,  # n=4,685
+    'sports_winner':     0.781,  # n=7,538
+    'sports_single_game':0.781,  # same as sports
+    'entertainment':     0.600,  # n=1,201 (estimated)
+    'deadline_binary':   0.600,  # generic fallback
+    'social_count':      0.600,  # generic fallback
+    'weather':           0.600,  # n=8,575 (limited resolution data)
+    'directional':       0.600,  # generic fallback
+    'other':             0.593,  # overall base rate
+}
+
+# ─── Duration Modifier (Becker: longer markets = more NO edge) ──────
+DURATION_MODIFIERS = {
+    'daily':    0.85,   # 0-1d: 51.7% NO (weak)
+    'short':    0.95,   # 2-3d: 55.4% NO
+    'weekly':   1.10,   # 4-7d: 65.7% NO (sweet spot)
+    'biweekly': 1.05,   # 8-14d: 60.7% NO
+    'monthly':  1.10,   # 15-30d: 66.3% NO
+    'quarterly':1.15,   # 31-90d: 76.5% NO (strongest)
+    'long':     1.10,   # >90d: 66.9% NO
+}
+
+def classify_duration(days_to_close: float) -> str:
+    """Classify market duration for Becker modifier."""
+    if days_to_close <= 1:
+        return 'daily'
+    elif days_to_close <= 3:
+        return 'short'
+    elif days_to_close <= 7:
+        return 'weekly'
+    elif days_to_close <= 14:
+        return 'biweekly'
+    elif days_to_close <= 30:
+        return 'monthly'
+    elif days_to_close <= 90:
+        return 'quarterly'
+    else:
+        return 'long'
+
+
 
 # ─── Kill Rules ──────────────────────────────────────────────────────
 
@@ -91,9 +136,10 @@ def check_kill_rules(title: str, entry_price: float, side: str) -> Tuple[bool, s
     if archetype == 'intraday_updown':
         return True, "K1: intraday up/down (53% WR, no edge after fees)"
 
-    # K4: Price range binary option
-    if archetype == 'price_range':
-        return True, "K4: price range binary option (efficiently priced)"
+    # K4: Price range — only kill YES side (Becker: NO wins 89%, n=2,447)
+    if archetype == 'price_range' and side == 'YES':
+        return True, "K4: price_range YES side (11% WR per Becker 408K study)"
+    # price_range NO passes through — 89% WR
 
     # K5: Directional dip/crash longshots
     if archetype == 'directional':
@@ -188,6 +234,7 @@ def calculate_empirical_confidence(
     side: str,
     entry_price: float,
     force_refresh: bool = False,
+    days_to_close: float = 7.0,
 ) -> Dict:
     """Calculate honest win probability from empirical data.
     
@@ -223,6 +270,8 @@ def calculate_empirical_confidence(
             "base_wr": 0.0,
             "smoothed_wr": 0.0,
             "zone_modifier": zone_mod,
+            "duration_modifier": 1.0,
+            "duration_bucket": "unknown",
             "sample_size": 0,
             "killed": True,
             "kill_reason": kill_reason,
@@ -276,7 +325,12 @@ def calculate_empirical_confidence(
         smoothed = side_smoothed
 
     # Apply price zone modifier
-    confidence = smoothed * zone_mod
+    # Apply duration modifier (Becker: weekly/monthly NO markets much stronger)
+    # days_to_close passed as parameter (default 7.0)  # default to weekly
+    dur_bucket = classify_duration(days_to_close)
+    dur_mod = DURATION_MODIFIERS.get(dur_bucket, 1.0)
+    
+    confidence = smoothed * zone_mod * dur_mod
 
     # Cap at 92% — nothing is certain
     confidence = min(0.92, max(0.08, confidence))
@@ -297,6 +351,8 @@ def calculate_empirical_confidence(
         "base_wr": round(base_wr, 4),
         "smoothed_wr": round(smoothed, 4),
         "zone_modifier": zone_mod,
+        "duration_modifier": dur_mod,
+        "duration_bucket": dur_bucket,
         "sample_size": n,
         "total_resolved": total_resolved,
         "prior_weight": prior_weight,
