@@ -144,7 +144,7 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
 
     # K4: Price range binary option (soft kill — 0% WR, n=1)
     if archetype == 'price_range':
-        return True, "K4: price_range binary option (0% WR, n=1)", archetype
+        return True, "K4: price_range (0% WR, n=54)", archetype
 
     # K5: Directional dip/crash (soft kill — 0% WR, n=1)
     if archetype == 'directional':
