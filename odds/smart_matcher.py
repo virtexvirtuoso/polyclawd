@@ -18,6 +18,7 @@ class MarketSignature:
     timeframe: Optional[str] = None                       # Date or period
     numeric_threshold: Optional[float] = None             # e.g., "$100k", "50%"
     is_yes_market: bool = True                           # YES or NO phrasing
+    market_scope: Optional[str] = None                    # 'championship', 'single_game', 'season', 'futures', None
 
 # Key entities to extract (case-insensitive)
 PERSON_PATTERNS = [
@@ -207,6 +208,45 @@ def extract_numeric_threshold(text: str) -> Optional[float]:
     
     return None
 
+def classify_market_scope(text: str) -> Optional[str]:
+    """Classify market scope to prevent championship vs single-game false matches.
+    
+    Returns: 'championship', 'single_game', 'season', 'futures', or None
+    """
+    t = text.lower()
+    
+    # Championship / tournament winner
+    if re.search(r'(win|winner|champion).*(finals?|championship|cup|bowl|trophy|title|playoffs|pennant)', t):
+        return 'championship'
+    if re.search(r'(finals?|championship|cup|bowl|trophy|title).*(win|winner|champion)', t):
+        return 'championship'
+    if re.search(r'(win|winner|champion).*202[4-9](?![-/])', t):
+        return 'championship'
+    
+    # Single game matchup (Team A vs/beat/defeat Team B on specific date)
+    if re.search(r'(beat|defeat|vs\.?|versus|against).*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)', t):
+        return 'single_game'
+    if re.search(r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec).*\d{1,2}.*(?:beat|defeat|vs\.?|versus|win on)', t):
+        return 'single_game'
+    # "Will X win on YYYY-MM-DD" or "X vs Y"
+    if re.search(r'win\s+on\s+\d{4}-\d{2}-\d{2}', t):
+        return 'single_game'
+    if re.search(r'\bvs\.?\b|\bversus\b', t) and re.search(r'\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b|\d{4}-\d{2}-\d{2}', t):
+        return 'single_game'
+    
+    # Season-level (win league, conference, division)
+    if re.search(r'win.*(league|conference|division|western|eastern|afc|nfc|al |nl )', t):
+        return 'season'
+    if re.search(r'(league|conference|division).*(winner|win|champion)', t):
+        return 'season'
+    
+    # Futures (reach playoffs, make it to, qualify)
+    if re.search(r'(reach|make|qualify|advance).*(playoff|final|round|stage)', t):
+        return 'futures'
+    
+    return None
+
+
 def create_signature(text: str) -> MarketSignature:
     """Create a market signature for matching"""
     return MarketSignature(
@@ -216,7 +256,8 @@ def create_signature(text: str) -> MarketSignature:
         target=extract_target(text),
         timeframe=extract_timeframe(text),
         numeric_threshold=extract_numeric_threshold(text),
-        is_yes_market='not' not in text.lower()[:50]  # Check for negation early in text
+        is_yes_market='not' not in text.lower()[:50],  # Check for negation early in text
+        market_scope=classify_market_scope(text),
     )
 
 def extract_subject(text: str, entities: Set[str]) -> Optional[str]:
@@ -271,6 +312,16 @@ def signatures_match(sig1: MarketSignature, sig2: MarketSignature, min_entity_ov
     
     confidence += 0.3 * len(entity_overlap)
     reasons.append(f"entities: {entity_overlap}")
+    
+    # Market scope check — prevent championship vs single-game false matches
+    if sig1.market_scope and sig2.market_scope:
+        if sig1.market_scope != sig2.market_scope:
+            return False, 0.0, f"Scope mismatch: {sig1.market_scope} vs {sig2.market_scope}"
+        confidence += 0.1
+        reasons.append(f"scope: {sig1.market_scope}")
+    elif sig1.market_scope or sig2.market_scope:
+        # One has scope, other doesn't — mild penalty but don't reject
+        confidence -= 0.1
     
     # Subject matching (who is doing the action)
     subj1 = extract_subject(sig1.raw_text, sig1.entities)
