@@ -96,6 +96,13 @@ def classify_archetype(title: str) -> str:
     if re.search(r'(prime minister|president|leader|supreme|chancellor|nominee|elected)', t):
         return 'election'
 
+    # Single-game sports ("Will X win on YYYY-MM-DD" or team name + win/beat)
+    if re.search(r'(win|beat|defeat)\s+on\s+\d{4}-\d{2}-\d{2}', t):
+        return 'sports_single_game'
+    if re.search(r'\b(fc|cf|sc|afc|utd|united|city|rovers|wanderers|athletic|sporting|real |inter |ac )\b', t):
+        if re.search(r'win|beat|vs|match|game', t):
+            return 'sports_single_game'
+
     # Entertainment / awards
     if re.search(r'(oscar|grammy|emmy|academy award|best picture|golden globe|tony award|bafta)', t):
         return 'entertainment'
@@ -152,7 +159,7 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     # K6: Kill sports (efficient) and truly unknown archetypes
     # Allow: geopolitical, election, deadline_binary, social_count, weather, ai_model
     ALLOWED_NEW = {'geopolitical', 'election', 'deadline_binary', 'social_count', 'weather', 'entertainment'}
-    if archetype == 'sports_winner':
+    if archetype in ('sports_winner', 'sports_single_game'):
         return True, "K6: sports_winner — efficient market", archetype
     if archetype == 'other':
         return True, "K6: unclassified archetype", archetype
