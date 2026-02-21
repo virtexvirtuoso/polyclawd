@@ -60,12 +60,18 @@ def _is_subdaily_noise(title: str) -> bool:
 def classify_archetype(title: str) -> str:
     """Classify market into archetype for kill rule evaluation.
 
-    Archetypes: daily_updown, intraday_updown, price_above,
-    price_range, directional, other.
+    Archetypes: daily_updown, intraday_updown, parlay, price_above,
+    price_range, directional, financial_price, ai_model, geopolitical,
+    election, sports_single_game, game_total, entertainment,
+    social_count, deadline_binary, sports_winner, weather, other.
     """
     if not title:
         return "other"
     t = title.lower()
+
+    # Parlay — multi-leg combined bet (2+ comma-separated "yes X" entries)
+    if re.search(r'yes\s+\w.*,\s*yes\s+\w', t):
+        return 'parlay'
 
     # Order matters: intraday must match before daily (both contain "up or down")
     if 'up or down' in t:
@@ -83,6 +89,11 @@ def classify_archetype(title: str) -> str:
         return 'price_above'
     if re.search(r'\b(dip|crash|fall|drop|plunge)\b.*\$', t):
         return 'directional'
+
+    # Financial instrument price threshold (non-crypto)
+    if re.search(r'\b(s&p|nasdaq|dow|russell|eur[/-]usd|usd[/-]jpy|gbp[/-]usd|crude|wti|brent|gold|silver|vix|10-year|treasury|nikkei|ftse|dax)\b', t):
+        if re.search(r'(above|below|at|over|under|reach|exceed|price|close|open)', t):
+            return 'financial_price'
 
     if re.search(r'\b(best|top|leading|#1)\b.*\b(ai|model|llm)\b', t):
         return 'ai_model'
@@ -102,6 +113,12 @@ def classify_archetype(title: str) -> str:
     if re.search(r'\b(fc|cf|sc|afc|utd|united|city|rovers|wanderers|athletic|sporting|real |inter |ac )\b', t):
         if re.search(r'win|beat|vs|match|game', t):
             return 'sports_single_game'
+
+    # Game total (over/under points)
+    if re.search(r'(over|under)\s+\d+\.?\d*\s*(points?|goals?|runs?|total)', t):
+        return 'game_total'
+    if re.search(r'(total|combined)\s+(points?|score|goals?|runs?)', t):
+        return 'game_total'
 
     # Entertainment / awards
     if re.search(r'(oscar|grammy|emmy|academy award|best picture|golden globe|tony award|bafta)', t):
@@ -138,20 +155,20 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     if price_cents < 30:
         return True, f"K3: entry {price_cents}c < 30c floor (20% WR)", archetype
 
-    # K1: Intraday up/down — coin flip (Becker: 50.1% NO, n=19,863 daily)
+    # K1: Intraday up/down — coin flip (50% NO WR, n=15,570)
     if archetype == 'intraday_updown':
-        return True, "K1: intraday_updown (50% WR, no edge, Becker n=19K)", archetype
+        return True, "K1: intraday_updown (50% NO WR, n=15,570 — no edge after fees)", archetype
 
-    # K4: Price range — only allow NO side (Becker: NO wins 89% on weekly, n=2,447)
-    # YES side is death, NO side is money
+    # K4: Price range — only allow NO side (57% NO WR, n=31,982)
+    # YES side is 43% WR, NO side has modest edge
     if archetype == 'price_range':
         # We can't check side here (kill rules run before side assignment)
         # So pass through — empirical_confidence will handle side-gating
-        pass  # K4 relaxed: price_range NO is profitable per Becker 408K market study
+        pass  # K4 relaxed: price_range NO has 57% WR (n=31,982)
 
-    # K5: Directional dip/crash (soft kill — 0% WR, n=1)
+    # K5: Directional dip/crash (70% NO WR but n=390 — unreliable)
     if archetype == 'directional':
-        return True, "K5: directional dip/crash (0% WR, n=1)", archetype
+        return True, "K5: directional dip/crash (70% NO WR, n=390 — low sample)", archetype
 
     # K2: price_above + cheap entry (hard kill — 20% WR, n=5)
     # Defense-in-depth: MIN_ENTRY_PRICE=55 already blocks <55c,
@@ -159,9 +176,13 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     if archetype == 'price_above' and price_cents < 45:
         return True, "K2: price_above cheap entry <45c (20% WR)", archetype
 
+    # K7: Game totals — 52% NO WR population, 41% traded WR (n=10,999). Coin flip after fees.
+    if archetype == 'game_total':
+        return True, "K7: game_total (52% NO WR population, n=10,999 — no edge after fees)", archetype
+
     # K6: Kill sports (efficient) and truly unknown archetypes
     # Allow: geopolitical, election, deadline_binary, social_count, weather, ai_model
-    ALLOWED_NEW = {'geopolitical', 'election', 'deadline_binary', 'social_count', 'weather', 'entertainment'}
+    ALLOWED_NEW = {'geopolitical', 'election', 'deadline_binary', 'social_count', 'weather', 'entertainment', 'parlay', 'financial_price'}
     # Sports: allow through with warning flag (unverified — no sharp odds cross-ref yet)
     # if archetype in ('sports_winner', 'sports_single_game'):
     #     return True, "K6: sports — efficient market", archetype
@@ -569,6 +590,9 @@ def _is_mispriced_polymarket(market: Dict) -> tuple:
         "entertainment": (0.20, "entertainment"),  # Awards/shows — historically mispriced
         "sports_winner": (0.15, "sports"),         # Becker: 78% NO on sports
         "sports_single_game": (0.12, "sports"),    # Less data than championship
+        "parlay":             (0.25, "dynamic"),    # Multi-leg — high NO WR expected
+        "financial_price":    (0.15, "tech"),        # Non-crypto price thresholds
+        "game_total":         (0.12, "sports"),      # Over/under totals
     }
     if archetype in ARCHETYPE_EDGES:
         edge, tier = ARCHETYPE_EDGES[archetype]

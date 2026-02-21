@@ -59,46 +59,53 @@ def price_zone(price: float) -> str:
         return 'expensive'
 
 
-# ─── Price Zone Modifiers (from empirical data, 51 trades) ───────────
+# ─── Price Zone Modifiers (NO-side, from 10K+ Kalshi trades backtest) ──
+# Adjusts P(win) relative to mid zone. Higher YES price = cheaper NO = lower WR.
+# Kelly sizing already captures the payoff asymmetry through cost basis.
 
 PRICE_ZONE_MODIFIERS = {
-    'garbage':   0.25,   # <30¢ → 20% WR
-    'cheap':     0.55,   # 30-45¢ → 43% WR
-    'mid_low':   0.85,   # 45-55¢ → limited data, neutral
-    'mid':       1.00,   # 55-65¢ → 64% WR (reference zone)
-    'sweet':     1.15,   # 65-75¢ → best risk/reward
-    'premium':   1.10,   # 75-85¢ → 80% WR, strong
-    'expensive': 0.75,   # 85-100¢ → 50% WR, overpaying
+    'garbage':   0.55,   # <30¢ YES — K3 kills these anyway
+    'cheap':     0.75,   # 30-45¢ YES — extrapolated, no direct data
+    'mid_low':   0.90,   # 45-55¢ YES — extrapolated, near mid
+    'mid':       1.00,   # 55-65¢ YES → 45.5% NO WR (reference, n=4,401)
+    'sweet':     0.83,   # 65-75¢ YES → 37.7% NO WR (n=2,812)
+    'premium':   0.66,   # 75-85¢ YES → 30.1% NO WR (n=1,958)
+    'expensive': 0.51,   # 85-92¢ YES → 23.3% NO WR (n=1,363)
 }
 
-# ─── Becker Priors (408K Polymarket markets, fallback when <10 resolved) ──
+# ─── Empirical NO Win Rates (159K markets: 110K Kalshi + 49K Polymarket) ───
 BECKER_NO_WIN_RATES = {
-    'daily_updown':      0.517,  # n=36,759
-    'intraday_updown':   0.517,  # same as daily (coin flip)
-    'price_above':       0.528,  # n=4,044
-    'price_range':       0.886,  # n=2,917 — strongest edge
-    'ai_model':          0.774,  # n=1,800
-    'geopolitical':      0.696,  # n=4,685 (election proxy)
-    'election':          0.696,  # n=4,685
-    'sports_winner':     0.781,  # n=7,538
-    'sports_single_game':0.781,  # same as sports
-    'entertainment':     0.600,  # n=1,201 (estimated)
-    'deadline_binary':   0.600,  # generic fallback
-    'social_count':      0.600,  # generic fallback
-    'weather':           0.600,  # n=8,575 (limited resolution data)
-    'directional':       0.600,  # generic fallback
-    'other':             0.593,  # overall base rate
+    'daily_updown':      0.463,  # n=887 (Poly only)
+    'intraday_updown':   0.504,  # n=15,570 (Poly only — coin flip confirmed)
+    'price_above':       0.593,  # n=3,763 (Kalshi 166 + Poly 3,597)
+    'price_range':       0.566,  # n=31,982 (Kalshi only — was 0.886 Becker)
+    'ai_model':          0.741,  # n=54 (Kalshi 45 + Poly 9)
+    'geopolitical':      0.686,  # n=315 (Kalshi 2 + Poly 313)
+    'election':          0.639,  # n=794 (Kalshi 557 + Poly 237)
+    'sports_winner':     0.567,  # n=27,642 (Kalshi 25,208 + Poly 2,434)
+    'sports_single_game':0.560,  # n=6,309 (Kalshi 1,850 + Poly 4,459)
+    'entertainment':     0.711,  # n=114 (Kalshi 68 + Poly 46)
+    'deadline_binary':   0.694,  # n=9,062 (Kalshi 5,704 + Poly 3,358)
+    'social_count':      0.941,  # n=1,773 (Poly only — NO almost always wins)
+    'weather':           0.853,  # n=68 (Kalshi 6 + Poly 62)
+    'directional':       0.697,  # n=390 (Poly only)
+    'other':             0.638,  # n=36,480 (Kalshi 20,828 @ 66.8% + Poly 15,652 @ 55.8%)
+    'parlay':            0.937,  # n=4,251 Kalshi (93.7% NO WR — multi-leg bets almost always fail)
+    'financial_price':   0.646,  # n=18,356 Kalshi + 21 Poly (64.6% NO WR)
+    'game_total':        0.521,  # n=10,999 Kalshi (52.1% NO WR — near coin flip after fees)
 }
 
-# ─── Duration Modifier (Becker: longer markets = more NO edge) ──────
+# ─── Duration Modifier (empirical: 97K tradeable markets, blended Kalshi+Poly) ──
+# Baseline: 61.4% NO WR across all tradeable durations.
+# Modifier = bucket NO WR / baseline. Platform gap <9pp on all buckets.
 DURATION_MODIFIERS = {
-    'daily':    0.85,   # 0-1d: 51.7% NO (weak)
-    'short':    0.95,   # 2-3d: 55.4% NO
-    'weekly':   1.10,   # 4-7d: 65.7% NO (sweet spot)
-    'biweekly': 1.05,   # 8-14d: 60.7% NO
-    'monthly':  1.10,   # 15-30d: 66.3% NO
-    'quarterly':1.15,   # 31-90d: 76.5% NO (strongest)
-    'long':     1.10,   # >90d: 66.9% NO
+    'daily':    0.94,   # 0-1d: 57.8% NO (n=51,425)
+    'short':    1.00,   # 2-3d: 61.7% NO (n=18,030) — baseline
+    'weekly':   1.15,   # 4-7d: 70.8% NO (n=13,502) — sweet spot confirmed
+    'biweekly': 1.06,   # 8-14d: 65.2% NO (n=10,471)
+    'monthly':  1.08,   # 15-30d: 66.1% NO (n=3,614)
+    'quarterly':1.15,   # 31-90d: no data in <=30d filter, keep Becker
+    'long':     1.10,   # >90d: no data in <=30d filter, keep Becker
 }
 
 def classify_duration(days_to_close: float) -> str:
@@ -134,16 +141,16 @@ def check_kill_rules(title: str, entry_price: float, side: str) -> Tuple[bool, s
 
     # K1: Intraday up/down — any side (coin flip minus fees)
     if archetype == 'intraday_updown':
-        return True, "K1: intraday up/down (53% WR, no edge after fees)"
+        return True, "K1: intraday up/down (50% NO WR, n=15,570 — no edge after fees)"
 
-    # K4: Price range — only kill YES side (Becker: NO wins 89%, n=2,447)
+    # K4: Price range — only kill YES side (57% NO WR, n=31,982)
     if archetype == 'price_range' and side == 'YES':
-        return True, "K4: price_range YES side (11% WR per Becker 408K study)"
-    # price_range NO passes through — 89% WR
+        return True, "K4: price_range YES side (43% WR, n=31,982)"
+    # price_range NO passes through — 57% NO WR
 
     # K5: Directional dip/crash longshots
     if archetype == 'directional':
-        return True, "K5: directional dip/crash bet (0% WR)"
+        return True, "K5: directional dip/crash bet (70% NO WR but low n=390, unreliable)"
 
     # K2: price_above + cheap YES
     if archetype == 'price_above' and side == 'YES' and price_cents < 45:
@@ -309,11 +316,13 @@ def calculate_empirical_confidence(
     zone_wr = sum(t["won"] for t in zone_trades) / zone_n if zone_n > 0 else base_wr
 
     # Archetype-level prior (all sides combined)
+    # Fall back to empirical priors from 159K resolved markets when no local data
+    becker_prior = BECKER_NO_WIN_RATES.get(archetype, 0.593)
     arch_trades = [t for t in trades if classify_archetype(t["title"]) == archetype]
-    arch_wr = sum(t["won"] for t in arch_trades) / len(arch_trades) if arch_trades else 0.50
+    arch_wr = sum(t["won"] for t in arch_trades) / len(arch_trades) if arch_trades else becker_prior
 
     # Overall system prior
-    overall_wr = sum(t["won"] for t in trades) / len(trades) if trades else 0.50
+    overall_wr = sum(t["won"] for t in trades) / len(trades) if trades else 0.593
 
     # Two-level Bayesian smoothing:
     # 1. Smooth archetype|side bucket toward archetype prior

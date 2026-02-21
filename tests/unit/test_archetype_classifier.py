@@ -52,9 +52,27 @@ class TestClassifyArchetype:
         ("Will SOL drop to $100?", "directional"),
         ("Will BTC plunge to $50,000?", "directional"),
 
+        # parlay — multi-leg combined bets
+        ("yes CeeDee Lamb: 80+,yes George Pickens: 67+", "parlay"),
+        ("yes Denver,yes Seattle,yes Baltimore", "parlay"),
+        ("yes Lakers,yes Celtics,yes Warriors,yes Nuggets", "parlay"),
+
+        # financial_price — non-crypto price thresholds
+        ("Will the S&P 500 be above 6,000?", "financial_price"),
+        ("Will EUR/USD open price be above 1.08?", "financial_price"),
+        ("Nasdaq close above 18,000 on Friday?", "financial_price"),
+        ("Will gold price close above 2,500?", "financial_price"),
+        ("VIX above 30 on Monday?", "financial_price"),
+
+        # game_total — over/under points
+        ("Over 45.5 points scored in Chiefs vs Ravens", "game_total"),
+        ("Total points in Lakers vs Celtics?", "game_total"),
+        ("Under 2.5 goals in Arsenal vs Chelsea", "game_total"),
+        ("Combined score in Super Bowl?", "game_total"),
+
         # other — unclassifiable
         ("Will the new iPhone have a USB-C port?", "other"),
-        ("Who will win Best Picture at the Oscars?", "other"),
+        ("Who will win Best Picture at the Oscars?", "entertainment"),
         ("Will it rain in NYC tomorrow?", "other"),
         ("Taylor Swift album release date?", "other"),
         ("", "other"),
@@ -98,11 +116,10 @@ class TestKillRules:
         assert "K1" in reason
         assert arch == "intraday_updown"
 
-    def test_k4_price_range(self):
-        """K4: Price range markets should be killed."""
+    def test_k4_price_range_passes_through(self):
+        """K4: Price range passes through (NO-side gating handled by empirical_confidence)."""
         killed, reason, arch = _check_kill_rules("Bitcoin price range on Feb 18?", 55)
-        assert killed
-        assert "K4" in reason
+        assert not killed
         assert arch == "price_range"
 
     def test_k5_directional(self):
@@ -126,7 +143,7 @@ class TestKillRules:
 
     def test_k6_unknown_archetype(self):
         """K6: Unknown archetype should be killed."""
-        killed, reason, arch = _check_kill_rules("Who will win the Super Bowl?", 55)
+        killed, reason, arch = _check_kill_rules("Will the new iPhone have a USB-C port?", 55)
         assert killed
         assert "K6" in reason
         assert arch == "other"
@@ -143,6 +160,31 @@ class TestKillRules:
         killed, reason, arch = _check_kill_rules("Will BTC be above $68,000?", 70)
         assert not killed
         assert arch == "price_above"
+
+    def test_parlay_passes(self):
+        """Parlay should pass kill rules (high NO WR expected)."""
+        killed, reason, arch = _check_kill_rules(
+            "yes Denver,yes Seattle,yes Baltimore", 65
+        )
+        assert not killed
+        assert arch == "parlay"
+
+    def test_financial_price_passes(self):
+        """Financial price threshold should pass kill rules."""
+        killed, reason, arch = _check_kill_rules(
+            "Will the S&P 500 be above 6,000?", 70
+        )
+        assert not killed
+        assert arch == "financial_price"
+
+    def test_game_total_killed(self):
+        """K7: Game total killed — 52% NO WR, coin flip after fees."""
+        killed, reason, arch = _check_kill_rules(
+            "Over 45.5 points scored in Chiefs vs Ravens", 60
+        )
+        assert killed
+        assert "K7" in reason
+        assert arch == "game_total"
 
     def test_k3_takes_priority_over_k1(self):
         """K3 (price) fires before K1 (archetype) since it's checked first."""
