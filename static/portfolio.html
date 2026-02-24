@@ -7,14 +7,25 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  /* Dark mode (default) */
   :root {
     --bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a26;--border:#2a2a3a;
-    --accent:#6c5ce7;--accent2:#a29bfe;--green:#00e676;--red:#ff5252;
+    --accent:#6c5ce7;--accent2:#a29bfe;--green:#00c853;--red:#ff5252;
     --orange:#ffab40;--cyan:#18ffff;--text:#e8e8f0;--text2:#8888a0;--gold:#ffd700;
+    --noise-opacity:0.03;--shadow:rgba(0,0,0,0.3);
+  }
+  /* Light mode — respects OS/browser preference */
+  @media(prefers-color-scheme:light){
+    :root{
+      --bg:#f5f5f8;--surface:#ffffff;--surface2:#eeeef2;--border:#d8d8e0;
+      --accent:#5b4cdb;--accent2:#6c5ce7;--green:#00a843;--red:#e53935;
+      --orange:#f57c00;--cyan:#0097a7;--text:#1a1a2e;--text2:#6b6b80;--gold:#c49000;
+      --noise-opacity:0;--shadow:rgba(0,0,0,0.08);
+    }
   }
   *{margin:0;padding:0;box-sizing:border-box}
   body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,sans-serif;min-height:100vh}
-  .noise{position:fixed;top:0;left:0;width:100%;height:100%;background:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");pointer-events:none;z-index:0}
+  .noise{position:fixed;top:0;left:0;width:100%;height:100%;background:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");pointer-events:none;z-index:0;opacity:var(--noise-opacity,0.03)}
   .container{max-width:1200px;margin:0 auto;padding:40px 24px;position:relative;z-index:1}
 
   /* Header */
@@ -94,7 +105,7 @@
   .pos-days{font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace}
 
   /* Signals */
-  .signal-row{display:flex;align-items:center;padding:12px 0;border-bottom:1px solid rgba(42,42,58,0.5);gap:12px}
+  .signal-row{display:flex;align-items:center;padding:12px 0;border-bottom:1px solid var(--border);gap:12px}
   .signal-row:last-child{border:none}
   .signal-market{flex:1;font-size:13px;font-weight:500}
   .signal-edge{font-family:'JetBrains Mono',monospace;font-size:12px;padding:3px 10px;border-radius:6px;white-space:nowrap}
@@ -107,7 +118,7 @@
   /* History Table */
   table{width:100%;border-collapse:collapse}
   th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text2);padding:10px 14px;border-bottom:1px solid var(--border);font-weight:500}
-  td{padding:12px 14px;border-bottom:1px solid rgba(42,42,58,0.3);font-size:13px}
+  td{padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px}
   tr:hover td{background:rgba(108,92,231,0.03)}
   .mono{font-family:'JetBrains Mono',monospace}
   .result-won{color:var(--green);font-weight:600}
@@ -143,7 +154,7 @@
   /* Archetype table */
   .arch-table{width:100%;border-collapse:collapse}
   .arch-table th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text2);padding:10px 12px;border-bottom:1px solid var(--border)}
-  .arch-table td{padding:10px 12px;border-bottom:1px solid rgba(42,42,58,0.3);font-size:13px}
+  .arch-table td{padding:10px 12px;border-bottom:1px solid var(--border);font-size:13px}
   .arch-table .arch-name{font-weight:600;color:var(--accent2)}
   .arch-bar{height:4px;border-radius:2px;background:var(--border);min-width:40px;position:relative;overflow:hidden}
   .arch-bar-fill{height:100%;border-radius:2px;transition:width 0.5s}
@@ -170,7 +181,7 @@
   .capacity-badge.ok{background:rgba(0,230,118,0.1);color:var(--green);border:1px solid rgba(0,230,118,0.2)}
 
   /* Resolve log */
-  .resolve-row{display:flex;align-items:center;padding:8px 0;border-bottom:1px solid rgba(42,42,58,0.3);gap:10px;font-size:12px}
+  .resolve-row{display:flex;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);gap:10px;font-size:12px}
   .resolve-row:last-child{border:none}
   .resolve-time{font-family:'JetBrains Mono',monospace;color:var(--text2);white-space:nowrap;font-size:11px}
   .resolve-market{flex:1;font-weight:500}
@@ -388,6 +399,11 @@
 const API = '/polyclawd/api';
 let equityChart = null;
 let cachedUnrealizedPnl = 0;
+
+// Theme-aware helpers for Chart.js (can't read CSS vars directly)
+function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function chartText() { return cssVar('--text2') || '#8888a0'; }
+function chartGrid() { return cssVar('--border') || '#2a2a3a'; }
 
 function marketUrl(p) {
   const id = p.market_id || p.id || '';
@@ -653,13 +669,13 @@ function updateEquityChart(history, liveRes) {
   const datasets = [{
     label: 'Realized',
     data,
-    borderColor: '#a29bfe',
+    borderColor: cssVar('--accent2') || '#a29bfe',
     backgroundColor: gradient,
     fill: true,
     tension: 0.35,
     pointRadius: data.length > 20 ? 0 : 4,
-    pointBackgroundColor: '#a29bfe',
-    pointBorderColor: '#0a0a0f',
+    pointBackgroundColor: cssVar('--accent2') || '#a29bfe',
+    pointBorderColor: cssVar('--bg') || '#0a0a0f',
     pointBorderWidth: 2,
     borderWidth: 2,
   }];
@@ -678,7 +694,7 @@ function updateEquityChart(history, liveRes) {
       tension: 0,
       pointRadius: [0, 6],
       pointBackgroundColor: totalUnreal >= 0 ? '#00e676' : '#ff5252',
-      pointBorderColor: '#0a0a0f',
+      pointBorderColor: cssVar('--bg') || '#0a0a0f',
       pointBorderWidth: 2,
       borderWidth: 2,
     });
@@ -691,10 +707,10 @@ function updateEquityChart(history, liveRes) {
       responsive: true,
       maintainAspectRatio: false,
       plugins: {
-        legend: { display: datasets.length > 1, labels: { color: '#8888a0', font: { size: 11 } } },
+        legend: { display: datasets.length > 1, labels: { color: chartText(), font: { size: 11 } } },
         tooltip: {
-          backgroundColor: '#1a1a26',
-          borderColor: '#2a2a3a',
+          backgroundColor: cssVar('--surface2') || '#1a1a26',
+          borderColor: cssVar('--border') || '#2a2a3a',
           borderWidth: 1,
           titleFont: { family: 'JetBrains Mono' },
           bodyFont: { family: 'JetBrains Mono' },
@@ -705,16 +721,16 @@ function updateEquityChart(history, liveRes) {
       },
       scales: {
         x: {
-          ticks: { color: '#8888a0', font: { size: 11, family: 'JetBrains Mono' } },
-          grid: { color: 'rgba(42,42,58,0.3)' },
+          ticks: { color: chartText(), font: { size: 11, family: 'JetBrains Mono' } },
+          grid: { color: chartGrid() },
         },
         y: {
           ticks: {
-            color: '#8888a0',
+            color: chartText(),
             font: { size: 11, family: 'JetBrains Mono' },
             callback: v => '$' + v
           },
-          grid: { color: 'rgba(42,42,58,0.3)' },
+          grid: { color: chartGrid() },
         }
       }
     }
