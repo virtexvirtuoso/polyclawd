@@ -21,6 +21,11 @@ try:
     HAS_TIME_DECAY = True
 except ImportError:
     HAS_TIME_DECAY = False
+try:
+    from price_momentum_filter import check_entry as _check_momentum
+    HAS_MOMENTUM = True
+except ImportError:
+    HAS_MOMENTUM = False
 import logging
 import math
 from datetime import datetime, timezone
@@ -382,6 +387,20 @@ def open_position(signal: dict) -> dict:
     if existing:
         conn.close()
         return {"opened": False, "reason": "Already tracking this market"}
+
+    # Price momentum filter — only bet NO when YES is rising or flat
+    momentum_data = None
+    if HAS_MOMENTUM and side == "NO":
+        mom_result = _check_momentum(market_id, market_price, side)
+        momentum_data = mom_result.get("momentum_data")
+        if not mom_result["allow"]:
+            logger.info("Position blocked by momentum: market=%s reason=%s", market_id, mom_result.get("reason"))
+            conn.close()
+            return {"opened": False, "reason": mom_result.get("reason", "Momentum filter"), "archetype": archetype, "edge": eval_result["edge"], "momentum": momentum_data}
+        if mom_result["multiplier"] > 1.0:
+            bet_size *= mom_result["multiplier"]
+            bet_size = min(MAX_BET, bet_size)
+            logger.info("Momentum boost: market=%s mult=%.2f new_bet=%.2f", market_id[:30], mom_result["multiplier"], bet_size)
 
     # Correlation cap — max positions per correlated group
     cap_reason = _check_correlation_cap(archetype, conn)
