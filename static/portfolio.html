@@ -8,21 +8,31 @@
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
   /* Dark mode (default) */
-  :root {
+  :root, [data-theme="dark"] {
     --bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a26;--border:#2a2a3a;
     --accent:#6c5ce7;--accent2:#a29bfe;--green:#00c853;--red:#ff5252;
     --orange:#ffab40;--cyan:#18ffff;--text:#e8e8f0;--text2:#8888a0;--gold:#ffd700;
     --noise-opacity:0.03;--shadow:rgba(0,0,0,0.3);
   }
-  /* Light mode — respects OS/browser preference */
+  /* Light mode */
+  [data-theme="light"] {
+    --bg:#f5f5f8;--surface:#ffffff;--surface2:#eeeef2;--border:#d8d8e0;
+    --accent:#5b4cdb;--accent2:#6c5ce7;--green:#00a843;--red:#e53935;
+    --orange:#f57c00;--cyan:#0097a7;--text:#1a1a2e;--text2:#6b6b80;--gold:#c49000;
+    --noise-opacity:0;--shadow:rgba(0,0,0,0.08);
+  }
+  /* Auto — respects OS preference when no manual override */
   @media(prefers-color-scheme:light){
-    :root{
+    [data-theme="auto"]{
       --bg:#f5f5f8;--surface:#ffffff;--surface2:#eeeef2;--border:#d8d8e0;
       --accent:#5b4cdb;--accent2:#6c5ce7;--green:#00a843;--red:#e53935;
       --orange:#f57c00;--cyan:#0097a7;--text:#1a1a2e;--text2:#6b6b80;--gold:#c49000;
       --noise-opacity:0;--shadow:rgba(0,0,0,0.08);
     }
   }
+  /* Theme toggle */
+  .theme-toggle{background:none;border:1px solid var(--border);border-radius:8px;cursor:pointer;padding:6px 10px;font-size:16px;line-height:1;transition:all 0.2s;color:var(--text2)}
+  .theme-toggle:hover{border-color:var(--accent);color:var(--text)}
   *{margin:0;padding:0;box-sizing:border-box}
   body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,sans-serif;min-height:100vh}
   .noise{position:fixed;top:0;left:0;width:100%;height:100%;background:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");pointer-events:none;z-index:0;opacity:var(--noise-opacity,0.03)}
@@ -238,7 +248,7 @@
 <div class="noise"></div>
 <div class="container">
 
-<nav style="text-align:right;padding:16px 24px 0"><a href="analysis.html" class="nav-link">← Analysis Suite</a></nav>
+<nav style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px 0"><a href="analysis.html" class="nav-link">← Analysis Suite</a><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode" aria-label="Toggle theme">🌙</button></nav>
 <header>
   <div class="logo">Virtuoso Crypto — <span>Polyclawd</span></div>
   <h1>Paper Portfolio</h1>
@@ -404,6 +414,32 @@ let cachedUnrealizedPnl = 0;
 function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 function chartText() { return cssVar('--text2') || '#8888a0'; }
 function chartGrid() { return cssVar('--border') || '#2a2a3a'; }
+
+// Theme toggle: auto → light → dark → auto
+function getTheme() { return localStorage.getItem('polyclawd-theme') || 'auto'; }
+function applyTheme(t) {
+  document.documentElement.setAttribute('data-theme', t);
+  const btn = document.querySelector('.theme-toggle');
+  if (btn) btn.textContent = t === 'light' ? '☀️' : t === 'dark' ? '🌙' : '🌓';
+  // Re-render charts with new colors
+  if (equityChart) {
+    equityChart.options.scales.x.ticks.color = chartText();
+    equityChart.options.scales.x.grid.color = chartGrid();
+    equityChart.options.scales.y.ticks.color = chartText();
+    equityChart.options.scales.y.grid.color = chartGrid();
+    equityChart.options.plugins.tooltip.backgroundColor = cssVar('--surface2') || '#1a1a26';
+    equityChart.options.plugins.tooltip.borderColor = cssVar('--border') || '#2a2a3a';
+    equityChart.update('none');
+  }
+}
+function toggleTheme() {
+  const cycle = { auto: 'light', light: 'dark', dark: 'auto' };
+  const next = cycle[getTheme()] || 'auto';
+  localStorage.setItem('polyclawd-theme', next);
+  applyTheme(next);
+}
+// Apply saved theme on load
+applyTheme(getTheme());
 
 function marketUrl(p) {
   const id = p.market_id || p.id || '';
