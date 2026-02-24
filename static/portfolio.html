@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Polyclawd — Paper Portfolio</title>
+<title>Virtuoso Prediction</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -279,14 +279,13 @@
 
 <nav style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px 0"><a href="analysis.html" class="nav-link">← Analysis Suite</a><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode" aria-label="Toggle theme">🌙</button></nav>
 <header>
-  <div class="logo">Virtuoso Crypto — <span>Polyclawd</span></div>
-  <h1>Paper Portfolio</h1>
-  <p class="subtitle">Prediction market paper trading · <strong>Dynamic Kelly</strong> · $10K bankroll · 10 max positions</p>
-  <div class="timestamp"><span class="live-dot"></span>live · auto-refresh 60s · <span id="lastUpdate">—</span></div>
+  <div class="logo">Virtuoso</div>
+  <h1>Prediction</h1>
+  <p class="subtitle">Dynamic Kelly · edge trading · auto-managed</p>
+  <div class="timestamp"><span class="live-dot"></span>live · <span id="lastUpdate">—</span></div>
 </header>
 
 <div class="controls">
-  <button class="btn btn-primary" id="processBtn" onclick="processSignals()">⚡ Process Signals</button>
   <button class="btn btn-secondary" onclick="loadAll()">↻ Refresh</button>
   <span class="status-msg" id="statusMsg"></span>
 </div>
@@ -294,50 +293,37 @@
 <div class="stats-row">
   <div class="stat-card bankroll">
     <div class="stat-label">Bankroll</div>
-    <div class="stat-value cyan" id="bankroll">$500.00</div>
+    <div class="stat-value cyan" id="bankroll">—</div>
     <div class="stat-sub" id="bankrollSub">starting capital</div>
   </div>
   <div class="stat-card pnl-pos" id="pnlCard">
-    <div class="stat-label">Total P&L</div>
-    <div class="stat-value" id="totalPnl">$0.00</div>
-    <div class="stat-sub" id="pnlSub">0 trades resolved</div>
+    <div class="stat-label">P&L</div>
+    <div class="stat-value" id="totalPnl">—</div>
+    <div class="stat-sub" id="pnlSub">0 resolved</div>
   </div>
   <div class="stat-card wr">
     <div class="stat-label">Win Rate</div>
     <div class="stat-value gold" id="winRate">—</div>
-    <div class="stat-sub" id="wrSub">wins / losses</div>
-  </div>
-  <div class="stat-card sharpe">
-    <div class="stat-label">Sharpe Estimate</div>
-    <div class="stat-value accent" id="sharpe">—</div>
-    <div class="stat-sub">risk-adjusted return</div>
+    <div class="stat-sub" id="wrSub">W / L</div>
   </div>
   <div class="stat-card dd">
-    <div class="stat-label">Max Drawdown</div>
-    <div class="stat-value orange" id="maxDD">0%</div>
-    <div class="stat-sub" id="ddSub">from peak bankroll</div>
+    <div class="stat-label">Drawdown</div>
+    <div class="stat-value orange" id="maxDD">—</div>
+    <div class="stat-sub" id="ddSub">from peak</div>
   </div>
   <div class="stat-card trades">
     <div class="stat-label">Positions</div>
-    <div class="stat-value cyan" id="tradeCount">0 / 0</div>
-    <div class="stat-sub">open / total</div>
+    <div class="stat-value cyan" id="tradeCount">—</div>
+    <div class="stat-sub">open / max</div>
   </div>
   <div class="stat-card unreal" id="unrealCard">
-    <div class="stat-label">Unrealized P&L</div>
+    <div class="stat-label">Unrealized</div>
     <div class="stat-value" id="unrealPnl">—</div>
-    <div class="stat-sub" id="unrealSub">open position value</div>
-  </div>
-  <div class="stat-card hold">
-    <div class="stat-label">Avg Hold Time</div>
-    <div class="stat-value accent" id="avgHold">—</div>
-    <div class="stat-sub">days to resolution</div>
-  </div>
-  <div class="stat-card risk">
-    <div class="stat-label">Capital at Risk</div>
-    <div class="stat-value red" id="capitalRisk">$0</div>
-    <div class="stat-sub" id="riskSub">of bankroll</div>
+    <div class="stat-sub" id="unrealSub">open value</div>
   </div>
 </div>
+<!-- Hidden but still rendered by JS -->
+<div style="display:none"><span id="sharpe"></span><span id="avgHold"></span><span id="capitalRisk"></span><span id="riskSub"></span></div>
 
 <!-- Risk Guards -->
 <div class="section-card" id="riskGuardsCard" style="margin-bottom:24px">
@@ -383,19 +369,8 @@
   </div>
 </div>
 
-<!-- Recent Signals -->
-<div class="section-card">
-  <div class="section-header">
-    <div class="section-title">
-      <span class="section-icon signals">🎯</span>
-      <h2>Recent Signals</h2>
-    </div>
-    <span class="section-count" id="signalCount">—</span>
-  </div>
-  <div class="section-body" id="recentSignals">
-    <div class="empty"><div class="empty-icon">📡</div>Process signals to see evaluation results</div>
-  </div>
-</div>
+<!-- Signals section removed — watchdog auto-processes -->
+<div style="display:none"><span id="signalCount"></span><span id="recentSignals"></span></div>
 
 <!-- Trade History -->
 <div class="section-card">
@@ -453,7 +428,7 @@
 </div>
 
 <footer>
-  <p><span class="brand">Polyclawd</span> · paper portfolio · dynamic Kelly · prediction market edge trading</p>
+  <p><span class="brand">Virtuoso Prediction</span> · dynamic Kelly · edge trading</p>
   <p style="margin-top:8px;font-size:11px;color:#555">Not financial advice · For research purposes only</p>
 </footer>
 
