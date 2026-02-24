@@ -2239,3 +2239,25 @@ async def get_risk_guards():
     except Exception as e:
         logger.exception(f"Risk guards failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/signals/strike-scanner")
+async def strike_scanner():
+    """Scan crypto strike markets for volatility-based mispricing signals."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from strike_probability import get_calculator
+        calc = get_calculator()
+        results = calc.scan_all_strikes()
+        return {
+            "signals": results,
+            "count": len(results),
+            "strategy": "price_to_strike",
+            "min_edge": "10%",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+    except Exception as e:
+        logger.exception(f"Strike scanner failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

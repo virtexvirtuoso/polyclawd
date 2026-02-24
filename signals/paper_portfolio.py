@@ -236,6 +236,12 @@ def _init_tables(conn: sqlite3.Connection):
         conn.commit()
     except sqlite3.OperationalError:
         pass  # Column already exists
+    # Migration: add strategy column if missing
+    try:
+        conn.execute("ALTER TABLE paper_positions ADD COLUMN strategy TEXT DEFAULT ''")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     conn.commit()
 
 
@@ -467,6 +473,25 @@ def open_position(signal: dict) -> dict:
     except Exception:
         pass
 
+    # Strategy field (e.g., "price_to_strike", "no_fade")
+    strategy = signal.get("strategy", "")
+
+    # Cross-strategy agreement: if price_to_strike and NO fade agree, boost; if disagree, halve
+    if strategy == "price_to_strike":
+        # Check if NO fade also has a signal on this market
+        try:
+            _cross_side = signal.get("cross_strategy_side")
+            if _cross_side:
+                if _cross_side == side:
+                    bet_size *= 1.2  # Agreement boost
+                    logger.info("Cross-strategy AGREE boost 1.2x: %s %s", market_id[:30], side)
+                else:
+                    bet_size *= 0.5  # Disagreement halve
+                    logger.info("Cross-strategy DISAGREE halve: %s %s vs %s", market_id[:30], side, _cross_side)
+                bet_size = max(MIN_BET, min(MAX_BET, bet_size))
+        except Exception:
+            pass
+
     conn = _get_db()
 
     # Check not already tracking this market
@@ -497,11 +522,11 @@ def open_position(signal: dict) -> dict:
         return {"opened": False, "reason": cap_reason, "archetype": archetype, "edge": eval_result["edge"]}
 
     conn.execute("""INSERT INTO paper_positions
-        (opened_at, market_id, market_title, platform, side, entry_price, bet_size, potential_payout, confidence, edge_pct, status, archetype)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)""",
+        (opened_at, market_id, market_title, platform, side, entry_price, bet_size, potential_payout, confidence, edge_pct, status, archetype, strategy)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)""",
         (datetime.now(timezone.utc).isoformat(), market_id, market_title,
          signal.get("platform", "kalshi"), side, market_price, bet_size,
-         round(potential_payout, 2), confidence, eval_result["edge"], archetype))
+         round(potential_payout, 2), confidence, eval_result["edge"], archetype, strategy))
     conn.commit()
     conn.close()
 
