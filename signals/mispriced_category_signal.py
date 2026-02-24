@@ -252,12 +252,13 @@ POLYMARKET_EFFICIENT_TAGS = {
 
 # Thresholds
 MIN_VOLUME_KALSHI = 5000        # Contracts
-MIN_VOLUME_POLYMARKET = 25000   # Dollars — lowered from 50K to catch more markets
+MIN_VOLUME_POLYMARKET = 50000   # Dollars — Becker: $50K+ vol = 67% NO WR (vs 59% at $25K)
 WHALE_VOLUME_KALSHI = 10000     # Contracts
 WHALE_VOLUME_POLYMARKET = 100000 # Dollars
 CONTESTED_LOW = 10              # Cents/pct — lowered from 15 to allow cheap NOs
 CONTESTED_HIGH = 95             # Raised from 92 — allow high-prob NO bets (Becker: 89% NO WR on price_range)
-MAX_DAYS_TO_CLOSE = 90          # Raised from 30 — Becker: monthly+ = 76.5% NO WR (strongest sweet spot)
+MAX_DAYS_TO_CLOSE = 365         # Becker: 3-12mo = 82.6% NO WR — don't exclude our best edge
+MIN_DAYS_TO_CLOSE = 7           # Becker: same-day = 53% NO WR (coin flip) — skip anything < 7d
 MIN_EDGE_PCT = 5
 MIN_ENTRY_PRICE = 45  # Cents — lowered from 55 (Becker: 45-55c range still has 61% NO WR)
 
@@ -710,7 +711,7 @@ def scan_kalshi_signals() -> List[Dict]:
         try:
             close_time = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
             days_to_close = (close_time - now).total_seconds() / 86400
-            if days_to_close <= 0 or days_to_close > MAX_DAYS_TO_CLOSE:
+            if days_to_close < MIN_DAYS_TO_CLOSE or days_to_close > MAX_DAYS_TO_CLOSE:
                 continue
         except Exception:
             continue
@@ -858,7 +859,7 @@ def scan_polymarket_signals() -> List[Dict]:
         try:
             end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
             days_to_close = (end_date - now).total_seconds() / 86400
-            if days_to_close <= 0 or days_to_close > MAX_DAYS_TO_CLOSE:
+            if days_to_close < MIN_DAYS_TO_CLOSE or days_to_close > MAX_DAYS_TO_CLOSE:
                 continue
         except Exception:
             continue

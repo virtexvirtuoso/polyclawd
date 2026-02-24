@@ -23,15 +23,15 @@ BASE_DIR = Path(__file__).parent.parent
 DB_PATH = BASE_DIR / "storage" / "shadow_trades.db"
 JSON_DIR = Path.home() / ".openclaw" / "paper-trading"
 
-STARTING_BANKROLL = 500.0
-KELLY_FRACTION = 1 / 8
+STARTING_BANKROLL = 10000.0
+KELLY_FRACTION = 1 / 6  # Becker-validated: 79% NO WR on high-conviction filters supports 1/6
 MAX_CONCURRENT = 10
 MIN_CONFIDENCE = 0.50
 MIN_EDGE = 0.12  # 12% minimum edge — lowered from 15% (Becker validates edges as low as 12%)
 MIN_PRICE = 0.05  # Price floor — reject garbage contracts below 5 cents
 MAX_PRICE = 0.95  # Price ceiling — reject near-certain markets (no edge)
 MIN_BET = 5.0
-MAX_BET = 50.0  # Raised from 35: Becker-validated strategies deserve more capital
+MAX_BET = 1000.0  # Scaled for $10K bankroll
 
 
 def _get_db() -> sqlite3.Connection:
