@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How Polyclawd Works</title>
+<script src="auth.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  :root, [data-theme="dark"] {
+    --bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a26;--border:#2a2a3a;
+    --accent:#6c5ce7;--accent2:#a29bfe;--green:#00c853;--red:#ff5252;
+    --orange:#ffab40;--cyan:#18ffff;--text:#e8e8f0;--text2:#8888a0;--gold:#ffd700;
+    --noise-opacity:0.03;--shadow:rgba(0,0,0,0.3);
+  }
+  [data-theme="light"] {
+    --bg:#f5f5f8;--surface:#ffffff;--surface2:#eeeef2;--border:#d8d8e0;
+    --accent:#5b4cdb;--accent2:#6c5ce7;--green:#00a843;--red:#e53935;
+    --orange:#f57c00;--cyan:#0097a7;--text:#1a1a2e;--text2:#6b6b80;--gold:#c49000;
+    --noise-opacity:0;--shadow:rgba(0,0,0,0.08);
+  }
+  @media(prefers-color-scheme:light){
+    [data-theme="auto"]{
+      --bg:#f5f5f8;--surface:#ffffff;--surface2:#eeeef2;--border:#d8d8e0;
+      --accent:#5b4cdb;--accent2:#6c5ce7;--green:#00a843;--red:#e53935;
+      --orange:#f57c00;--cyan:#0097a7;--text:#1a1a2e;--text2:#6b6b80;--gold:#c49000;
+      --noise-opacity:0;--shadow:rgba(0,0,0,0.08);
+    }
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,sans-serif;min-height:100vh;line-height:1.7}
+  .noise{position:fixed;top:0;left:0;width:100%;height:100%;background:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");pointer-events:none;z-index:0;opacity:var(--noise-opacity,0.03)}
+  .container{max-width:800px;margin:0 auto;padding:40px 24px;position:relative;z-index:1}
+
+  /* Header */
+  header{text-align:center;margin-bottom:48px;position:relative}
+  header::before{content:'';position:absolute;top:-100px;left:50%;transform:translateX(-50%);width:600px;height:600px;background:radial-gradient(circle,rgba(108,92,231,0.08) 0%,transparent 70%);pointer-events:none}
+  .logo{font-size:13px;letter-spacing:6px;text-transform:uppercase;color:var(--accent2);margin-bottom:16px;font-weight:500}
+  .logo span{color:var(--gold)}
+  h1{font-size:42px;font-weight:700;letter-spacing:-1px;background:linear-gradient(135deg,var(--text) 0%,var(--accent2) 50%,var(--cyan) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:12px}
+  .subtitle{color:var(--text2);font-size:15px;font-weight:300}
+
+  /* Theme toggle */
+  .theme-toggle{position:absolute;top:0;right:0;background:none;border:1px solid var(--border);border-radius:8px;cursor:pointer;padding:6px 10px;font-size:16px;line-height:1;transition:all 0.2s;color:var(--text2)}
+  .theme-toggle:hover{border-color:var(--accent);color:var(--text)}
+
+  /* Nav */
+  .nav-link{display:inline-block;font-size:12px;color:var(--text2);text-decoration:none;padding:8px 16px;border:1px solid var(--border);border-radius:8px;transition:all 0.2s;margin-bottom:16px}
+  .nav-link:hover{border-color:var(--accent);color:var(--accent2)}
+
+  /* One-liner callout */
+  .callout{background:linear-gradient(135deg,rgba(108,92,231,0.1),rgba(24,255,255,0.05));border:1px solid var(--accent);border-radius:16px;padding:32px;text-align:center;margin-bottom:48px}
+  .callout p{font-size:20px;font-weight:600;line-height:1.5}
+  .callout .highlight{color:var(--accent2)}
+
+  /* Section */
+  .section{background:var(--surface);border:1px solid var(--border);border-radius:16px;margin-bottom:24px;overflow:hidden;transition:border-color 0.3s}
+  .section:hover{border-color:var(--accent)}
+  .section-head{display:flex;align-items:center;gap:12px;padding:20px 28px;border-bottom:1px solid var(--border);background:var(--surface2)}
+  .section-head .icon{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;font-size:14px}
+  .section-head h2{font-size:18px;font-weight:600}
+  .section-body{padding:24px 28px}
+  .section-body p{margin-bottom:16px;color:var(--text);font-size:14px}
+  .section-body p:last-child{margin-bottom:0}
+
+  /* Blockquote */
+  blockquote{border-left:3px solid var(--accent);padding:12px 20px;margin:16px 0;background:var(--surface2);border-radius:0 8px 8px 0;font-style:italic;color:var(--text2);font-size:14px}
+
+  /* Tables */
+  table{width:100%;border-collapse:collapse;margin:16px 0}
+  th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text2);padding:10px 14px;border-bottom:1px solid var(--border);font-weight:500}
+  td{padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px}
+  tr:hover td{background:rgba(108,92,231,0.03)}
+  .mono{font-family:'JetBrains Mono',monospace}
+  .green{color:var(--green)}.red{color:var(--red)}.gold{color:var(--gold)}.cyan{color:var(--cyan)}.accent{color:var(--accent2)}.orange{color:var(--orange)}
+
+  /* Check list */
+  .checks{list-style:none;padding:0;margin:16px 0}
+  .checks li{padding:8px 0;font-size:14px;display:flex;align-items:center;gap:10px}
+  .checks li::before{content:'✅';font-size:14px}
+
+  /* Pipeline */
+  .pipeline{display:flex;flex-direction:column;gap:8px;margin:16px 0}
+  .pipe-step{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--surface2);border-radius:8px;font-size:13px;font-weight:500}
+  .pipe-num{width:24px;height:24px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0}
+  .pipe-arrow{color:var(--text2);text-align:center;font-size:12px}
+
+  /* Settings grid */
+  .settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:16px 0}
+  .setting-card{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+  .setting-label{font-size:10px;text-transform:uppercase;letter-spacing:2px;color:var(--text2);margin-bottom:4px}
+  .setting-value{font-size:20px;font-weight:700;font-family:'JetBrains Mono',monospace;color:var(--accent2)}
+  .setting-why{font-size:11px;color:var(--text2);margin-top:4px}
+
+  /* Status badge */
+  .status-badge{display:inline-flex;align-items:center;gap:8px;padding:10px 20px;background:rgba(255,215,0,0.1);border:1px solid rgba(255,215,0,0.3);border-radius:10px;font-size:14px;font-weight:600;color:var(--gold);margin-top:16px}
+
+  /* Footer */
+  footer{text-align:center;padding:40px 0 20px;border-top:1px solid var(--border);margin-top:20px}
+  footer p{font-size:12px;color:var(--text2);font-family:'JetBrains Mono',monospace}
+  footer .brand{color:var(--accent2)}
+
+  /* Mobile */
+  @media(max-width:768px){
+    .container{padding:16px 12px}
+    h1{font-size:28px}
+    .callout p{font-size:16px}
+    .section-head{padding:14px 18px}
+    .section-body{padding:18px}
+    .settings-grid{grid-template-columns:1fr}
+    .pipe-step{font-size:12px;padding:8px 12px}
+    table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  }
+</style>
+</head>
+<body>
+<div class="noise"></div>
+<div class="container">
+
+  <a href="portfolio.html" class="nav-link">← Portfolio Dashboard</a>
+
+  <header>
+    <button class="theme-toggle" onclick="cycleTheme()" title="Toggle theme">🌓</button>
+    <div class="logo">Virtuoso <span>⚡</span> Prediction</div>
+    <h1>How It Works</h1>
+    <p class="subtitle">The data-driven case for betting NO</p>
+  </header>
+
+  <div class="callout">
+    <p>People overpay for YES. We sell it to them.<br><span class="highlight">Math says we win 7 out of 10 times.</span></p>
+  </div>
+
+  <!-- Step 1 -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(108,92,231,0.15)">🔍</div>
+      <h2>Step 1: Find Markets</h2>
+    </div>
+    <div class="section-body">
+      <p>Every 10 minutes, the system scans <strong style="color:var(--accent2)">Polymarket</strong> — a site where people bet YES or NO on questions like:</p>
+      <blockquote>"Will Bitcoin be above $64,000 on March 1st?"<br>"Will Sean Penn win Best Supporting Actor?"</blockquote>
+      <p>Each question has a YES price and a NO price. They always add up to $1. So if YES is 55¢, NO is 45¢.</p>
+    </div>
+  </div>
+
+  <!-- Step 2 -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(0,200,83,0.15)">🧠</div>
+      <h2>Step 2: Decide If The Market Is Wrong</h2>
+    </div>
+    <div class="section-body">
+      <p>Core insight from the <strong style="color:var(--gold)">Becker dataset</strong> (408,000 real resolved markets):</p>
+      <p style="font-size:16px;font-weight:600;color:var(--accent2)">Most things people bet YES on... don't happen.</p>
+      <p>People are optimistic. They bid up YES on exciting outcomes. The crowd overpays for YES. Result: <strong class="green">NO wins 59-82% of the time</strong> depending on market type.</p>
+
+      <h3 style="font-size:14px;font-weight:600;margin:20px 0 8px;color:var(--text2)">NO Win Rate by Duration</h3>
+      <table>
+        <tr><th>Duration</th><th>NO Win Rate</th></tr>
+        <tr><td>Same day</td><td class="mono" style="color:var(--text2)">53.3%</td></tr>
+        <tr><td>1-7 days</td><td class="mono">59.8%</td></tr>
+        <tr><td>1-4 weeks</td><td class="mono green">63.0%</td></tr>
+        <tr><td>1-3 months</td><td class="mono green">77.6%</td></tr>
+        <tr><td>3-12 months</td><td class="mono green" style="font-weight:700">82.6%</td></tr>
+      </table>
+
+      <h3 style="font-size:14px;font-weight:600;margin:20px 0 8px;color:var(--text2)">NO Win Rate by Category</h3>
+      <table>
+        <tr><th>Category</th><th>NO Win Rate</th><th>Sample</th></tr>
+        <tr><td>Sports</td><td class="mono green">69.7%</td><td class="mono" style="color:var(--text2)">6,267</td></tr>
+        <tr><td>Geopolitical</td><td class="mono green">68.8%</td><td class="mono" style="color:var(--text2)">6,715</td></tr>
+        <tr><td>Politics</td><td class="mono green">68.2%</td><td class="mono" style="color:var(--text2)">12,201</td></tr>
+        <tr><td>AI</td><td class="mono green">67.6%</td><td class="mono" style="color:var(--text2)">1,687</td></tr>
+        <tr><td>Other</td><td class="mono">60.6%</td><td class="mono" style="color:var(--text2)">232,308</td></tr>
+        <tr><td>Crypto/Price</td><td class="mono" style="color:var(--text2)">54.4%</td><td class="mono" style="color:var(--text2)">117,723</td></tr>
+      </table>
+
+      <h3 style="font-size:14px;font-weight:600;margin:20px 0 8px;color:var(--text2)">The Filters</h3>
+      <ul class="checks">
+        <li>Is this the kind of market where NO historically wins?</li>
+        <li>Is there enough volume ($50K+) to trust the price?</li>
+        <li>Is the duration 7+ days? (Short markets are coin flips)</li>
+        <li>Is the NO price reasonable? (Not too cheap, not too expensive)</li>
+      </ul>
+      <p>If all pass → <strong class="green">bet NO</strong>.</p>
+    </div>
+  </div>
+
+  <!-- Step 3 -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(255,215,0,0.15)">📐</div>
+      <h2>Step 3: Size with Kelly</h2>
+    </div>
+    <div class="section-body">
+      <p>We use the <strong style="color:var(--gold)">Kelly Criterion</strong> — a formula that answers: <em>"Given my win rate and the payout, what % of my bankroll should I bet?"</em></p>
+      <p><strong>We use 1/6 Kelly</strong> — bet 1/6th of the mathematically optimal amount. Safe enough to survive bad streaks, aggressive enough to grow.</p>
+
+      <table>
+        <tr><th>Fraction</th><th>Risk Level</th><th>Bet on $10K</th></tr>
+        <tr><td>Full</td><td class="red">Reckless</td><td class="mono">$6,400</td></tr>
+        <tr><td>1/4</td><td class="orange">Aggressive</td><td class="mono">$1,600</td></tr>
+        <tr><td style="font-weight:700;color:var(--accent2)">1/6</td><td class="accent" style="font-weight:700">Current</td><td class="mono" style="font-weight:700;color:var(--accent2)">$1,000</td></tr>
+        <tr><td>1/8</td><td style="color:var(--text2)">Conservative</td><td class="mono">$800</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- Step 4 -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(24,255,255,0.15)">⏳</div>
+      <h2>Step 4: Wait For Resolution</h2>
+    </div>
+    <div class="section-body">
+      <p>The market closes on its end date. Either:</p>
+      <p><span class="green" style="font-weight:600">NO wins</span> → We paid 40¢, get $1 back = <strong class="green">60¢ profit per share</strong> ✅</p>
+      <p><span class="red" style="font-weight:600">YES wins</span> → We paid 40¢, get $0 back = <strong class="red">40¢ loss per share</strong> ❌</p>
+      <p>Since NO wins ~70-80% of the time on our filtered markets, we profit over many bets.</p>
+    </div>
+  </div>
+
+  <!-- Pipeline -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(108,92,231,0.15)">⚡</div>
+      <h2>The System</h2>
+    </div>
+    <div class="section-body">
+      <div class="pipeline">
+        <div class="pipe-step"><div class="pipe-num">1</div><span><strong>Scan</strong> — Find markets every 10 minutes</span></div>
+        <div class="pipe-arrow">↓</div>
+        <div class="pipe-step"><div class="pipe-num">2</div><span><strong>Filter</strong> — Only keep high-edge markets (7-365 days, $50K+ volume)</span></div>
+        <div class="pipe-arrow">↓</div>
+        <div class="pipe-step"><div class="pipe-num">3</div><span><strong>Bet NO</strong> — The crowd overpays for YES</span></div>
+        <div class="pipe-arrow">↓</div>
+        <div class="pipe-step"><div class="pipe-num">4</div><span><strong>Size with Kelly</strong> — Bet proportional to edge, divided by 6</span></div>
+        <div class="pipe-arrow">↓</div>
+        <div class="pipe-step"><div class="pipe-num">5</div><span><strong>Resolve</strong> — Collect winnings or take the loss</span></div>
+        <div class="pipe-arrow">↓</div>
+        <div class="pipe-step"><div class="pipe-num">6</div><span><strong>Repeat</strong> — Law of large numbers does the rest</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(162,155,254,0.15)">⚙️</div>
+      <h2>Current Settings</h2>
+    </div>
+    <div class="section-body">
+      <div class="settings-grid">
+        <div class="setting-card">
+          <div class="setting-label">Bankroll</div>
+          <div class="setting-value">$10,000</div>
+          <div class="setting-why">Paper trading starting capital</div>
+        </div>
+        <div class="setting-card">
+          <div class="setting-label">Kelly Fraction</div>
+          <div class="setting-value">1/6</div>
+          <div class="setting-why">Balanced risk — backed by 79% WR data</div>
+        </div>
+        <div class="setting-card">
+          <div class="setting-label">Max Bet</div>
+          <div class="setting-value">$1,000</div>
+          <div class="setting-why">Cap per position</div>
+        </div>
+        <div class="setting-card">
+          <div class="setting-label">Min Volume</div>
+          <div class="setting-value">$50K</div>
+          <div class="setting-why">Only liquid, trustworthy markets</div>
+        </div>
+        <div class="setting-card">
+          <div class="setting-label">Duration</div>
+          <div class="setting-value">7-365d</div>
+          <div class="setting-why">Skip coin-flip dailies</div>
+        </div>
+        <div class="setting-card">
+          <div class="setting-label">Side</div>
+          <div class="setting-value">NO only</div>
+          <div class="setting-why">Structural YES overpricing</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sweet Spot -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(255,215,0,0.15)">🎯</div>
+      <h2>The Sweet Spot</h2>
+    </div>
+    <div class="section-body">
+      <p>All backed by the <strong style="color:var(--gold)">Becker dataset</strong> — 408,000 real Polymarket markets with known outcomes.</p>
+      <table>
+        <tr><th>Filter</th><th>Markets</th><th>NO Win Rate</th><th>EV / $1</th></tr>
+        <tr><td>Everything</td><td class="mono">76,781</td><td class="mono">58.8%</td><td class="mono">$0.24</td></tr>
+        <tr><td>7-365d, $50K+ vol</td><td class="mono">24,040</td><td class="mono green">67.2%</td><td class="mono green">$0.32</td></tr>
+        <tr><td style="font-weight:600">30-365d, $100K+ vol</td><td class="mono" style="font-weight:600">6,493</td><td class="mono green" style="font-weight:700">79.0%</td><td class="mono green" style="font-weight:700">$0.44</td></tr>
+      </table>
+      <p>The tighter the filter, the higher the win rate — but fewer bets. Our settings balance edge with opportunity.</p>
+    </div>
+  </div>
+
+  <!-- Status -->
+  <div style="text-align:center;margin:32px 0">
+    <div class="status-badge">🟡 Paper Trading — no real money yet</div>
+    <p style="margin-top:16px;color:var(--text2);font-size:13px">Once enough resolved trades confirm the edge holds live, the system connects to real exchange accounts.</p>
+  </div>
+
+  <footer>
+    <p><span class="brand">polyclawd</span> · virtuoso prediction engine</p>
+  </footer>
+</div>
+
+<script>
+function cycleTheme(){
+  const el=document.documentElement,themes=['auto','light','dark'],labels=['🌓','☀️','🌙'];
+  let i=themes.indexOf(el.getAttribute('data-theme')||'auto');
+  i=(i+1)%3;el.setAttribute('data-theme',themes[i]);
+  document.querySelector('.theme-toggle').textContent=labels[i];
+  localStorage.setItem('theme',themes[i]);
+}
+(function(){const t=localStorage.getItem('theme');if(t){document.documentElement.setAttribute('data-theme',t);const labels={'auto':'🌓','light':'☀️','dark':'🌙'};document.addEventListener('DOMContentLoaded',()=>{const btn=document.querySelector('.theme-toggle');if(btn)btn.textContent=labels[t]||'🌓'});}})();
+</script>
+</body>
+</html>

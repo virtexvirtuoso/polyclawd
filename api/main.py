@@ -126,6 +126,102 @@ app.include_router(engine_router, prefix="/api", tags=["Engine"])
 app.include_router(edge_scanner_router, tags=["Edge Scanner"])
 
 # ============================================================================
+# Visitor Tracking
+# ============================================================================
+
+@app.post("/api/visitor-log")
+async def visitor_log(request: Request):
+    """Log visitor access for tracking."""
+    import sqlite3, json as _json
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    ip = request.headers.get("x-real-ip", request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown"))
+    entry = {
+        "timestamp": body.get("timestamp", ""),
+        "ip": ip,
+        "page": body.get("page", ""),
+        "user_agent": body.get("userAgent", ""),
+        "screen_size": body.get("screenSize", ""),
+        "language": body.get("language", ""),
+        "referrer": body.get("referrer", ""),
+    }
+
+    db_path = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""CREATE TABLE IF NOT EXISTS visitor_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT, ip TEXT, page TEXT,
+            user_agent TEXT, screen_size TEXT, language TEXT, referrer TEXT,
+            logged_at TEXT DEFAULT (datetime('now'))
+        )""")
+        conn.execute(
+            "INSERT INTO visitor_log (timestamp, ip, page, user_agent, screen_size, language, referrer) VALUES (?,?,?,?,?,?,?)",
+            (entry["timestamp"], entry["ip"], entry["page"], entry["user_agent"], entry["screen_size"], entry["language"], entry["referrer"])
+        )
+        conn.commit()
+        conn.close()
+        logger.info(f"[VISITOR] {entry['ip']} → {entry['page']} ({entry['screen_size']})")
+
+        # Discord alert
+        import urllib.request
+        discord_url = "https://discord.com/api/webhooks/1379097202613420163/IJXNvNxw09zXGvQe2oZZ-8TwYc91hZH4PqD6XtVEQa5fH6TpBt9hBLuTZiejUPjW9m8i"
+        embed = {
+            "embeds": [{
+                "title": "🔐 Polyclawd Login",
+                "color": 0x6c5ce7,
+                "fields": [
+                    {"name": "IP", "value": entry["ip"], "inline": True},
+                    {"name": "Page", "value": entry["page"] or "login", "inline": True},
+                    {"name": "Screen", "value": entry["screen_size"], "inline": True},
+                    {"name": "User Agent", "value": (entry["user_agent"] or "unknown")[:200]},
+                    {"name": "Referrer", "value": entry["referrer"] or "direct", "inline": True},
+                ],
+                "timestamp": entry["timestamp"] or None
+            }]
+        }
+        try:
+            req = urllib.request.Request(
+                discord_url,
+                data=_json.dumps(embed).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception as de:
+            logger.warning(f"[VISITOR] Discord alert failed: {de}")
+
+    except Exception as e:
+        logger.error(f"[VISITOR] Failed to log: {e}")
+
+    return {"ok": True}
+
+
+@app.get("/api/visitor-log")
+async def get_visitor_log(limit: int = 50):
+    """Get recent visitor log entries."""
+    import sqlite3
+    db_path = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""CREATE TABLE IF NOT EXISTS visitor_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT, ip TEXT, page TEXT,
+            user_agent TEXT, screen_size TEXT, language TEXT, referrer TEXT,
+            logged_at TEXT DEFAULT (datetime('now'))
+        )""")
+        rows = conn.execute("SELECT * FROM visitor_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        cols = ["id", "timestamp", "ip", "page", "user_agent", "screen_size", "language", "referrer", "logged_at"]
+        conn.close()
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ============================================================================
 # Static Files & Frontend
 # ============================================================================
 

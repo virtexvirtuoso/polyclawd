@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Virtuoso Prediction — Access</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  :root, [data-theme="dark"] {
+    --bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a26;--border:#2a2a3a;
+    --accent:#6c5ce7;--accent2:#a29bfe;--green:#00c853;--red:#ff5252;
+    --text:#e8e8f0;--text2:#8888a0;--gold:#ffd700;--cyan:#18ffff;
+    --shadow:rgba(0,0,0,0.3);
+  }
+  [data-theme="light"] {
+    --bg:#f5f5f8;--surface:#ffffff;--surface2:#eeeef2;--border:#d8d8e0;
+    --accent:#5b4cdb;--accent2:#6c5ce7;--green:#00a843;--red:#e53935;
+    --text:#1a1a2e;--text2:#6b6b80;--gold:#c49000;--cyan:#0097a7;
+    --shadow:rgba(0,0,0,0.08);
+  }
+  @media(prefers-color-scheme:light){
+    [data-theme="auto"]{
+      --bg:#f5f5f8;--surface:#ffffff;--surface2:#eeeef2;--border:#d8d8e0;
+      --accent:#5b4cdb;--accent2:#6c5ce7;--green:#00a843;--red:#e53935;
+      --text:#1a1a2e;--text2:#6b6b80;--gold:#c49000;--cyan:#0097a7;
+      --shadow:rgba(0,0,0,0.08);
+    }
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center}
+  .noise{position:fixed;top:0;left:0;width:100%;height:100%;background:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");pointer-events:none;z-index:0;opacity:0.03}
+  .login-container{position:relative;z-index:1;width:100%;max-width:400px;padding:24px}
+  .login-box{background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:48px 36px;text-align:center;position:relative;overflow:hidden}
+  .login-box::before{content:'';position:absolute;top:-100px;left:50%;transform:translateX(-50%);width:400px;height:400px;background:radial-gradient(circle,rgba(108,92,231,0.1) 0%,transparent 70%);pointer-events:none}
+  .logo{font-size:12px;letter-spacing:6px;text-transform:uppercase;color:var(--accent2);margin-bottom:12px;font-weight:500}
+  .logo span{color:var(--gold)}
+  h1{font-size:28px;font-weight:700;letter-spacing:-0.5px;background:linear-gradient(135deg,var(--text) 0%,var(--accent2) 50%,var(--cyan) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px}
+  .subtitle{color:var(--text2);font-size:13px;font-weight:300;margin-bottom:32px}
+  .input-group{position:relative;margin-bottom:20px}
+  .input-group input{width:100%;padding:14px 18px;background:var(--surface2);border:1px solid var(--border);border-radius:12px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:16px;text-align:center;letter-spacing:3px;outline:none;transition:border-color 0.2s}
+  .input-group input::placeholder{color:var(--text2);letter-spacing:1px;font-size:13px}
+  .input-group input:focus{border-color:var(--accent)}
+  .btn{width:100%;padding:14px;border-radius:12px;border:none;cursor:pointer;font-family:'Inter',sans-serif;font-weight:600;font-size:14px;transition:all 0.25s;background:linear-gradient(135deg,var(--accent),#7c3aed);color:#fff}
+  .btn:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(108,92,231,0.3)}
+  .btn:active{transform:translateY(0)}
+  .error{color:var(--red);font-size:12px;margin-top:12px;opacity:0;transition:opacity 0.2s;font-family:'JetBrains Mono',monospace}
+  .error.show{opacity:1}
+  .shake{animation:shake 0.4s ease-in-out}
+  @keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-8px)}75%{transform:translateX(8px)}}
+</style>
+</head>
+<body>
+<div class="noise"></div>
+<div class="login-container">
+  <div class="login-box" id="login-box">
+    <div class="logo">Virtuoso <span>⚡</span> Prediction</div>
+    <h1>Access Required</h1>
+    <p class="subtitle">Enter your access code to continue</p>
+    <form id="access-form">
+      <div class="input-group">
+        <input type="password" id="access-code" placeholder="Access Code" autocomplete="off" autofocus>
+      </div>
+      <button type="submit" class="btn">Enter →</button>
+    </form>
+    <div class="error" id="error-msg">Invalid access code</div>
+  </div>
+</div>
+
+<script src="auth.js"></script>
+<script>
+// If already authed, redirect
+if (polyclawdAuth.isAuthed()) {
+  const params = new URLSearchParams(window.location.search);
+  window.location.href = params.get('r') || 'portfolio.html';
+}
+
+document.getElementById('access-form').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  const code = document.getElementById('access-code').value;
+  const ok = await polyclawdAuth.handleAccessCode(code);
+  if (!ok) {
+    const box = document.getElementById('login-box');
+    const err = document.getElementById('error-msg');
+    err.classList.add('show');
+    box.classList.add('shake');
+    setTimeout(() => box.classList.remove('shake'), 400);
+    document.getElementById('access-code').value = '';
+    document.getElementById('access-code').focus();
+  }
+});
+</script>
+</body>
+</html>

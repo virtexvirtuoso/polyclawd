@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Virtuoso Prediction</title>
+<script src="auth.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -189,6 +190,18 @@
   .resolve-time{font-family:'JetBrains Mono',monospace;color:var(--text2);white-space:nowrap;font-size:11px}
   .resolve-market{flex:1;font-weight:500}
 
+  /* Collapsible sections */
+  .section-card[data-collapsible] .section-header{cursor:pointer;user-select:none;-webkit-user-select:none}
+  .section-card[data-collapsible] .section-header::after{content:'▾';font-size:14px;color:var(--text2);margin-left:8px;transition:transform 0.25s}
+  .section-card.collapsed .section-header::after{transform:rotate(-90deg)}
+  .section-card.collapsed .section-header{border-bottom:none}
+  .section-card[data-collapsible] .section-body{overflow:hidden;transition:max-height 0.3s ease-out,padding-top 0.3s ease-out,padding-bottom 0.3s ease-out}
+  .section-card.collapsed .section-body{max-height:0!important;padding-top:0!important;padding-bottom:0!important}
+
+  /* Bottom sticky bar (mobile only) */
+  .mobile-bar{display:none}
+  .mobile-bar-spacer{display:none}
+
   @media(max-width:768px){
     .container{padding:16px 12px}
     header{margin-bottom:24px}
@@ -227,6 +240,13 @@
     footer{padding:24px 0 16px}
     /* Bigger tap targets */
     .nav-link{padding:12px 20px;min-height:44px}
+    /* Bottom sticky bar */
+    .mobile-bar{display:flex;position:fixed;bottom:0;left:0;right:0;z-index:100;background:var(--surface);border-top:1px solid var(--border);padding:10px 16px;padding-bottom:calc(10px + env(safe-area-inset-bottom,0px));gap:10px;align-items:center;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+    .mobile-bar .btn{flex:1;justify-content:center;min-height:44px;font-size:13px}
+    .mobile-bar .status-msg{display:none}
+    .mobile-bar-spacer{display:block;height:70px}
+    /* Hide desktop controls on mobile — sticky bar replaces them */
+    .controls{display:none}
   }
   /* Phone breakpoint */
   @media(max-width:480px){
@@ -387,8 +407,8 @@
 </div>
 
 <!-- Equity Curve -->
-<div class="section-card">
-  <div class="section-header">
+<div class="section-card" data-collapsible>
+  <div class="section-header" onclick="toggleSection(this)">
     <div class="section-title">
       <span class="section-icon equity">📉</span>
       <h2>Equity Curve</h2>
@@ -400,8 +420,8 @@
 </div>
 
 <!-- Archetype Breakdown -->
-<div class="section-card">
-  <div class="section-header">
+<div class="section-card" data-collapsible>
+  <div class="section-header" onclick="toggleSection(this)">
     <div class="section-title">
       <span class="section-icon signals">🧬</span>
       <h2>Archetype Breakdown</h2>
@@ -414,8 +434,8 @@
 </div>
 
 <!-- Resolve Log -->
-<div class="section-card">
-  <div class="section-header">
+<div class="section-card" data-collapsible>
+  <div class="section-header" onclick="toggleSection(this)">
     <div class="section-title">
       <span class="section-icon history">🔄</span>
       <h2>Resolve Log</h2>
@@ -432,6 +452,13 @@
   <p style="margin-top:8px;font-size:11px;color:#555">Not financial advice · For research purposes only</p>
 </footer>
 
+<div class="mobile-bar-spacer"></div>
+</div>
+
+<!-- Bottom sticky bar (mobile) -->
+<div class="mobile-bar">
+  <button class="btn btn-primary" onclick="loadAll()">↻ Refresh</button>
+  <button class="btn btn-secondary" onclick="window.scrollTo({top:0,behavior:'smooth'})">↑ Top</button>
 </div>
 
 <script>
@@ -469,6 +496,31 @@ function toggleTheme() {
 }
 // Apply saved theme on load
 applyTheme(getTheme());
+
+// Collapsible sections
+function toggleSection(headerEl) {
+  const card = headerEl.closest('.section-card');
+  if (!card) return;
+  const body = card.querySelector('.section-body');
+  if (card.classList.contains('collapsed')) {
+    // Expand: set max-height to content height for animation, then remove it
+    card.classList.remove('collapsed');
+    body.style.maxHeight = body.scrollHeight + 'px';
+    setTimeout(() => { body.style.maxHeight = ''; }, 300);
+  } else {
+    // Collapse: set explicit max-height first (for transition), then set to 0
+    body.style.maxHeight = body.scrollHeight + 'px';
+    requestAnimationFrame(() => { card.classList.add('collapsed'); });
+  }
+}
+// Auto-collapse sections on mobile
+function initCollapsible() {
+  if (window.innerWidth > 768) return;
+  document.querySelectorAll('.section-card[data-collapsible]').forEach(card => {
+    card.classList.add('collapsed');
+  });
+}
+initCollapsible();
 
 function marketUrl(p) {
   const id = p.market_id || p.id || '';
