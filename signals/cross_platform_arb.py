@@ -25,8 +25,8 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 
 # Thresholds
-MIN_SPREAD_PCT = 5       # Minimum spread in percentage points to flag as arb
-MIN_SIMILARITY = 0.35    # Minimum cosine similarity to consider a match
+MIN_SPREAD_PCT = 2       # Minimum spread in pp — even tight arbs are useful signals
+MIN_SIMILARITY = 0.60    # Higher sim threshold — quality over quantity
 MIN_VOLUME = 10000       # Minimum volume on both sides
 MAX_RESULTS = 50         # Maximum arb opportunities to return
 
@@ -72,6 +72,111 @@ def _cosine_similarity(tokens_a: List[str], tokens_b: List[str]) -> float:
     return dot / (mag_a * mag_b)
 
 
+def _extract_subject(title: str) -> str:
+    """Extract the core subject/entity from a market title for matching validation.
+    
+    Returns a normalized subject string. Two markets should only match if they
+    share the same core subject (e.g., same person, same event, same metric).
+    """
+    t = title.lower()
+    
+    # Extract proper nouns (capitalized words from original)
+    names = set(re.findall(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', title))
+    
+    # Extract numbers (prices, dates, thresholds)
+    numbers = set(re.findall(r'\d+(?:,\d+)*', t))
+    
+    # Key entity patterns
+    entities = set()
+    for pattern in [
+        r'(trump|biden|harris|kamala|newsom|desantis|vance|rubio|aoc|ocasio)',
+        r'(bitcoin|ethereum|btc|eth|solana)',
+        r'(fed\w*\s+rate|interest rate|cpi|gdp|inflation|recession)',
+        r'(pope|mars|greenland|ukraine|russia|china|taiwan|iran)',
+        r'(oscars?|grammy|emmy|super\s*bowl|world\s*cup|nba\s+finals)',
+        r'(tiktok|openai|spacex|tesla|amazon|apple|google)',
+    ]:
+        match = re.search(pattern, t)
+        if match:
+            entities.add(match.group(1).strip())
+    
+    # Combine: names + specific numbers + entities
+    parts = sorted(entities) + sorted(n for n in names if len(n) > 3) + sorted(numbers)
+    return " ".join(parts).lower() if parts else ""
+
+
+def _question_type(title: str) -> str:
+    """Classify the question type to prevent matching different question kinds."""
+    t = title.lower()
+    
+    # "Will X occur/happen" — existence questions
+    if re.search(r'(occur|happen|take place|be held)', t):
+        return "existence"
+    
+    # "Will X win Y" — winner questions  
+    if re.search(r'(win |winner|champion|nominee|nominated)', t):
+        # Extract the specific person/entity being asked about
+        # "Will Kamala Harris win..." -> "harris_win"
+        name_match = re.search(r'will\s+(\w+\s+\w+)\s+(win|be)', t)
+        if name_match:
+            return f"win_{name_match.group(1).replace(' ', '_')}"
+        return "winner"
+    
+    # "Will X be above/below Y" — threshold questions
+    if re.search(r'(above|below|over|under|between|price|reach)', t):
+        return "threshold"
+    
+    # "Will X run for / announce" — action questions
+    if re.search(r'(run for|announce|launch|sign|pass|approve)', t):
+        return "action"
+    
+    # "Who will" — multi-outcome
+    if t.startswith("who will"):
+        return "who_will"
+    
+    return "general"
+
+
+def _subjects_compatible(title_a: str, title_b: str, subj_a: str, subj_b: str) -> bool:
+    """Check if two markets are about the same thing AND asking the same question.
+    
+    Prevents matching "Will 2028 election occur?" with "Will AOC win 2028?"
+    """
+    # Different question types = not compatible
+    type_a = _question_type(title_a)
+    type_b = _question_type(title_b)
+    
+    # "who_will" can match with specific "win_X" questions
+    if type_a != type_b:
+        if not ({type_a, type_b} & {"who_will"} and {type_a, type_b} & {t for t in [type_a, type_b] if t.startswith("win_")}):
+            return False
+    
+    # For winner questions, require the same person/entity
+    if type_a.startswith("win_") and type_b.startswith("win_"):
+        if type_a != type_b:
+            return False
+    
+    # Extract proper nouns from both titles (names, places, orgs)
+    names_a = set(re.findall(r'[A-Z][a-z]{2,}', title_a))
+    names_b = set(re.findall(r'[A-Z][a-z]{2,}', title_b))
+    
+    # Remove generic capitalized words
+    generic_names = {'Will', 'The', 'Democratic', 'Republican', 'United', 'States',
+                     'Presidential', 'President', 'Prime', 'Minister', 'Party',
+                     'Best', 'Next', 'National', 'Supreme', 'February', 'March',
+                     'January', 'April', 'May', 'June', 'July', 'August',
+                     'September', 'October', 'November', 'December'}
+    names_a -= generic_names
+    names_b -= generic_names
+    
+    # Must share at least one proper noun (a person's name, country, org)
+    shared_names = names_a & names_b
+    if not shared_names:
+        return False
+    
+    return True
+
+
 def _fetch_json(url: str, params: dict = None, timeout: int = 15) -> Optional[dict]:
     """Fetch JSON with error handling."""
     try:
@@ -84,43 +189,24 @@ def _fetch_json(url: str, params: dict = None, timeout: int = 15) -> Optional[di
         return None
 
 
-def fetch_kalshi_active(limit: int = 200) -> List[Dict]:
-    """Fetch active Kalshi markets with volume by scanning popular series."""
+def fetch_kalshi_active(limit: int = 500) -> List[Dict]:
+    """Fetch active Kalshi markets via events endpoint (has nested markets with volume)."""
     markets = []
     seen_tickers = set()
+    cursor = None
     
-    # Popular Kalshi series that overlap with Polymarket topics
-    POPULAR_SERIES = [
-        "KXBTCD", "KXBTC", "KXETHD",       # Crypto prices
-        "KXPRES", "KXSENATE", "KXHOUSE",     # Elections
-        "KXFEDRATE",                          # Fed rates
-        "KXRECESSION",                        # Recession
-        "KXCPI", "KXGDP",                    # Economic indicators
-        "KXTIKTOK", "KXAI",                   # Tech/AI
-        "KXNBA", "KXNFL", "KXMLB",          # Sports
-        "KXOSCAR", "KXGRAMMY",               # Entertainment
-        "KXSPACEX",                           # Space
-    ]
-    
-    # Also do a general scan with pagination
-    for series in POPULAR_SERIES + [None]:  # None = general scan
-        cursor = None
-        for page in range(3):
-            params = {"status": "open", "limit": 100}
-            if series:
-                params["series_ticker"] = series
-            if cursor:
-                params["cursor"] = cursor
-            
-            data = _fetch_json(f"{KALSHI_API}/markets", params=params)
-            if not data:
-                break
-            
-            page_markets = data.get("markets", [])
-            if not page_markets:
-                break
-            
-            for m in page_markets:
+    for _ in range(5):  # Max 5 pages of 100 events each
+        params = {"status": "open", "limit": 100, "with_nested_markets": "true"}
+        if cursor:
+            params["cursor"] = cursor
+        
+        data = _fetch_json(f"{KALSHI_API}/events", params=params)
+        if not data:
+            break
+        
+        for event in data.get("events", []):
+            event_title = event.get("title", "")
+            for m in event.get("markets", []):
                 ticker = m.get("ticker", "")
                 if ticker in seen_tickers:
                     continue
@@ -129,22 +215,25 @@ def fetch_kalshi_active(limit: int = 200) -> List[Dict]:
                 vol = m.get("volume", 0) or 0
                 last_price = m.get("last_price", 0) or 0
                 if vol >= MIN_VOLUME and 5 <= last_price <= 95:
+                    # Use event title if market title is multi-outcome gibberish
+                    title = m.get("title", "") or event_title
+                    if title.startswith("yes ") or title.startswith("no "):
+                        title = event_title  # Multi-outcome format, use event title
+                    
                     markets.append({
                         "id": ticker,
-                        "title": m.get("title", ""),
+                        "title": title,
                         "price_yes": last_price / 100,
                         "volume": vol,
                         "close_time": m.get("close_time", ""),
                         "platform": "kalshi",
                     })
-            
-            cursor = data.get("cursor")
-            if not cursor or len(markets) >= limit:
-                break
         
-        if len(markets) >= limit:
+        cursor = data.get("cursor")
+        if not cursor or len(markets) >= limit:
             break
     
+    logger.info(f"Kalshi: fetched {len(markets)} active markets with volume")
     return markets
 
 
@@ -233,11 +322,13 @@ def find_arb_opportunities(
     Uses inverted index for efficient O(n*k) matching instead of O(n*m) brute force.
     """
     # Build inverted index on Polymarket tokens
-    poly_index = {}  # token -> list of (market_idx, token_list)
+    poly_index = {}  # token -> list of market_idx
     poly_tokens = []
+    poly_subjects = []
     for i, pm in enumerate(poly_markets):
         toks = _tokenize(pm["title"])
         poly_tokens.append(toks)
+        poly_subjects.append(_extract_subject(pm["title"]))
         for tok in set(toks):  # unique tokens only
             poly_index.setdefault(tok, []).append(i)
     
@@ -247,6 +338,8 @@ def find_arb_opportunities(
         k_tokens = _tokenize(km["title"])
         if len(k_tokens) < 2:
             continue
+        
+        k_subject = _extract_subject(km["title"])
         
         # Find candidate Polymarket markets via inverted index
         # (markets sharing at least 2 tokens)
@@ -264,6 +357,10 @@ def find_arb_opportunities(
                 continue
             
             pm = poly_markets[pi]
+            
+            # Subject compatibility check — prevent "election occurs?" vs "AOC wins?"
+            if not _subjects_compatible(km["title"], pm["title"], k_subject, poly_subjects[pi]):
+                continue
             
             # Calculate spread (both directions)
             # If Kalshi YES=70% and Poly YES=60%, spread=10pp
@@ -307,12 +404,13 @@ def find_arb_opportunities(
     # Sort by spread descending, filter top results
     opportunities.sort(key=lambda x: x["spread_pp"], reverse=True)
     
-    # Deduplicate: keep best spread per Kalshi market
-    seen_kalshi = set()
+    # Deduplicate: keep best spread per unique pair (both sides)
+    seen_pairs = set()
     unique = []
     for opp in opportunities:
-        if opp["kalshi_id"] not in seen_kalshi:
-            seen_kalshi.add(opp["kalshi_id"])
+        pair_key = (opp["kalshi_id"], opp["poly_id"])
+        if pair_key not in seen_pairs:
+            seen_pairs.add(pair_key)
             unique.append(opp)
     
     return unique[:MAX_RESULTS]
