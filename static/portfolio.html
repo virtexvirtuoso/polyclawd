@@ -172,14 +172,7 @@
   /* Sparkline canvas */
   .arch-spark{width:80px;height:24px}
 
-  /* Manual close buttons */
-  .pos-actions{display:flex;gap:6px;margin-top:10px}
-  .pos-btn{padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface);cursor:pointer;font-size:11px;font-weight:600;font-family:'Inter',sans-serif;transition:all 0.2s}
-  .pos-btn:hover{transform:translateY(-1px)}
-  .pos-btn.won{color:var(--green);border-color:rgba(0,230,118,0.3)}
-  .pos-btn.won:hover{background:rgba(0,230,118,0.1)}
-  .pos-btn.lost{color:var(--red);border-color:rgba(255,82,82,0.3)}
-  .pos-btn.lost:hover{background:rgba(255,82,82,0.1)}
+  /* Manual close removed — auto-resolver handles it */
 
   /* Risk exposure bar */
   .risk-bar{display:flex;align-items:center;gap:12px;padding:14px 0;margin-bottom:8px}
@@ -233,7 +226,6 @@
     nav{padding:8px 12px 0!important}
     footer{padding:24px 0 16px}
     /* Bigger tap targets */
-    .pos-btn{padding:10px 16px;min-height:44px;font-size:13px}
     .nav-link{padding:12px 20px;min-height:44px}
   }
   /* Phone breakpoint */
@@ -274,8 +266,6 @@
   }
   /* Touch-specific: replace hover with active */
   @media(hover:none) and (pointer:coarse){
-    .pos-btn.won:active{background:rgba(0,230,118,0.2)}
-    .pos-btn.lost:active{background:rgba(255,82,82,0.2)}
     .btn-primary:active{transform:translateY(-1px);box-shadow:0 4px 12px rgba(108,92,231,0.3)}
     .pos-card:active{border-color:var(--accent)}
     .stat-card:active{border-color:var(--accent)}
@@ -735,34 +725,11 @@ function renderPositions(positions) {
         <span class="platform-tag">${(p.platform || 'polymarket').toUpperCase()}</span>
         <span class="pos-days${isStale ? ' orange' : ''}">${days}d open</span>
       </div>
-      <div class="pos-actions">
-        <button class="pos-btn won" onclick="manualClose(${p.id},'won',this)">Mark Won</button>
-        <button class="pos-btn lost" onclick="manualClose(${p.id},'lost',this)">Mark Lost</button>
-      </div>
     </div>`;
   }).join('');
 }
 
-async function manualClose(id, outcome, btn) {
-  if (!confirm(`Mark position #${id} as ${outcome}?`)) return;
-  btn.disabled = true;
-  btn.textContent = '...';
-  try {
-    const res = await fetch(`${API}/portfolio/close/${id}?outcome=${outcome}`, { method: 'POST' }).then(r => r.json());
-    if (res.closed) {
-      document.getElementById('statusMsg').textContent = `${outcome === 'won' ? '✅' : '❌'} ${res.market} → ${outcome} (${res.pnl >= 0 ? '+' : ''}$${res.pnl.toFixed(2)})`;
-      setTimeout(loadAll, 300);
-    } else {
-      alert(res.reason || 'Failed to close');
-      btn.disabled = false;
-      btn.textContent = outcome === 'won' ? 'Mark Won' : 'Mark Lost';
-    }
-  } catch(e) {
-    alert('Error: ' + e.message);
-    btn.disabled = false;
-    btn.textContent = outcome === 'won' ? 'Mark Won' : 'Mark Lost';
-  }
-}
+// Manual close removed — auto-resolver runs every 5min via watchdog
 
 function renderHistory(history, liveRes) {
   const el = document.getElementById('tradeHistory');
