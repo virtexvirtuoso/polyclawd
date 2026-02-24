@@ -23,6 +23,76 @@ BASE_DIR = Path(__file__).parent.parent
 DB_PATH = BASE_DIR / "storage" / "shadow_trades.db"
 JSON_DIR = Path.home() / ".openclaw" / "paper-trading"
 
+# ─── Correlation Cap ────────────────────────────────────────
+# Archetypes that move together are grouped. Max N open positions per group.
+CORRELATION_GROUPS = {
+    "price_above": "crypto", "price_range": "crypto",
+    "daily_updown": "crypto", "intraday_updown": "crypto",
+    "directional": "crypto",
+    "sports_single_game": "sports", "sports_winner": "sports",
+    "game_total": "sports",
+    "election": "politics", "geopolitical": "politics",
+    "deadline_binary": "politics",
+    "financial_price": "finance",
+    "entertainment": "culture", "ai_model": "culture",
+    "social_count": "culture", "weather": "culture",
+    "parlay": "other", "other": "other",
+}
+MAX_PER_GROUP = 3
+
+
+def _check_correlation_cap(archetype: str, conn) -> Optional[str]:
+    """Return block reason if correlation group is full, else None."""
+    group = CORRELATION_GROUPS.get(archetype, "other")
+    sibling_archetypes = [a for a, g in CORRELATION_GROUPS.items() if g == group]
+    placeholders = ",".join("?" * len(sibling_archetypes))
+    row = conn.execute(
+        f"SELECT COUNT(*) as c FROM paper_positions WHERE status='open' AND archetype IN ({placeholders})",
+        sibling_archetypes
+    ).fetchone()
+    count = row["c"]
+    logger.debug(
+        "Correlation cap check: archetype=%s group=%s open=%d/%d siblings=%s",
+        archetype, group, count, MAX_PER_GROUP, sibling_archetypes
+    )
+    if count >= MAX_PER_GROUP:
+        logger.info(
+            "BLOCKED by correlation cap: archetype=%s group=%s open=%d/%d",
+            archetype, group, count, MAX_PER_GROUP
+        )
+        return f"Correlation cap: {group} {count}/{MAX_PER_GROUP}"
+    return None
+
+
+def get_correlation_status() -> dict:
+    """Return current open position counts per correlation group for debugging."""
+    conn = _get_db()
+    rows = conn.execute(
+        "SELECT archetype, COUNT(*) as c FROM paper_positions WHERE status='open' GROUP BY archetype"
+    ).fetchall()
+    conn.close()
+
+    groups: Dict[str, dict] = {}
+    for row in rows:
+        arch = row["archetype"] or "other"
+        group = CORRELATION_GROUPS.get(arch, "other")
+        if group not in groups:
+            groups[group] = {"count": 0, "max": MAX_PER_GROUP, "archetypes": {}}
+        groups[group]["count"] += row["c"]
+        groups[group]["archetypes"][arch] = row["c"]
+
+    # Include empty groups for completeness
+    all_groups = set(CORRELATION_GROUPS.values())
+    for g in all_groups:
+        if g not in groups:
+            groups[g] = {"count": 0, "max": MAX_PER_GROUP, "archetypes": {}}
+
+    for g in groups.values():
+        g["full"] = g["count"] >= g["max"]
+
+    return groups
+
+
 STARTING_BANKROLL = 10000.0
 KELLY_FRACTION = 1 / 6  # Becker-validated: 79% NO WR on high-conviction filters supports 1/6
 MAX_CONCURRENT = 10
@@ -267,6 +337,13 @@ def open_position(signal: dict) -> dict:
     if existing:
         conn.close()
         return {"opened": False, "reason": "Already tracking this market"}
+
+    # Correlation cap — max positions per correlated group
+    cap_reason = _check_correlation_cap(archetype, conn)
+    if cap_reason:
+        logger.info("Position blocked: market=%s archetype=%s reason=%s", market_id, archetype, cap_reason)
+        conn.close()
+        return {"opened": False, "reason": cap_reason, "archetype": archetype, "edge": eval_result["edge"]}
 
     conn.execute("""INSERT INTO paper_positions
         (opened_at, market_id, market_title, platform, side, entry_price, bet_size, potential_payout, confidence, edge_pct, status, archetype)
