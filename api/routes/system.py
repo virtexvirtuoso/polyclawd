@@ -1,11 +1,15 @@
 """System routes for health, readiness, and metrics."""
+import logging
 from datetime import datetime
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from api.deps import get_storage_service
 from api.models import HealthResponse, ReadyResponse, MetricsResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -56,6 +60,19 @@ async def ready(request: Request) -> ReadyResponse:
         ready=all_ready,
         checks=checks
     )
+
+
+@router.get("/api/source-health")
+@limiter.limit("30/minute")
+async def source_health(request: Request):
+    """Get health metrics for all data sources."""
+    try:
+        from api.services.source_health import get_all_source_health
+        health_data = get_all_source_health()
+        return JSONResponse(content={"sources": health_data})
+    except Exception as e:
+        logger.error(f"Source health endpoint error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @router.get("/metrics", response_model=MetricsResponse)

@@ -18,6 +18,13 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Resilient fetch wrapper
+try:
+    from api.services.resilient_fetch import resilient_call
+    HAS_RESILIENT = True
+except ImportError:
+    HAS_RESILIENT = False
+
 ACTION_API = "https://api.actionnetwork.com/web/v1/scoreboard"
 
 SPORTS = {
@@ -90,17 +97,23 @@ def fetch_action_odds(sport: str = "nba") -> List[GameOdds]:
     if sport not in SPORTS:
         return []
     
-    try:
+    def _do_fetch():
         r = httpx.get(
             f"{ACTION_API}/{SPORTS[sport]}",
             timeout=15,
             headers={"User-Agent": "Mozilla/5.0"},
         )
         if r.status_code != 200:
-            logger.warning(f"ActionNetwork {sport} returned {r.status_code}")
-            return []
-        
-        data = r.json()
+            raise RuntimeError(f"ActionNetwork {sport} returned {r.status_code}")
+        return r.json()
+    
+    try:
+        if HAS_RESILIENT:
+            data = resilient_call("action_network", _do_fetch, retries=2, backoff_base=2.0)
+            if data is None:
+                return []
+        else:
+            data = _do_fetch()
         games = data.get("games", [])
     except Exception as e:
         logger.error(f"ActionNetwork fetch failed: {e}")

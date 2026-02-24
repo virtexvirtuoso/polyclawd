@@ -12,6 +12,24 @@ from dataclasses import dataclass
 CLOB_API = "https://clob.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
 
+# Resilient fetch wrapper
+try:
+    from api.services.resilient_fetch import resilient_call
+    HAS_RESILIENT = True
+except ImportError:
+    HAS_RESILIENT = False
+
+def _resilient_urlopen(source_name, url, timeout=10):
+    """Fetch URL with resilient wrapper if available."""
+    import json, urllib.request
+    def _do_fetch():
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    if HAS_RESILIENT:
+        return resilient_call(source_name, _do_fetch, retries=2, backoff_base=2.0)
+    return _do_fetch()
+
 
 @dataclass
 class OrderBookLevel:
@@ -35,9 +53,7 @@ def get_token_id_for_market(market_slug: str, outcome: str = "Yes") -> Optional[
     """Get CLOB token ID for a market outcome"""
     try:
         url = f"{GAMMA_API}/markets?slug={market_slug}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            markets = json.loads(resp.read().decode())
+        markets = _resilient_urlopen("polymarket_gamma", url, timeout=10)
         
         if not markets:
             return None
@@ -75,9 +91,7 @@ def get_orderbook(token_id: str) -> Optional[OrderBook]:
     """
     try:
         url = f"{CLOB_API}/book?token_id={token_id}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
+        data = _resilient_urlopen("polymarket_clob", url, timeout=10)
         
         if "error" in data:
             return None
@@ -148,9 +162,7 @@ def get_price_history(
         if end_ts:
             url += f"&endTs={end_ts}"
         
-        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
+        data = _resilient_urlopen("polymarket_clob", url, timeout=15)
         
         if not data or "history" not in data:
             return []

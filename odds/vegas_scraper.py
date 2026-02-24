@@ -5,6 +5,13 @@ Scrapes odds from VegasInsider and compares with Polymarket
 
 import requests
 import asyncio
+
+# Resilient fetch wrapper
+try:
+    from api.services.resilient_fetch import resilient_call
+    HAS_RESILIENT = True
+except ImportError:
+    HAS_RESILIENT = False
 from concurrent.futures import ThreadPoolExecutor
 import re
 from dataclasses import dataclass
@@ -47,12 +54,13 @@ def _scrape_vegasinsider_sync() -> dict:
     
     # Main futures page
     try:
-        resp = requests.get(
-            "https://www.vegasinsider.com/soccer/odds/futures/",
-            headers=headers,
-            timeout=30
-        )
-        if resp.status_code == 200:
+        def _fetch_soccer():
+            r = requests.get("https://www.vegasinsider.com/soccer/odds/futures/", headers=headers, timeout=30)
+            if r.status_code != 200:
+                raise RuntimeError(f"VegasInsider soccer returned {r.status_code}")
+            return r
+        resp = resilient_call("vegas", _fetch_soccer, retries=2, backoff_base=2.0) if HAS_RESILIENT else requests.get("https://www.vegasinsider.com/soccer/odds/futures/", headers=headers, timeout=30)
+        if resp and resp.status_code == 200:
             text = resp.text
             now = datetime.utcnow().isoformat()
             

@@ -11,6 +11,24 @@ from dataclasses import dataclass
 
 MANIFOLD_API = "https://api.manifold.markets/v0"
 
+# Resilient fetch wrapper
+try:
+    from api.services.resilient_fetch import resilient_call
+    HAS_RESILIENT = True
+except ImportError:
+    HAS_RESILIENT = False
+
+def _resilient_urlopen(url, timeout=15):
+    """Fetch URL with resilient wrapper if available."""
+    import json, urllib.request
+    def _do_fetch():
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    if HAS_RESILIENT:
+        return resilient_call("manifold", _do_fetch, retries=2, backoff_base=2.0)
+    return _do_fetch()
+
 @dataclass
 class ManifoldMarket:
     id: str
@@ -25,16 +43,15 @@ def fetch_markets(limit: int = 100, sort: str = "liquidity") -> List[Dict]:
     """Fetch active markets from Manifold"""
     try:
         url = f"{MANIFOLD_API}/markets?limit={limit}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-            # API returns array directly
-            if isinstance(data, list):
-                # Sort by liquidity locally
-                if sort == "liquidity":
-                    data.sort(key=lambda x: x.get("totalLiquidity", 0), reverse=True)
-                return data
+        data = _resilient_urlopen(url, timeout=15)
+        if data is None:
             return []
+        # API returns array directly
+        if isinstance(data, list):
+            if sort == "liquidity":
+                data.sort(key=lambda x: x.get("totalLiquidity", 0), reverse=True)
+            return data
+        return []
     except Exception as e:
         print(f"Manifold fetch error: {e}")
         return []

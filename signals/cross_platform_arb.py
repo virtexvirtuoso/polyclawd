@@ -20,6 +20,14 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Resilient fetch wrapper
+try:
+    from api.services.resilient_fetch import resilient_call
+    from api.services.source_health import get_last_success_timestamp
+    HAS_RESILIENT = True
+except ImportError:
+    HAS_RESILIENT = False
+
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
@@ -177,13 +185,19 @@ def _subjects_compatible(title_a: str, title_b: str, subj_a: str, subj_b: str) -
     return True
 
 
-def _fetch_json(url: str, params: dict = None, timeout: int = 15) -> Optional[dict]:
-    """Fetch JSON with error handling."""
-    try:
+def _fetch_json(url: str, params: dict = None, timeout: int = 15, source_name: str = None) -> Optional[dict]:
+    """Fetch JSON with error handling and optional resilient wrapper."""
+    def _do_fetch():
         r = httpx.get(url, params=params, timeout=timeout,
                       headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
         return r.json()
+    
+    if HAS_RESILIENT and source_name:
+        return resilient_call(source_name, _do_fetch, retries=2, backoff_base=2.0)
+    
+    try:
+        return _do_fetch()
     except Exception as e:
         logger.warning(f"Fetch failed {url}: {e}")
         return None
@@ -200,7 +214,7 @@ def fetch_kalshi_active(limit: int = 500) -> List[Dict]:
         if cursor:
             params["cursor"] = cursor
         
-        data = _fetch_json(f"{KALSHI_API}/events", params=params)
+        data = _fetch_json(f"{KALSHI_API}/events", params=params, source_name="kalshi")
         if not data:
             break
         
@@ -245,7 +259,7 @@ def fetch_polymarket_active(limit: int = 200) -> List[Dict]:
     data = _fetch_json(f"{GAMMA_API}/markets", params={
         "active": "true", "closed": "false",
         "limit": limit, "order": "volume24hr", "ascending": "false"
-    })
+    }, source_name="polymarket_gamma")
     if data:
         for m in data:
             vol = float(m.get("volume", 0) or 0)
@@ -275,7 +289,7 @@ def fetch_polymarket_active(limit: int = 200) -> List[Dict]:
     events = _fetch_json(f"{GAMMA_API}/events", params={
         "active": "true", "closed": "false",
         "limit": 50, "order": "volume24hr", "ascending": "false"
-    })
+    }, source_name="polymarket_gamma")
     if events:
         seen = {m["id"] for m in markets}
         for event in events:
@@ -431,6 +445,30 @@ def scan_cross_platform_arb() -> Dict:
     
     arbs = find_arb_opportunities(kalshi, poly)
     
+    # Staleness tags
+    sources_used = []
+    source_freshness = {}
+    if HAS_RESILIENT:
+        import time as _time
+        now_ts = _time.time()
+        for src in ["kalshi", "polymarket_gamma"]:
+            ts = get_last_success_timestamp(src)
+            if ts:
+                age = now_ts - ts
+                source_freshness[src] = round(age, 1)
+                sources_used.append(src)
+            else:
+                source_freshness[src] = None
+    
+    # Tag each arb with source freshness
+    for arb in arbs:
+        arb["sources_used"] = sources_used
+        kalshi_age = source_freshness.get("kalshi")
+        poly_age = source_freshness.get("polymarket_gamma")
+        arb["data_age_seconds"] = max(
+            kalshi_age or 0, poly_age or 0
+        )
+    
     result = {
         "kalshi_markets": len(kalshi),
         "poly_markets": len(poly),
@@ -439,6 +477,8 @@ def scan_cross_platform_arb() -> Dict:
         "avg_spread": round(sum(a["spread_pp"] for a in arbs) / max(len(arbs), 1), 1),
         "max_spread": arbs[0]["spread_pp"] if arbs else 0,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "sources_used": sources_used,
+        "source_freshness": source_freshness,
     }
     
     _cache["data"] = result
