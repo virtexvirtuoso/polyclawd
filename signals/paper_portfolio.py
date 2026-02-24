@@ -11,6 +11,11 @@ try:
     HAS_EMPIRICAL = True
 except ImportError:
     HAS_EMPIRICAL = False
+try:
+    from volume_spike_detector import detect_spike as _detect_volume_spike
+    HAS_VOLUME_SPIKE = True
+except ImportError:
+    HAS_VOLUME_SPIKE = False
 import logging
 import math
 from datetime import datetime, timezone
@@ -279,12 +284,32 @@ def evaluate_signal(signal: dict) -> dict:
     elif days_to_close < 1:
         bet_size *= 0.85  # Daily: 51.7% NO WR — weak (Becker)
     
+    # Volume spike boost: retail FOMO = YES overpriced = best NO entry
+    volume_spike_data = None
+    if HAS_VOLUME_SPIKE and side == "NO":
+        market_id = signal.get("market_id") or signal.get("ticker") or signal.get("id", "")
+        volume = signal.get("volume", 0)
+        if isinstance(volume, str):
+            try:
+                volume = int(float(volume))
+            except (ValueError, TypeError):
+                volume = 0
+        if market_id and volume > 0:
+            volume_spike_data = _detect_volume_spike(market_id, volume)
+            if volume_spike_data.get("spike"):
+                if volume_spike_data["level"] == "mega":
+                    bet_size *= 1.20  # 10x+ volume = extreme FOMO, 20% boost
+                    logger.info("Volume MEGA spike boost: market=%s ratio=%.1fx bet_size=%.2f", market_id[:30], volume_spike_data["ratio"], bet_size)
+                else:
+                    bet_size *= 1.10  # 3x+ volume = FOMO, 10% boost
+                    logger.info("Volume spike boost: market=%s ratio=%.1fx bet_size=%.2f", market_id[:30], volume_spike_data["ratio"], bet_size)
+
     bet_size = max(MIN_BET, min(MAX_BET, bet_size))
     
     if bet_size > bankroll:
         return {"eligible": False, "reason": f"Insufficient bankroll ${bankroll:.2f}", "edge": edge, "kelly_pct": kelly_pct, "bet_size": 0}
     
-    return {"eligible": True, "bet_size": round(bet_size, 2), "edge": round(edge, 4), "kelly_pct": round(kelly_pct, 4), "reason": "Criteria met", "empirical": empirical_result}
+    return {"eligible": True, "bet_size": round(bet_size, 2), "edge": round(edge, 4), "kelly_pct": round(kelly_pct, 4), "reason": "Criteria met", "empirical": empirical_result, "volume_spike": volume_spike_data}
 
 
 def open_position(signal: dict) -> dict:
