@@ -215,32 +215,71 @@
     .pos-stat{padding:6px 8px}
     .pos-stat-value{font-size:12px}
     .controls{flex-wrap:wrap;justify-content:center;gap:8px;margin-bottom:24px}
-    .btn{padding:8px 16px;font-size:12px}
+    .btn{padding:10px 20px;font-size:12px;min-height:44px}
     .section-header{padding:14px 16px}
     .section-title h2{font-size:15px}
     .section-body{padding:14px 16px}
     .section-card{margin-bottom:20px}
     .chart-container{height:200px}
-    /* Table horizontal scroll */
+    /* Table horizontal scroll fallback */
     .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -16px;padding:0 16px}
-    table{min-width:500px}
     th,td{padding:8px 10px;font-size:12px}
     /* Signal rows */
     .signal-row{flex-wrap:wrap;gap:8px;padding:10px 0}
     .signal-market{flex-basis:100%;font-size:12px}
-    /* Archetype table scroll */
-    .arch-table{min-width:400px}
     /* Risk bar */
     .risk-labels{font-size:10px}
     /* Nav */
     nav{padding:8px 12px 0!important}
     footer{padding:24px 0 16px}
+    /* Bigger tap targets */
+    .pos-btn{padding:10px 16px;min-height:44px;font-size:13px}
+    .nav-link{padding:12px 20px;min-height:44px}
+  }
+  /* Phone breakpoint */
+  @media(max-width:480px){
+    .container{padding:16px 10px}
+    h1{font-size:22px}
+    .subtitle{font-size:12px}
+    .stats-row{grid-template-columns:1fr;gap:8px}
+    .stat-value{font-size:20px}
+    .stat-label{font-size:9px}
+    .section-body{padding:12px}
+    .section-header{padding:12px 14px}
+    .section-title h2{font-size:14px}
+    .pos-grid{grid-template-columns:repeat(2,1fr)}
+    .signal-row{flex-wrap:wrap;gap:6px}
+    .chart-container{height:180px}
+    /* Resolve log mobile */
+    .resolve-row{flex-wrap:wrap;gap:4px;padding:10px 0}
+    .resolve-market{flex-basis:100%;font-size:12px}
+    .resolve-time{font-size:10px}
+    /* Tables → card layout */
+    .table-wrap{overflow-x:visible;margin:0;padding:0}
+    table thead,
+    .arch-table thead{display:none}
+    table tbody tr,
+    .arch-table tbody tr{display:block;margin-bottom:12px;border:1px solid var(--border);border-radius:10px;padding:12px;background:var(--surface2)}
+    table tbody td,
+    .arch-table tbody td{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border:none;font-size:13px}
+    table tbody td::before,
+    .arch-table tbody td::before{content:attr(data-label);color:var(--text2);font-size:10px;text-transform:uppercase;letter-spacing:1px;flex-shrink:0;margin-right:12px}
+    /* Hide volume bar column on mobile cards */
+    .arch-table tbody td:last-child .arch-bar{display:inline-block;max-width:60px}
+    .arch-spark{width:60px;height:20px}
   }
   @media(max-width:380px){
-    .stats-row{grid-template-columns:1fr}
     .pos-grid{grid-template-columns:1fr}
-    h1{font-size:20px}
-    .stat-value{font-size:16px}
+    .stat-value{font-size:18px}
+  }
+  /* Touch-specific: replace hover with active */
+  @media(hover:none) and (pointer:coarse){
+    .pos-btn.won:active{background:rgba(0,230,118,0.2)}
+    .pos-btn.lost:active{background:rgba(255,82,82,0.2)}
+    .btn-primary:active{transform:translateY(-1px);box-shadow:0 4px 12px rgba(108,92,231,0.3)}
+    .pos-card:active{border-color:var(--accent)}
+    .stat-card:active{border-color:var(--accent)}
+    .section-card:active{border-color:var(--accent)}
   }
 </style>
 </head>
@@ -306,7 +345,32 @@
   <div class="stat-card risk">
     <div class="stat-label">Capital at Risk</div>
     <div class="stat-value red" id="capitalRisk">$0</div>
-    <div class="stat-sub" id="riskSub">of $500 bankroll</div>
+    <div class="stat-sub" id="riskSub">of bankroll</div>
+  </div>
+</div>
+
+<!-- Risk Guards -->
+<div class="section-card" id="riskGuardsCard" style="margin-bottom:24px">
+  <div class="section-header">
+    <div class="section-title">
+      <span class="section-icon" style="background:rgba(108,92,231,0.15)">🛡️</span>
+      <h2>Risk Guards</h2>
+    </div>
+    <span class="section-count" id="guardStatus">loading…</span>
+  </div>
+  <div class="section-body">
+    <div class="stats-row" id="riskGuards" style="margin-bottom:0">
+      <div class="stat-card">
+        <div class="stat-label">Kelly Mode</div>
+        <div class="stat-value" id="kellyMode" style="font-size:16px">—</div>
+        <div class="stat-sub" id="kellySub">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Correlation Cap</div>
+        <div class="stat-value" id="corrStatus" style="font-size:14px">—</div>
+        <div class="stat-sub" id="corrSub">max 3 per group</div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -399,7 +463,7 @@
 </div>
 
 <footer>
-  <p><span class="brand">Polyclawd</span> · paper portfolio · 1/8 Kelly · prediction market edge trading</p>
+  <p><span class="brand">Polyclawd</span> · paper portfolio · dynamic Kelly · prediction market edge trading</p>
   <p style="margin-top:8px;font-size:11px;color:#555">Not financial advice · For research purposes only</p>
 </footer>
 
@@ -458,17 +522,19 @@ async function loadAll() {
     // Auto-resolve stale positions first (fire-and-forget)
     fetch(`${API}/portfolio/resolve`, { method: 'POST' }).catch(() => {});
 
-    const [statusRes, liveRes, histRes, archRes, archPnlRes, resolveLogRes] = await Promise.all([
+    const [statusRes, liveRes, histRes, archRes, archPnlRes, resolveLogRes, guardsRes] = await Promise.all([
       fetch(`${API}/portfolio/status`).then(r => r.json()).catch(() => ({})),
       fetch(`${API}/portfolio/positions-live`).then(r => r.json()).catch(() => null),
       fetch(`${API}/portfolio/history?limit=50`).then(r => r.json()).catch(() => []),
       fetch(`${API}/portfolio/archetype-breakdown`).then(r => r.json()).catch(() => null),
       fetch(`${API}/portfolio/archetype-pnl-series`).then(r => r.json()).catch(() => null),
       fetch(`${API}/portfolio/resolve-log?limit=15`).then(r => r.json()).catch(() => []),
+      fetch(`${API}/portfolio/risk-guards`).then(r => r.json()).catch(() => null),
     ]);
 
     renderStatus(statusRes, archRes);
     renderRiskExposure(statusRes);
+    renderRiskGuards(guardsRes);
     const positions = liveRes ? liveRes.positions : (statusRes.positions || []);
     renderPositions(positions);
     if (liveRes) renderUnrealizedPnl(liveRes);
@@ -483,10 +549,11 @@ async function loadAll() {
 }
 
 function renderStatus(s, archRes) {
-  const bankroll = s.bankroll || 500;
-  document.getElementById('bankroll').textContent = `$${bankroll.toFixed(2)}`;
-  const returnPct = ((bankroll - 500) / 500 * 100).toFixed(1);
-  document.getElementById('bankrollSub').textContent = bankroll !== 500 ? `${returnPct > 0 ? '+' : ''}${returnPct}% return` : 'starting capital';
+  const startingBankroll = s.starting_bankroll || 10000;
+  const bankroll = s.bankroll || startingBankroll;
+  document.getElementById('bankroll').textContent = `$${bankroll.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
+  const returnPct = ((bankroll - startingBankroll) / startingBankroll * 100).toFixed(1);
+  document.getElementById('bankrollSub').textContent = bankroll !== startingBankroll ? `${returnPct > 0 ? '+' : ''}${returnPct}% return` : 'starting capital';
 
   const pnl = s.total_pnl || 0;
   const pnlEl = document.getElementById('totalPnl');
@@ -521,6 +588,59 @@ function renderStatus(s, archRes) {
   document.getElementById('capitalRisk').textContent = `$${car.toFixed(0)}`;
   const bankPct = bankroll > 0 ? (car / bankroll * 100).toFixed(0) : 0;
   document.getElementById('riskSub').textContent = `${bankPct}% of bankroll`;
+}
+
+function renderRiskGuards(g) {
+  const statusEl = document.getElementById('guardStatus');
+  if (!g || g.detail) {
+    statusEl.textContent = 'unavailable';
+    document.getElementById('kellyMode').textContent = '—';
+    document.getElementById('corrStatus').textContent = '—';
+    return;
+  }
+
+  // Kelly
+  const k = g.kelly || {};
+  const kellyEl = document.getElementById('kellyMode');
+  const kellySub = document.getElementById('kellySub');
+  if (k.status === 'paused') {
+    kellyEl.textContent = '🛑 PAUSED';
+    kellyEl.className = 'stat-value red';
+    kellySub.textContent = `DD ${(k.drawdown_pct * 100).toFixed(1)}% — trading halted`;
+  } else if (k.status === 'cold') {
+    kellyEl.textContent = '❄️ COLD';
+    kellyEl.className = 'stat-value orange';
+    kellySub.textContent = `WR ${(k.rolling_wr * 100).toFixed(0)}% / ${k.rolling_trades} trades — half size`;
+  } else {
+    kellyEl.textContent = '✅ NORMAL';
+    kellyEl.className = 'stat-value green';
+    kellySub.textContent = `WR ${(k.rolling_wr * 100).toFixed(0)}% / ${k.rolling_trades} trades — 1/6 Kelly`;
+  }
+  kellyEl.style.fontSize = '16px';
+
+  // Correlation
+  const corr = g.correlation || {};
+  const corrEl = document.getElementById('corrStatus');
+  const corrSub = document.getElementById('corrSub');
+  const groups = Object.entries(corr).filter(([_, v]) => v.count > 0).sort((a, b) => b[1].count - a[1].count);
+  if (groups.length === 0) {
+    corrEl.textContent = 'No positions';
+    corrSub.textContent = 'max 3 per group';
+  } else {
+    corrEl.innerHTML = groups.map(([name, v]) => {
+      const color = v.full ? 'var(--red)' : v.count >= 2 ? 'var(--orange)' : 'var(--green)';
+      return `<span style="color:${color};margin-right:8px">${name} ${v.count}/3</span>`;
+    }).join('');
+    const fullGroups = groups.filter(([_, v]) => v.full);
+    corrSub.textContent = fullGroups.length > 0 ? `⚠️ ${fullGroups.map(g => g[0]).join(', ')} full` : 'all groups open';
+  }
+
+  // Overall status
+  const alerts = [];
+  if (k.status === 'paused') alerts.push('PAUSED');
+  if (k.status === 'cold') alerts.push('COLD');
+  if (groups.some(([_, v]) => v.full)) alerts.push('CAP HIT');
+  statusEl.textContent = alerts.length > 0 ? '⚠️ ' + alerts.join(' · ') : '✅ all clear';
 }
 
 function renderRiskExposure(s) {
@@ -661,12 +781,12 @@ function renderHistory(history, liveRes) {
       const tTitle = (t.market_title || '').substring(0, 55);
       const tTitleHtml = tUrl ? `<a href="${tUrl}" target="_blank" rel="noopener" class="market-link">${tTitle} ↗</a>` : tTitle;
       return `<tr>
-        <td>${tTitleHtml}</td>
-        <td><span class="badge badge-${(t.side||'').toLowerCase()}">${t.side}</span></td>
-        <td class="mono">${((t.entry_price||0)*100).toFixed(0)}¢</td>
-        <td class="mono">$${(t.bet_size||0).toFixed(2)}</td>
-        <td class="mono ${pnl >= 0 ? 'result-won' : 'result-lost'}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
-        <td>${t.status === 'won' ? '✅ Won' : '❌ Lost'}</td>
+        <td data-label="Market">${tTitleHtml}</td>
+        <td data-label="Side"><span class="badge badge-${(t.side||'').toLowerCase()}">${t.side}</span></td>
+        <td data-label="Entry" class="mono">${((t.entry_price||0)*100).toFixed(0)}¢</td>
+        <td data-label="Bet" class="mono">$${(t.bet_size||0).toFixed(2)}</td>
+        <td data-label="P&L" class="mono ${pnl >= 0 ? 'result-won' : 'result-lost'}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
+        <td data-label="Result">${t.status === 'won' ? '✅ Won' : '❌ Lost'}</td>
       </tr>`;
     }).join('')}</tbody>
   </table></div>`;
@@ -790,14 +910,14 @@ function renderArchetypeBreakdown(archRes, archPnlRes) {
       const barWidth = Math.max(10, (a.trades / maxTrades) * 100);
       const hasSparkline = pnlSeries[a.archetype] && pnlSeries[a.archetype].length >= 2;
       return `<tr>
-        <td class="arch-name">${a.archetype}</td>
-        <td class="mono">${a.trades}</td>
-        <td class="mono ${a.win_rate >= 50 ? 'green' : 'red'}">${a.win_rate}%</td>
-        <td class="mono ${a.pnl >= 0 ? 'result-won' : 'result-lost'}">${a.pnl >= 0 ? '+' : ''}$${a.pnl.toFixed(2)}</td>
-        <td class="mono ${a.roi >= 0 ? 'green' : 'red'}">${a.roi >= 0 ? '+' : ''}${a.roi}%</td>
-        <td class="mono">${a.avg_hold_days}d</td>
-        <td>${hasSparkline ? `<canvas class="arch-spark" data-arch="${a.archetype}"></canvas>` : '—'}</td>
-        <td><div class="arch-bar" style="width:100px"><div class="arch-bar-fill" style="width:${barWidth}%;background:${barColor}"></div></div></td>
+        <td data-label="Archetype" class="arch-name">${a.archetype}</td>
+        <td data-label="Trades" class="mono">${a.trades}</td>
+        <td data-label="Win Rate" class="mono ${a.win_rate >= 50 ? 'green' : 'red'}">${a.win_rate}%</td>
+        <td data-label="P&L" class="mono ${a.pnl >= 0 ? 'result-won' : 'result-lost'}">${a.pnl >= 0 ? '+' : ''}$${a.pnl.toFixed(2)}</td>
+        <td data-label="ROI" class="mono ${a.roi >= 0 ? 'green' : 'red'}">${a.roi >= 0 ? '+' : ''}${a.roi}%</td>
+        <td data-label="Avg Hold" class="mono">${a.avg_hold_days}d</td>
+        <td data-label="Trend">${hasSparkline ? `<canvas class="arch-spark" data-arch="${a.archetype}"></canvas>` : '—'}</td>
+        <td data-label="Volume"><div class="arch-bar" style="width:100px"><div class="arch-bar-fill" style="width:${barWidth}%;background:${barColor}"></div></div></td>
       </tr>`;
     }).join('')}</tbody>
   </table></div>`;

@@ -2220,3 +2220,22 @@ async def copy_trade_positions():
     from signals.copy_trade_watcher import discover_whales, scan_whale_positions
     whales = discover_whales()
     return scan_whale_positions(whales[:15])
+
+
+@router.get("/portfolio/risk-guards")
+async def get_risk_guards():
+    """Get status of all risk guard features — Kelly, correlation cap, time decay windows."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from paper_portfolio import get_kelly_status, get_correlation_status
+        from time_decay_optimizer import get_optimal_entry_windows
+        return {
+            "kelly": get_kelly_status(),
+            "correlation": get_correlation_status(),
+            "time_decay_windows": get_optimal_entry_windows()["windows"][:5],
+        }
+    except Exception as e:
+        logger.exception(f"Risk guards failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
