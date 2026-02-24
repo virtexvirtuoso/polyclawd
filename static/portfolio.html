@@ -176,11 +176,50 @@
   .resolve-market{flex:1;font-weight:500}
 
   @media(max-width:768px){
-    h1{font-size:28px}
-    .stats-row{grid-template-columns:repeat(2,1fr)}
+    .container{padding:16px 12px}
+    header{margin-bottom:24px}
+    header::before{width:300px;height:300px}
+    h1{font-size:24px}
+    .logo{font-size:11px;letter-spacing:4px}
+    .subtitle{font-size:13px}
+    .stats-row{grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:24px}
+    .stat-card{padding:12px 14px}
+    .stat-value{font-size:18px}
+    .stat-label{font-size:9px}
+    .stat-sub{font-size:10px}
     .positions-grid{grid-template-columns:1fr}
-    .controls{flex-wrap:wrap;justify-content:center}
-    .section-body{padding:16px}
+    .pos-card{padding:14px 16px}
+    .pos-market{font-size:13px}
+    .pos-grid{grid-template-columns:repeat(3,1fr);gap:6px}
+    .pos-stat{padding:6px 8px}
+    .pos-stat-value{font-size:12px}
+    .controls{flex-wrap:wrap;justify-content:center;gap:8px;margin-bottom:24px}
+    .btn{padding:8px 16px;font-size:12px}
+    .section-header{padding:14px 16px}
+    .section-title h2{font-size:15px}
+    .section-body{padding:14px 16px}
+    .section-card{margin-bottom:20px}
+    .chart-container{height:200px}
+    /* Table horizontal scroll */
+    .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -16px;padding:0 16px}
+    table{min-width:500px}
+    th,td{padding:8px 10px;font-size:12px}
+    /* Signal rows */
+    .signal-row{flex-wrap:wrap;gap:8px;padding:10px 0}
+    .signal-market{flex-basis:100%;font-size:12px}
+    /* Archetype table scroll */
+    .arch-table{min-width:400px}
+    /* Risk bar */
+    .risk-labels{font-size:10px}
+    /* Nav */
+    nav{padding:8px 12px 0!important}
+    footer{padding:24px 0 16px}
+  }
+  @media(max-width:380px){
+    .stats-row{grid-template-columns:1fr}
+    .pos-grid{grid-template-columns:1fr}
+    h1{font-size:20px}
+    .stat-value{font-size:16px}
   }
 </style>
 </head>
@@ -192,7 +231,7 @@
 <header>
   <div class="logo">Virtuoso Crypto — <span>Polyclawd</span></div>
   <h1>Paper Portfolio</h1>
-  <p class="subtitle">Prediction market paper trading · <strong>1/8 Kelly</strong> · $500 bankroll · 10 max positions</p>
+  <p class="subtitle">Prediction market paper trading · <strong>Dynamic Kelly</strong> · $10K bankroll · 10 max positions</p>
   <div class="timestamp"><span class="live-dot"></span>live · auto-refresh 60s · <span id="lastUpdate">—</span></div>
 </header>
 
@@ -562,7 +601,7 @@ function renderHistory(history, liveRes) {
     updateEquityChart([], liveRes);
     return;
   }
-  el.innerHTML = `<table>
+  el.innerHTML = `<div class="table-wrap"><table>
     <thead><tr><th>Market</th><th>Side</th><th>Entry</th><th>Bet</th><th>P&L</th><th>Result</th></tr></thead>
     <tbody>${items.map(t => {
       const pnl = t.pnl || 0;
@@ -578,7 +617,7 @@ function renderHistory(history, liveRes) {
         <td>${t.status === 'won' ? '✅ Won' : '❌ Lost'}</td>
       </tr>`;
     }).join('')}</tbody>
-  </table>`;
+  </table></div>`;
   updateEquityChart(items, liveRes);
 }
 
@@ -692,7 +731,7 @@ function renderArchetypeBreakdown(archRes, archPnlRes) {
   }
   const pnlSeries = (archPnlRes && archPnlRes.series) || {};
   const maxTrades = Math.max(...items.map(a => a.trades));
-  el.innerHTML = `<table class="arch-table">
+  el.innerHTML = `<div class="table-wrap"><table class="arch-table">
     <thead><tr><th>Archetype</th><th>Trades</th><th>Win Rate</th><th>P&L</th><th>ROI</th><th>Avg Hold</th><th>Trend</th><th></th></tr></thead>
     <tbody>${items.map(a => {
       const barColor = a.pnl >= 0 ? 'var(--green)' : 'var(--red)';
@@ -709,7 +748,7 @@ function renderArchetypeBreakdown(archRes, archPnlRes) {
         <td><div class="arch-bar" style="width:100px"><div class="arch-bar-fill" style="width:${barWidth}%;background:${barColor}"></div></div></td>
       </tr>`;
     }).join('')}</tbody>
-  </table>`;
+  </table></div>`;
 
   // Draw sparklines on canvases
   el.querySelectorAll('canvas.arch-spark').forEach(canvas => {
