@@ -141,11 +141,17 @@ class TestKillRules:
         assert not killed
         assert arch == "price_above"
 
-    def test_k6_unknown_archetype(self):
-        """K6: Unknown archetype should be killed."""
-        killed, reason, arch = _check_kill_rules("Will the new iPhone have a USB-C port?", 55)
+    def test_k6_unknown_archetype_cheap(self):
+        """K6: Unknown archetype + cheap entry (<40c) should be killed."""
+        killed, reason, arch = _check_kill_rules("Will the new iPhone have a USB-C port?", 35)
         assert killed
         assert "K6" in reason
+        assert arch == "other"
+
+    def test_k6_unknown_archetype_normal_price(self):
+        """K6: Unknown archetype at normal price passes (relaxed rule)."""
+        killed, reason, arch = _check_kill_rules("Will the new iPhone have a USB-C port?", 55)
+        assert not killed
         assert arch == "other"
 
     def test_daily_updown_passes(self):
