@@ -51,6 +51,9 @@
   .stat-card.sharpe::after{background:var(--accent2)}
   .stat-card.dd::after{background:var(--orange)}
   .stat-card.trades::after{background:var(--cyan)}
+  .stat-card.hold::after{background:var(--accent2)}
+  .stat-card.unreal::after{background:linear-gradient(90deg,var(--green),var(--orange))}
+  .stat-card.risk::after{background:var(--red)}
   .stat-label{font-size:10px;text-transform:uppercase;letter-spacing:2px;color:var(--text2);margin-bottom:6px}
   .stat-value{font-size:24px;font-weight:700;font-family:'JetBrains Mono',monospace}
   .stat-sub{font-size:11px;color:var(--text2);margin-top:4px}
@@ -126,6 +129,52 @@
   .nav-link{display:inline-block;font-size:12px;color:var(--text2);text-decoration:none;padding:8px 16px;border:1px solid var(--border);border-radius:8px;transition:all 0.2s;margin-bottom:16px}
   .nav-link:hover{border-color:var(--accent);color:var(--accent2)}
 
+  /* Market link */
+  .market-link{color:var(--text);text-decoration:none;transition:color 0.2s}
+  .market-link:hover{color:var(--accent2);text-decoration:underline}
+
+  /* Stale position warning */
+  .pos-card.stale{border-color:var(--orange)}
+  .pos-card.stale::after{content:'STALE';position:absolute;top:8px;right:8px;font-size:9px;font-weight:700;letter-spacing:1px;color:var(--orange);background:rgba(255,171,64,0.12);padding:2px 8px;border-radius:4px}
+  .unrealized{font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace;margin-top:8px;padding:4px 8px;border-radius:6px;display:inline-block}
+  .unrealized.up{background:rgba(0,230,118,0.1);color:var(--green)}
+  .unrealized.down{background:rgba(255,82,82,0.1);color:var(--red)}
+
+  /* Archetype table */
+  .arch-table{width:100%;border-collapse:collapse}
+  .arch-table th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text2);padding:10px 12px;border-bottom:1px solid var(--border)}
+  .arch-table td{padding:10px 12px;border-bottom:1px solid rgba(42,42,58,0.3);font-size:13px}
+  .arch-table .arch-name{font-weight:600;color:var(--accent2)}
+  .arch-bar{height:4px;border-radius:2px;background:var(--border);min-width:40px;position:relative;overflow:hidden}
+  .arch-bar-fill{height:100%;border-radius:2px;transition:width 0.5s}
+
+  /* Sparkline canvas */
+  .arch-spark{width:80px;height:24px}
+
+  /* Manual close buttons */
+  .pos-actions{display:flex;gap:6px;margin-top:10px}
+  .pos-btn{padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface);cursor:pointer;font-size:11px;font-weight:600;font-family:'Inter',sans-serif;transition:all 0.2s}
+  .pos-btn:hover{transform:translateY(-1px)}
+  .pos-btn.won{color:var(--green);border-color:rgba(0,230,118,0.3)}
+  .pos-btn.won:hover{background:rgba(0,230,118,0.1)}
+  .pos-btn.lost{color:var(--red);border-color:rgba(255,82,82,0.3)}
+  .pos-btn.lost:hover{background:rgba(255,82,82,0.1)}
+
+  /* Risk exposure bar */
+  .risk-bar{display:flex;align-items:center;gap:12px;padding:14px 0;margin-bottom:8px}
+  .risk-bar-visual{flex:1;height:8px;border-radius:4px;background:var(--surface2);overflow:hidden;position:relative}
+  .risk-bar-fill{height:100%;border-radius:4px;transition:width 0.5s}
+  .risk-labels{display:flex;justify-content:space-between;font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace}
+  .capacity-badge{font-size:10px;font-weight:700;letter-spacing:1px;padding:3px 10px;border-radius:6px;display:inline-block}
+  .capacity-badge.full{background:rgba(255,82,82,0.15);color:var(--red);border:1px solid rgba(255,82,82,0.3)}
+  .capacity-badge.ok{background:rgba(0,230,118,0.1);color:var(--green);border:1px solid rgba(0,230,118,0.2)}
+
+  /* Resolve log */
+  .resolve-row{display:flex;align-items:center;padding:8px 0;border-bottom:1px solid rgba(42,42,58,0.3);gap:10px;font-size:12px}
+  .resolve-row:last-child{border:none}
+  .resolve-time{font-family:'JetBrains Mono',monospace;color:var(--text2);white-space:nowrap;font-size:11px}
+  .resolve-market{flex:1;font-weight:500}
+
   @media(max-width:768px){
     h1{font-size:28px}
     .stats-row{grid-template-columns:repeat(2,1fr)}
@@ -184,7 +233,25 @@
     <div class="stat-value cyan" id="tradeCount">0 / 0</div>
     <div class="stat-sub">open / total</div>
   </div>
+  <div class="stat-card unreal" id="unrealCard">
+    <div class="stat-label">Unrealized P&L</div>
+    <div class="stat-value" id="unrealPnl">—</div>
+    <div class="stat-sub" id="unrealSub">open position value</div>
+  </div>
+  <div class="stat-card hold">
+    <div class="stat-label">Avg Hold Time</div>
+    <div class="stat-value accent" id="avgHold">—</div>
+    <div class="stat-sub">days to resolution</div>
+  </div>
+  <div class="stat-card risk">
+    <div class="stat-label">Capital at Risk</div>
+    <div class="stat-value red" id="capitalRisk">$0</div>
+    <div class="stat-sub" id="riskSub">of $500 bankroll</div>
+  </div>
 </div>
+
+<!-- Risk Exposure -->
+<div id="riskExposure" style="margin-bottom:32px"></div>
 
 <!-- Open Positions -->
 <div class="section-card">
@@ -243,6 +310,34 @@
   </div>
 </div>
 
+<!-- Archetype Breakdown -->
+<div class="section-card">
+  <div class="section-header">
+    <div class="section-title">
+      <span class="section-icon signals">🧬</span>
+      <h2>Archetype Breakdown</h2>
+    </div>
+    <span class="section-count" id="archCount">—</span>
+  </div>
+  <div class="section-body" id="archetypeBreakdown">
+    <div class="empty"><div class="empty-icon">🧬</div>No resolved trades yet — breakdown appears after positions close</div>
+  </div>
+</div>
+
+<!-- Resolve Log -->
+<div class="section-card">
+  <div class="section-header">
+    <div class="section-title">
+      <span class="section-icon history">🔄</span>
+      <h2>Resolve Log</h2>
+    </div>
+    <span class="section-count" id="resolveCount">—</span>
+  </div>
+  <div class="section-body" id="resolveLog">
+    <div class="empty"><div class="empty-icon">🔄</div>No resolutions yet</div>
+  </div>
+</div>
+
 <footer>
   <p><span class="brand">Polyclawd</span> · paper portfolio · 1/8 Kelly · prediction market edge trading</p>
   <p style="margin-top:8px;font-size:11px;color:#555">Not financial advice · For research purposes only</p>
@@ -253,18 +348,42 @@
 <script>
 const API = '/polyclawd/api';
 let equityChart = null;
+let cachedUnrealizedPnl = 0;
+
+function marketUrl(p) {
+  const id = p.market_id || p.id || '';
+  const plat = (p.platform || '').toLowerCase();
+  if (plat === 'kalshi' || (!plat && !id.startsWith('0x'))) {
+    return id ? `https://kalshi.com/markets/${id}` : '';
+  }
+  // Use market_slug for working Polymarket links (/market/<slug> -> 307 redirect)
+  const slug = p.market_slug || '';
+  if (slug) return `https://polymarket.com/market/${slug}`;
+  return id ? `https://polymarket.com/markets/${id}` : '';
+}
 
 async function loadAll() {
   try {
-    const [statusRes, posRes, histRes] = await Promise.all([
-      fetch(`${API}/portfolio/status`).then(r => r.json()),
-      fetch(`${API}/portfolio/positions?status=open`).then(r => r.json()),
-      fetch(`${API}/portfolio/history?limit=50`).then(r => r.json()),
+    // Auto-resolve stale positions first (fire-and-forget)
+    fetch(`${API}/portfolio/resolve`, { method: 'POST' }).catch(() => {});
+
+    const [statusRes, liveRes, histRes, archRes, archPnlRes, resolveLogRes] = await Promise.all([
+      fetch(`${API}/portfolio/status`).then(r => r.json()).catch(() => ({})),
+      fetch(`${API}/portfolio/positions-live`).then(r => r.json()).catch(() => null),
+      fetch(`${API}/portfolio/history?limit=50`).then(r => r.json()).catch(() => []),
+      fetch(`${API}/portfolio/archetype-breakdown`).then(r => r.json()).catch(() => null),
+      fetch(`${API}/portfolio/archetype-pnl-series`).then(r => r.json()).catch(() => null),
+      fetch(`${API}/portfolio/resolve-log?limit=15`).then(r => r.json()).catch(() => []),
     ]);
-    renderStatus(statusRes);
-    const positions = posRes.positions || statusRes.positions || [];
+
+    renderStatus(statusRes, archRes);
+    renderRiskExposure(statusRes);
+    const positions = liveRes ? liveRes.positions : (statusRes.positions || []);
     renderPositions(positions);
-    renderHistory(histRes);
+    if (liveRes) renderUnrealizedPnl(liveRes);
+    renderHistory(histRes, liveRes);
+    if (archRes) renderArchetypeBreakdown(archRes, archPnlRes);
+    renderResolveLog(resolveLogRes);
     document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
   } catch(e) {
     console.error('Load failed:', e);
@@ -272,7 +391,7 @@ async function loadAll() {
   }
 }
 
-function renderStatus(s) {
+function renderStatus(s, archRes) {
   const bankroll = s.bankroll || 500;
   document.getElementById('bankroll').textContent = `$${bankroll.toFixed(2)}`;
   const returnPct = ((bankroll - 500) / 500 * 100).toFixed(1);
@@ -301,6 +420,53 @@ function renderStatus(s) {
   const total = s.total_trades || 0;
   document.getElementById('tradeCount').textContent = `${open} / ${total}`;
   document.getElementById('openCount').textContent = `${open} open`;
+
+  // Average hold time from archetype breakdown
+  const avgHold = archRes ? archRes.avg_hold_days : 0;
+  document.getElementById('avgHold').textContent = avgHold > 0 ? `${avgHold}d` : '—';
+
+  // Capital at risk
+  const car = s.capital_at_risk || 0;
+  document.getElementById('capitalRisk').textContent = `$${car.toFixed(0)}`;
+  const bankPct = bankroll > 0 ? (car / bankroll * 100).toFixed(0) : 0;
+  document.getElementById('riskSub').textContent = `${bankPct}% of bankroll`;
+}
+
+function renderRiskExposure(s) {
+  const el = document.getElementById('riskExposure');
+  const car = s.capital_at_risk || 0;
+  const maxLoss = s.max_loss || 0;
+  const maxGain = s.max_gain || 0;
+  const bankroll = s.bankroll || 500;
+  const open = s.open_positions || 0;
+  const maxPos = s.max_positions || 10;
+  const isFull = open >= maxPos;
+  const riskPct = bankroll > 0 ? Math.min(100, car / bankroll * 100) : 0;
+
+  el.innerHTML = `<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 24px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <span style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;color:var(--text2)">Risk Exposure</span>
+      <span class="capacity-badge ${isFull ? 'full' : 'ok'}">${open}/${maxPos} SLOTS${isFull ? ' — FULL' : ''}</span>
+    </div>
+    <div class="risk-bar-visual">
+      <div class="risk-bar-fill" style="width:${riskPct}%;background:${riskPct > 60 ? 'var(--red)' : riskPct > 30 ? 'var(--orange)' : 'var(--green)'}"></div>
+    </div>
+    <div class="risk-labels" style="margin-top:8px">
+      <span>Max loss: <span class="red">${maxLoss >= 0 ? '+' : ''}$${maxLoss.toFixed(2)}</span></span>
+      <span>At risk: <span style="color:var(--text)">$${car.toFixed(2)}</span> (${riskPct.toFixed(0)}%)</span>
+      <span>Max gain: <span class="green">+$${maxGain.toFixed(2)}</span></span>
+    </div>
+  </div>`;
+}
+
+function renderUnrealizedPnl(liveRes) {
+  const unreal = liveRes.total_unrealized_pnl || 0;
+  cachedUnrealizedPnl = unreal;
+  const el = document.getElementById('unrealPnl');
+  el.textContent = `${unreal >= 0 ? '+' : ''}$${unreal.toFixed(2)}`;
+  el.className = `stat-value ${unreal >= 0 ? 'green' : 'red'}`;
+  const count = (liveRes.positions || []).filter(p => p.unrealized_pnl !== null).length;
+  document.getElementById('unrealSub').textContent = `${count} position${count !== 1 ? 's' : ''} priced`;
 }
 
 function renderPositions(positions) {
@@ -310,13 +476,24 @@ function renderPositions(positions) {
     return;
   }
   el.innerHTML = positions.map(p => {
-    const days = Math.max(0, Math.floor((Date.now() - new Date(p.opened_at).getTime()) / 86400000));
+    const days = p.hold_days != null ? p.hold_days : Math.max(0, Math.floor((Date.now() - new Date(p.opened_at).getTime()) / 86400000));
+    const isStale = p.stale || days >= 3;
     const sideClass = (p.side || '').toLowerCase();
     const payout = p.potential_payout || 0;
     const roi = p.bet_size ? ((payout / p.bet_size - 1) * 100).toFixed(0) : '0';
-    return `<div class="pos-card ${sideClass}">
+    const unreal = p.unrealized_pnl;
+    const unrealHtml = unreal != null
+      ? `<div class="unrealized ${unreal >= 0 ? 'up' : 'down'}">${unreal >= 0 ? '+' : ''}$${unreal.toFixed(2)} unrealized</div>`
+      : '';
+    const currentPriceHtml = p.current_price != null
+      ? `<div class="pos-stat"><div class="pos-stat-label">Now</div><div class="pos-stat-value">${(p.current_price * 100).toFixed(0)}¢</div></div>`
+      : '';
+    const mUrl = marketUrl(p);
+    const titleText = (p.market_title || '').substring(0, 80);
+    const titleHtml = mUrl ? `<a href="${mUrl}" target="_blank" rel="noopener" class="market-link">${titleText} ↗</a>` : titleText;
+    return `<div class="pos-card ${sideClass}${isStale ? ' stale' : ''}">
       <div class="pos-top">
-        <div class="pos-market">${(p.market_title || '').substring(0, 80)}</div>
+        <div class="pos-market">${titleHtml}</div>
         <span class="badge badge-${sideClass}">${p.side}</span>
       </div>
       <div class="pos-grid">
@@ -324,6 +501,7 @@ function renderPositions(positions) {
           <div class="pos-stat-label">Entry</div>
           <div class="pos-stat-value">${((p.entry_price || 0) * 100).toFixed(0)}¢</div>
         </div>
+        ${currentPriceHtml}
         <div class="pos-stat">
           <div class="pos-stat-label">Bet Size</div>
           <div class="pos-stat-value">$${(p.bet_size || 0).toFixed(2)}</div>
@@ -340,34 +518,59 @@ function renderPositions(positions) {
           <div class="pos-stat-label">Edge</div>
           <div class="pos-stat-value green">${((p.edge_pct || 0) * 100).toFixed(1)}%</div>
         </div>
-        <div class="pos-stat">
-          <div class="pos-stat-label">ROI if Win</div>
-          <div class="pos-stat-value gold">+${roi}%</div>
-        </div>
       </div>
+      ${unrealHtml}
       <div class="pos-platform">
         <span class="platform-tag">${(p.platform || 'polymarket').toUpperCase()}</span>
-        <span class="pos-days">${days}d open</span>
+        <span class="pos-days${isStale ? ' orange' : ''}">${days}d open</span>
+      </div>
+      <div class="pos-actions">
+        <button class="pos-btn won" onclick="manualClose(${p.id},'won',this)">Mark Won</button>
+        <button class="pos-btn lost" onclick="manualClose(${p.id},'lost',this)">Mark Lost</button>
       </div>
     </div>`;
   }).join('');
 }
 
-function renderHistory(history) {
+async function manualClose(id, outcome, btn) {
+  if (!confirm(`Mark position #${id} as ${outcome}?`)) return;
+  btn.disabled = true;
+  btn.textContent = '...';
+  try {
+    const res = await fetch(`${API}/portfolio/close/${id}?outcome=${outcome}`, { method: 'POST' }).then(r => r.json());
+    if (res.closed) {
+      document.getElementById('statusMsg').textContent = `${outcome === 'won' ? '✅' : '❌'} ${res.market} → ${outcome} (${res.pnl >= 0 ? '+' : ''}$${res.pnl.toFixed(2)})`;
+      setTimeout(loadAll, 300);
+    } else {
+      alert(res.reason || 'Failed to close');
+      btn.disabled = false;
+      btn.textContent = outcome === 'won' ? 'Mark Won' : 'Mark Lost';
+    }
+  } catch(e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = outcome === 'won' ? 'Mark Won' : 'Mark Lost';
+  }
+}
+
+function renderHistory(history, liveRes) {
   const el = document.getElementById('tradeHistory');
   const items = Array.isArray(history) ? history : (history.positions || []);
   document.getElementById('historyCount').textContent = `${items.length} trade${items.length !== 1 ? 's' : ''}`;
   if (!items.length) {
     el.innerHTML = '<div class="empty"><div class="empty-icon">⏳</div>No closed trades yet — waiting for market resolutions</div>';
-    updateEquityChart([]);
+    updateEquityChart([], liveRes);
     return;
   }
   el.innerHTML = `<table>
     <thead><tr><th>Market</th><th>Side</th><th>Entry</th><th>Bet</th><th>P&L</th><th>Result</th></tr></thead>
     <tbody>${items.map(t => {
       const pnl = t.pnl || 0;
+      const tUrl = marketUrl(t);
+      const tTitle = (t.market_title || '').substring(0, 55);
+      const tTitleHtml = tUrl ? `<a href="${tUrl}" target="_blank" rel="noopener" class="market-link">${tTitle} ↗</a>` : tTitle;
       return `<tr>
-        <td>${(t.market_title || '').substring(0, 55)}</td>
+        <td>${tTitleHtml}</td>
         <td><span class="badge badge-${(t.side||'').toLowerCase()}">${t.side}</span></td>
         <td class="mono">${((t.entry_price||0)*100).toFixed(0)}¢</td>
         <td class="mono">$${(t.bet_size||0).toFixed(2)}</td>
@@ -376,10 +579,10 @@ function renderHistory(history) {
       </tr>`;
     }).join('')}</tbody>
   </table>`;
-  updateEquityChart(items);
+  updateEquityChart(items, liveRes);
 }
 
-function updateEquityChart(history) {
+function updateEquityChart(history, liveRes) {
   const sorted = [...history].reverse();
   let bankroll = 500;
   const labels = ['Start'];
@@ -387,9 +590,19 @@ function updateEquityChart(history) {
 
   sorted.forEach((t, i) => {
     bankroll += (t.pnl || 0);
-    labels.push(`#${i + 1}`);
+    const d = t.closed_at ? new Date(t.closed_at) : null;
+    labels.push(d ? `${d.getMonth()+1}/${d.getDate()}` : `#${i + 1}`);
     data.push(Math.round(bankroll * 100) / 100);
   });
+
+  // Add unrealized P&L as final dotted point
+  const unrealData = [...data];
+  const unrealLabels = [...labels];
+  const totalUnreal = liveRes ? (liveRes.total_unrealized_pnl || 0) : 0;
+  if (totalUnreal !== 0 && data.length > 1) {
+    unrealLabels.push('now');
+    unrealData.push(Math.round((bankroll + totalUnreal) * 100) / 100);
+  }
 
   if (equityChart) equityChart.destroy();
 
@@ -398,28 +611,48 @@ function updateEquityChart(history) {
   gradient.addColorStop(0, 'rgba(108,92,231,0.2)');
   gradient.addColorStop(1, 'rgba(108,92,231,0)');
 
+  const datasets = [{
+    label: 'Realized',
+    data,
+    borderColor: '#a29bfe',
+    backgroundColor: gradient,
+    fill: true,
+    tension: 0.35,
+    pointRadius: data.length > 20 ? 0 : 4,
+    pointBackgroundColor: '#a29bfe',
+    pointBorderColor: '#0a0a0f',
+    pointBorderWidth: 2,
+    borderWidth: 2,
+  }];
+
+  // Dotted unrealized line: from last realized point to projected point
+  if (totalUnreal !== 0 && data.length > 1) {
+    const unrealLine = new Array(data.length - 1).fill(null);
+    unrealLine.push(data[data.length - 1]);
+    unrealLine.push(Math.round((bankroll + totalUnreal) * 100) / 100);
+    datasets.push({
+      label: 'Unrealized',
+      data: unrealLine,
+      borderColor: totalUnreal >= 0 ? 'rgba(0,230,118,0.6)' : 'rgba(255,82,82,0.6)',
+      borderDash: [6, 4],
+      fill: false,
+      tension: 0,
+      pointRadius: [0, 6],
+      pointBackgroundColor: totalUnreal >= 0 ? '#00e676' : '#ff5252',
+      pointBorderColor: '#0a0a0f',
+      pointBorderWidth: 2,
+      borderWidth: 2,
+    });
+  }
+
   equityChart = new Chart(ctx, {
     type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        data,
-        borderColor: '#a29bfe',
-        backgroundColor: gradient,
-        fill: true,
-        tension: 0.35,
-        pointRadius: data.length > 20 ? 0 : 4,
-        pointBackgroundColor: '#a29bfe',
-        pointBorderColor: '#0a0a0f',
-        pointBorderWidth: 2,
-        borderWidth: 2,
-      }]
-    },
+    data: { labels: totalUnreal !== 0 && data.length > 1 ? unrealLabels : labels, datasets },
     options: {
       responsive: true,
       maintainAspectRatio: false,
       plugins: {
-        legend: { display: false },
+        legend: { display: datasets.length > 1, labels: { color: '#8888a0', font: { size: 11 } } },
         tooltip: {
           backgroundColor: '#1a1a26',
           borderColor: '#2a2a3a',
@@ -449,6 +682,103 @@ function updateEquityChart(history) {
   });
 }
 
+function renderArchetypeBreakdown(archRes, archPnlRes) {
+  const el = document.getElementById('archetypeBreakdown');
+  const items = archRes.breakdown || [];
+  document.getElementById('archCount').textContent = `${items.length} archetype${items.length !== 1 ? 's' : ''}`;
+  if (!items.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">🧬</div>No resolved trades yet — breakdown appears after positions close</div>';
+    return;
+  }
+  const pnlSeries = (archPnlRes && archPnlRes.series) || {};
+  const maxTrades = Math.max(...items.map(a => a.trades));
+  el.innerHTML = `<table class="arch-table">
+    <thead><tr><th>Archetype</th><th>Trades</th><th>Win Rate</th><th>P&L</th><th>ROI</th><th>Avg Hold</th><th>Trend</th><th></th></tr></thead>
+    <tbody>${items.map(a => {
+      const barColor = a.pnl >= 0 ? 'var(--green)' : 'var(--red)';
+      const barWidth = Math.max(10, (a.trades / maxTrades) * 100);
+      const hasSparkline = pnlSeries[a.archetype] && pnlSeries[a.archetype].length >= 2;
+      return `<tr>
+        <td class="arch-name">${a.archetype}</td>
+        <td class="mono">${a.trades}</td>
+        <td class="mono ${a.win_rate >= 50 ? 'green' : 'red'}">${a.win_rate}%</td>
+        <td class="mono ${a.pnl >= 0 ? 'result-won' : 'result-lost'}">${a.pnl >= 0 ? '+' : ''}$${a.pnl.toFixed(2)}</td>
+        <td class="mono ${a.roi >= 0 ? 'green' : 'red'}">${a.roi >= 0 ? '+' : ''}${a.roi}%</td>
+        <td class="mono">${a.avg_hold_days}d</td>
+        <td>${hasSparkline ? `<canvas class="arch-spark" data-arch="${a.archetype}"></canvas>` : '—'}</td>
+        <td><div class="arch-bar" style="width:100px"><div class="arch-bar-fill" style="width:${barWidth}%;background:${barColor}"></div></div></td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>`;
+
+  // Draw sparklines on canvases
+  el.querySelectorAll('canvas.arch-spark').forEach(canvas => {
+    const arch = canvas.dataset.arch;
+    const series = pnlSeries[arch] || [];
+    if (series.length < 2) return;
+    const values = series.map(s => s.cumulative_pnl);
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width = 80;
+    const h = canvas.height = 24;
+    const min = Math.min(0, ...values);
+    const max = Math.max(0, ...values);
+    const range = max - min || 1;
+    const final = values[values.length - 1];
+    const color = final >= 0 ? '#00e676' : '#ff5252';
+
+    ctx.clearRect(0, 0, w, h);
+    // Zero line
+    const zeroY = h - ((0 - min) / range) * (h - 4) - 2;
+    ctx.strokeStyle = 'rgba(136,136,160,0.3)';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(0, zeroY);
+    ctx.lineTo(w, zeroY);
+    ctx.stroke();
+    // Sparkline
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    values.forEach((v, i) => {
+      const x = (i / (values.length - 1)) * w;
+      const y = h - ((v - min) / range) * (h - 4) - 2;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    // End dot
+    const lastX = w;
+    const lastY = h - ((final - min) / range) * (h - 4) - 2;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(lastX - 1, lastY, 2, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+function renderResolveLog(resolveLogRes) {
+  const el = document.getElementById('resolveLog');
+  const items = Array.isArray(resolveLogRes) ? resolveLogRes : [];
+  document.getElementById('resolveCount').textContent = `${items.length} recent`;
+  if (!items.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">🔄</div>No resolutions yet</div>';
+    return;
+  }
+  el.innerHTML = items.map(r => {
+    const pnl = r.pnl || 0;
+    const ts = r.closed_at ? new Date(r.closed_at) : null;
+    const timeStr = ts ? `${ts.getMonth()+1}/${ts.getDate()} ${ts.getHours()}:${String(ts.getMinutes()).padStart(2,'0')}` : '—';
+    const outcome = r.status === 'won' ? '✅' : '❌';
+    const reason = r.close_reason || 'auto-resolved';
+    return `<div class="resolve-row">
+      <span class="resolve-time">${timeStr}</span>
+      <span>${outcome}</span>
+      <span class="resolve-market">${(r.market_title || '').substring(0, 60)}</span>
+      <span class="mono ${pnl >= 0 ? 'green' : 'red'}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</span>
+      <span style="font-size:10px;color:var(--text2)">${reason}</span>
+    </div>`;
+  }).join('');
+}
+
 async function processSignals() {
   const btn = document.getElementById('processBtn');
   const msg = document.getElementById('statusMsg');
@@ -459,8 +789,14 @@ async function processSignals() {
     const res = await fetch(`${API}/portfolio/process-signals`, { method: 'POST' }).then(r => r.json());
     const opened = res.opened || 0;
     const processed = res.processed || 0;
-    msg.textContent = `✅ ${processed} evaluated · ${opened} opened`;
-    renderSignals(res.signals || res.results || []);
+    const skipped = res.skipped || 0;
+    // Count kill reasons
+    const signals = res.signals || res.results || [];
+    const killed = signals.filter(s => (s.reason || '').startsWith('Kill rule')).length;
+    const lowEdge = signals.filter(s => (s.reason || '').includes('Edge')).length;
+    const lowConf = signals.filter(s => (s.reason || '').includes('Confidence')).length;
+    msg.textContent = `✅ ${processed} scanned · ${opened} opened · ${killed} killed · ${skipped - killed} filtered`;
+    renderSignals(signals);
     setTimeout(loadAll, 500);
   } catch(e) {
     msg.textContent = '❌ Error: ' + e.message;
@@ -481,12 +817,14 @@ function renderSignals(signals) {
     const isGood = edge >= 0.05;
     const action = s.action || s.status || 'skipped';
     const isOpened = action === 'opened' || action === 'traded';
+    const reason = s.reason || 'skipped';
+    const isKilled = reason.startsWith('Kill rule');
     return `<div class="signal-row">
       <span class="badge badge-${(s.side||'no').toLowerCase()}" style="margin-right:8px">${s.side || '?'}</span>
       <div class="signal-market">${(s.market || s.title || '').substring(0, 60)}</div>
       <span class="signal-edge ${isGood ? 'good' : 'low'}">${edgePct}% edge</span>
-      <span class="signal-action ${isOpened ? 'opened' : 'skipped'}">
-        ${isOpened ? `✅ $${(s.bet_size || 0).toFixed(0)}` : `⊘ ${s.reason || 'skipped'}`}
+      <span class="signal-action ${isOpened ? 'opened' : 'skipped'}" ${isKilled ? 'style="color:var(--orange)"' : ''}>
+        ${isOpened ? `✅ $${(s.bet_size || 0).toFixed(0)}` : `⊘ ${reason.substring(0, 40)}`}
       </span>
     </div>`;
   }).join('');

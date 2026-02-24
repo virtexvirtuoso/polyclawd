@@ -29,6 +29,14 @@ MAX_WALLETS_TO_SCAN = 25        # Top N wallets to deep-scan
 OVERLAP_CONFIDENCE_BOOST = 0.10 # Confidence boost when whale confirms our signal
 TRADE_FETCH_LIMIT = 1000        # Recent trades to analyze
 
+# Becker-validated whale addresses (from 408K market analysis)
+# 0x6810460f: Focused trader, 76% WR across 5 high-conviction markets
+# 0x896Ec1e9: Pure NO specialist, 61% WR across 22 markets — confirms NO bias alpha
+BECKER_WHALES = [
+    "0x6810460f",  # Focused high-conviction trader
+    "0x896Ec1e9",  # NO specialist — 61% WR, 22 markets
+]
+
 # Cache
 _cache: Dict = {"data": None, "timestamp": 0}
 CACHE_TTL = 300  # 5 min

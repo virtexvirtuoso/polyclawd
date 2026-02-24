@@ -187,8 +187,10 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     # if archetype in ('sports_winner', 'sports_single_game'):
     #     return True, "K6: sports — efficient market", archetype
     # UNBLOCKED: sports now pass through as 'unverified' with lower confidence
-    if archetype == 'other':
-        return True, "K6: unclassified archetype", archetype
+    # K6: Only kill 'other' if price is also in the danger zone (<40c)
+    # Above 40c, unclassified markets still have ~60% NO WR from Becker data
+    if archetype == 'other' and price_cents < 40:
+        return True, "K6: unclassified archetype + cheap entry", archetype
 
     return False, "", archetype
 
@@ -240,21 +242,24 @@ POLYMARKET_MISPRICED_TAGS = {
 }
 
 # Polymarket efficient tags (sports well-calibrated)
+# NOTE: Sports archetypes pass through via classify_archetype() even if tags match here.
+# Only tag-based sports filtering is affected; archetype pass-through takes priority.
 POLYMARKET_EFFICIENT_TAGS = {
-    'nfl', 'nba', 'mlb', 'nhl', 'soccer', 'tennis', 'golf',
-    'formula-1', 'mma', 'boxing', 'cricket',
+    'tennis', 'golf', 'formula-1', 'mma', 'boxing', 'cricket',
+    # Removed nfl/nba/mlb/nhl/soccer — Becker data shows 78% NO WR on sports.
+    # These now pass through archetype system with sports_winner/sports_single_game edges.
 }
 
 # Thresholds
 MIN_VOLUME_KALSHI = 5000        # Contracts
-MIN_VOLUME_POLYMARKET = 50000   # Dollars (Polymarket volume is in USD)
+MIN_VOLUME_POLYMARKET = 25000   # Dollars — lowered from 50K to catch more markets
 WHALE_VOLUME_KALSHI = 10000     # Contracts
 WHALE_VOLUME_POLYMARKET = 100000 # Dollars
-CONTESTED_LOW = 15              # Cents/pct
-CONTESTED_HIGH = 92  # Raised: take NO bets up to 92c (was 85)
-MAX_DAYS_TO_CLOSE = 30
+CONTESTED_LOW = 10              # Cents/pct — lowered from 15 to allow cheap NOs
+CONTESTED_HIGH = 95             # Raised from 92 — allow high-prob NO bets (Becker: 89% NO WR on price_range)
+MAX_DAYS_TO_CLOSE = 90          # Raised from 30 — Becker: monthly+ = 76.5% NO WR (strongest sweet spot)
 MIN_EDGE_PCT = 5
-MIN_ENTRY_PRICE = 55  # Cents — reject below this (data: <55c = 37% WR, >55c = 73% WR)
+MIN_ENTRY_PRICE = 45  # Cents — lowered from 55 (Becker: 45-55c range still has 61% NO WR)
 
 # Confidence scoring weights
 WEIGHT_CATEGORY_EDGE = 0.35
@@ -540,9 +545,10 @@ def _is_mispriced_polymarket(market: Dict) -> tuple:
     if tags & POLYMARKET_EFFICIENT_TAGS:
         return False, 0, ""
 
-    # Check for sport keywords in question
-    sport_keywords = {"nfl", "nba", "mlb", "nhl", "premier league", "champions league", "tennis", "golf"}
-    if any(kw in question for kw in sport_keywords):
+    # Check for truly efficient sport keywords (individual sports)
+    # Team sports now pass through archetype system — Becker: 78% NO WR on sports
+    efficient_sport_keywords = {"tennis", "golf", "formula 1", "f1 grand prix"}
+    if any(kw in question for kw in efficient_sport_keywords):
         return False, 0, ""
 
     # Check mispriced tags
@@ -911,7 +917,7 @@ def scan_polymarket_signals() -> List[Dict]:
             "confidence_breakdown": conf,
             "archetype": archetype,
             "strategy": "MispricedCategoryWhale",
-            "url": f"https://polymarket.com/event/{slug}" if slug else None,
+            "url": f"https://polymarket.com/market/{slug}" if slug else None,
             "backtest_stats": {
                 "win_rate": 75.0,
                 "sharpe": 1.25,

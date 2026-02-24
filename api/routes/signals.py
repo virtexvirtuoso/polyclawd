@@ -1682,6 +1682,152 @@ async def process_portfolio_signals():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/portfolio/resolve")
+async def resolve_portfolio_positions():
+    """Auto-resolve stale open positions using Polymarket CLOB / Kalshi APIs."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from paper_portfolio import resolve_open_positions
+        return resolve_open_positions()
+    except Exception as e:
+        logger.exception(f"Portfolio resolve failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/portfolio/positions-live")
+async def get_portfolio_positions_live():
+    """Get open positions with live market prices and unrealized P&L."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from paper_portfolio import get_live_positions
+        return get_live_positions()
+    except Exception as e:
+        logger.exception(f"Live positions failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/portfolio/archetype-breakdown")
+async def get_portfolio_archetype_breakdown():
+    """Get win rate and P&L breakdown by market archetype."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from paper_portfolio import get_archetype_breakdown
+        return get_archetype_breakdown()
+    except Exception as e:
+        logger.exception(f"Archetype breakdown failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/portfolio/archetype-pnl-series")
+async def get_archetype_pnl_series():
+    """Get per-archetype cumulative P&L series for sparklines."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from paper_portfolio import get_archetype_cumulative_pnl
+        return get_archetype_cumulative_pnl()
+    except Exception as e:
+        logger.exception(f"Archetype P&L series failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/portfolio/close/{position_id}")
+async def manually_close_position(position_id: int, outcome: str = Query(..., pattern="^(won|lost)$")):
+    """Manually close an open position as won or lost."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from paper_portfolio import close_position_by_id
+        return close_position_by_id(position_id, outcome)
+    except Exception as e:
+        logger.exception(f"Manual close failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/portfolio/resolve-log")
+async def get_resolve_log(limit: int = Query(default=20)):
+    """Get the last N resolved positions with timestamps and close reasons."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from paper_portfolio import get_resolve_log
+        return get_resolve_log(limit=limit)
+    except Exception as e:
+        logger.exception(f"Resolve log failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Equity Curve
+# ============================================================================
+
+@router.get("/portfolio/equity-curve")
+async def get_portfolio_equity_curve():
+    """Get equity curve data points from paper_portfolio_state table."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        import sqlite3
+        from pathlib import Path
+        db_path = Path(signals_path).parent / "storage" / "shadow_trades.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT timestamp, bankroll FROM paper_portfolio_state ORDER BY timestamp ASC"
+        ).fetchall()
+        conn.close()
+        # Add initial point
+        curve = [{"t": "", "v": 500.0}]
+        for r in rows:
+            curve.append({"t": r["timestamp"], "v": r["bankroll"]})
+        return curve
+    except Exception as e:
+        logger.exception(f"Equity curve failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Copy-Trade Whale Signals
+# ============================================================================
+
+@router.get("/signals/copy-trade")
+async def get_copy_trade_data():
+    """Get whale copy-trade signals and overlaps."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from copy_trade_watcher import get_copy_trade_signals
+        return get_copy_trade_signals()
+    except Exception as e:
+        logger.exception(f"Copy-trade scan failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/signals/cross-platform-arb")
+async def get_cross_platform_arb():
+    """Scan for cross-platform arbitrage between Kalshi and Polymarket."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from cross_platform_arb import scan_cross_platform_arb
+        return scan_cross_platform_arb()
+    except Exception as e:
+        logger.exception(f"Cross-platform arb scan failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============================================================================
 # Resolution Certainty Scanner
 # ============================================================================
