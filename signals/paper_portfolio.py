@@ -108,8 +108,69 @@ def get_correlation_status() -> dict:
     return groups
 
 
+def _get_dynamic_kelly(conn) -> Dict[str, Any]:
+    """Calculate dynamic Kelly fraction based on rolling performance.
+
+    Returns:
+        {"fraction": float, "rolling_wr": float, "rolling_trades": int,
+         "drawdown_pct": float, "status": str, "reason": str}
+    """
+    # Rolling win rate from last N closed trades
+    rows = conn.execute(
+        "SELECT status FROM paper_positions WHERE status IN ('won','lost') ORDER BY closed_at DESC LIMIT ?",
+        (KELLY_ROLLING_WINDOW,)
+    ).fetchall()
+
+    rolling_trades = len(rows)
+    wins = sum(1 for r in rows if r["status"] == "won")
+    rolling_wr = wins / rolling_trades if rolling_trades > 0 else 0.5
+
+    # Current drawdown
+    bankroll = _get_bankroll(conn)
+    peak = _get_peak(conn)
+    drawdown_pct = (peak - bankroll) / peak if peak > 0 else 0
+
+    # Decision logic
+    if drawdown_pct >= DRAWDOWN_PAUSE_PCT:
+        fraction = 0
+        status = "paused"
+        reason = f"Drawdown {drawdown_pct:.1%} >= {DRAWDOWN_PAUSE_PCT:.0%} — trading paused"
+        logger.warning("🛑 KELLY PAUSED: drawdown=%.1f%% (threshold %.0f%%)", drawdown_pct * 100, DRAWDOWN_PAUSE_PCT * 100)
+    elif rolling_trades >= 10 and rolling_wr < KELLY_MIN_WR:
+        fraction = KELLY_FRACTION_COLD
+        status = "cold"
+        reason = f"WR {rolling_wr:.0%} < {KELLY_MIN_WR:.0%} over {rolling_trades} trades — half size"
+        logger.info("❄️ KELLY COLD: wr=%.0f%% trades=%d fraction=1/%d", rolling_wr * 100, rolling_trades, int(1/fraction))
+    else:
+        fraction = KELLY_FRACTION
+        status = "normal"
+        reason = f"WR {rolling_wr:.0%} over {rolling_trades} trades — full size"
+        logger.debug("Kelly normal: wr=%.0f%% trades=%d", rolling_wr * 100, rolling_trades)
+
+    return {
+        "fraction": fraction,
+        "rolling_wr": round(rolling_wr, 3),
+        "rolling_trades": rolling_trades,
+        "drawdown_pct": round(drawdown_pct, 4),
+        "status": status,
+        "reason": reason,
+    }
+
+
+def get_kelly_status() -> Dict[str, Any]:
+    """Return current Kelly status for dashboard/API."""
+    conn = _get_db()
+    result = _get_dynamic_kelly(conn)
+    conn.close()
+    return result
+
+
 STARTING_BANKROLL = 10000.0
-KELLY_FRACTION = 1 / 6  # Becker-validated: 79% NO WR on high-conviction filters supports 1/6
+KELLY_FRACTION = 1 / 6        # Becker-validated: 79% NO WR on high-conviction filters supports 1/6
+KELLY_FRACTION_COLD = 1 / 12  # Half size when win rate drops
+KELLY_ROLLING_WINDOW = 20     # Trades to evaluate rolling WR
+KELLY_MIN_WR = 0.55           # Below this → downshift to KELLY_FRACTION_COLD
+DRAWDOWN_PAUSE_PCT = 0.15     # 15% drawdown → pause trading
 MAX_CONCURRENT = 10
 MIN_CONFIDENCE = 0.50
 MIN_EDGE = 0.12  # 12% minimum edge — lowered from 15% (Becker validates edges as low as 12%)
@@ -278,12 +339,20 @@ def evaluate_signal(signal: dict) -> dict:
     conn = _get_db()
     bankroll = _get_bankroll(conn)
     open_count = _count_open(conn)
-    conn.close()
     
     if open_count >= MAX_CONCURRENT:
+        conn.close()
         return {"eligible": False, "reason": f"Max {MAX_CONCURRENT} concurrent positions", "edge": edge, "kelly_pct": kelly_pct, "bet_size": 0}
     
-    bet_size = bankroll * kelly_pct * KELLY_FRACTION
+    # Dynamic Kelly — adjusts fraction based on rolling performance
+    kelly_data = _get_dynamic_kelly(conn)
+    conn.close()
+    
+    if kelly_data["status"] == "paused":
+        return {"eligible": False, "reason": kelly_data["reason"], "edge": edge, "kelly_pct": kelly_pct, "bet_size": 0, "kelly": kelly_data}
+    
+    effective_kelly = kelly_data["fraction"]
+    bet_size = bankroll * kelly_pct * effective_kelly
     
     # Becker time decay: duration × volume modifier (replaces simple duration boost)
     days_to_close = signal.get("days_to_close", 7)
@@ -334,7 +403,7 @@ def evaluate_signal(signal: dict) -> dict:
     if bet_size > bankroll:
         return {"eligible": False, "reason": f"Insufficient bankroll ${bankroll:.2f}", "edge": edge, "kelly_pct": kelly_pct, "bet_size": 0}
     
-    return {"eligible": True, "bet_size": round(bet_size, 2), "edge": round(edge, 4), "kelly_pct": round(kelly_pct, 4), "reason": "Criteria met", "empirical": empirical_result, "volume_spike": volume_spike_data, "time_decay": time_decay_data}
+    return {"eligible": True, "bet_size": round(bet_size, 2), "edge": round(edge, 4), "kelly_pct": round(kelly_pct, 4), "reason": "Criteria met", "empirical": empirical_result, "volume_spike": volume_spike_data, "time_decay": time_decay_data, "kelly": kelly_data}
 
 
 def open_position(signal: dict) -> dict:
