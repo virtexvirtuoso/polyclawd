@@ -16,6 +16,11 @@ try:
     HAS_VOLUME_SPIKE = True
 except ImportError:
     HAS_VOLUME_SPIKE = False
+try:
+    from time_decay_optimizer import get_time_decay_modifier
+    HAS_TIME_DECAY = True
+except ImportError:
+    HAS_TIME_DECAY = False
 import logging
 import math
 from datetime import datetime, timezone
@@ -275,14 +280,29 @@ def evaluate_signal(signal: dict) -> dict:
     
     bet_size = bankroll * kelly_pct * KELLY_FRACTION
     
-    # Becker duration boost: weekly/monthly markets have strongest NO edge
+    # Becker time decay: duration × volume modifier (replaces simple duration boost)
     days_to_close = signal.get("days_to_close", 7)
-    if days_to_close >= 28:
-        bet_size *= 1.15  # Monthly+: 76.5% NO WR — strongest (Becker)
-    elif days_to_close >= 7:
-        bet_size *= 1.10  # Weekly: 65.7% NO WR — sweet spot (Becker)
-    elif days_to_close < 1:
-        bet_size *= 0.85  # Daily: 51.7% NO WR — weak (Becker)
+    volume = signal.get("volume", 0)
+    if isinstance(volume, str):
+        try:
+            volume = float(volume)
+        except (ValueError, TypeError):
+            volume = 0
+    time_decay_data = None
+    if HAS_TIME_DECAY:
+        time_decay_data = get_time_decay_modifier(days_to_close, volume, side)
+        bet_size *= time_decay_data["multiplier"]
+        logger.debug("Time decay applied: mult=%.3f no_wr=%.1f%% dur=%s vol=%s",
+                      time_decay_data["multiplier"], time_decay_data["no_wr"] * 100,
+                      time_decay_data["duration"], time_decay_data["volume_bucket"])
+    else:
+        # Fallback: old simple duration modifier
+        if days_to_close >= 28:
+            bet_size *= 1.15
+        elif days_to_close >= 7:
+            bet_size *= 1.10
+        elif days_to_close < 1:
+            bet_size *= 0.85
     
     # Volume spike boost: retail FOMO = YES overpriced = best NO entry
     volume_spike_data = None
@@ -309,7 +329,7 @@ def evaluate_signal(signal: dict) -> dict:
     if bet_size > bankroll:
         return {"eligible": False, "reason": f"Insufficient bankroll ${bankroll:.2f}", "edge": edge, "kelly_pct": kelly_pct, "bet_size": 0}
     
-    return {"eligible": True, "bet_size": round(bet_size, 2), "edge": round(edge, 4), "kelly_pct": round(kelly_pct, 4), "reason": "Criteria met", "empirical": empirical_result, "volume_spike": volume_spike_data}
+    return {"eligible": True, "bet_size": round(bet_size, 2), "edge": round(edge, 4), "kelly_pct": round(kelly_pct, 4), "reason": "Criteria met", "empirical": empirical_result, "volume_spike": volume_spike_data, "time_decay": time_decay_data}
 
 
 def open_position(signal: dict) -> dict:
