@@ -55,7 +55,7 @@ CORRELATION_GROUPS = {
     "deadline_binary": "politics",
     "financial_price": "finance",
     "entertainment": "culture", "ai_model": "culture",
-    "social_count": "culture", "weather": "culture",
+    "social_count": "culture", "weather": "weather",
     "parlay": "other", "other": "other",
 }
 MAX_PER_GROUP = 3

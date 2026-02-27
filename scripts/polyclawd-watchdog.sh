@@ -97,6 +97,27 @@ print(f'signals={len(signals)} opened={result.get(\"opened\",0)} skipped={result
 " 2>&1)
     log "SCAN: $SCAN_OUT"
 
+    # Weather scanner — feed into paper portfolio
+    WEATHER_OUT=$($VENV -c "
+import sys
+sys.path.insert(0, 'signals')
+from signals.weather_scanner import scan_all_weather
+from signals.paper_portfolio import process_signals
+
+result = scan_all_weather()
+weather_sigs = result.get('signals', [])
+if weather_sigs:
+    # Cap position sizes for weather
+    for s in weather_sigs:
+        s.setdefault('archetype', 'weather')
+        s.setdefault('max_position', 25)
+    pr = process_signals(weather_sigs)
+    print(f'weather={len(weather_sigs)} opened={pr.get(\"opened\",0)} skipped={pr.get(\"skipped\",0)}')
+else:
+    print('weather=0')
+" 2>&1)
+    log "WEATHER: $WEATHER_OUT"
+
     # Alpha snapshot
     $VENV -c "from signals.alpha_score_tracker import run_snapshot; run_snapshot()" >> "$LOG" 2>&1 || true
     log "ALPHA: done"

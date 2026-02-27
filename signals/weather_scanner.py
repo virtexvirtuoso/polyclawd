@@ -340,6 +340,32 @@ def _f_to_c(fahrenheit: float) -> float:
     return (fahrenheit - 32) * 5 / 9
 
 
+# In-memory forecast cache (city → forecast_data) — cleared each scan cycle
+_forecast_cache: Dict[str, dict] = {}
+_forecast_cache_ts: float = 0
+
+
+def _get_cached_forecast(city: str, days_until: float) -> Optional[dict]:
+    """Get forecast with per-scan caching (avoids re-fetching same city)."""
+    global _forecast_cache, _forecast_cache_ts
+    now = time.time()
+    # Clear cache if older than 10 minutes
+    if now - _forecast_cache_ts > 600:
+        _forecast_cache = {}
+        _forecast_cache_ts = now
+
+    cache_key = f"{city}:{'hourly' if days_until <= 2 else 'daily'}"
+    if cache_key in _forecast_cache:
+        return _forecast_cache[cache_key]
+
+    if days_until <= 2:
+        data = get_hourly_forecast(city, days=2)
+    else:
+        data = get_weather_forecast(city)
+    _forecast_cache[cache_key] = data
+    return data
+
+
 def evaluate_weather_market(title: str, market_price: float) -> Optional[dict]:
     """Evaluate a weather market against Open-Meteo forecast.
     
@@ -359,13 +385,9 @@ def evaluate_weather_market(title: str, market_price: float) -> Optional[dict]:
     if days_until < -1:
         return None  # already past
     
-    # Use hourly data for same-day/next-day (much more accurate)
-    if days_until <= 2:
-        forecast_data = get_hourly_forecast(city, days=2)
-        data_source = "hourly"
-    else:
-        forecast_data = get_weather_forecast(city)
-        data_source = "daily"
+    # Use cached forecast (one Open-Meteo call per city, not per market)
+    data_source = "hourly" if days_until <= 2 else "daily"
+    forecast_data = _get_cached_forecast(city, days_until)
     
     if not forecast_data:
         return None
@@ -511,12 +533,14 @@ def evaluate_weather_market(title: str, market_price: float) -> Optional[dict]:
             edge = fair_value - market_price
             if abs(edge) > 0.10:
                 side = "YES" if edge > 0 else "NO"
+                certainty = "high" if diff > 5 else ("medium" if diff > 2 else "low")
                 signal = {
                     "type": "temperature_exact",
                     "threshold": threshold,
                     "forecast_high_f": forecast_high_f,
                     "diff_f": round(diff, 1),
                     "fair_value": round(fair_value, 2),
+                    "certainty": certainty,
                     "side": side,
                     "edge": round(abs(edge), 3),
                 }
@@ -597,52 +621,73 @@ def scan_kalshi_weather() -> List[dict]:
     return signals
 
 
+WEATHER_CITIES_SLUG = [
+    'nyc', 'london', 'buenos-aires', 'wellington', 'miami', 'dallas',
+    'atlanta', 'sao-paulo', 'toronto', 'seoul', 'seattle', 'chicago',
+    'paris', 'sydney', 'tokyo',
+]
+
+# Max position size for weather trades (small, uncorrelated bets)
+WEATHER_MAX_BET = 25.0
+WEATHER_MIN_BET = 5.0
+
+
 def scan_polymarket_weather() -> List[dict]:
-    """Scan Polymarket for weather-related markets."""
+    """Scan Polymarket for weather temperature markets via slug-based discovery."""
     signals = []
-    
-    weather_kw = [
-        "temperature", "highest temperature", "snow", "rainfall",
-        "hurricane", "wildfire", "weather",
-    ]
-    
-    # Search for weather markets
-    for kw in ["temperature", "weather"]:
-        url = f"{GAMMA_API}/markets?limit=100&active=true"
-        data = _fetch_json(url)
-        if not data:
-            continue
-        
-        for market in data if isinstance(data, list) else []:
-            question = market.get("question", "").lower()
-            if not any(w in question for w in weather_kw):
+    now = datetime.now(timezone.utc)
+
+    # Check today + next 2 days
+    dates_to_check = [(now + timedelta(days=d)) for d in range(3)]
+    month_names = {
+        1: 'january', 2: 'february', 3: 'march', 4: 'april',
+        5: 'may', 6: 'june', 7: 'july', 8: 'august',
+        9: 'september', 10: 'october', 11: 'november', 12: 'december',
+    }
+
+    for city in WEATHER_CITIES_SLUG:
+        for dt in dates_to_check:
+            month = month_names[dt.month]
+            day = dt.day
+            slug = f"highest-temperature-in-{city}-on-{month}-{day}-{dt.year}"
+            url = f"{GAMMA_API}/events?slug={slug}"
+            data = _fetch_json(url)
+            if not data or not isinstance(data, list) or len(data) == 0:
                 continue
-            
-            # Parse price
-            prices = market.get("outcomePrices", "")
-            if isinstance(prices, str):
-                try:
-                    prices = json.loads(prices)
-                except Exception:
+
+            event = data[0]
+            markets = event.get("markets", [])
+            logger.debug("Weather: %s → %d markets", slug, len(markets))
+
+            for market in markets:
+                question = market.get("question", "")
+                prices = market.get("outcomePrices", "")
+                if isinstance(prices, str):
+                    try:
+                        prices = json.loads(prices)
+                    except Exception:
+                        continue
+                if not prices or len(prices) < 1:
                     continue
-            
-            if not prices or len(prices) < 1:
-                continue
-            
-            yes_price = float(prices[0]) if prices[0] != "0" else float(prices[1]) if len(prices) > 1 else 0.5
-            volume = float(market.get("volume", 0))
-            
-            if volume < 1000:
-                continue
-            
-            result = evaluate_weather_market(market.get("question", ""), yes_price)
-            if result:
-                result["platform"] = "polymarket"
-                result["market_id"] = market.get("conditionId", market.get("id", ""))
-                result["market"] = market.get("question", "")[:200]
-                result["volume"] = volume
-                signals.append(result)
-    
+
+                yes_price = float(prices[0])
+                volume = float(market.get("volumeNum", 0) or market.get("volume", 0) or 0)
+                liquidity = float(market.get("liquidityNum", 0) or 0)
+                condition_id = market.get("conditionId", market.get("id", ""))
+
+                result = evaluate_weather_market(question, yes_price)
+                if result:
+                    result["platform"] = "polymarket"
+                    result["market_id"] = condition_id
+                    result["market"] = question[:200]
+                    result["volume"] = volume
+                    result["liquidity"] = liquidity
+                    result["slug"] = market.get("slug", "")
+                    result["archetype"] = "weather"
+                    signals.append(result)
+
+    logger.info("Weather scan: %d signals from %d cities × %d dates",
+                len(signals), len(WEATHER_CITIES_SLUG), len(dates_to_check))
     return signals
 
 
