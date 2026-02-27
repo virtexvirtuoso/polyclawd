@@ -1202,6 +1202,58 @@ async def hf_opportunities():
     return await handle_edge_request("hf-opportunities", _opps())
 
 
+@router.get("/hf/latency")
+async def hf_latency_state():
+    """Get real-time latency engine state (Binance vs Chainlink oracle).
+    
+    Shows current price divergence, active latency signals, and engine stats.
+    Proxies to the HF engine service on port 8422.
+    """
+    async def _latency():
+        import urllib.request
+        try:
+            req = urllib.request.Request("http://127.0.0.1:8422/state", 
+                                        headers={"User-Agent": "Polyclawd-API"})
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                return json.loads(resp.read().decode())
+        except Exception:
+            return {"error": "HF engine not running", "hint": "Start with: sudo systemctl start polyclawd-hf"}
+    
+    return await handle_edge_request("hf-latency", _latency())
+
+
+@router.get("/hf/latency/events")
+async def hf_latency_events():
+    """Get recent latency divergence events detected by the HF engine."""
+    async def _events():
+        import urllib.request
+        try:
+            req = urllib.request.Request("http://127.0.0.1:8422/events",
+                                        headers={"User-Agent": "Polyclawd-API"})
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                return json.loads(resp.read().decode())
+        except Exception:
+            return {"error": "HF engine not running"}
+    
+    return await handle_edge_request("hf-latency-events", _events())
+
+
+@router.get("/hf/latency/signals")
+async def hf_latency_signals():
+    """Get current actionable latency signals (Binance ahead of oracle)."""
+    async def _signals():
+        import urllib.request
+        try:
+            req = urllib.request.Request("http://127.0.0.1:8422/signals",
+                                        headers={"User-Agent": "Polyclawd-API"})
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                return json.loads(resp.read().decode())
+        except Exception:
+            return {"error": "HF engine not running"}
+    
+    return await handle_edge_request("hf-latency-signals", _signals())
+
+
 @router.get("/hf/risk")
 async def hf_risk_gate(
     max_drawdown: float = Query(default=10.0, ge=1.0, le=50.0),
