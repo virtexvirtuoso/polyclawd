@@ -30,24 +30,37 @@ CV_CAP = 0.60                    # Maximum CV haircut (never more than 60%)
 
 
 def get_historical_returns(db_path: str = "storage/shadow_trades.db") -> List[float]:
-    """Extract historical returns from resolved shadow trades."""
+    """Extract historical returns from resolved paper positions + shadow trades."""
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
-            SELECT pnl, entry_price FROM shadow_trades 
-            WHERE resolved = 1 AND pnl IS NOT NULL
-            ORDER BY resolved_at
-        """).fetchall()
-        conn.close()
-        
         returns = []
+
+        # Primary: paper_positions (our actual portfolio)
+        rows = conn.execute("""
+            SELECT pnl, bet_size FROM paper_positions
+            WHERE status IN ('resolved', 'won', 'lost') AND pnl IS NOT NULL
+        """).fetchall()
         for r in rows:
             pnl = r["pnl"] or 0
-            entry = r["entry_price"] or 0.5
-            # Return as fraction of bet size (entry price is the risk)
-            if entry > 0:
-                returns.append(pnl / entry)
+            bet = r["bet_size"] or 100
+            if bet > 0:
+                returns.append(pnl / bet)
+
+        # Fallback: shadow_trades if paper_positions has too few
+        if len(returns) < MIN_RESOLVED_FOR_CV:
+            rows2 = conn.execute("""
+                SELECT pnl, entry_price FROM shadow_trades
+                WHERE resolved = 1 AND pnl IS NOT NULL
+                ORDER BY resolved_at
+            """).fetchall()
+            for r in rows2:
+                pnl = r["pnl"] or 0
+                entry = r["entry_price"] or 0.5
+                if entry > 0:
+                    returns.append(pnl / entry)
+
+        conn.close()
         return returns
     except Exception as e:
         print(f"Error loading historical returns: {e}")

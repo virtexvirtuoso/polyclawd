@@ -407,6 +407,23 @@ def evaluate_signal(signal: dict) -> dict:
         return {"eligible": False, "reason": kelly_data["reason"], "edge": edge, "kelly_pct": kelly_pct, "bet_size": 0, "kelly": kelly_data}
     
     effective_kelly = kelly_data["fraction"]
+
+    # CV Kelly haircut — uncertainty-adjusted sizing
+    # Only applies AFTER bootstrap phase (need real data, not seeded WR)
+    if kelly_data["status"] not in ("bootstrap", "paused"):
+        try:
+            from signals.cv_kelly import calculate_cv_kelly_haircut
+            cv_result = calculate_cv_kelly_haircut(effective_kelly)
+            if cv_result["n_resolved"] >= 15:
+                effective_kelly = cv_result["kelly_adjusted"]
+                logger.info("📐 CV Kelly: haircut=%.1f%% kelly=%.4f→%.4f (n=%d, cv=%.3f)",
+                            cv_result["cv_haircut"] * 100, kelly_data["fraction"],
+                            effective_kelly, cv_result["n_resolved"], cv_result["cv_edge"])
+        except Exception as e:
+            logger.debug("CV Kelly skipped: %s", e)
+    else:
+        logger.debug("CV Kelly deferred: still in %s mode", kelly_data["status"])
+
     bet_size = bankroll * kelly_pct * effective_kelly
     
     # Becker time decay: duration × volume modifier (replaces simple duration boost)

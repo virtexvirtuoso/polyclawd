@@ -2231,8 +2231,18 @@ async def get_risk_guards():
             sys.path.insert(0, signals_path)
         from paper_portfolio import get_kelly_status, get_correlation_status
         from time_decay_optimizer import get_optimal_entry_windows
+        # CV Kelly haircut
+        cv_kelly_data = {}
+        try:
+            from cv_kelly import calculate_cv_kelly_haircut
+            kelly_info = get_kelly_status()
+            cv_kelly_data = calculate_cv_kelly_haircut(kelly_info.get("fraction", 0.125))
+        except Exception:
+            cv_kelly_data = {"note": "insufficient data"}
+
         return {
             "kelly": get_kelly_status(),
+            "cv_kelly": cv_kelly_data,
             "correlation": get_correlation_status(),
             "time_decay_windows": get_optimal_entry_windows()["windows"][:5],
         }
