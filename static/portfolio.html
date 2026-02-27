@@ -745,11 +745,11 @@ function renderPositions(positions) {
         </div>
         <div class="pos-stat">
           <div class="pos-stat-label">Confidence</div>
-          <div class="pos-stat-value">${((p.confidence || 0) * 100).toFixed(0)}%</div>
+          <div class="pos-stat-value">${((p.confidence || 0) > 1 ? (p.confidence || 0) : (p.confidence || 0) * 100).toFixed(0)}%</div>
         </div>
         <div class="pos-stat">
           <div class="pos-stat-label">Edge</div>
-          <div class="pos-stat-value green">${((p.edge_pct || 0) * 100).toFixed(1)}%</div>
+          <div class="pos-stat-value green">${((p.edge_pct || 0) > 1 ? (p.edge_pct || 0) : (p.edge_pct || 0) * 100).toFixed(1)}%</div>
         </div>
       </div>
       ${unrealHtml}

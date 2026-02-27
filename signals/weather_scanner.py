@@ -366,10 +366,112 @@ def _get_cached_forecast(city: str, days_until: float) -> Optional[dict]:
     return data
 
 
+def _try_ensemble_evaluate(title: str, market_price: float, city: str, target_date: str, temp_info) -> Optional[dict]:
+    """Try ensemble-based evaluation. Returns signal dict or None to fall back."""
+    try:
+        from signals.weather_ensemble import ensemble_fair_value, get_ensemble_forecast
+    except ImportError:
+        logger.debug("weather_ensemble not available, using legacy")
+        return None
+
+    if not temp_info:
+        return None
+
+    comparison, threshold, unit = temp_info
+
+    # Convert threshold to °F for ensemble
+    if unit == "C":
+        if comparison == "between":
+            thresh_f = _c_to_f(threshold[0])
+            thresh_high_f = _c_to_f(threshold[1])
+        elif comparison == "exact":
+            thresh_f = _c_to_f(threshold)
+            thresh_high_f = None
+        else:
+            thresh_f = _c_to_f(threshold)
+            thresh_high_f = None
+    else:
+        if comparison == "between":
+            thresh_f = threshold[0]
+            thresh_high_f = threshold[1]
+        elif comparison == "exact":
+            thresh_f = threshold
+            thresh_high_f = None
+        else:
+            thresh_f = threshold
+            thresh_high_f = None
+
+    result = ensemble_fair_value(city, target_date, comparison, thresh_f, thresh_high_f)
+    if not result:
+        return None
+
+    fair_value = result["fair_value"]
+    edge = fair_value - market_price
+
+    if abs(edge) < 0.05:  # Less than 5% edge — skip
+        return None
+
+    side = "YES" if edge > 0 else "NO"
+    if side == "NO":
+        fair_value = 1.0 - fair_value
+        edge = fair_value - (1.0 - market_price)
+        if edge < 0.05:
+            return None
+
+    # Days until resolution
+    target_dt = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    days_until = (target_dt - datetime.now(timezone.utc)).total_seconds() / 86400
+
+    # Confidence from ensemble quality
+    confidence = result["confidence"] * 100  # Convert to 0-100 scale
+    # Boost for short-dated (forecast more accurate)
+    if days_until <= 0.5:
+        confidence = min(95, confidence + 15)
+    elif days_until <= 1:
+        confidence = min(95, confidence + 10)
+
+    forecast_data = get_ensemble_forecast(city, target_date)
+    ens = forecast_data["ensemble"] if forecast_data else {}
+
+    logger.debug(
+        "ENSEMBLE %s: %s fair=%.3f mkt=%.3f edge=%.1f%% side=%s n_models=%d agree=%.2f",
+        city, comparison, result["fair_value"], market_price,
+        abs(edge) * 100, side, result.get("n_sources", 0), result.get("agreement", 0),
+    )
+
+    return {
+        "source": "weather_ensemble",
+        "city": city,
+        "target_date": target_date,
+        "days_until": round(days_until, 1),
+        "data_source": "ensemble",
+        "market_price": market_price,
+        "side": side,
+        "confidence": round(confidence, 1),
+        "edge_pct": round(abs(edge) * 100, 1),
+        "fair_value": round(fair_value if side == "YES" else result["fair_value"], 3),
+        "weather_detail": {
+            "type": "temperature_high",
+            "comparison": comparison,
+            "threshold_f": thresh_f,
+            "forecast_mean_f": result["forecast_mean_f"],
+            "forecast_std_f": result["forecast_std_f"],
+            "n_sources": result["n_sources"],
+            "n_models": ens.get("n_models", 0),
+            "agreement": result["agreement"],
+            "distribution": result.get("distribution", "normal"),
+        },
+        "forecast": {
+            "ensemble_mean_f": result["forecast_mean_f"],
+            "ensemble_std_f": result["forecast_std_f"],
+        },
+    }
+
+
 def evaluate_weather_market(title: str, market_price: float) -> Optional[dict]:
-    """Evaluate a weather market against Open-Meteo forecast.
+    """Evaluate a weather market against forecast data.
     
-    Returns signal dict if edge found, None otherwise.
+    Uses ensemble (multi-model) when available, falls back to single Open-Meteo.
     """
     city = _extract_city_from_market(title)
     target_date = _extract_date_from_market(title)
@@ -378,6 +480,12 @@ def evaluate_weather_market(title: str, market_price: float) -> Optional[dict]:
     if not city or not target_date:
         return None
     
+    # Try ensemble first (calibrated probabilities from multiple models)
+    ensemble_result = _try_ensemble_evaluate(title, market_price, city, target_date, temp_info)
+    if ensemble_result:
+        return ensemble_result
+    
+    # Legacy fallback: single Open-Meteo deterministic forecast
     # Days until resolution
     target_dt = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     days_until = (target_dt - datetime.now(timezone.utc)).total_seconds() / 86400
