@@ -533,6 +533,44 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {"hours": {"type": "integer", "description": "Hours to look back", "default": 24}}, "required": []}
     },
 
+    # === WEATHER ===
+    {
+        "name": "polyclawd_weather",
+        "description": "Scan weather temperature markets on Polymarket against Open-Meteo forecasts. Returns signals with edges for 15 cities × 3 days. 80-90% WR on same-day forecasts.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
+    },
+
+    # === ELECTIONS ===
+    {
+        "name": "polyclawd_election_polls",
+        "description": "Get Wikipedia polling data for tracked elections (Hungary 2026, Brazil 2026, Venezuela). Compares polls to Polymarket prices with incumbency detection.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "polyclawd_cross_platform",
+        "description": "Cross-platform election price comparison (Polymarket vs Manifold Markets). Shows divergence signals for election markets.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
+    },
+
+    # === STRIKE SCANNER ===
+    {
+        "name": "polyclawd_strike_scanner",
+        "description": "Price-to-Strike probability scanner. Uses Student-t fat-tail model + momentum overlay to calculate fair probability for crypto strike markets (e.g. BTC above $75K).",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
+    },
+
+    # === RISK & SIZING ===
+    {
+        "name": "polyclawd_risk_guards",
+        "description": "Get current risk guard status: Kelly mode (bootstrap/normal/cold/paused), CV Kelly haircut, correlation group fill levels, time decay windows.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "polyclawd_source_health",
+        "description": "Get data source health status (circuit breakers, staleness, last success timestamps for all 7 sources).",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
+    },
+
     {
         "name": "polyclawd_health",
         "description": "Get API health status",
@@ -787,6 +825,23 @@ def handle_tool_call(name: str, arguments: dict) -> Any:
         hours = arguments.get("hours", 24)
         return api_get(f"/api/signals/btc-tracker?hours={hours}")
 
+    # Weather
+    elif name == "polyclawd_weather":
+        return api_get("/api/signals/weather")
+    # Elections
+    elif name == "polyclawd_election_polls":
+        return api_get("/api/signals/election-polls")
+    elif name == "polyclawd_cross_platform":
+        return api_get("/api/signals/cross-platform")
+    # Strike scanner
+    elif name == "polyclawd_strike_scanner":
+        return api_get("/api/signals/strike-scanner")
+    # Risk & sizing
+    elif name == "polyclawd_risk_guards":
+        return api_get("/api/portfolio/risk-guards")
+    elif name == "polyclawd_source_health":
+        return api_get("/api/source-health")
+    
     elif name == "polyclawd_health":
         return api_get("/api/health")
     elif name == "polyclawd_metrics":
