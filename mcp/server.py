@@ -22,12 +22,29 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://virtuosocrypto.com/polyclawd"
 PROTOCOL_VERSION = "2024-11-05"
 
-# Endpoints to skip (health/ready are noise, POST-only mutators, internal)
+# Endpoints to skip
 SKIP_PATHS = {
     "/health", "/ready", "/metrics",
-    "/api/visitor-log",  # POST-only logging
+    "/api/visitor-log",
+    "/", "/manifest.json", "/sw.js",
 }
-SKIP_PREFIXES = ("/docs", "/openapi", "/redoc")
+SKIP_PREFIXES = (
+    "/docs", "/openapi", "/redoc",
+    "/static",
+)
+
+# Skip POST endpoints that are mutators (only expose read-only tools)
+# Allow specific safe POSTs
+SAFE_POST_PATHS = {
+    "/api/edge-scanner/calculate",
+    "/api/phase/simulate",
+    "/api/kelly/simulate",
+}
+
+# Skip endpoints that are duplicates or internal
+SKIP_PATTERNS = {
+    "polyclawd_",  # bare root
+}
 
 # Friendly category prefixes for tool naming
 CATEGORY_ORDER = [
@@ -146,6 +163,11 @@ def discover_tools(base_url: str = None) -> List[dict]:
         for method in ("get", "post"):
             if method not in methods:
                 continue
+
+            # POST endpoints: only allow explicitly safe ones
+            if method == "post" and path not in SAFE_POST_PATHS:
+                continue
+
             endpoint = methods[method]
 
             # Skip if requires API key (mutating endpoints)
@@ -167,6 +189,13 @@ def discover_tools(base_url: str = None) -> List[dict]:
             # Build input schema from query/path parameters
             params = endpoint.get("parameters", [])
             input_schema = _extract_params(params, spec)
+
+            # Skip junk tool names
+            if tool_name in SKIP_PATTERNS or len(tool_name) <= len("polyclawd_"):
+                continue
+            # Skip static file extensions
+            if any(tool_name.endswith(ext) for ext in (".js", ".json", ".html", ".css", ".png")):
+                continue
 
             tools.append({
                 "name": tool_name,
