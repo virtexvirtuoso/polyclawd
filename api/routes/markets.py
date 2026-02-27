@@ -1159,6 +1159,84 @@ async def hf_neg_vig_scan(
     return await handle_edge_request("hf-negvig", _negvig())
 
 
+@router.get("/hf/signal/{asset}")
+async def hf_directional_signal(asset: str):
+    """Get Virtuoso-powered directional signal for a crypto asset.
+    
+    Combines fusion signal, market regime, kill switch, and manipulation
+    alerts to produce a trade recommendation for Polymarket 5/15-min markets.
+    
+    Args:
+        asset: BTC or ETH
+    """
+    async def _signal():
+        from services.virtuoso_bridge import get_directional_signal
+        from dataclasses import asdict
+        sig = get_directional_signal(asset)
+        return asdict(sig)
+    
+    return await handle_edge_request("hf-signal", _signal())
+
+
+@router.get("/hf/signals")
+async def hf_all_signals():
+    """Get directional signals for all supported assets (BTC, ETH)."""
+    async def _signals():
+        from services.virtuoso_bridge import scan_all_assets
+        return scan_all_assets()
+    
+    return await handle_edge_request("hf-signals", _signals())
+
+
+@router.get("/hf/opportunities")
+async def hf_opportunities():
+    """Match Virtuoso directional signals to available Polymarket HF markets.
+    
+    Full pipeline: signal generation → market discovery → matching → ranking.
+    Returns tradeable opportunities sorted by estimated edge.
+    """
+    async def _opps():
+        from services.virtuoso_bridge import match_signals_to_markets
+        return match_signals_to_markets()
+    
+    return await handle_edge_request("hf-opportunities", _opps())
+
+
+@router.get("/hf/risk")
+async def hf_risk_gate(
+    max_drawdown: float = Query(default=10.0, ge=1.0, le=50.0),
+    window_min: int = Query(default=60, ge=5, le=1440),
+):
+    """Run all risk checks — determines if HF trading is allowed.
+    
+    Hard blocks (any one = no trading):
+    - Kill switch triggered
+    - Manipulation detected  
+    - Drawdown exceeded
+    - API unhealthy
+    
+    Soft warnings (logged, don't block):
+    - Low volatility regime
+    """
+    async def _risk():
+        from services.hf_risk_gate import evaluate_risk_gate
+        from dataclasses import asdict
+        result = evaluate_risk_gate(
+            max_drawdown_pct=max_drawdown,
+            drawdown_window_min=window_min,
+        )
+        return {
+            "trading_allowed": result.trading_allowed,
+            "summary": result.summary,
+            "hard_blocks": result.hard_blocks,
+            "soft_warnings": result.soft_warnings,
+            "checks": [asdict(c) for c in result.checks],
+            "timestamp": result.timestamp,
+        }
+    
+    return await handle_edge_request("hf-risk", _risk())
+
+
 # ============================================================================
 # Kalshi Edge Detection
 # ============================================================================
