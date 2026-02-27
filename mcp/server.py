@@ -1,912 +1,287 @@
 #!/usr/bin/env python3
 """
-Polyclawd MCP Server
+Polyclawd MCP Server — Auto-discovering
 
-Exposes Polyclawd API as MCP tools for Claude integration.
-Run: python server.py (stdio mode)
+Fetches OpenAPI spec from the Polyclawd API and exposes every GET endpoint
+as an MCP tool.  No more manual TOOLS list to maintain.
+
+Stdio transport:  python server.py
+HTTP transport:   imported by http_server.py (FastMCP wrapper)
 """
 
 import json
+import logging
+import re
 import sys
 import urllib.request
-from typing import Any
+from typing import Any, Dict, List, Optional
 
-# Base URL for Polyclawd API
+logger = logging.getLogger(__name__)
+
+# ── config ───────────────────────────────────────────────────────────────
 BASE_URL = "https://virtuosocrypto.com/polyclawd"
-
-# MCP Protocol version
 PROTOCOL_VERSION = "2024-11-05"
 
-def api_get(path: str) -> dict:
-    """Make GET request to Polyclawd API."""
-    url = f"{BASE_URL}{path}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd-MCP/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode())
-    except Exception as e:
-        return {"error": str(e)}
+# Endpoints to skip (health/ready are noise, POST-only mutators, internal)
+SKIP_PATHS = {
+    "/health", "/ready", "/metrics",
+    "/api/visitor-log",  # POST-only logging
+}
+SKIP_PREFIXES = ("/docs", "/openapi", "/redoc")
 
-def api_post(path: str, params: dict = None) -> dict:
-    """Make POST request to Polyclawd API."""
-    url = f"{BASE_URL}{path}"
-    if params:
-        url += "?" + "&".join(f"{k}={v}" for k, v in params.items())
-    req = urllib.request.Request(url, method="POST", headers={"User-Agent": "Polyclawd-MCP/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode())
-    except Exception as e:
-        return {"error": str(e)}
-
-# Tool definitions organized by category
-TOOLS = [
-    # === CORE SIGNALS ===
-    {
-        "name": "polyclawd_signals",
-        "description": "Get all aggregated trading signals from all sources",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_news",
-        "description": "Get news-based signals from Google News and Reddit",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_volume_spikes",
-        "description": "Get volume spike signals (unusual trading activity)",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_smart_money",
-        "description": "Get smart money whale signals",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_inverse_whale",
-        "description": "Get inverse whale signals (fade the whales)",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    
-    # === ARBITRAGE & EDGE ===
-    {
-        "name": "polyclawd_arb_scan",
-        "description": "Scan for cross-platform arbitrage opportunities",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_kalshi_edge",
-        "description": "Get Kalshi vs Polymarket edge opportunities",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_kalshi_entertainment",
-        "description": "Get Kalshi entertainment/sports prop markets (Super Bowl halftime, Grammy, Oscar, celebrity props)",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_kalshi_all",
-        "description": "Get ALL Kalshi markets with comprehensive pagination",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_manifold_edge",
-        "description": "Get Manifold vs Polymarket edge opportunities",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_metaculus_edge",
-        "description": "Get Metaculus vs Polymarket edge opportunities",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_predictit_edge",
-        "description": "Get PredictIt vs Polymarket edge opportunities",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_betfair_edge",
-        "description": "Get Betfair exchange edge opportunities",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_polyrouter_edge",
-        "description": "Get PolyRouter cross-platform edge (7 platforms)",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    
-    # === VEGAS ODDS ===
-    {
-        "name": "polyclawd_vegas_nfl",
-        "description": "Get NFL Vegas odds (Super Bowl, AFC, NFC futures)",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_vegas_superbowl",
-        "description": "Get Super Bowl winner odds only",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_vegas_soccer",
-        "description": "Get all soccer futures odds",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_vegas_epl",
-        "description": "Get English Premier League futures odds",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_vegas_ucl",
-        "description": "Get UEFA Champions League futures odds",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_vegas_edge",
-        "description": "Get Vegas vs Polymarket edge for sports",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    
-    # === ESPN ODDS ===
-    {
-        "name": "polyclawd_espn_moneyline",
-        "description": "Get ESPN moneyline odds with true probabilities",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "sport": {"type": "string", "description": "Sport: nfl, nba, nhl, mlb", "default": "nfl"}
-            },
-            "required": []
-        }
-    },
-    {
-        "name": "polyclawd_espn_moneylines",
-        "description": "Get all ESPN moneylines across all sports",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_espn_edge",
-        "description": "Get ESPN vs Polymarket edge opportunities",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    
-    # === MARKETS ===
-    {
-        "name": "polyclawd_markets_trending",
-        "description": "Get trending Polymarket markets",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_markets_opportunities",
-        "description": "Get market opportunities (mispriced, high volume)",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_markets_search",
-        "description": "Search markets by query",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query"}
-            },
-            "required": ["query"]
-        }
-    },
-    {
-        "name": "polyclawd_markets_new",
-        "description": "Get newly created markets",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_kalshi_markets",
-        "description": "Get Kalshi markets",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_manifold_markets",
-        "description": "Get Manifold markets",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_predictit_markets",
-        "description": "Get PredictIt markets",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_metaculus_questions",
-        "description": "Get Metaculus questions",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    
-    # === POLYROUTER ===
-    {
-        "name": "polyclawd_polyrouter_markets",
-        "description": "Get markets from PolyRouter (7 platforms unified)",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_polyrouter_search",
-        "description": "Search PolyRouter markets",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query"}
-            },
-            "required": ["query"]
-        }
-    },
-    {
-        "name": "polyclawd_polyrouter_sports",
-        "description": "Get sports markets from PolyRouter",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "league": {"type": "string", "description": "League: nfl, nba, mlb, nhl, soccer"}
-            },
-            "required": ["league"]
-        }
-    },
-    
-    # === ENGINE & TRADING ===
-    {
-        "name": "polyclawd_engine",
-        "description": "Get trading engine status",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_engine_start",
-        "description": "Start the automated trading engine",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_engine_stop",
-        "description": "Stop the automated trading engine",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_engine_trigger",
-        "description": "Manually trigger a trading scan",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_trades",
-        "description": "Get recent trades",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_positions",
-        "description": "Get current positions",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    
-    # === PAPER TRADING ===
-    {
-        "name": "polyclawd_phase",
-        "description": "Get current scaling phase, balance, and position limits",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_balance",
-        "description": "Get paper trading balance",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_simulate",
-        "description": "Simulate position sizing for given parameters",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "balance": {"type": "number", "description": "Account balance in USD"},
-                "confidence": {"type": "number", "description": "Signal confidence 0-100"}
-            },
-            "required": ["balance", "confidence"]
-        }
-    },
-    {
-        "name": "polyclawd_simmer_portfolio",
-        "description": "Get Simmer paper trading portfolio",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_simmer_status",
-        "description": "Get Simmer account status",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    
-    # === CONFIDENCE & LEARNING ===
-    {
-        "name": "polyclawd_keywords",
-        "description": "Get learned keyword performance statistics",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_learn",
-        "description": "Teach keyword learner from a market title",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string", "description": "Market title to learn from"},
-                "outcome": {"type": "string", "enum": ["win", "loss"], "description": "Trade outcome"}
-            },
-            "required": ["title"]
-        }
-    },
-    {
-        "name": "polyclawd_confidence_sources",
-        "description": "Get confidence scores by signal source",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_confidence_calibration",
-        "description": "Get confidence calibration stats",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    
-    # === RESOLUTION & ROTATION ===
-    {
-        "name": "polyclawd_resolution_approaching",
-        "description": "Get markets approaching resolution",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_resolution_imminent",
-        "description": "Get markets with imminent resolution (<24h)",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_rotation_candidates",
-        "description": "Get position rotation candidates (weak positions to exit)",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    
-    # === NEW: POLYMARKET CLOB ===
-    {
-        "name": "polyclawd_polymarket_orderbook",
-        "description": "Get Polymarket orderbook depth for a market",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "slug": {"type": "string", "description": "Market slug (e.g. 'will-trump-win-2024')"},
-                "outcome": {"type": "string", "description": "Outcome: Yes or No", "default": "Yes"}
-            },
-            "required": ["slug"]
-        }
-    },
-    {
-        "name": "polyclawd_polymarket_microstructure",
-        "description": "Get market microstructure analysis (spread, depth, liquidity)",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "slug": {"type": "string", "description": "Market slug"}
-            },
-            "required": ["slug"]
-        }
-    },
-    
-    # === NEW: MANIFOLD ===
-    {
-        "name": "polyclawd_manifold_bets",
-        "description": "Get recent bets on Manifold (track betting flow)",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_manifold_top_traders",
-        "description": "Get top Manifold traders (smart money)",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    
-    # === NEW: METACULUS ===
-    {
-        "name": "polyclawd_metaculus_divergence",
-        "description": "Get Metaculus vs community prediction divergence (expert signal)",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    
-    # === NEW: Cross-Market Correlation ===
-    {
-        "name": "polyclawd_correlation_violations",
-        "description": "Find probability constraint violations between related markets (arb opportunities). E.g., P(Chiefs win SB) should be <= P(Chiefs win AFC)",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "min_violation": {"type": "number", "description": "Minimum violation % to report (default 3)", "default": 3}
-            },
-            "required": []
-        }
-    },
-    {
-        "name": "polyclawd_correlation_entities",
-        "description": "Get all entities (teams, people) with multiple related markets for manual correlation analysis",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    
-    # === NEW: ESPN ===
-    {
-        "name": "polyclawd_espn_injuries",
-        "description": "Get injury report for a sport (predict line movements)",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "sport": {"type": "string", "description": "Sport: nfl, nba, mlb, nhl", "default": "nfl"}
-            },
-            "required": []
-        }
-    },
-    {
-        "name": "polyclawd_espn_standings",
-        "description": "Get team standings for a sport",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "sport": {"type": "string", "description": "Sport: nfl, nba, mlb, nhl", "default": "nfl"}
-            },
-            "required": []
-        }
-    },
-    
-    # === NEW: VEGAS (more sports) ===
-    {
-        "name": "polyclawd_vegas_nba",
-        "description": "Get NBA championship futures odds",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_vegas_mlb",
-        "description": "Get MLB World Series futures odds",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_vegas_nhl",
-        "description": "Get NHL Stanley Cup futures odds",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    
-    # === NEW: POLYROUTER ===
-    {
-        "name": "polyclawd_polyrouter_arbitrage",
-        "description": "Find cross-platform arbitrage opportunities",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_polyrouter_props",
-        "description": "Get player props from multiple platforms",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "league": {"type": "string", "description": "League: nfl, nba, mlb, nhl", "default": "nfl"}
-            },
-            "required": []
-        }
-    },
-    
-    # === NEW: KALSHI ENTERTAINMENT ===
-    {
-        "name": "polyclawd_kalshi_entertainment",
-        "description": "Get Kalshi entertainment/sports props (Super Bowl, Grammys, Oscars)",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    
-    # === MISPRICED CATEGORY STRATEGY ===
-    {
-        "name": "polyclawd_mispriced_category",
-        "description": "Get mispriced category signals from MispricedCategoryWhale strategy (Kalshi + Polymarket). Backtested: 75% WR, 1.25 Sharpe across 155K trades. Scans for mispriced entertainment, weather, crypto, tech categories with volume/whale confirmation.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_shadow_performance",
-        "description": "Get shadow/paper trading performance stats — win rate, Sharpe, drawdown, daily summaries, open trades. Tracks what the strategy WOULD have traded.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_shadow_resolve",
-        "description": "Trigger shadow trade resolution — checks Kalshi API for resolved markets, calculates P&L, generates daily summary.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    # === AI MODEL TRACKER ===
-    {
-        "name": "polyclawd_ai_model_tracker",
-        "description": "Get Arena leaderboard rankings and AI model market edge signals. Shows which company leads, score gaps, and new model detections.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_ai_model_trends",
-        "description": "Get Arena score trends over recent days. Track ranking changes and momentum.",
-        "inputSchema": {"type": "object", "properties": {"days": {"type": "integer", "description": "Number of days to look back (1-90)", "default": 7}}, "required": []}
-    },
-
-    # === SYSTEM ===
-    # === ALPHA SCORE TRACKER ===
-    {
-        "name": "polyclawd_alpha_snapshot",
-        "description": "Take fresh snapshot of Virtuoso confluence alpha scores + BTC/ETH prices. Returns scores for 10 monitored symbols and current crypto prices.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_alpha_history",
-        "description": "Get confluence alpha score history and deltas for a symbol. Shows score trajectory over time.",
-        "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string", "description": "Symbol e.g. SOLUSDT"}, "hours": {"type": "integer", "description": "Hours to look back", "default": 24}}, "required": ["symbol"]}
-    },
-    {
-        "name": "polyclawd_btc_tracker",
-        "description": "Get BTC/ETH price snapshot history with 2h/6h/24h deltas. Key input for prediction market resolution certainty.",
-        "inputSchema": {"type": "object", "properties": {"hours": {"type": "integer", "description": "Hours to look back", "default": 24}}, "required": []}
-    },
-
-    # === WEATHER ===
-    {
-        "name": "polyclawd_weather",
-        "description": "Scan weather temperature markets on Polymarket against Open-Meteo forecasts. Returns signals with edges for 15 cities × 3 days. 80-90% WR on same-day forecasts.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-
-    # === ELECTIONS ===
-    {
-        "name": "polyclawd_election_polls",
-        "description": "Get Wikipedia polling data for tracked elections (Hungary 2026, Brazil 2026, Venezuela). Compares polls to Polymarket prices with incumbency detection.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_cross_platform",
-        "description": "Cross-platform election price comparison (Polymarket vs Manifold Markets). Shows divergence signals for election markets.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-
-    # === STRIKE SCANNER ===
-    {
-        "name": "polyclawd_strike_scanner",
-        "description": "Price-to-Strike probability scanner. Uses Student-t fat-tail model + momentum overlay to calculate fair probability for crypto strike markets (e.g. BTC above $75K).",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-
-    # === RISK & SIZING ===
-    {
-        "name": "polyclawd_risk_guards",
-        "description": "Get current risk guard status: Kelly mode (bootstrap/normal/cold/paused), CV Kelly haircut, correlation group fill levels, time decay windows.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_source_health",
-        "description": "Get data source health status (circuit breakers, staleness, last success timestamps for all 7 sources).",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-
-    {
-        "name": "polyclawd_health",
-        "description": "Get API health status",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-    {
-        "name": "polyclawd_metrics",
-        "description": "Get system metrics",
-        "inputSchema": {"type": "object", "properties": {}, "required": []}
-    },
-
-    {
-        "name": "polyclawd_archetype_classify",
-        "description": "Classify a market title into an archetype (daily_updown, intraday_updown, price_above, price_range, directional, other)",
-        "inputSchema": {"type": "object", "properties": {"title": {"type": "string", "description": "Market title to classify"}}, "required": ["title"]},
-    },
-    {
-        "name": "polyclawd_kill_check",
-        "description": "Check if a market would be killed by archetype kill rules (K1-K6). Returns killed status, reason, and archetype.",
-        "inputSchema": {"type": "object", "properties": {"title": {"type": "string"}, "price_cents": {"type": "integer", "description": "YES price in cents 0-100"}}, "required": ["title", "price_cents"]},
-    },
-    {
-        "name": "polyclawd_wr_buckets",
-        "description": "Get empirical win rates by archetype, side, and price zone from all resolved trades. Core data for confidence redesign.",
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "polyclawd_kill_stats",
-        "description": "Get stats on how many current signals are killed by archetype rules and why.",
-        "inputSchema": {"type": "object", "properties": {}},
-    },
+# Friendly category prefixes for tool naming
+CATEGORY_ORDER = [
+    "signals", "portfolio", "archetype", "markets", "vegas", "espn",
+    "kalshi", "manifold", "metaculus", "predictit", "betfair",
+    "polyrouter", "basket-arb", "copy-trade", "engine", "phase",
+    "kelly", "alerts", "llm", "paper", "simmer", "trading",
+    "scan", "topics", "calculate", "rewards",
 ]
 
+
+# ── helpers ──────────────────────────────────────────────────────────────
+
+def api_get(path: str, timeout: int = 60) -> dict:
+    url = f"{BASE_URL}{path}"
+    req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd-MCP/2.1"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def api_post(path: str, params: dict = None, timeout: int = 30) -> dict:
+    url = f"{BASE_URL}{path}"
+    body = json.dumps(params or {}).encode()
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"User-Agent": "Polyclawd-MCP/2.1", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _path_to_tool_name(path: str) -> str:
+    """Convert /api/signals/weather → polyclawd_signals_weather"""
+    # Strip /api/ prefix
+    clean = re.sub(r"^/api/", "", path)
+    clean = re.sub(r"^/", "", clean)
+    # Replace slashes and hyphens with underscores
+    clean = clean.replace("/", "_").replace("-", "_")
+    # Remove path parameters like {market_id}
+    clean = re.sub(r"\{[^}]+\}", "", clean).strip("_")
+    return f"polyclawd_{clean}"
+
+
+def _path_to_description(path: str, method: str, summary: str, docstring: str) -> str:
+    """Build a concise description from OpenAPI metadata."""
+    if summary:
+        return summary
+    if docstring:
+        # First sentence
+        first = docstring.split(".")[0].strip()
+        if first:
+            return first
+    return f"{method.upper()} {path}"
+
+
+def _extract_params(schema: dict, openapi_spec: dict) -> dict:
+    """Convert OpenAPI parameters to MCP inputSchema."""
+    properties = {}
+    required = []
+    for param in schema:
+        name = param.get("name", "")
+        if param.get("in") == "header":
+            continue  # skip headers
+        p_schema = param.get("schema", {})
+        # Resolve $ref
+        if "$ref" in p_schema:
+            ref_path = p_schema["$ref"].replace("#/", "").split("/")
+            resolved = openapi_spec
+            for part in ref_path:
+                resolved = resolved.get(part, {})
+            p_schema = resolved
+        prop = {"type": p_schema.get("type", "string")}
+        desc = param.get("description", "")
+        if desc:
+            prop["description"] = desc
+        if "default" in p_schema:
+            prop["default"] = p_schema["default"]
+        if "enum" in p_schema:
+            prop["enum"] = p_schema["enum"]
+        properties[name] = prop
+        if param.get("required"):
+            required.append(name)
+    return {"type": "object", "properties": properties, "required": required}
+
+
+# ── auto-discovery ───────────────────────────────────────────────────────
+
+def discover_tools(base_url: str = None) -> List[dict]:
+    """Fetch OpenAPI spec and convert GET endpoints to MCP tool definitions."""
+    url = (base_url or BASE_URL).rstrip("/") + "/api/openapi.json"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd-MCP/2.1"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            spec = json.loads(resp.read().decode())
+    except Exception as e:
+        logger.error("Failed to fetch OpenAPI spec from %s: %s", url, e)
+        return []
+
+    tools = []
+    seen_names = set()
+    paths = spec.get("paths", {})
+
+    for path, methods in sorted(paths.items()):
+        # Skip excluded paths
+        if path in SKIP_PATHS:
+            continue
+        if any(path.startswith(p) for p in SKIP_PREFIXES):
+            continue
+
+        for method in ("get", "post"):
+            if method not in methods:
+                continue
+            endpoint = methods[method]
+
+            # Skip if requires API key (mutating endpoints)
+            security = endpoint.get("security", [])
+            if security:
+                continue
+
+            tool_name = _path_to_tool_name(path)
+            # Deduplicate (GET wins over POST)
+            if tool_name in seen_names:
+                continue
+            seen_names.add(tool_name)
+
+            summary = endpoint.get("summary", "")
+            description = _path_to_description(
+                path, method, summary, endpoint.get("description", "")
+            )
+
+            # Build input schema from query/path parameters
+            params = endpoint.get("parameters", [])
+            input_schema = _extract_params(params, spec)
+
+            tools.append({
+                "name": tool_name,
+                "description": description,
+                "inputSchema": input_schema,
+                "_path": path,
+                "_method": method,
+            })
+
+    logger.info("Auto-discovered %d MCP tools from OpenAPI spec", len(tools))
+    return tools
+
+
+# ── global tool registry (populated on first use) ───────────────────────
+
+TOOLS: List[dict] = []
+_TOOL_MAP: Dict[str, dict] = {}
+
+
+def _ensure_tools():
+    """Lazy-load tools on first access."""
+    global TOOLS, _TOOL_MAP
+    if TOOLS:
+        return
+    TOOLS = discover_tools()
+    _TOOL_MAP = {t["name"]: t for t in TOOLS}
+
+
+def get_tools() -> List[dict]:
+    """Return tool definitions (without internal fields)."""
+    _ensure_tools()
+    return [
+        {k: v for k, v in t.items() if not k.startswith("_")}
+        for t in TOOLS
+    ]
+
+
+# ── tool execution ───────────────────────────────────────────────────────
+
 def handle_tool_call(name: str, arguments: dict) -> Any:
-    """Execute a tool and return the result."""
-    
-    # Core signals
-    if name == "polyclawd_signals":
-        return api_get("/api/signals")
-    elif name == "polyclawd_news":
-        return api_get("/api/signals/news")
-    elif name == "polyclawd_volume_spikes":
-        return api_get("/api/volume/spikes")
-    elif name == "polyclawd_smart_money":
-        return api_get("/api/smart-money")
-    elif name == "polyclawd_inverse_whale":
-        return api_get("/api/inverse-whale")
-    
-    # Arbitrage & edge
-    elif name == "polyclawd_arb_scan":
-        return api_get("/api/arb-scan")
-    elif name == "polyclawd_kalshi_edge":
-        return api_get("/api/kalshi/markets")
-    elif name == "polyclawd_kalshi_entertainment":
-        return api_get("/api/kalshi/entertainment")
-    elif name == "polyclawd_kalshi_all":
-        return api_get("/api/kalshi/all")
-    elif name == "polyclawd_manifold_edge":
-        return api_get("/api/manifold/edge")
-    elif name == "polyclawd_metaculus_edge":
-        return api_get("/api/metaculus/edge")
-    elif name == "polyclawd_predictit_edge":
-        return api_get("/api/predictit/edge")
-    elif name == "polyclawd_betfair_edge":
-        return api_get("/api/betfair/edge")
-    elif name == "polyclawd_polyrouter_edge":
-        return api_get("/api/polyrouter/edge")
-    
-    # Vegas odds
-    elif name == "polyclawd_vegas_nfl":
-        return api_get("/api/vegas/nfl")
-    elif name == "polyclawd_vegas_superbowl":
-        return api_get("/api/vegas/nfl/superbowl")
-    elif name == "polyclawd_vegas_soccer":
-        return api_get("/api/vegas/soccer")
-    elif name == "polyclawd_vegas_epl":
-        return api_get("/api/vegas/epl")
-    elif name == "polyclawd_vegas_ucl":
-        return api_get("/api/vegas/ucl")
-    elif name == "polyclawd_vegas_edge":
-        return api_get("/api/vegas/edge")
-    
-    # ESPN odds
-    elif name == "polyclawd_espn_moneyline":
-        sport = arguments.get("sport", "nfl")
-        return api_get(f"/api/espn/moneyline/{sport}")
-    elif name == "polyclawd_espn_moneylines":
-        return api_get("/api/espn/moneylines")
-    elif name == "polyclawd_espn_edge":
-        return api_get("/api/espn/edge")
-    
-    # Markets
-    elif name == "polyclawd_markets_trending":
-        return api_get("/api/markets/trending")
-    elif name == "polyclawd_markets_opportunities":
-        return api_get("/api/markets/opportunities")
-    elif name == "polyclawd_markets_search":
-        query = arguments.get("query", "")
-        return api_get(f"/api/markets/search?q={query}")
-    elif name == "polyclawd_markets_new":
-        return api_get("/api/markets/new")
-    elif name == "polyclawd_kalshi_markets":
-        return api_get("/api/kalshi/markets")
-    elif name == "polyclawd_manifold_markets":
-        return api_get("/api/manifold/markets")
-    elif name == "polyclawd_predictit_markets":
-        return api_get("/api/predictit/markets")
-    elif name == "polyclawd_metaculus_questions":
-        return api_get("/api/metaculus/questions")
-    
-    # PolyRouter
-    elif name == "polyclawd_polyrouter_markets":
-        return api_get("/api/polyrouter/markets")
-    elif name == "polyclawd_polyrouter_search":
-        query = arguments.get("query", "")
-        return api_get(f"/api/polyrouter/search?q={query}")
-    elif name == "polyclawd_polyrouter_sports":
-        league = arguments.get("league", "nfl")
-        return api_get(f"/api/polyrouter/sports/{league}")
-    
-    # Engine & trading
-    elif name == "polyclawd_engine":
-        return api_get("/api/engine/status")
-    elif name == "polyclawd_engine_start":
-        return api_post("/api/engine/start")
-    elif name == "polyclawd_engine_stop":
-        return api_post("/api/engine/stop")
-    elif name == "polyclawd_engine_trigger":
-        return api_post("/api/engine/trigger")
-    elif name == "polyclawd_trades":
-        return api_get("/api/trades")
-    elif name == "polyclawd_positions":
-        return api_get("/api/positions")
-    
-    # Paper trading
-    elif name == "polyclawd_phase":
-        return api_get("/api/phase/current")
-    elif name == "polyclawd_balance":
-        return api_get("/api/paper/balance")
-    elif name == "polyclawd_simulate":
-        params = {
-            "balance": arguments.get("balance", 1000),
-            "confidence": arguments.get("confidence", 50),
-            "win_rate": arguments.get("win_rate", 0.55),
-            "win_streak": arguments.get("win_streak", 0),
-            "source_agreement": arguments.get("source_agreement", 1)
-        }
-        return api_post("/api/phase/simulate", params)
-    elif name == "polyclawd_simmer_portfolio":
-        return api_get("/api/simmer/portfolio")
-    elif name == "polyclawd_simmer_status":
-        return api_get("/api/simmer/status")
-    
-    # Confidence & learning
-    elif name == "polyclawd_keywords":
-        return api_get("/api/keywords/stats")
-    elif name == "polyclawd_learn":
-        params = {"title": arguments.get("title", "")}
-        if arguments.get("outcome"):
-            params["outcome"] = arguments["outcome"]
-        params["market_id"] = f"mcp-{hash(params['title']) % 10000}"
-        return api_post("/api/keywords/learn", params)
-    elif name == "polyclawd_confidence_sources":
-        return api_get("/api/confidence/sources")
-    elif name == "polyclawd_confidence_calibration":
-        return api_get("/api/confidence/calibration")
-    
-    # Resolution & rotation
-    elif name == "polyclawd_resolution_approaching":
-        return api_get("/api/resolution/approaching")
-    elif name == "polyclawd_resolution_imminent":
-        return api_get("/api/resolution/imminent")
-    elif name == "polyclawd_rotation_candidates":
-        return api_get("/api/rotation/candidates")
-    
-    # New: Polymarket CLOB
-    elif name == "polyclawd_polymarket_orderbook":
-        slug = arguments.get("slug", "")
-        outcome = arguments.get("outcome", "Yes")
-        return api_get(f"/api/polymarket/orderbook/{slug}?outcome={outcome}")
-    elif name == "polyclawd_polymarket_microstructure":
-        slug = arguments.get("slug", "")
-        return api_get(f"/api/polymarket/microstructure/{slug}")
-    
-    # New: Manifold
-    elif name == "polyclawd_manifold_bets":
-        return api_get("/api/manifold/bets")
-    elif name == "polyclawd_manifold_top_traders":
-        return api_get("/api/manifold/top-traders")
-    
-    # New: Metaculus
-    elif name == "polyclawd_metaculus_divergence":
-        return api_get("/api/metaculus/divergence")
-    
-    # New: Cross-Market Correlation
-    elif name == "polyclawd_correlation_violations":
-        min_violation = arguments.get("min_violation", 3)
-        return api_get(f"/api/correlation/violations?min_violation={min_violation}")
-    elif name == "polyclawd_correlation_entities":
-        return api_get("/api/correlation/entities")
-    
-    # New: ESPN
-    elif name == "polyclawd_espn_injuries":
-        sport = arguments.get("sport", "nfl")
-        return api_get(f"/api/espn/injuries/{sport}")
-    elif name == "polyclawd_espn_standings":
-        sport = arguments.get("sport", "nfl")
-        return api_get(f"/api/espn/standings/{sport}")
-    
-    # New: Vegas (more sports)
-    elif name == "polyclawd_vegas_nba":
-        return api_get("/api/vegas/nba")
-    elif name == "polyclawd_vegas_mlb":
-        return api_get("/api/vegas/mlb")
-    elif name == "polyclawd_vegas_nhl":
-        return api_get("/api/vegas/nhl")
-    
-    # New: PolyRouter
-    elif name == "polyclawd_polyrouter_arbitrage":
-        return api_get("/api/polyrouter/arbitrage")
-    elif name == "polyclawd_polyrouter_props":
-        league = arguments.get("league", "nfl")
-        return api_get(f"/api/polyrouter/props/{league}")
-    
-    # New: Kalshi entertainment
-    elif name == "polyclawd_kalshi_entertainment":
-        return api_get("/api/kalshi/entertainment")
-    
-    # Mispriced Category Strategy
-    elif name == "polyclawd_mispriced_category":
-        return api_get("/api/signals/mispriced-category")
-    elif name == "polyclawd_shadow_performance":
-        return api_get("/api/signals/shadow-performance")
-    elif name == "polyclawd_shadow_resolve":
-        return api_post("/api/signals/shadow-resolve")
-    
-    
-    # AI Model Tracker
-    elif name == "polyclawd_ai_model_tracker":
-        return api_get("/api/signals/ai-models")
-    elif name == "polyclawd_ai_model_trends":
-        days = arguments.get("days", 7)
-        return api_get(f"/api/signals/ai-models/trends?days={days}")
-    # System
-    elif name == "polyclawd_alpha_snapshot":
-        return api_get("/api/signals/alpha-snapshot")
-    elif name == "polyclawd_alpha_history":
-        symbol = arguments.get("symbol", "SOLUSDT")
-        hours = arguments.get("hours", 24)
-        return api_get(f"/api/signals/alpha-history/{symbol}?hours={hours}")
-    elif name == "polyclawd_btc_tracker":
-        hours = arguments.get("hours", 24)
-        return api_get(f"/api/signals/btc-tracker?hours={hours}")
-
-    # Weather
-    elif name == "polyclawd_weather":
-        return api_get("/api/signals/weather")
-    # Elections
-    elif name == "polyclawd_election_polls":
-        return api_get("/api/signals/election-polls")
-    elif name == "polyclawd_cross_platform":
-        return api_get("/api/signals/cross-platform")
-    # Strike scanner
-    elif name == "polyclawd_strike_scanner":
-        return api_get("/api/signals/strike-scanner")
-    # Risk & sizing
-    elif name == "polyclawd_risk_guards":
-        return api_get("/api/portfolio/risk-guards")
-    elif name == "polyclawd_source_health":
-        return api_get("/api/source-health")
-    
-    elif name == "polyclawd_health":
-        return api_get("/api/health")
-    elif name == "polyclawd_metrics":
-        return api_get("/api/metrics")
-
-    elif name == "polyclawd_archetype_classify":
-        return api_get("/api/archetype/classify", params)
-    elif name == "polyclawd_kill_check":
-        return api_get("/api/archetype/kill-check", params)
-    elif name == "polyclawd_wr_buckets":
-        return api_get("/api/archetype/wr-buckets")
-    elif name == "polyclawd_kill_stats":
-        return api_get("/api/archetype/kill-stats")
-    
-    else:
+    """Execute a tool by routing to the corresponding API endpoint."""
+    _ensure_tools()
+    tool = _TOOL_MAP.get(name)
+    if not tool:
         return {"error": f"Unknown tool: {name}"}
 
-def send_response(id: Any, result: Any):
-    """Send JSON-RPC response."""
-    response = {
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result
-    }
-    print(json.dumps(response), flush=True)
+    path = tool["_path"]
+    method = tool["_method"]
 
-def send_error(id: Any, code: int, message: str):
-    """Send JSON-RPC error."""
-    response = {
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {"code": code, "message": message}
+    # Substitute path parameters like {symbol}, {position_id}
+    for key, val in arguments.items():
+        placeholder = "{" + key + "}"
+        if placeholder in path:
+            path = path.replace(placeholder, str(val))
+
+    # Remaining arguments become query params for GET
+    query_params = {
+        k: v for k, v in arguments.items()
+        if "{" + k + "}" not in tool["_path"]
     }
-    print(json.dumps(response), flush=True)
+
+    if method == "get":
+        if query_params:
+            qs = "&".join(f"{k}={v}" for k, v in query_params.items())
+            path = f"{path}?{qs}"
+        return api_get(path)
+    else:
+        return api_post(path, query_params)
+
+
+# ── stdio MCP transport ─────────────────────────────────────────────────
+
+def send_response(id, result):
+    msg = json.dumps({"jsonrpc": "2.0", "id": id, "result": result})
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
+
+
+def send_error(id, code, message):
+    msg = json.dumps({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
+
 
 def main():
-    """Main stdio loop."""
+    """Run MCP server in stdio mode."""
+    _ensure_tools()
+    logger.info("Polyclawd MCP Server started — %d tools", len(TOOLS))
+
     for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
         try:
-            request = json.loads(line.strip())
+            request = json.loads(line)
         except json.JSONDecodeError:
             continue
-        
-        method = request.get("method")
+
         id = request.get("id")
+        method = request.get("method")
         params = request.get("params", {})
-        
+
         if method == "initialize":
             send_response(id, {
                 "protocolVersion": PROTOCOL_VERSION,
-                "serverInfo": {
-                    "name": "polyclawd",
-                    "version": "2.0.0"
-                },
-                "capabilities": {
-                    "tools": {}
-                }
+                "serverInfo": {"name": "polyclawd", "version": "2.1.0"},
+                "capabilities": {"tools": {}},
             })
-        
+
         elif method == "notifications/initialized":
-            pass  # No response needed
-        
+            pass
+
         elif method == "tools/list":
-            send_response(id, {"tools": TOOLS})
-        
+            send_response(id, {"tools": get_tools()})
+
         elif method == "tools/call":
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
@@ -916,9 +291,11 @@ def main():
                     {"type": "text", "text": json.dumps(result, indent=2)}
                 ]
             })
-        
+
         else:
             send_error(id, -32601, f"Method not found: {method}")
 
+
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     main()
