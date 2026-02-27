@@ -718,8 +718,9 @@ function renderPositions(positions) {
     const unrealHtml = unreal != null
       ? `<div class="unrealized ${unreal >= 0 ? 'up' : 'down'}">${unreal >= 0 ? '+' : ''}$${unreal.toFixed(2)} unrealized</div>`
       : '';
-    const currentPriceHtml = p.current_price != null
-      ? `<div class="pos-stat"><div class="pos-stat-label">Now</div><div class="pos-stat-value">${(p.current_price * 100).toFixed(0)}¢</div></div>`
+    const displayCurrentPrice = p.current_price != null ? (p.side === 'NO' ? 1 - p.current_price : p.current_price) : null;
+    const currentPriceHtml = displayCurrentPrice != null
+      ? `<div class="pos-stat"><div class="pos-stat-label">Now</div><div class="pos-stat-value">${(displayCurrentPrice * 100).toFixed(0)}¢</div></div>`
       : '';
     const mUrl = marketUrl(p);
     const titleText = (p.market_title || '').substring(0, 80);
@@ -732,7 +733,7 @@ function renderPositions(positions) {
       <div class="pos-grid">
         <div class="pos-stat">
           <div class="pos-stat-label">Entry</div>
-          <div class="pos-stat-value">${((p.entry_price || 0) * 100).toFixed(0)}¢</div>
+          <div class="pos-stat-value">${((p.side === 'NO' ? 1 - (p.entry_price || 0) : (p.entry_price || 0)) * 100).toFixed(0)}¢</div>
         </div>
         ${currentPriceHtml}
         <div class="pos-stat">
@@ -782,7 +783,7 @@ function renderHistory(history, liveRes) {
       return `<tr>
         <td data-label="Market">${tTitleHtml}</td>
         <td data-label="Side"><span class="badge badge-${(t.side||'').toLowerCase()}">${t.side}</span></td>
-        <td data-label="Entry" class="mono">${((t.entry_price||0)*100).toFixed(0)}¢</td>
+        <td data-label="Entry" class="mono">${((t.side === 'NO' ? 1 - (t.entry_price||0) : (t.entry_price||0))*100).toFixed(0)}¢</td>
         <td data-label="Bet" class="mono">$${(t.bet_size||0).toFixed(2)}</td>
         <td data-label="P&L" class="mono ${pnl >= 0 ? 'result-won' : 'result-lost'}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
         <td data-label="Result">${t.status === 'won' ? '✅ Won' : '❌ Lost'}</td>
