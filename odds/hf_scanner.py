@@ -107,7 +107,7 @@ def _detect_duration(text: str) -> Optional[str]:
         return "5min"
     if any(p in text_lower for p in ["15-minute", "15 minute", "15min", "15m ", "next 15"]):
         return "15min"
-    if any(p in text_lower for p in ["1-minute", "1 minute", "1min", "1m "]):
+    if any(p in text_lower for p in ["1-minute", "1 minute", "1min"]):
         return "1min"
     if any(p in text_lower for p in ["1-hour", "1 hour", "1h ", "hourly"]):
         return "1h"
@@ -233,12 +233,16 @@ def discover_hf_markets(limit: int = 200) -> List[HFMarket]:
         if not asset:
             continue
         
-        # Must be short-duration
+        # Must be short-duration — require time-range in title or explicit duration keyword
         duration = _detect_duration(question)
         if not duration:
-            duration = _detect_duration_from_dates(
-                m.get("createdAt"), m.get("endDate")
-            )
+            # Only fall back to date-based detection if title contains "up or down"
+            # This prevents long-term markets (e.g. "bitcoin hit $1m before GTA VI") 
+            # from being misclassified as HF markets
+            if "up or down" in question.lower():
+                duration = _detect_duration_from_dates(
+                    m.get("createdAt"), m.get("endDate")
+                )
         if not duration:
             continue
         
