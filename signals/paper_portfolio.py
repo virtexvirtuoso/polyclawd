@@ -470,6 +470,28 @@ def evaluate_signal(signal: dict) -> dict:
                     bet_size *= 1.10  # 3x+ volume = FOMO, 10% boost
                     logger.info("Volume spike boost: market=%s ratio=%.1fx bet_size=%.2f", market_id[:30], volume_spike_data["ratio"], bet_size)
 
+    # Score velocity — crypto markets get multiplier from Virtuoso confluence score trend
+    score_velocity_data = None
+    if archetype in ("crypto", "price_above", "price_range", "daily_updown", "intraday_updown", "directional"):
+        try:
+            from signals.alpha_score_tracker import score_velocity_modifier
+            # Try to match signal to a symbol (e.g. "BTC" in title → BTCUSDT)
+            title_upper = (signal.get("market_title") or signal.get("title") or "").upper()
+            symbol = None
+            for sym in ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "DOT", "LINK", "MATIC"]:
+                if sym in title_upper:
+                    symbol = sym + "USDT"
+                    break
+            if symbol:
+                sv = score_velocity_modifier(symbol)
+                score_velocity_data = sv
+                if sv["multiplier"] != 1.0:
+                    bet_size *= sv["multiplier"]
+                    logger.info("📈 Score velocity: %s delta=%.1f mult=%.3f bet_size=%.2f",
+                                symbol, sv.get("delta") or 0, sv["multiplier"], bet_size)
+        except Exception as e:
+            logger.debug("Score velocity skipped: %s", e)
+
     # Archetype boost — proven profitable archetypes get larger size
     if archetype in ARCHETYPE_BOOST:
         boost = ARCHETYPE_BOOST[archetype]
@@ -481,7 +503,7 @@ def evaluate_signal(signal: dict) -> dict:
     if bet_size > bankroll:
         return {"eligible": False, "reason": f"Insufficient bankroll ${bankroll:.2f}", "edge": edge, "kelly_pct": kelly_pct, "bet_size": 0}
     
-    return {"eligible": True, "bet_size": round(bet_size, 2), "edge": round(edge, 4), "kelly_pct": round(kelly_pct, 4), "reason": "Criteria met", "empirical": empirical_result, "volume_spike": volume_spike_data, "time_decay": time_decay_data, "kelly": kelly_data}
+    return {"eligible": True, "bet_size": round(bet_size, 2), "edge": round(edge, 4), "kelly_pct": round(kelly_pct, 4), "reason": "Criteria met", "empirical": empirical_result, "volume_spike": volume_spike_data, "time_decay": time_decay_data, "score_velocity": score_velocity_data, "kelly": kelly_data}
 
 
 def open_position(signal: dict) -> dict:
