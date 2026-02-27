@@ -74,7 +74,31 @@ ENSEMBLE_MODELS = [
 # ── Cache ────────────────────────────────────────────────────────────────
 _cache: Dict[str, dict] = {}
 _cache_ts: Dict[str, float] = {}
-CACHE_TTL = 1800  # 30 min — forecasts don't change faster than this
+CACHE_TTL = 3600  # 1 hour — forecasts update every 3-12h, no need to poll faster
+
+# Rate limit tracking per source
+_rate_limits = {
+    "pirate_weather": {"calls": 0, "reset_ts": 0, "max_per_hour": 15, "max_per_month": 10000},
+    "tomorrow_io": {"calls": 0, "reset_ts": 0, "max_per_hour": 20, "max_per_day": 450},
+    "weatherapi": {"calls": 0, "reset_ts": 0, "max_per_hour": 50, "max_per_month": 95000},
+}
+
+def _rate_check(source: str) -> bool:
+    """Check if we can make another API call for this source."""
+    if source not in _rate_limits:
+        return True
+    rl = _rate_limits[source]
+    now = time.time()
+    # Reset hourly counter
+    if now - rl["reset_ts"] > 3600:
+        rl["calls"] = 0
+        rl["reset_ts"] = now
+    return rl["calls"] < rl["max_per_hour"]
+
+def _rate_track(source: str):
+    """Record an API call for rate limiting."""
+    if source in _rate_limits:
+        _rate_limits[source]["calls"] += 1
 
 
 def _cache_key(city: str, date: str) -> str:
@@ -233,9 +257,21 @@ def _fetch_open_meteo_ensemble_fallback(lat: float, lon: float, date: str) -> Op
 
 
 # ── Source 2: Pirate Weather ────────────────────────────────────────────
+# Returns 7 days in one call — cache all days per city
+
+_pirate_cache: Dict[str, dict] = {}  # "lat,lon" → {date_str: result}
+_pirate_cache_ts: Dict[str, float] = {}
 
 def _fetch_pirate_weather(lat: float, lon: float, date: str) -> Optional[dict]:
     if not PIRATE_API_KEY:
+        return None
+    
+    loc_key = f"{lat},{lon}"
+    if loc_key in _pirate_cache and (time.time() - _pirate_cache_ts.get(loc_key, 0)) < CACHE_TTL:
+        return _pirate_cache[loc_key].get(date)
+    
+    if not _rate_check("pirate_weather"):
+        logger.debug("Pirate Weather rate limited, skipping")
         return None
     url = (
         f"https://api.pirateweather.net/forecast/{PIRATE_API_KEY}"
@@ -245,24 +281,39 @@ def _fetch_pirate_weather(lat: float, lon: float, date: str) -> Optional[dict]:
     if not data or "daily" not in data:
         return None
 
-    target_date = datetime.strptime(date, "%Y-%m-%d").date()
+    _rate_track("pirate_weather")
+    city_days = {}
     for day in data["daily"].get("data", []):
         day_dt = datetime.fromtimestamp(day["time"], tz=timezone.utc).date()
-        if day_dt == target_date:
-            return {
-                "source": "pirate_weather",
-                "high_f": round(day.get("temperatureHigh", 0), 1),
-                "high_std_f": None,  # Point estimate only
-                "low_f": round(day.get("temperatureLow", 0), 1),
-                "model": "GEFS+GFS+HRRR",
-            }
-    return None
+        day_str = day_dt.strftime("%Y-%m-%d")
+        city_days[day_str] = {
+            "source": "pirate_weather",
+            "high_f": round(day.get("temperatureHigh", 0), 1),
+            "high_std_f": None,
+            "low_f": round(day.get("temperatureLow", 0), 1),
+            "model": "GEFS+GFS+HRRR",
+        }
+    _pirate_cache[loc_key] = city_days
+    _pirate_cache_ts[loc_key] = time.time()
+    return city_days.get(date)
 
 
 # ── Source 3: Tomorrow.io ────────────────────────────────────────────────
+# Returns multi-day forecast — cache all days per city
+
+_tomorrow_cache: Dict[str, dict] = {}
+_tomorrow_cache_ts: Dict[str, float] = {}
 
 def _fetch_tomorrow_io(lat: float, lon: float, date: str) -> Optional[dict]:
     if not TOMORROW_API_KEY:
+        return None
+    
+    loc_key = f"{lat},{lon}"
+    if loc_key in _tomorrow_cache and (time.time() - _tomorrow_cache_ts.get(loc_key, 0)) < CACHE_TTL:
+        return _tomorrow_cache[loc_key].get(date)
+    
+    if not _rate_check("tomorrow_io"):
+        logger.debug("Tomorrow.io rate limited, skipping")
         return None
     url = (
         f"https://api.tomorrow.io/v4/weather/forecast"
@@ -274,59 +325,76 @@ def _fetch_tomorrow_io(lat: float, lon: float, date: str) -> Optional[dict]:
     data = _fetch_json(url, timeout=10)
     if not data:
         return None
+    _rate_track("tomorrow_io")
 
-    target_date = datetime.strptime(date, "%Y-%m-%d").date()
-    
-    # Tomorrow.io daily timeline
+    # Cache ALL days from response
     timelines = data.get("timelines", {})
     daily = timelines.get("daily", [])
+    city_days = {}
     
     for day in daily:
-        day_dt = datetime.fromisoformat(day["time"].replace("Z", "+00:00")).date()
-        if day_dt == target_date:
+        try:
+            day_dt = datetime.fromisoformat(day["time"].replace("Z", "+00:00")).date()
+            day_str = day_dt.strftime("%Y-%m-%d")
             vals = day.get("values", {})
-            return {
+            city_days[day_str] = {
                 "source": "tomorrow_io",
                 "high_f": round(vals.get("temperatureMax", 0), 1),
                 "high_std_f": None,
                 "low_f": round(vals.get("temperatureMin", 0), 1),
                 "model": "Tomorrow_AI",
             }
-    return None
+        except Exception:
+            continue
+    
+    _tomorrow_cache[loc_key] = city_days
+    _tomorrow_cache_ts[loc_key] = time.time()
+    return city_days.get(date)
 
 
 # ── Source 4: WeatherAPI.com ─────────────────────────────────────────────
+# Always request max days (3 for free tier) — cache all days per city
+
+_weatherapi_cache: Dict[str, dict] = {}
+_weatherapi_cache_ts: Dict[str, float] = {}
 
 def _fetch_weatherapi(lat: float, lon: float, date: str) -> Optional[dict]:
     if not WEATHERAPI_KEY:
         return None
     
-    target_date = datetime.strptime(date, "%Y-%m-%d").date()
-    days_ahead = (target_date - datetime.now(timezone.utc).date()).days
-    if days_ahead < 0 or days_ahead > 13:
+    loc_key = f"{lat},{lon}"
+    if loc_key in _weatherapi_cache and (time.time() - _weatherapi_cache_ts.get(loc_key, 0)) < CACHE_TTL:
+        return _weatherapi_cache[loc_key].get(date)
+    
+    if not _rate_check("weatherapi"):
+        logger.debug("WeatherAPI rate limited, skipping")
         return None
 
+    # Always fetch 3 days (covers our today + next 2 days scan window)
     url = (
         f"http://api.weatherapi.com/v1/forecast.json"
         f"?key={WEATHERAPI_KEY}"
         f"&q={lat},{lon}"
-        f"&days={days_ahead + 1}"
+        f"&days=3"
     )
     data = _fetch_json(url, timeout=10)
     if not data or "forecast" not in data:
         return None
+    _rate_track("weatherapi")
 
+    city_days = {}
     for day in data["forecast"].get("forecastday", []):
-        if day["date"] == date:
-            d = day["day"]
-            return {
-                "source": "weatherapi",
-                "high_f": round(d.get("maxtemp_f", 0), 1),
-                "high_std_f": None,
-                "low_f": round(d.get("mintemp_f", 0), 1),
-                "model": "WeatherAPI_Blend",
-            }
-    return None
+        d = day["day"]
+        city_days[day["date"]] = {
+            "source": "weatherapi",
+            "high_f": round(d.get("maxtemp_f", 0), 1),
+            "high_std_f": None,
+            "low_f": round(d.get("mintemp_f", 0), 1),
+            "model": "WeatherAPI_Blend",
+        }
+    _weatherapi_cache[loc_key] = city_days
+    _weatherapi_cache_ts[loc_key] = time.time()
+    return city_days.get(date)
 
 
 # ── Ensemble aggregation ─────────────────────────────────────────────────
@@ -592,6 +660,7 @@ def source_health() -> dict:
             "key_set": bool(WEATHERAPI_KEY),
         },
         "cache_entries": len(_cache),
+        "rate_limits": {k: {"calls_this_hour": v["calls"], "max_per_hour": v["max_per_hour"]} for k, v in _rate_limits.items()},
     }
 
 
