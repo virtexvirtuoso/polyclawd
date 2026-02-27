@@ -332,8 +332,11 @@ def evaluate_signal(signal: dict) -> dict:
     # Price floor/ceiling filter — reject garbage and near-certain contracts
     # "Namibia wins World Cup" at 0.1¢ = garbage, don't buy it
     effective_price = market_price if side == "YES" else (1 - market_price)
-    if effective_price < MIN_PRICE:
-        return {"eligible": False, "reason": f"Price {effective_price:.1%} below floor {MIN_PRICE:.0%} — garbage contract", "edge": 0, "kelly_pct": 0, "bet_size": 0}
+    # Weather YES bets at low prices are legitimate longshots (e.g. 3¢ temperature bucket)
+    early_archetype = signal.get("archetype") or ""
+    price_floor = 0.01 if early_archetype == "weather" else MIN_PRICE
+    if effective_price < price_floor:
+        return {"eligible": False, "reason": f"Price {effective_price:.1%} below floor {price_floor:.0%} — garbage contract", "edge": 0, "kelly_pct": 0, "bet_size": 0}
     if effective_price > MAX_PRICE:
         return {"eligible": False, "reason": f"Price {effective_price:.1%} above ceiling {MAX_PRICE:.0%} — no edge", "edge": 0, "kelly_pct": 0, "bet_size": 0}
     
@@ -355,7 +358,7 @@ def evaluate_signal(signal: dict) -> dict:
     if HAS_EMPIRICAL:
         try:
             market_title = signal.get("market") or signal.get("market_title") or signal.get("title", "")
-            empirical_result = calculate_empirical_confidence(market_title, side or "YES", market_price)
+            empirical_result = calculate_empirical_confidence(market_title, side or "YES", market_price, override_archetype=early_archetype or None)
             if empirical_result["killed"]:
                 return {"eligible": False, "reason": f"Kill rule: {empirical_result['kill_reason']}", "edge": 0, "kelly_pct": 0, "bet_size": 0, "empirical": empirical_result}
             confidence = empirical_result["confidence"]
@@ -379,7 +382,7 @@ def evaluate_signal(signal: dict) -> dict:
         from mispriced_category_signal import classify_archetype
     except ImportError:
         classify_archetype = lambda s: s.get("archetype", "unknown")
-    archetype = classify_archetype(signal)
+    archetype = early_archetype or signal.get("archetype") or classify_archetype(signal.get("market_title") or signal.get("title") or "")
     if archetype in ARCHETYPE_BLOCKLIST:
         logger.info("🚫 BLOCKED archetype=%s market=%s (0%% WR, -100%% ROI)", archetype, signal.get("market", "")[:40])
         return {"eligible": False, "reason": f"Blocked archetype: {archetype} (0% historical WR)", "edge": edge, "kelly_pct": 0, "bet_size": 0}
@@ -498,7 +501,11 @@ def evaluate_signal(signal: dict) -> dict:
         bet_size *= boost
         logger.info("🎯 Archetype boost: %s x%.1f bet_size=%.2f", archetype, boost, bet_size)
 
-    bet_size = max(MIN_BET, min(MAX_BET, bet_size))
+    # Weather-specific sizing: $5-$50 (thin liquidity, uncorrelated small bets)
+    if archetype == "weather":
+        bet_size = max(5.0, min(50.0, bet_size))
+    else:
+        bet_size = max(MIN_BET, min(MAX_BET, bet_size))
     
     if bet_size > bankroll:
         return {"eligible": False, "reason": f"Insufficient bankroll ${bankroll:.2f}", "edge": edge, "kelly_pct": kelly_pct, "bet_size": 0}

@@ -129,14 +129,14 @@ def classify_duration(days_to_close: float) -> str:
 
 # ─── Kill Rules ──────────────────────────────────────────────────────
 
-def check_kill_rules(title: str, entry_price: float, side: str) -> Tuple[bool, str]:
+def check_kill_rules(title: str, entry_price: float, side: str, signal_archetype: str = None) -> Tuple[bool, str]:
     """Hard reject losing combos. Returns (killed, reason)."""
-    archetype = classify_archetype(title)
+    archetype = signal_archetype or classify_archetype(title)
     # entry_price here is always the YES market price (0-1)
     price_cents = int(entry_price * 100)
 
-    # K3: Anything below 30¢
-    if price_cents < 30:
+    # K3: Anything below 30¢ — exempt weather (multi-outcome categorical, low prices are normal)
+    if price_cents < 30 and archetype != "weather":
         return True, f"K3: entry {price_cents}¢ < 30¢ floor (20% WR historically)"
 
     # K1: Intraday up/down — any side (coin flip minus fees)
@@ -242,6 +242,7 @@ def calculate_empirical_confidence(
     entry_price: float,
     force_refresh: bool = False,
     days_to_close: float = 7.0,
+    override_archetype: str = None,
 ) -> Dict:
     """Calculate honest win probability from empirical data.
     
@@ -262,12 +263,12 @@ def calculate_empirical_confidence(
     """
     global _wr_cache, _wr_cache_count
 
-    archetype = classify_archetype(title)
+    archetype = override_archetype or classify_archetype(title)
     zone = price_zone(entry_price)
     zone_mod = PRICE_ZONE_MODIFIERS.get(zone, 1.0)
 
     # Kill rule check
-    killed, kill_reason = check_kill_rules(title, entry_price, side)
+    killed, kill_reason = check_kill_rules(title, entry_price, side, signal_archetype=archetype)
     if killed:
         return {
             "confidence": 0.0,
