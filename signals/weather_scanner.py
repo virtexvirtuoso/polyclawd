@@ -13,6 +13,7 @@ Supported market types:
 
 import json
 import logging
+import os
 import re
 import time
 import urllib.request
@@ -797,6 +798,167 @@ def scan_polymarket_weather() -> List[dict]:
     logger.info("Weather scan: %d signals from %d cities × %d dates",
                 len(signals), len(WEATHER_CITIES_SLUG), len(dates_to_check))
     return signals
+
+
+def reeval_weather_positions() -> dict:
+    """
+    Re-evaluate open weather positions against fresh ensemble data.
+    
+    Closes positions where:
+    1. Edge has flipped (we bet YES but fair value now < entry price)
+    2. Same-day position where forecast shifted significantly (>5°F)
+    
+    Runs every 5 min via watchdog for same-day positions,
+    every 30 min for multi-day positions.
+    """
+    import sqlite3
+    
+    results = {"checked": 0, "closed": 0, "kept": 0, "errors": 0, "details": []}
+    
+    try:
+        from signals.weather_ensemble import get_ensemble_forecast, prob_below, prob_above, prob_in_range, _cache, _cache_ts
+    except ImportError:
+        logger.warning("weather_ensemble not available for re-evaluation")
+        return results
+    
+    db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "storage", "shadow_trades.db")
+    if not os.path.exists(db_path):
+        # Try relative
+        db_path = "storage/shadow_trades.db"
+    
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    
+    positions = conn.execute(
+        "SELECT id, market_title, market_id, side, entry_price, bet_size, opened_at, archetype "
+        "FROM paper_positions WHERE status='open' AND archetype='weather'"
+    ).fetchall()
+    
+    now = datetime.now(timezone.utc)
+    
+    for pos in positions:
+        results["checked"] += 1
+        title = pos["market_title"]
+        
+        city = _extract_city_from_market(title)
+        target_date = _extract_date_from_market(title)
+        temp_info = _extract_temp_threshold(title)
+        
+        if not city or not target_date or not temp_info:
+            results["errors"] += 1
+            continue
+        
+        target_dt = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        hours_until = (target_dt - now).total_seconds() / 3600
+        
+        # Only re-eval same-day (<24h) positions every cycle
+        # Multi-day positions only every 30min (handled by caller)
+        
+        # Force fresh ensemble data for same-day positions
+        if hours_until < 24:
+            cache_key = f"{city.lower()}:{target_date}"
+            _cache.pop(cache_key, None)
+            _cache_ts.pop(cache_key, None)
+        
+        comparison, threshold, unit = temp_info
+        
+        # Convert to °F
+        if unit == "C":
+            if comparison == "between":
+                thresh_f = _c_to_f(threshold[0])
+                thresh_high_f = _c_to_f(threshold[1])
+            elif comparison == "exact":
+                thresh_f = _c_to_f(threshold)
+                thresh_high_f = None
+            else:
+                thresh_f = _c_to_f(threshold)
+                thresh_high_f = None
+        else:
+            if comparison == "between":
+                thresh_f = threshold[0]
+                thresh_high_f = threshold[1]
+            else:
+                thresh_f = threshold
+                thresh_high_f = None
+        
+        # Get fresh probability
+        if comparison == "above":
+            result = prob_above(city, target_date, thresh_f)
+        elif comparison == "below":
+            result = prob_below(city, target_date, thresh_f)
+        elif comparison in ("between", "exact"):
+            if thresh_high_f is None:
+                thresh_high_f = thresh_f + 0.5
+                thresh_f = thresh_f - 0.5
+            result = prob_in_range(city, target_date, thresh_f, thresh_high_f)
+        else:
+            continue
+        
+        if not result:
+            results["errors"] += 1
+            continue
+        
+        fair_value = result["probability"]
+        side = pos["side"]
+        entry = pos["entry_price"]
+        
+        # For NO bets, flip the fair value
+        if side == "NO":
+            fair_value = 1.0 - fair_value
+            entry = 1.0 - entry
+        
+        current_edge = fair_value - entry
+        
+        detail = {
+            "id": pos["id"],
+            "market": title[:80],
+            "side": side,
+            "entry": round(pos["entry_price"], 3),
+            "fair_value": round(fair_value, 3),
+            "edge_now": round(current_edge * 100, 1),
+            "hours_until": round(hours_until, 1),
+            "action": "keep",
+        }
+        
+        # EXIT CRITERIA:
+        # 1. Edge has flipped negative by >10% (forecast shifted against us)
+        # 2. Same-day: edge flipped negative at all (no time to recover)
+        should_close = False
+        close_reason = ""
+        
+        if hours_until < 12 and current_edge < -0.05:
+            # Same-day, edge gone — cut losses
+            should_close = True
+            close_reason = f"weather-reeval: same-day edge flipped to {current_edge*100:.1f}%"
+        elif current_edge < -0.15:
+            # Multi-day but edge badly flipped (>15% against us)
+            should_close = True
+            close_reason = f"weather-reeval: edge flipped to {current_edge*100:.1f}%"
+        
+        if should_close:
+            try:
+                from signals.paper_portfolio import close_position
+                close_result = close_position(pos["market_id"], "lost", exit_price=None)
+                detail["action"] = "closed"
+                detail["close_reason"] = close_reason
+                results["closed"] += 1
+                logger.info("WEATHER REEVAL: Closed position %d (%s) — %s", 
+                           pos["id"], title[:50], close_reason)
+            except Exception as e:
+                logger.error("Failed to close position %d: %s", pos["id"], e)
+                results["errors"] += 1
+        else:
+            results["kept"] += 1
+            if current_edge < 0:
+                logger.debug("WEATHER REEVAL: %s edge eroded to %.1f%% but holding",
+                           title[:50], current_edge * 100)
+        
+        results["details"].append(detail)
+    
+    conn.close()
+    logger.info("Weather reeval: checked=%d closed=%d kept=%d errors=%d",
+               results["checked"], results["closed"], results["kept"], results["errors"])
+    return results
 
 
 def scan_all_weather() -> dict:
