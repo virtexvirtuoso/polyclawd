@@ -1094,6 +1094,72 @@ async def get_betfair_edge():
 
 
 # ============================================================================
+# High-Frequency Polymarket Scanner (Phase 1)
+# ============================================================================
+
+@router.get("/hf/scan")
+async def hf_full_scan(
+    threshold: float = Query(default=0.99, ge=0.90, le=1.0, description="Neg vig threshold")
+):
+    """Full HF scan: discover short-duration crypto markets + neg vig detection.
+    
+    Finds 5-min, 15-min, and hourly BTC/ETH/SOL prediction markets,
+    then checks CLOB orderbooks for negative vig (Yes+No < threshold).
+    
+    Based on the $134→$200K Polymarket bot strategy.
+    """
+    async def _scan():
+        from odds.hf_scanner import full_hf_scan
+        return full_hf_scan(neg_vig_threshold=threshold)
+    
+    return await handle_edge_request("hf-scanner", _scan())
+
+
+@router.get("/hf/markets")
+async def hf_discover_markets():
+    """Discover active short-duration crypto prediction markets.
+    
+    Searches for 5-min, 15-min BTC/ETH/SOL up/down markets on Polymarket.
+    """
+    async def _discover():
+        from odds.hf_scanner import discover_hf_markets
+        from dataclasses import asdict
+        markets = discover_hf_markets()
+        return {
+            "markets": [asdict(m) for m in markets],
+            "count": len(markets),
+            "timestamp": datetime.now().isoformat(),
+        }
+    
+    return await handle_edge_request("hf-discovery", _discover())
+
+
+@router.get("/hf/negvig")
+async def hf_neg_vig_scan(
+    threshold: float = Query(default=0.99, ge=0.90, le=1.0)
+):
+    """Scan for negative vig opportunities on short-duration markets.
+    
+    Checks CLOB orderbooks where Yes_ask + No_ask < threshold.
+    Buying both sides = guaranteed profit on resolution.
+    """
+    async def _negvig():
+        from odds.hf_scanner import discover_hf_markets, scan_neg_vig
+        from dataclasses import asdict
+        markets = discover_hf_markets()
+        opps = scan_neg_vig(markets, threshold=threshold)
+        return {
+            "opportunities": [asdict(o) for o in opps],
+            "count": len(opps),
+            "markets_scanned": len(markets),
+            "threshold": threshold,
+            "timestamp": datetime.now().isoformat(),
+        }
+    
+    return await handle_edge_request("hf-negvig", _negvig())
+
+
+# ============================================================================
 # Kalshi Edge Detection
 # ============================================================================
 
