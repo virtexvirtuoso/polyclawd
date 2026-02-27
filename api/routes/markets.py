@@ -1254,6 +1254,41 @@ async def hf_latency_signals():
     return await handle_edge_request("hf-latency-signals", _signals())
 
 
+@router.post("/hf/trade")
+async def hf_process_signals():
+    """Process HF signals and open paper positions.
+    
+    Reads from: trigger engine, Virtuoso bridge, neg vig scanner.
+    Opens paper positions via the existing portfolio system.
+    Positions appear on portfolio.html tagged as hf_crypto.
+    """
+    async def _trade():
+        from services.hf_paper_trader import process_hf_signals
+        return process_hf_signals()
+    
+    return await handle_edge_request("hf-trade", _trade())
+
+
+@router.get("/hf/paper-performance")
+async def hf_paper_performance():
+    """Get HF paper trading performance stats."""
+    async def _perf():
+        from services.hf_paper_trader import get_hf_performance
+        return get_hf_performance()
+    
+    return await handle_edge_request("hf-paper-perf", _perf())
+
+
+@router.post("/hf/resolve")
+async def hf_resolve_positions():
+    """Auto-resolve HF paper positions against market outcomes."""
+    async def _resolve():
+        from services.hf_paper_trader import resolve_hf_positions
+        return resolve_hf_positions()
+    
+    return await handle_edge_request("hf-resolve", _resolve())
+
+
 @router.get("/hf/collect")
 async def hf_run_collection():
     """Run one data collection cycle (resolutions + divergence + signals).
