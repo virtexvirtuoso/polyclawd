@@ -1254,6 +1254,78 @@ async def hf_latency_signals():
     return await handle_edge_request("hf-latency-signals", _signals())
 
 
+@router.get("/hf/collect")
+async def hf_run_collection():
+    """Run one data collection cycle (resolutions + divergence + signals).
+    
+    Call periodically to build backtesting dataset.
+    """
+    async def _collect():
+        from services.hf_collector import run_collection_cycle
+        return run_collection_cycle()
+    
+    return await handle_edge_request("hf-collect", _collect())
+
+
+@router.get("/hf/collection-stats")
+async def hf_collection_stats():
+    """Get stats on collected HF data for backtesting."""
+    async def _stats():
+        from services.hf_collector import get_collection_stats
+        return get_collection_stats()
+    
+    return await handle_edge_request("hf-collection-stats", _stats())
+
+
+@router.get("/hf/backtest")
+async def hf_backtest(
+    balance: float = Query(default=134.0, ge=1.0, description="Starting balance"),
+    simulations: int = Query(default=500, ge=50, le=5000),
+    trades: int = Query(default=200, ge=10, le=2000),
+):
+    """Run Monte Carlo backtest for all HF strategies.
+    
+    Simulates latency_arb, neg_vig, directional, and combined strategies.
+    Uses collected data when available, falls back to parameterized estimates.
+    """
+    async def _backtest():
+        from services.hf_backtest import full_backtest_report
+        return full_backtest_report(
+            starting_balance=balance,
+            num_simulations=simulations,
+            trades_per_sim=trades,
+        )
+    
+    return await handle_edge_request("hf-backtest", _backtest())
+
+
+@router.get("/hf/backtest/{strategy}")
+async def hf_backtest_strategy(
+    strategy: str,
+    balance: float = Query(default=134.0, ge=1.0),
+    simulations: int = Query(default=1000, ge=50, le=5000),
+    trades: int = Query(default=200, ge=10, le=2000),
+    kelly: float = Query(default=0.10, ge=0.01, le=0.5),
+):
+    """Run Monte Carlo backtest for a specific strategy.
+    
+    Strategies: latency_arb, neg_vig, directional, combined
+    """
+    async def _bt():
+        from services.hf_backtest import run_monte_carlo
+        from dataclasses import asdict
+        result = run_monte_carlo(
+            starting_balance=balance,
+            num_simulations=simulations,
+            trades_per_sim=trades,
+            strategy=strategy,
+            kelly_fraction=kelly,
+        )
+        return asdict(result)
+    
+    return await handle_edge_request(f"hf-backtest-{strategy}", _bt())
+
+
 @router.get("/hf/risk")
 async def hf_risk_gate(
     max_drawdown: float = Query(default=10.0, ge=1.0, le=50.0),
