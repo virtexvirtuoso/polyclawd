@@ -1289,6 +1289,16 @@ async def hf_resolve_positions():
     return await handle_edge_request("hf-resolve", _resolve())
 
 
+@router.post("/hf/daily-summary")
+async def hf_daily_summary():
+    """Send daily HF performance summary to Telegram."""
+    async def _summary():
+        from services.hf_paper_trader import send_daily_summary
+        return send_daily_summary()
+    
+    return await handle_edge_request("hf-daily-summary", _summary())
+
+
 @router.get("/hf/collect")
 async def hf_run_collection():
     """Run one data collection cycle (resolutions + divergence + signals).

@@ -39,6 +39,40 @@ CLOB_API = "https://clob.polymarket.com"
 HF_ENGINE_URL = "http://127.0.0.1:8422"
 VIRTUOSO_EDGE_URL = "http://localhost:8002/api/polymarket/edge"
 
+# OpenClaw gateway for Telegram alerts
+OPENCLAW_GATEWAY = "http://localhost:18789"
+ALERT_ENABLED = True
+ALERT_MIN_CONFIDENCE = 0.60  # Only alert on >= 60% confidence
+
+
+def _send_alert(message: str, silent: bool = False):
+    """Send alert via OpenClaw gateway to Telegram."""
+    if not ALERT_ENABLED:
+        return
+    try:
+        payload = json.dumps({
+            "action": "send",
+            "channel": "telegram",
+            "message": message,
+            "silent": silent,
+        }).encode()
+        req = urllib.request.Request(
+            f"{OPENCLAW_GATEWAY}/api/message",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as e:
+        # Fallback: write alert to a file the watchdog can pick up
+        try:
+            alert_file = Path(__file__).parent.parent / "data" / "hf_alerts.jsonl"
+            with open(alert_file, "a") as f:
+                f.write(json.dumps({"message": message, "ts": datetime.now(timezone.utc).isoformat()}) + "\n")
+        except:
+            pass
+        logger.debug(f"Alert send failed (non-critical): {e}")
+
 
 # ============================================================================
 # Signal Sources
@@ -223,6 +257,18 @@ def open_hf_paper_position(
             # Also log to HF-specific table
             _log_hf_trade(market, direction, trigger_type, confidence,
                          edge_pct, bet_size, entry_price, strength)
+            
+            # Telegram alert
+            if confidence >= ALERT_MIN_CONFIDENCE:
+                arrow = "🟢" if direction == "UP" else "🔴"
+                _send_alert(
+                    f"{arrow} **HF Paper Trade**\n"
+                    f"**{market['asset']}** {direction} via `{trigger_type}`\n"
+                    f"💰 ${bet_size:.2f} at {entry_price:.3f}\n"
+                    f"📊 Conf: {confidence:.0%} | Edge: {edge_pct:.1%} | {strength}\n"
+                    f"⏱ {market.get('question', '')[:60]}",
+                    silent=(strength == "low"),
+                )
         
         return result
     
@@ -571,6 +617,15 @@ def resolve_hf_positions() -> Dict:
                     f"{trade_direction} → {actual_direction} | "
                     f"P&L: ${pnl:+.2f} | {trade['trigger_type']}"
                 )
+                
+                # Alert on resolution
+                icon = "✅" if pnl > 0 else "❌"
+                _send_alert(
+                    f"{icon} **HF Resolved**\n"
+                    f"**{trade['asset']}** {trade_direction} → {actual_direction}\n"
+                    f"💰 P&L: **${pnl:+.2f}** | `{trade['trigger_type']}`",
+                    silent=True,
+                )
             
             except Exception as e:
                 logger.debug(f"Resolve check error for {market_id[:20]}: {e}")
@@ -588,6 +643,35 @@ def resolve_hf_positions() -> Dict:
     except Exception as e:
         logger.error(f"HF resolve error: {e}")
         return {"error": str(e)}
+
+
+def send_daily_summary():
+    """Send a daily HF performance summary to Telegram."""
+    perf = get_hf_performance()
+    
+    if perf.get("total_trades", 0) == 0:
+        return {"sent": False, "reason": "no_trades"}
+    
+    total = perf["total_trades"]
+    resolved = perf["resolved"]
+    wins = perf["wins"]
+    wr = perf["win_rate_pct"]
+    pnl = perf["total_pnl"]
+    open_count = perf["open"]
+    
+    trigger_lines = ""
+    for t in perf.get("by_trigger", []):
+        trigger_lines += f"  `{t['trigger']}`: {t['trades']} trades, {t['win_rate']}% WR, ${t['pnl']:+.2f}\n"
+    
+    _send_alert(
+        f"📊 **HF Daily Summary**\n"
+        f"Trades: {total} ({open_count} open, {resolved} resolved)\n"
+        f"Win Rate: **{wr}%** ({wins}/{resolved})\n"
+        f"P&L: **${pnl:+.2f}**\n"
+        f"\n**By Trigger:**\n{trigger_lines or '  No resolved trades yet'}"
+    )
+    
+    return {"sent": True, "total": total, "pnl": pnl}
 
 
 if __name__ == "__main__":
