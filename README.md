@@ -134,26 +134,72 @@ EDGE: Time-sensitive, lines move within hours
 
 ---
 
-## Trading Engine
+## Signal Pipeline (11 Stages)
 
-### Features
-- **Real-time scanning**: Every 30 seconds
-- **Adaptive confidence**: Gets stricter as trades accumulate (+3/trade, -1/30min decay)
-- **Drawdown breaker**: Halts at 5% daily loss
-- **Opportunity cost engine**: Rotates weak positions for better signals
-- **Kelly sizing**: Quarter-Kelly (25%) for conservative sizing
-- **Phase management**: Configurable trading phases with position limits
+Every signal passes through this pipeline before a position is opened:
 
-### Bayesian Confidence Formula
 ```
-Final = Base × (source_win_rate / 0.5) × (1 + 0.2 × agreeing_sources)
-
-Example:
-  Base: 40
-  Source win rate: 60% → multiplier = 1.2
-  2 agreeing sources → multiplier = 1.4
-  Final: 40 × 1.2 × 1.4 = 67.2
+Signal → Confidence → Edge → Archetype Blocklist → NO Prob Floor
+→ Kelly Sizing → CV Kelly → Time Decay → Volume Spike
+→ Score Velocity → Archetype Boost → Correlation Cap → TRADE
 ```
+
+### Key Components
+
+| Component | Description |
+|-----------|-------------|
+| **Bootstrap Kelly** | Seeded 57% WR + 1/8 Kelly until 20 resolved trades |
+| **CV Kelly Haircut** | Monte Carlo uncertainty adjustment (post-bootstrap) |
+| **Archetype Blocklist** | `price_above` (0/4) and `sports_winner` (0/3) blocked entirely |
+| **NO Prob Floor** | Markets where NO <35% implied are too efficient to fade |
+| **Time Decay** | Becker-calibrated 28-cell lookup (7 durations × 4 volume buckets) |
+| **Volume Spike Detector** | 3x+ = spike (+10%), 10x+ = mega (+20%) from `signal_snapshots` |
+| **Price Momentum** | YES rising 5%+ → 1.15x boost, YES falling 5%+ → BLOCK |
+| **Score Velocity** | Alpha score delta for crypto archetypes, multiplier [0.7, 1.3] |
+| **Correlation Cap** | 6 groups (politics, geopolitical, culture, sports, crypto, weather), max 3 per group |
+
+### Sizing
+- **$100 minimum bet** — small bets don't move P&L
+- **$10K starting bankroll**
+- **Dynamic Kelly** — rolling WR over 20 trades, WR<55% → 1/12 Kelly, drawdown≥15% → pause
+
+## Weather Ensemble (4-Source Probabilistic)
+
+Multi-source forecast aggregator producing calibrated probability distributions:
+
+| Source | Models | Auth | Update |
+|--------|--------|------|--------|
+| **Open-Meteo Ensemble** | 92 members (ICON, GEFS, GEM) | No key | 6-12h |
+| **Pirate Weather** | GEFS + GFS + HRRR + ECMWF | Free API key | 6h |
+| **Tomorrow.io** | Proprietary AI (HyperCast) | Free API key | Continuous |
+| **WeatherAPI.com** | Station blend + ML | Free API key | 6h |
+
+- Normal/Student-t CDF for calibrated probabilities (not hardcoded buckets)
+- Source disagreement >3°F auto-widens distribution (fat tail penalty)
+- Multi-day response caching — 1 API call per city returns all dates
+- **Same-day re-evaluation** every 5min — auto-closes if edge flips >5%
+- 15 cities: NYC, London, Buenos Aires, Wellington, Miami, Dallas, Atlanta, São Paulo, Toronto, Seoul, Seattle, Chicago, Paris, Sydney, Tokyo
+
+## Election Prediction
+
+- `signals/election_polls.py` — Wikipedia polling scraper with recency weighting (30d=1.0x, 90d=0.7x, >90d=0.4x)
+- `signals/cross_platform_elections.py` — Manifold vs Polymarket divergence detection (>10%=1.3x, 5-10%=1.15x)
+- Incumbency advantage as systematic NO thesis (~70% win rate globally)
+- `geopolitical` correlation group (separate from `politics`, each gets 3 slots)
+
+## API Resilience
+
+- **Source health table** — tracks failures per data source
+- **`@resilient()` decorator** — circuit breaker (5 fails → 30min cooldown)
+- **Staleness tags** — flags stale data from degraded sources
+- **ESPN fallback** — Vegas endpoints fall back to ESPN when circuit-broken
+
+## MCP Server (Auto-Discovery)
+
+- `https://virtuosocrypto.com/polyclawd/mcp` — public FastMCP endpoint
+- **140 tools auto-discovered** from OpenAPI spec — no manual tool list
+- Add API endpoint → restart MCP → tool appears
+- Both stdio (`mcp/server.py`) and HTTP (`mcp/http_server.py`) transports
 
 ---
 
@@ -339,24 +385,16 @@ Example:
 
 ---
 
-## Cron Jobs (OpenClaw)
+## Automated Operations
 
-Automated monitoring and alerting via [OpenClaw](https://github.com/anthropics/openclaw) agent framework, delivering alerts to Telegram.
+### VPS Watchdog (`/etc/cron.d/polyclawd-watchdog`)
+Runs every 5 minutes — handles health, resolution, signal scanning, and weather re-eval. See Watchdog section below.
 
-| Job | Schedule | Description |
-|-----|----------|-------------|
-| `polyclawd-monitor` | Every 2h | Full system check: engine status, whale signals, rotations, smart money |
-| `polyclawd-rotation-alert` | Every 30m | Position rotation notifications |
-| `vegas-edge-scanner` | 3x/day (9am, 3pm, 9pm) | Sports edges >= 8% with Kelly sizing |
-| `kalshi-edge-scanner` | 3x/day (9am, 3pm, 9pm) | Kalshi vs Polymarket edge detection |
-| `edge-scanner-6h` | Every 6h | Cross-platform edge scan (all sources) |
-| `correlation-violation-scanner` | Every 4h | Math constraint violations between related markets |
-| `injury-impact-scanner` | Every 3h | Key player injuries vs stale lines |
-| `resolution-timing-alert` | Every 2h | Markets resolving soon (theta collection) |
-| `orderbook-whale-walls` | Every 4h | Bid/ask wall detection in orderbooks |
-| `weekly-signal-calibration` | Sunday 9am | Signal source win rates and recommendations |
+### VPS Cache Warmer (`*/15 * * * *`)
+Pre-warms expensive API responses every 15 minutes.
 
-All schedules are in `America/New_York` timezone.
+### OpenClaw Agent
+Polyclawd runs as an [OpenClaw](https://github.com/openclaw/openclaw) agent, delivering alerts and analysis to Telegram.
 
 ---
 
@@ -377,37 +415,49 @@ sudo systemctl status polyclawd-api
 
 ## Architecture
 
-### API Structure (v2.1.0)
-
-The API uses a modular router architecture with domain-specific modules:
+### Project Structure
 
 ```
 api/
-├── main.py              # App factory, lifespan, router registration
-├── routes/
+├── main.py              # FastAPI app, lifespan, router registration
+├── routes/              # 6 routers, 140+ endpoints
 │   ├── system.py        # /health, /ready, /metrics
-│   ├── trading.py       # /api/balance, /api/positions, /api/trade, /api/simmer/*, /api/paper/*
-│   ├── markets.py       # /api/markets/*, /api/vegas/*, /api/espn/*, /api/betfair/*, /api/polyrouter/*, etc.
-│   ├── signals.py       # /api/signals, /api/inverse-whale, /api/confidence/*, /api/rotations
-│   ├── engine.py        # /api/engine/*, /api/alerts/*, /api/kelly/*, /api/phase/*, /api/llm/*
-│   └── edge_scanner.py  # /api/edge/scan, /api/edge/calculate, /api/edge/topics
-├── deps.py              # Dependency injection (settings, services)
+│   ├── trading.py       # Paper trading, portfolio, Simmer SDK
+│   ├── markets.py       # Market data, Vegas, ESPN, PolyRouter
+│   ├── signals.py       # Signal aggregation, weather, elections, IC
+│   ├── engine.py        # Engine control, Kelly, phases, alerts
+│   └── edge_scanner.py  # Cross-platform edge scanning
 ├── middleware.py         # Security headers, rate limiting, auth
 └── services/            # Business logic layer
+
+signals/
+├── paper_portfolio.py       # Core trading engine + 11-stage pipeline
+├── weather_scanner.py       # Polymarket weather market discovery
+├── weather_ensemble.py      # 4-source probabilistic forecasting
+├── election_polls.py        # Wikipedia polling scraper
+├── cross_platform_elections.py  # Manifold vs Polymarket divergence
+├── cv_kelly.py              # CV Kelly uncertainty adjustment
+├── strike_probability.py    # Price-to-Strike (Strategy 2)
+├── alpha_score_tracker.py   # Score velocity tracking
+├── mispriced_category_signal.py  # Core signal generator
+├── ic_tracker.py            # Information Coefficient tracking
+├── calibrator.py            # Signal calibration + source weights
+├── resilience.py            # Circuit breaker + source health
+└── shadow_tracker.py        # Shadow trade resolution
+
+mcp/
+├── server.py           # stdio MCP — auto-discovers from OpenAPI spec
+└── http_server.py      # FastMCP HTTP — 140 tools, port 8421
+
+static/
+├── portfolio.html      # Paper trading dashboard (auth-gated)
+├── analysis.html       # Signal analysis dashboard
+├── how-it-works.html   # Pipeline visualization
+├── login.html          # Access code gate
+└── auth.js             # Client-side SHA-256 auth
 ```
 
-### Router Organization
-
-| Router | Prefix | Endpoints | Purpose |
-|--------|--------|-----------|---------|
-| `system_router` | (none) | 3 | Health, readiness, metrics |
-| `trading_router` | `/api` | 16 | Paper trading, Simmer SDK |
-| `markets_router` | `/api` | 58 | Market data, edge detection, ESPN, PolyRouter |
-| `signals_router` | `/api` | 19 | Signal aggregation, whales, confidence |
-| `engine_router` | `/api` | 20 | Engine control, alerts, Kelly, phases, LLM |
-| `edge_scanner_router` | `/api/edge` | 5 | Cross-platform edge scanning |
-
-**Total: 121 endpoints**
+**140+ API endpoints**, **140 MCP tools** (auto-discovered from OpenAPI spec)
 
 ### Security
 
@@ -419,44 +469,41 @@ api/
 ### Data Flow
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│                           DATA SOURCES                               │
-├──────────┬──────────┬──────────┬──────────┬──────────┬──────────────-┤
-│Polymarket│PredictIt │ Manifold │  Vegas   │  ESPN    │  Metaculus   │
-│  Kalshi  │ Smarkets │  Simmer  │ Betfair  │ Soccer   │  PolyRouter  │
-└────┬─────┴────┬─────┴────┬─────┴────┬─────┴────┬─────┴──────┬───────┘
-     │          │          │          │          │            │
-     └──────────┴──────────┴────┬─────┴──────────┴────────────┘
-                                ▼
-                  ┌──────────────────────────┐
-                  │     EDGE SCANNER         │
-                  │  Cross-platform + Shin   │
-                  └────────────┬─────────────┘
-                               ▼
-                  ┌──────────────────────────┐
-                  │   SIGNAL AGGREGATOR      │
-                  │   (15 sources)           │
-                  └────────────┬─────────────┘
-                               ▼
-                  ┌──────────────────────────┐
-                  │   BAYESIAN SCORING       │
-                  │   + Confidence Tracking  │
-                  └────────────┬─────────────┘
-                               ▼
-                  ┌──────────────────────────┐
-                  │   TRADING ENGINE         │
-                  │   Adaptive + Kelly       │
-                  └────────────┬─────────────┘
-                               ▼
-                  ┌──────────────────────────┐
-                  │   PAPER TRADING          │
-                  │   $10K Starting Balance  │
-                  └────────────┬─────────────┘
-                               ▼
-                  ┌──────────────────────────┐
-                  │   OPENCLAW CRON ALERTS   │
-                  │   → Telegram             │
-                  └──────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                         DATA SOURCES                             │
+├───────────┬──────────┬──────────┬──────────┬───────────┬────────┤
+│Polymarket │ Manifold │  ESPN    │ Metaculus │ Weather×4 │ Polls  │
+│  Kalshi   │ Simmer   │ Action   │ PolyRouter│ (ensemble)│ (Wiki) │
+└─────┬─────┴────┬─────┴────┬─────┴────┬─────┴─────┬─────┴───┬────┘
+      └──────────┴──────────┴────┬─────┴───────────┴─────────┘
+                                 ▼
+              ┌──────────────────────────────────┐
+              │   API RESILIENCE LAYER           │
+              │   Circuit breaker + staleness    │
+              └──────────────┬───────────────────┘
+                             ▼
+              ┌──────────────────────────────────┐
+              │   SIGNAL PIPELINE (11 stages)    │
+              │   Confidence → Edge → Blocklist  │
+              │   → Kelly → Time Decay → Vol     │
+              │   → Score Velocity → Corr Cap    │
+              └──────────────┬───────────────────┘
+                             ▼
+              ┌──────────────────────────────────┐
+              │   PAPER PORTFOLIO ENGINE         │
+              │   Bootstrap Kelly · $10K bank    │
+              │   6 correlation groups · 10 max  │
+              └──────────────┬───────────────────┘
+                             ▼
+              ┌──────────────────────────────────┐
+              │   WATCHDOG (every 5-10min)       │
+              │   Resolution · Re-eval · IC      │
+              └──────────────┬───────────────────┘
+                             ▼
+              ┌──────────────────────────────────┐
+              │   MCP SERVER (140 tools)         │
+              │   + Dashboard + Discord alerts   │
+              └──────────────────────────────────┘
 ```
 
 ### Performance
@@ -472,23 +519,28 @@ Load tested with Locust (50 concurrent users):
 
 ### VPS Infrastructure
 - **Host**: Hetzner VPS (`ssh vps` / 5.223.63.4)
-- **Service**: `polyclawd-api.service` (systemd, port 8420, behind nginx)
+- **Service**: `polyclawd-api.service` (systemd, port 8420, 2 uvicorn workers)
+- **MCP**: port 8421, proxied via nginx at `/polyclawd/mcp`
 - **Reverse proxy**: nginx at `virtuosocrypto.com/polyclawd`
+- **Database**: SQLite `storage/shadow_trades.db` (WAL mode)
+  - Tables: `paper_positions`, `paper_portfolio_state`, `shadow_trades`, `signal_snapshots`, `source_health`, `visitor_log`, `price_snapshots`, `daily_summaries`, `alpha_snapshots`, `signal_predictions`, `ic_measurements`, `calibration_curves`, `source_weights`
+- **Test suite**: 300+ tests (`venv/bin/pytest`)
 
-### Watchdog
-Automated health monitoring runs every 5 minutes via cron:
+### Watchdog (v8)
+Automated health + trading loop runs every 5 minutes via `/etc/cron.d/polyclawd-watchdog`:
 
-```
-*/5 * * * * root /usr/local/bin/polyclawd-watchdog.sh
-```
+| Cycle | Frequency | What it does |
+|-------|-----------|-------------|
+| Health check | Every 5min | 3 retries → restart if unhealthy, backoff after 5 consecutive |
+| Resolution | Every 5min | CLOB → Gamma fallback → force-resolve 24h+ past expiry |
+| Weather re-eval | Every 5min | Fresh ensemble data for same-day positions, auto-close on flip |
+| Signal scan | Every 10min | Mispriced category + weather scanner → `process_signals()` |
+| Alpha snapshot | Every 10min | Score velocity tracking per crypto symbol |
+| IC + Calibration | Every 30min | Spearman IC, calibration curves, source weight updates |
+| Arena snapshot | Every 6h | Leaderboard tracking |
 
-Behavior:
-- Checks `GET /health` endpoint with 3 retries (5s gaps, 8s timeout each)
-- Validates JSON response contains `"healthy"`
-- On failure: `systemctl restart polyclawd-api`
-- Backoff: stops after 5 consecutive restarts (manual intervention required)
-- State: `/tmp/polyclawd-watchdog.state` (consecutive restart counter)
-- Logs: `journalctl -t polyclawd-watchdog`
+- State: `/tmp/polyclawd-watchdog.state`
+- Logs: `/var/log/polyclawd-watchdog.log` (auto-rotated at 2000 lines)
 
 ### Common Operations
 ```bash
