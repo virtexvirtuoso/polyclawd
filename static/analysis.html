@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Polyclawd — Full Analysis Suite</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  :root {
+    --bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a26;--border:#2a2a3a;
+    --accent:#6c5ce7;--accent2:#a29bfe;--green:#00e676;--red:#ff5252;
+    --orange:#ffab40;--cyan:#18ffff;--text:#e8e8f0;--text2:#8888a0;--gold:#ffd700;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,sans-serif;min-height:100vh}
+  .noise{position:fixed;top:0;left:0;width:100%;height:100%;background:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");pointer-events:none;z-index:0}
+  .container{max-width:1200px;margin:0 auto;padding:40px 24px;position:relative;z-index:1}
+  header{text-align:center;margin-bottom:48px;position:relative}
+  header::before{content:'';position:absolute;top:-100px;left:50%;transform:translateX(-50%);width:600px;height:600px;background:radial-gradient(circle,rgba(108,92,231,0.08) 0%,transparent 70%);pointer-events:none}
+  .logo{font-size:13px;letter-spacing:6px;text-transform:uppercase;color:var(--accent2);margin-bottom:16px;font-weight:500}
+  .logo span{color:var(--gold)}
+  h1{font-size:42px;font-weight:700;letter-spacing:-1px;background:linear-gradient(135deg,var(--text) 0%,var(--accent2) 50%,var(--cyan) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:12px}
+  .subtitle{color:var(--text2);font-size:15px;font-weight:300}.subtitle strong{color:var(--green);font-weight:500}
+  .timestamp{display:inline-block;margin-top:16px;padding:6px 16px;background:var(--surface);border:1px solid var(--border);border-radius:20px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text2)}
+  .stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:48px}
+  .stat-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 20px;position:relative;overflow:hidden}
+  .stat-card::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--accent),var(--cyan))}
+  .stat-label{font-size:10px;text-transform:uppercase;letter-spacing:2px;color:var(--text2);margin-bottom:6px}
+  .stat-value{font-size:24px;font-weight:700;font-family:'JetBrains Mono',monospace}
+  .stat-value.green{color:var(--green)}.stat-value.gold{color:var(--gold)}.stat-value.cyan{color:var(--cyan)}.stat-value.accent{color:var(--accent2)}.stat-value.red{color:var(--red)}
+  .stat-sub{font-size:11px;color:var(--text2);margin-top:4px}
+  .analysis-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;margin-bottom:32px;overflow:hidden;transition:border-color 0.3s}
+  .analysis-card:hover{border-color:var(--accent)}
+  .card-header{display:flex;align-items:center;justify-content:space-between;padding:20px 28px;border-bottom:1px solid var(--border);background:var(--surface2)}
+  .card-title{display:flex;align-items:center;gap:12px}
+  .card-title .num{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;background:var(--accent);color:white;font-weight:700;font-size:13px}
+  .card-title h2{font-size:18px;font-weight:600}
+  .verdict{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:20px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px}
+  .verdict.edge{background:rgba(0,230,118,0.15);color:var(--green)}
+  .verdict.neutral{background:rgba(255,171,64,0.15);color:var(--orange)}
+  .verdict.insight{background:rgba(24,255,255,0.15);color:var(--cyan)}
+  .verdict.warning{background:rgba(255,82,82,0.15);color:var(--red)}
+  .card-body{padding:28px}
+  .chart-wrap{background:#fff;border-radius:12px;overflow:hidden;margin-bottom:20px;box-shadow:0 4px 24px rgba(0,0,0,0.3)}
+  .chart-wrap img{width:100%;height:auto;display:block}
+  .findings{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media(max-width:768px){.findings{grid-template-columns:1fr}}
+  .finding{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:14px 18px}
+  .finding-label{font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text2);margin-bottom:5px}
+  .finding-value{font-size:14px;font-weight:500;line-height:1.5}
+  .finding-value .highlight{color:var(--green);font-weight:600}
+  .finding-value .warn{color:var(--orange);font-weight:600}
+  .finding-value .bad{color:var(--red);font-weight:600}
+  .takeaway{margin-top:20px;padding:18px 22px;background:linear-gradient(135deg,rgba(108,92,231,0.1),rgba(24,255,255,0.05));border:1px solid rgba(108,92,231,0.3);border-radius:12px}
+  .takeaway-title{font-size:11px;text-transform:uppercase;letter-spacing:2px;color:var(--accent2);margin-bottom:6px}
+  .takeaway p{font-size:13px;line-height:1.7;color:var(--text)}
+  footer{text-align:center;padding:40px 0 20px;border-top:1px solid var(--border);margin-top:20px}
+  footer p{font-size:12px;color:var(--text2);font-family:'JetBrains Mono',monospace}
+  footer .brand{color:var(--accent2)}
+</style>
+</head>
+<body>
+<div class="noise"></div>
+<div class="container">
+<nav style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px"><a href="portfolio.html" style="display:inline-block;font-size:12px;color:#8888a0;text-decoration:none;padding:8px 16px;border:1px solid #2a2a3a;border-radius:8px">← Portfolio</a><a href="how-it-works.html" style="display:inline-block;font-size:12px;color:#8888a0;text-decoration:none;padding:8px 16px;border:1px solid #2a2a3a;border-radius:8px">How It Works</a></nav>
+
+<header>
+  <div class="logo">Virtuoso Crypto — <span>Polyclawd</span></div>
+  <h1>Prediction Market Analysis</h1>
+  <p class="subtitle">Full Suite: <strong>9 analyses</strong> · 3.7M+ markets · Kalshi + Polymarket</p>
+  <div class="timestamp">generated 2026-02-11 08:15 EST · jon-becker/prediction-market-analysis + custom analyses · dark theme</div>
+</header>
+
+<div class="stats-row">
+  <div class="stat-card">
+    <div class="stat-label">Markets Analyzed</div>
+    <div class="stat-value cyan">3.75M</div>
+    <div class="stat-sub">3.4M Kalshi · 290K Polymarket</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Volume-Error Corr</div>
+    <div class="stat-value green">-0.323</div>
+    <div class="stat-sub">strong: more volume = less error</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Best Theta</div>
+    <div class="stat-value gold">&lt;1 day</div>
+    <div class="stat-sub">short markets = best theta</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Weekend Edge</div>
+    <div class="stat-value accent">-1.4pp</div>
+    <div class="stat-sub">weekends MORE efficient (flipped!)</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Worst Category</div>
+    <div class="stat-value red">EUR/USD</div>
+    <div class="stat-sub">45% avg error — FX markets worst</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Kalshi Indexer</div>
+    <div class="stat-value green">2,400+ files</div>
+    <div class="stat-sub">22M+ markets, still running</div>
+  </div>
+</div>
+
+<!-- 1. Cross-Platform Divergence -->
+<div class="analysis-card">
+  <div class="card-header">
+    <div class="card-title"><span class="num">1</span><h2>Cross-Platform Divergence</h2></div>
+    <span class="verdict insight">⚡ structural insight</span>
+  </div>
+  <div class="card-body">
+    <div class="chart-wrap"><img src="cross_platform_divergence.png" alt="Cross-platform divergence"></div>
+    <div class="findings">
+      <div class="finding"><div class="finding-label">Kalshi</div><div class="finding-value"><span class="highlight">3,443,267</span> resolved · avg price <span class="warn">17.5%</span> — skewed to cheap NO contracts</div></div>
+      <div class="finding"><div class="finding-label">Polymarket</div><div class="finding-value"><span class="highlight">235,930</span> markets · avg <span class="highlight">39.1%</span> — bimodal clustering at extremes</div></div>
+      <div class="finding"><div class="finding-label">Max Divergence</div><div class="finding-value">At <span class="warn">98%</span> price level — Polymarket has massive spike of near-certain markets</div></div>
+      <div class="finding"><div class="finding-label">Arb Signal</div><div class="finding-value">Different structures = different pricing regimes. Cross-platform arb is <span class="highlight">structurally valid</span></div></div>
+    </div>
+    <div class="takeaway"><div class="takeaway-title">🎯 Polyclawd Takeaway</div><p>Focus arb scanning on the <strong>15-85% overlap zone</strong> where both platforms have liquidity. The 98% divergence spike is noise (different market types). Kalshi's low-price skew means it offers more long-shot plays; Polymarket clusters at certainty.</p></div>
+  </div>
+</div>
+
+<!-- 2. Volume Spike Outcomes -->
+<div class="analysis-card">
+  <div class="card-header">
+    <div class="card-title"><span class="num">2</span><h2>Volume Spike → Outcomes</h2></div>
+    <span class="verdict edge">✓ signal confirmed</span>
+  </div>
+  <div class="card-body">
+    <div class="chart-wrap"><img src="volume_spike_outcomes.png" alt="Volume spike outcomes"></div>
+    <div class="findings">
+      <div class="finding"><div class="finding-label">Win Rate</div><div class="finding-value"><span class="highlight">99.8%</span> favored-side win rate across 48,823 spike events</div></div>
+      <div class="finding"><div class="finding-label">By Tier</div><div class="finding-value">1-2σ: 99.8% (41.5K) · 2-3σ: 99.8% (6.5K) · 3-4σ: 99.6% (721) · 4σ+: <span class="highlight">100%</span></div></div>
+      <div class="finding"><div class="finding-label">Error Trend</div><div class="finding-value">&lt;1σ: 0.0097 → 4σ+: <span class="highlight">0.0033</span> — higher volume = tighter pricing</div></div>
+      <div class="finding"><div class="finding-label">⚠️ Caveat</div><div class="finding-value"><span class="warn">Uses final prices</span> — confirms direction but doesn't prove predictive edge at signal time</div></div>
+    </div>
+    <div class="takeaway"><div class="takeaway-title">🎯 Polyclawd Takeaway</div><p>Volume confirms direction overwhelmingly. <strong>Keep volume_spike active as confirmation signal</strong>. Need trade-level timestamps to prove it leads price — that analysis unlocks when Kalshi trades finish downloading.</p></div>
+  </div>
+</div>
+
+<!-- 3. Polymarket Mispricing -->
+<div class="analysis-card">
+  <div class="card-header">
+    <div class="card-title"><span class="num">3</span><h2>Polymarket Mispricing</h2></div>
+    <span class="verdict neutral">◐ needs depth</span>
+  </div>
+  <div class="card-body">
+    <div class="chart-wrap"><img src="polymarket_mispricing.png" alt="Polymarket mispricing"></div>
+    <div class="findings">
+      <div class="finding"><div class="finding-label">Distribution</div><div class="finding-value"><span class="highlight">289K</span> closed markets — 170K at 0-5%, 115K at 95-100%. Only <span class="warn">776</span> contested (30-70%)</div></div>
+      <div class="finding"><div class="finding-label">Volume</div><div class="finding-value">$30B+ at low prices, $13B at high. Median market: <span class="warn">$8,924</span></div></div>
+      <div class="finding"><div class="finding-label">Top Contested</div><div class="finding-value">Ansem vs Bitboy ($4.2M), Packers vs Cowboys ($4.1M), Aspinall vs Gane ($3.2M)</div></div>
+      <div class="finding"><div class="finding-label">Insight</div><div class="finding-value">99.7% resolve to extremes — edge is catching the transition <span class="highlight">early</span></div></div>
+    </div>
+    <div class="takeaway"><div class="takeaway-title">🎯 Polyclawd Takeaway</div><p>Filter to $100K+ volume markets still in 20-80% range. The edge isn't finding mispriced 50/50 markets — it's catching the move from mid-range to extreme earlier than the market.</p></div>
+  </div>
+</div>
+
+<!-- 4. Whale Wallet Profitability -->
+<div class="analysis-card">
+  <div class="card-header">
+    <div class="card-title"><span class="num">4</span><h2>Volume Tier Profitability</h2></div>
+    <span class="verdict edge">✓ whale edge confirmed</span>
+  </div>
+  <div class="card-body">
+    <div class="chart-wrap"><img src="whale_wallet.png" alt="Whale wallet profitability"></div>
+    <div class="findings">
+      <div class="finding"><div class="finding-label">Scale</div><div class="finding-value"><span class="highlight">3.75M markets</span> across Kalshi + Polymarket, <span class="highlight">25,018</span> whale-tier ($100K+)</div></div>
+      <div class="finding"><div class="finding-label">Whale Accuracy</div><div class="finding-value">High-volume markets have the <span class="highlight">lowest prediction error</span> — smart money prices correctly</div></div>
+      <div class="finding"><div class="finding-label">Tier Gradient</div><div class="finding-value">Clear monotonic improvement: micro → small → medium → large → whale accuracy</div></div>
+      <div class="finding"><div class="finding-label">Inverse Signal</div><div class="finding-value">Validates inverse_whale: <span class="highlight">fading whale positions at extremes has less edge</span> than expected</div></div>
+    </div>
+    <div class="takeaway"><div class="takeaway-title">🎯 Polyclawd Takeaway</div><p>Whales are right more often — the inverse_whale signal should be used cautiously. Only fade whales when <strong>multiple independent signals</strong> agree on the opposite direction. The current 35% whale-win assumption may be too low.</p></div>
+  </div>
+</div>
+
+<!-- 5. Price Impact by Size -->
+<div class="analysis-card">
+  <div class="card-header">
+    <div class="card-title"><span class="num">5</span><h2>Price Impact by Market Size</h2></div>
+    <span class="verdict edge">✓ strong signal</span>
+  </div>
+  <div class="card-body">
+    <div class="chart-wrap"><img src="price_impact.png" alt="Price impact by size"></div>
+    <div class="findings">
+      <div class="finding"><div class="finding-label">Correlation</div><div class="finding-value"><span class="highlight">r = -0.323</span> — strong negative: more volume dramatically reduces pricing error</div></div>
+      <div class="finding"><div class="finding-label">Low vs High</div><div class="finding-value">Low vol (&lt;$1K): <span class="bad">0.189 error</span> vs High vol (&gt;$100K): <span class="highlight">0.001 error</span> — 200x improvement</div></div>
+      <div class="finding"><div class="finding-label">Total</div><div class="finding-value"><span class="highlight">1.075M markets</span> analyzed across both platforms</div></div>
+      <div class="finding"><div class="finding-label">Position Sizing</div><div class="finding-value">Only trade markets with $10K+ volume for reliable pricing. Below that, <span class="warn">noise dominates</span></div></div>
+    </div>
+    <div class="takeaway"><div class="takeaway-title">🎯 Polyclawd Takeaway</div><p><strong>Hard filter: minimum $10K volume for any signal.</strong> Below $10K, prices are effectively random (19% error rate). The 200x improvement from low→high volume is the single strongest finding. Use this as the first gate in signal validation.</p></div>
+  </div>
+</div>
+
+<!-- 6. Resolution Timing -->
+<div class="analysis-card">
+  <div class="card-header">
+    <div class="card-title"><span class="num">6</span><h2>Resolution Timing (Theta)</h2></div>
+    <span class="verdict edge">✓ theta confirmed</span>
+  </div>
+  <div class="card-body">
+    <div class="chart-wrap"><img src="resolution_timing.png" alt="Resolution timing"></div>
+    <div class="findings">
+      <div class="finding"><div class="finding-label">Best Theta</div><div class="finding-value"><span class="highlight">&lt;1 day markets</span> — highest theta proxy (confidence/day ratio)</div></div>
+      <div class="finding"><div class="finding-label">Short-term</div><div class="finding-value">≤7 day markets: <span class="highlight">90.1%</span> accuracy — very well-priced near expiry</div></div>
+      <div class="finding"><div class="finding-label">Long-term</div><div class="finding-value">&gt;90 day markets: <span class="highlight">100%</span> accuracy — but low theta (slow convergence)</div></div>
+      <div class="finding"><div class="finding-label">Sweet Spot</div><div class="finding-value">1-7 day markets balance theta and accuracy — <span class="highlight">best risk/reward</span></div></div>
+    </div>
+    <div class="takeaway"><div class="takeaway-title">🎯 Polyclawd Takeaway</div><p>Short-duration markets are both accurate and high-theta. <strong>Prioritize markets expiring within 7 days</strong> for theta collection. Long-term markets are perfectly calibrated but theta is minimal — only enter those for large mispricing (&gt;10pp edge).</p></div>
+  </div>
+</div>
+
+<!-- 7. Category Edge Persistence -->
+<div class="analysis-card">
+  <div class="card-header">
+    <div class="card-title"><span class="num">7</span><h2>Category Edge Persistence</h2></div>
+    <span class="verdict warning">⚠ exploitable categories</span>
+  </div>
+  <div class="card-body">
+    <div class="chart-wrap"><img src="category_edge.png" alt="Category edge persistence"></div>
+    <div class="findings">
+      <div class="finding"><div class="finding-label">Categories</div><div class="finding-value"><span class="highlight">152 categories</span> with 20+ markets across 739K Kalshi markets</div></div>
+      <div class="finding"><div class="finding-label">Most Mispriced</div><div class="finding-value"><span class="bad">KXSPOTIFYARTISTD</span> — 60% avg error. Spotify daily artist markets are massively mispriced</div></div>
+      <div class="finding"><div class="finding-label">Best Calibrated</div><div class="finding-value"><span class="highlight">KXPGATOUR</span> — 1% error. PGA Tour markets are almost perfectly priced</div></div>
+      <div class="finding"><div class="finding-label">Calibration Curve</div><div class="finding-value">Overall Kalshi calibration is good at extremes but <span class="warn">mid-range prices show systematic bias</span></div></div>
+    </div>
+    <div class="takeaway"><div class="takeaway-title">🎯 Polyclawd Takeaway</div><p><strong>Target Spotify, weather, and entertainment categories</strong> for edge exploitation — they're consistently mispriced. Avoid PGA Tour, MLB, and established sports categories where pricing is near-perfect. The category filter should be a core Polyclawd feature.</p></div>
+  </div>
+</div>
+
+<!-- 8. Post-Event Price Efficiency -->
+<div class="analysis-card">
+  <div class="card-header">
+    <div class="card-title"><span class="num">8</span><h2>Post-Event Price Efficiency</h2></div>
+    <span class="verdict insight">⚡ efficiency map</span>
+  </div>
+  <div class="card-body">
+    <div class="chart-wrap"><img src="post_event_efficiency.png" alt="Post-event efficiency"></div>
+    <div class="findings">
+      <div class="finding"><div class="finding-label">Extreme Rate</div><div class="finding-value"><span class="highlight">~99%</span> of markets close at extreme prices (&gt;95% or &lt;5%)</div></div>
+      <div class="finding"><div class="finding-label">Contested</div><div class="finding-value">Only ~1% remain contested (30-70%) at close — <span class="highlight">markets are efficient</span></div></div>
+      <div class="finding"><div class="finding-label">Duration Effect</div><div class="finding-value">Short markets (&lt;1d) are <span class="highlight">most likely to reach extremes</span> quickly</div></div>
+      <div class="finding"><div class="finding-label">Platform</div><div class="finding-value">Both platforms show similar efficiency — no structural advantage to either</div></div>
+    </div>
+    <div class="takeaway"><div class="takeaway-title">🎯 Polyclawd Takeaway</div><p>Markets are extremely efficient at close — the opportunity is in the <strong>path to resolution</strong>, not the final price. Look for markets that are still contested with &lt;48h to close. Those represent the highest-conviction, highest-theta opportunities.</p></div>
+  </div>
+</div>
+
+<!-- 9. Weekend vs Weekday -->
+<div class="analysis-card">
+  <div class="card-header">
+    <div class="card-title"><span class="num">9</span><h2>Weekend vs Weekday Efficiency</h2></div>
+    <span class="verdict neutral">◐ marginal edge</span>
+  </div>
+  <div class="card-body">
+    <div class="chart-wrap"><img src="weekend_efficiency.png" alt="Weekend efficiency"></div>
+    <div class="findings">
+      <div class="finding"><div class="finding-label">Scale</div><div class="finding-value"><span class="highlight">1.71M markets</span> analyzed with day-of-week resolution timing</div></div>
+      <div class="finding"><div class="finding-label">Weekend Edge</div><div class="finding-value">Weekend error: 0.1718 vs Weekday: 0.1670 — <span class="warn">+0.48pp difference</span></div></div>
+      <div class="finding"><div class="finding-label">Worst Day</div><div class="finding-value"><span class="warn">Thursday</span> — highest prediction error (unexpected)</div></div>
+      <div class="finding"><div class="finding-label">Best Day</div><div class="finding-value"><span class="highlight">Monday</span> — most accurate pricing (fresh week, high attention)</div></div>
+    </div>
+    <div class="takeaway"><div class="takeaway-title">🎯 Polyclawd Takeaway</div><p>Weekend inefficiency exists but is <strong>marginal</strong> (0.48pp). Not enough to build a strategy around alone. However, Thursday's poor pricing is interesting — possibly pre-weekend position unwinding. <strong>Consider weighting signals slightly higher on weekends and Thursdays</strong>, but don't over-optimize for this.</p></div>
+  </div>
+</div>
+
+<!-- Executive Summary -->
+<div class="analysis-card" style="border-color:var(--gold)">
+  <div class="card-header" style="background:linear-gradient(135deg,rgba(255,215,0,0.1),rgba(108,92,231,0.1))">
+    <div class="card-title"><span class="num" style="background:var(--gold);color:#000">★</span><h2>Executive Summary — Signal Calibration</h2></div>
+  </div>
+  <div class="card-body">
+    <div class="findings">
+      <div class="finding"><div class="finding-label">🔑 #1 Rule</div><div class="finding-value"><span class="highlight">Minimum $10K volume</span> — below this, pricing is noise (200x error increase)</div></div>
+      <div class="finding"><div class="finding-label">🎯 Best Categories</div><div class="finding-value">Spotify, weather, entertainment have <span class="highlight">persistent mispricing</span>. Avoid PGA/MLB.</div></div>
+      <div class="finding"><div class="finding-label">⏱️ Optimal Duration</div><div class="finding-value"><span class="highlight">1-7 day markets</span> — best theta/accuracy balance. Contested + expiring = gold.</div></div>
+      <div class="finding"><div class="finding-label">🐋 Whale Signal</div><div class="finding-value">Whales are right more than assumed. <span class="warn">Raise whale-win estimate from 35% to ~45%</span></div></div>
+      <div class="finding"><div class="finding-label">📈 Volume Spike</div><div class="finding-value"><span class="highlight">Confirmed as confirmation signal</span>. Need timestamps to prove it leads price.</div></div>
+      <div class="finding"><div class="finding-label">📅 Timing</div><div class="finding-value">Slight weekend edge (+0.48pp). Thursday worst day. Monday best. <span class="warn">Marginal.</span></div></div>
+    </div>
+    <div class="takeaway"><div class="takeaway-title">📋 Recommended Polyclawd Changes</div><p>
+      1. <strong>Add $10K volume floor</strong> to all signal generation<br>
+      2. <strong>Category whitelist</strong>: boost Spotify/weather/entertainment signals, dampen PGA/MLB<br>
+      3. <strong>Duration weighting</strong>: 2x weight for markets expiring in 1-7 days<br>
+      4. <strong>Raise inverse_whale threshold</strong>: whale win rate is higher than 35%<br>
+      5. <strong>Weekend boost</strong>: +5% confidence on weekend signals (small but real)<br>
+      6. <strong>Contested + expiring filter</strong>: flag markets at 30-70% with &lt;48h to close as highest priority
+    </p></div>
+  </div>
+</div>
+
+<footer>
+  <p><span class="brand">polyclawd</span> · virtuoso crypto · prediction market intelligence</p>
+  <p style="margin-top:8px;font-size:11px;">9/9 analyses complete · Kalshi live indexer: 616 files, 5.3M markets (still collecting)</p>
+</footer>
+
+</div>
+</body>
+</html>

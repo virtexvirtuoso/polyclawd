@@ -297,7 +297,7 @@
 <div class="noise"></div>
 <div class="container">
 
-<nav style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px 0"><a href="analysis.html" class="nav-link">← Analysis Suite</a><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode" aria-label="Toggle theme">🌙</button></nav>
+<nav style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px 0;gap:8px"><div style="display:flex;gap:8px;flex-wrap:wrap"><a href="analysis.html" class="nav-link">← Analysis</a><a href="how-it-works.html" class="nav-link">How It Works</a></div><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode" aria-label="Toggle theme">🌙</button></nav>
 <header>
   <div class="logo">Virtuoso</div>
   <h1>Prediction</h1>
@@ -531,7 +531,8 @@ function marketUrl(p) {
   // Use market_slug for working Polymarket links (/market/<slug> -> 307 redirect)
   const slug = p.market_slug || '';
   if (slug) return `https://polymarket.com/market/${slug}`;
-  return id ? `https://polymarket.com/markets/${id}` : '';
+  // No slug available — condition_id URLs don't work on Polymarket
+  return '';
 }
 
 async function loadAll() {
@@ -628,6 +629,10 @@ function renderRiskGuards(g) {
     kellyEl.textContent = '❄️ COLD';
     kellyEl.className = 'stat-value orange';
     kellySub.textContent = `WR ${(k.rolling_wr * 100).toFixed(0)}% / ${k.rolling_trades} trades — half size`;
+  } else if (k.status === 'bootstrap') {
+    kellyEl.textContent = '🚀 BOOTSTRAP';
+    kellyEl.className = 'stat-value cyan';
+    kellySub.textContent = `${k.rolling_trades}/20 trades — seeded 57% WR, 1/8 Kelly`;
   } else {
     kellyEl.textContent = '✅ NORMAL';
     kellyEl.className = 'stat-value green';
@@ -705,7 +710,7 @@ function renderPositions(positions) {
   }
   el.innerHTML = positions.map(p => {
     const days = p.hold_days != null ? p.hold_days : Math.max(0, Math.floor((Date.now() - new Date(p.opened_at).getTime()) / 86400000));
-    const isStale = p.stale || days >= 3;
+    const isStale = p.stale === true;  // Only mark stale if API says price data is stale
     const sideClass = (p.side || '').toLowerCase();
     const payout = p.potential_payout || 0;
     const roi = p.bet_size ? ((payout / p.bet_size - 1) * 100).toFixed(0) : '0';
@@ -789,9 +794,9 @@ function renderHistory(history, liveRes) {
 
 function updateEquityChart(history, liveRes) {
   const sorted = [...history].reverse();
-  let bankroll = 500;
+  let bankroll = 10000;
   const labels = ['Start'];
-  const data = [500];
+  const data = [10000];
 
   sorted.forEach((t, i) => {
     bankroll += (t.pnl || 0);

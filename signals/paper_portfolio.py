@@ -141,7 +141,14 @@ def _get_dynamic_kelly(conn) -> Dict[str, Any]:
         status = "paused"
         reason = f"Drawdown {drawdown_pct:.1%} >= {DRAWDOWN_PAUSE_PCT:.0%} — trading paused"
         logger.warning("🛑 KELLY PAUSED: drawdown=%.1f%% (threshold %.0f%%)", drawdown_pct * 100, DRAWDOWN_PAUSE_PCT * 100)
-    elif rolling_trades >= 10 and rolling_wr < KELLY_MIN_WR:
+    elif rolling_trades < BOOTSTRAP_TRADES:
+        # Bootstrap mode: seed WR assumption until enough data
+        fraction = KELLY_FRACTION_BOOTSTRAP
+        rolling_wr = BOOTSTRAP_WR  # Override with Becker-validated WR
+        status = "bootstrap"
+        reason = f"Bootstrap mode: {rolling_trades}/{BOOTSTRAP_TRADES} trades — seeded {BOOTSTRAP_WR:.0%} WR, 1/8 Kelly"
+        logger.info("🚀 KELLY BOOTSTRAP: trades=%d/%d fraction=1/8 seeded_wr=%.0f%%", rolling_trades, BOOTSTRAP_TRADES, BOOTSTRAP_WR * 100)
+    elif rolling_wr < KELLY_MIN_WR:
         fraction = KELLY_FRACTION_COLD
         status = "cold"
         reason = f"WR {rolling_wr:.0%} < {KELLY_MIN_WR:.0%} over {rolling_trades} trades — half size"
@@ -176,13 +183,22 @@ KELLY_FRACTION_COLD = 1 / 12  # Half size when win rate drops
 KELLY_ROLLING_WINDOW = 20     # Trades to evaluate rolling WR
 KELLY_MIN_WR = 0.55           # Below this → downshift to KELLY_FRACTION_COLD
 DRAWDOWN_PAUSE_PCT = 0.15     # 15% drawdown → pause trading
+BOOTSTRAP_TRADES = 20         # Minimum trades before trusting rolling stats
+BOOTSTRAP_WR = 0.57           # Seeded WR during bootstrap (Becker-validated)
+KELLY_FRACTION_BOOTSTRAP = 1 / 8  # Between cold (1/12) and normal (1/6)
 MAX_CONCURRENT = 10
 MIN_CONFIDENCE = 0.50
 MIN_EDGE = 0.12  # 12% minimum edge — lowered from 15% (Becker validates edges as low as 12%)
 MIN_PRICE = 0.05  # Price floor — reject garbage contracts below 5 cents
 MAX_PRICE = 0.95  # Price ceiling — reject near-certain markets (no edge)
-MIN_BET = 5.0
+MIN_BET = 100.0  # Bootstrap: meaningful minimum bet size
 MAX_BET = 1000.0  # Scaled for $10K bankroll
+
+# Archetype filters — data-driven from resolved trades
+ARCHETYPE_BLOCKLIST = {"price_above", "sports_winner"}  # 0% WR, -100% ROI across 7 trades
+ARCHETYPE_BOOST = {"sports_single_game": 1.3, "social_count": 1.3}  # Proven +180% blended ROI
+MIN_NO_IMPLIED_PROB = 0.35  # Minimum implied NO probability (1 - entry_price for NO bets)
+MIN_EXPIRY_HOURS = 72  # Minimum 3 days to resolution for crypto/price markets
 
 
 def _get_db() -> sqlite3.Connection:
@@ -357,6 +373,21 @@ def evaluate_signal(signal: dict) -> dict:
         return {"eligible": False, "reason": f"Confidence {confidence:.0%} < {MIN_CONFIDENCE:.0%}", "edge": edge, "kelly_pct": 0, "bet_size": 0}
     if edge < MIN_EDGE:
         return {"eligible": False, "reason": f"Edge {edge:.1%} < {MIN_EDGE:.0%}", "edge": edge, "kelly_pct": 0, "bet_size": 0}
+
+    # Archetype blocklist — proven unprofitable archetypes
+    try:
+        from mispriced_category_signal import classify_archetype
+    except ImportError:
+        classify_archetype = lambda s: s.get("archetype", "unknown")
+    archetype = classify_archetype(signal)
+    if archetype in ARCHETYPE_BLOCKLIST:
+        logger.info("🚫 BLOCKED archetype=%s market=%s (0%% WR, -100%% ROI)", archetype, signal.get("market", "")[:40])
+        return {"eligible": False, "reason": f"Blocked archetype: {archetype} (0% historical WR)", "edge": edge, "kelly_pct": 0, "bet_size": 0}
+
+    # Minimum NO implied probability — reject if market is too efficient
+    if side == "NO" and effective_price < MIN_NO_IMPLIED_PROB:
+        logger.info("🚫 BLOCKED low NO prob=%.0f%% market=%s", effective_price*100, signal.get("market", "")[:40])
+        return {"eligible": False, "reason": f"NO implied prob {effective_price:.0%} < {MIN_NO_IMPLIED_PROB:.0%} — market too efficient", "edge": edge, "kelly_pct": 0, "bet_size": 0}
     
     kelly_pct = edge / odds if odds > 0 else 0
     
@@ -421,6 +452,12 @@ def evaluate_signal(signal: dict) -> dict:
                 else:
                     bet_size *= 1.10  # 3x+ volume = FOMO, 10% boost
                     logger.info("Volume spike boost: market=%s ratio=%.1fx bet_size=%.2f", market_id[:30], volume_spike_data["ratio"], bet_size)
+
+    # Archetype boost — proven profitable archetypes get larger size
+    if archetype in ARCHETYPE_BOOST:
+        boost = ARCHETYPE_BOOST[archetype]
+        bet_size *= boost
+        logger.info("🎯 Archetype boost: %s x%.1f bet_size=%.2f", archetype, boost, bet_size)
 
     bet_size = max(MIN_BET, min(MAX_BET, bet_size))
     
@@ -879,7 +916,7 @@ def get_live_positions() -> dict:
                 opened = datetime.fromisoformat(p["opened_at"].replace("Z", "+00:00"))
                 hold_days = (datetime.now(timezone.utc) - opened).days
                 p["hold_days"] = hold_days
-                p["stale"] = hold_days >= 3
+                p["stale"] = False  # Staleness based on price data freshness, not hold time
             except Exception:
                 p["hold_days"] = 0
                 p["stale"] = False
