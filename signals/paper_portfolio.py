@@ -51,7 +51,7 @@ CORRELATION_GROUPS = {
     "directional": "crypto",
     "sports_single_game": "sports", "sports_winner": "sports",
     "game_total": "sports",
-    "election": "politics", "geopolitical": "politics",
+    "election": "geopolitical", "geopolitical": "geopolitical",
     "deadline_binary": "politics",
     "financial_price": "finance",
     "entertainment": "culture", "ai_model": "culture",
