@@ -549,12 +549,13 @@ def open_position(signal: dict) -> dict:
 
     # Classify archetype for breakdown tracking
     market_title = (signal.get("market") or signal.get("market_title") or signal.get("title", ""))[:120]
-    archetype = "other"
-    try:
-        from mispriced_category_signal import classify_archetype
-        archetype = classify_archetype(market_title)
-    except Exception:
-        pass
+    archetype = signal.get("archetype") or "other"
+    if archetype == "other":
+        try:
+            from mispriced_category_signal import classify_archetype
+            archetype = classify_archetype(market_title)
+        except Exception:
+            pass
 
     # Strategy field (e.g., "price_to_strike", "no_fade")
     strategy = signal.get("strategy", "")
