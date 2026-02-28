@@ -345,13 +345,157 @@ def _f_to_c(fahrenheit: float) -> float:
 _forecast_cache: Dict[str, dict] = {}
 _forecast_cache_ts: float = 0
 
+# File-based forecast cache for persistence across restarts (2h TTL)
+_FORECAST_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'storage', 'weather_forecast_cache.json')
+_FORECAST_CACHE_TTL = 7200  # 2 hours — forecasts update every 6-12h
+
+
+def _load_file_cache() -> Dict:
+    """Load forecast cache from disk."""
+    try:
+        if os.path.exists(_FORECAST_CACHE_FILE):
+            with open(_FORECAST_CACHE_FILE) as f:
+                cache = json.load(f)
+            # Check TTL
+            if time.time() - cache.get('_ts', 0) < _FORECAST_CACHE_TTL:
+                return cache
+    except Exception as e:
+        logger.debug("Cache load failed: %s", e)
+    return {}
+
+
+def _save_file_cache(cache: Dict):
+    """Save forecast cache to disk."""
+    try:
+        cache['_ts'] = time.time()
+        os.makedirs(os.path.dirname(_FORECAST_CACHE_FILE), exist_ok=True)
+        with open(_FORECAST_CACHE_FILE, 'w') as f:
+            json.dump(cache, f)
+    except Exception as e:
+        logger.debug("Cache save failed: %s", e)
+
+
+def preload_forecasts(cities: List[str] = None, days: int = 3) -> Dict[str, dict]:
+    """Batch-fetch forecasts for all weather cities. One API call per city.
+    
+    Uses file cache (2h TTL) + request spacing (200ms) to avoid 429s.
+    Returns dict: city_key → {date → {max_f, min_f, ...}}.
+    """
+    global _forecast_cache, _forecast_cache_ts
+    
+    # Try file cache first
+    file_cache = _load_file_cache()
+    if file_cache and len(file_cache) > 3:  # Has real data
+        logger.info("Using cached forecasts (%d cities, age %.0fs)", 
+                     len([k for k in file_cache if k != '_ts']),
+                     time.time() - file_cache.get('_ts', 0))
+        # Populate legacy in-memory cache so evaluate_weather_market works
+        for city_slug, dates in file_cache.items():
+            if city_slug == '_ts' or not isinstance(dates, dict):
+                continue
+            city_name = city_slug.replace('-', ' ')
+            for key_type in ('daily', 'hourly'):
+                cache_key = f"{city_name}:{key_type}"
+                if cache_key not in _forecast_cache:
+                    _forecast_cache[cache_key] = {
+                        'city': city_name,
+                        'forecasts': {},
+                    }
+                for date_str, vals in dates.items():
+                    if not isinstance(vals, dict):
+                        continue
+                    _forecast_cache[cache_key]['forecasts'][date_str] = {
+                        'date': date_str,
+                        'temp_max_f': vals.get('max_f', 0),
+                        'temp_min_f': vals.get('min_f', 0),
+                    }
+        _forecast_cache_ts = file_cache.get('_ts', time.time())
+        return file_cache
+    
+    if cities is None:
+        cities = list(WEATHER_CITIES_SLUG)
+    
+    now = datetime.now(timezone.utc)
+    start_date = now.strftime("%Y-%m-%d")
+    end_date = (now + timedelta(days=days)).strftime("%Y-%m-%d")
+    
+    results = {}
+    for city_slug in cities:
+        # Map slug to city name for coords lookup
+        city_name = city_slug.replace('-', ' ')
+        coords = _resolve_city(city_name)
+        if not coords:
+            continue
+        
+        lat, lon, tz = coords
+        url = (
+            f"{METEO_URL}?latitude={lat}&longitude={lon}"
+            f"&daily=temperature_2m_max,temperature_2m_min"
+            f"&timezone={tz}"
+            f"&start_date={start_date}&end_date={end_date}"
+        )
+        
+        data = _fetch_json(url, timeout=10)
+        if data and 'daily' in data:
+            daily = data['daily']
+            city_forecasts = {}
+            for i, date_str in enumerate(daily['time']):
+                max_c = daily['temperature_2m_max'][i]
+                min_c = daily['temperature_2m_min'][i]
+                if max_c is not None:
+                    city_forecasts[date_str] = {
+                        'max_f': round(max_c * 9/5 + 32, 1),
+                        'min_f': round(min_c * 9/5 + 32, 1),
+                        'max_c': round(max_c, 1),
+                        'min_c': round(min_c, 1),
+                    }
+            results[city_slug] = city_forecasts
+            logger.debug("Forecast loaded: %s → %d dates", city_slug, len(city_forecasts))
+        else:
+            logger.warning("Forecast fetch failed for %s", city_slug)
+        
+        # Rate limit spacing — 200ms between requests
+        time.sleep(0.2)
+    
+    if results:
+        # Also populate legacy cache format for evaluate_weather_market fallback
+        for city_slug, dates in results.items():
+            city_name = city_slug.replace('-', ' ')
+            for date_str, vals in dates.items():
+                legacy_key = f"{city_name}:daily"
+                if legacy_key not in _forecast_cache:
+                    _forecast_cache[legacy_key] = {
+                        'city': city_name,
+                        'forecasts': {},
+                    }
+                _forecast_cache[legacy_key]['forecasts'][date_str] = {
+                    'date': date_str,
+                    'temp_max_f': vals['max_f'],
+                    'temp_min_f': vals['min_f'],
+                }
+                # Also hourly key (so evaluate_weather_market finds it)
+                hourly_key = f"{city_name}:hourly"
+                if hourly_key not in _forecast_cache:
+                    _forecast_cache[hourly_key] = _forecast_cache[legacy_key]
+        
+        _forecast_cache_ts = time.time()
+        
+        # Save to disk
+        file_data = dict(results)
+        file_data['_ts'] = time.time()
+        _save_file_cache(file_data)
+        
+        logger.info("Preloaded forecasts for %d/%d cities", len(results), len(cities))
+    
+    return results
+
 
 def _get_cached_forecast(city: str, days_until: float) -> Optional[dict]:
     """Get forecast with per-scan caching (avoids re-fetching same city)."""
     global _forecast_cache, _forecast_cache_ts
     now = time.time()
-    # Clear cache if older than 10 minutes
-    if now - _forecast_cache_ts > 600:
+    # Clear cache if older than 2 hours (was 10 min — way too aggressive)
+    if now - _forecast_cache_ts > _FORECAST_CACHE_TTL:
         _forecast_cache = {}
         _forecast_cache_ts = now
 
@@ -370,10 +514,23 @@ def _get_cached_forecast(city: str, days_until: float) -> Optional[dict]:
 def _try_ensemble_evaluate(title: str, market_price: float, city: str, target_date: str, temp_info) -> Optional[dict]:
     """Try ensemble-based evaluation. Returns signal dict or None to fall back."""
     try:
-        from signals.weather_ensemble import ensemble_fair_value, get_ensemble_forecast
+        from signals.weather_ensemble import ensemble_fair_value, get_ensemble_forecast, source_health
     except ImportError:
         logger.debug("weather_ensemble not available, using legacy")
         return None
+
+    # Skip ensemble if no API keys configured (saves rate-limited Open-Meteo calls)
+    try:
+        health = source_health()
+        has_keys = any(
+            health.get(src, {}).get('key_set', False)
+            for src in ('pirate_weather', 'tomorrow_io', 'weatherapi')
+        )
+        if not has_keys:
+            logger.debug("No ensemble API keys configured, using legacy path")
+            return None
+    except Exception:
+        pass
 
     if not temp_info:
         return None
@@ -745,6 +902,9 @@ def scan_polymarket_weather() -> List[dict]:
     """Scan Polymarket for weather temperature markets via slug-based discovery."""
     signals = []
     now = datetime.now(timezone.utc)
+
+    # Pre-load all forecasts in one batch (uses cache, avoids per-market API calls)
+    preload_forecasts(days=3)
 
     # Check today + next 2 days
     dates_to_check = [(now + timedelta(days=d)) for d in range(3)]
