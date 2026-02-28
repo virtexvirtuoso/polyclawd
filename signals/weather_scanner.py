@@ -1121,6 +1121,58 @@ def reeval_weather_positions() -> dict:
     return results
 
 
+def get_weather_portfolio_signals(min_edge: float = 10.0, max_signals: int = 5) -> List[dict]:
+    """Get weather signals formatted for paper_portfolio.process_signals().
+    
+    Returns top signals (by edge) adapted to the portfolio signal dict format.
+    Deduplicates: only the best bracket per city/date combo.
+    """
+    raw_signals = scan_polymarket_weather()
+    if not raw_signals:
+        return []
+    
+    # Deduplicate: pick best signal per city+date (don't bet multiple brackets)
+    best_per_event = {}
+    for s in raw_signals:
+        key = f"{s.get('city', '')}_{s.get('target_date', '')}"
+        edge = s.get("edge_pct", 0)
+        if edge >= min_edge and (key not in best_per_event or edge > best_per_event[key].get("edge_pct", 0)):
+            best_per_event[key] = s
+    
+    # Sort by edge, take top N
+    top = sorted(best_per_event.values(), key=lambda x: x.get("edge_pct", 0), reverse=True)[:max_signals]
+    
+    portfolio_signals = []
+    for s in top:
+        market_price = s.get("market_price", 0.5)
+        side = s.get("side", "YES")
+        
+        portfolio_signals.append({
+            "market_id": s.get("market_id", ""),
+            "market": s.get("market", "")[:120],
+            "market_title": s.get("market", "")[:120],
+            "side": side,
+            "entry_price": market_price,
+            "market_price": market_price,
+            "confidence": s.get("confidence", 70) / 100 if s.get("confidence", 0) > 1 else s.get("confidence", 0.7),
+            "edge_pct": s.get("edge_pct", 0),
+            "strategy": "weather",
+            "archetype": "weather",
+            "platform": s.get("platform", "polymarket"),
+            "source": "weather_scanner",
+            "city": s.get("city", ""),
+            "target_date": s.get("target_date", ""),
+            "days_to_close": max(0.1, s.get("days_until", 1)),
+            "volume": 0,  # Weather markets have volume but we don't track per-bracket
+            "slug": s.get("slug", ""),
+            "weather_detail": s.get("weather_detail", {}),
+        })
+    
+    logger.info("Weather portfolio signals: %d/%d pass min_edge=%.0f%%",
+                len(portfolio_signals), len(raw_signals), min_edge)
+    return portfolio_signals
+
+
 def scan_all_weather() -> dict:
     """Run full weather scan across both platforms."""
     kalshi_signals = scan_kalshi_weather()

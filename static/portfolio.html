@@ -79,7 +79,12 @@
   .stat-label{font-size:10px;text-transform:uppercase;letter-spacing:2px;color:var(--text2);margin-bottom:6px}
   .stat-value{font-size:24px;font-weight:700;font-family:'JetBrains Mono',monospace}
   .stat-sub{font-size:11px;color:var(--text2);margin-top:4px}
-  .green{color:var(--green)}.red{color:var(--red)}.gold{color:var(--gold)}.cyan{color:var(--cyan)}.accent{color:var(--accent2)}.orange{color:var(--orange)}
+  .green{color:var(--green)}.red{color:var(--red)}.gold{color:var(--gold)}.cyan{color:var(--cyan)}.accent{color:var(--accent2)}.accent2{color:var(--accent2)}.orange{color:var(--orange)}
+
+  /* Skeleton loading shimmer */
+  @keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+  .stats-row.skeleton .stat-value,
+  .stats-row.skeleton .stat-sub{color:transparent!important;background:linear-gradient(90deg,var(--surface2) 25%,var(--border) 50%,var(--surface2) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:4px;min-height:1em}
 
   /* Section Cards */
   .section-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;margin-bottom:32px;overflow:hidden;transition:border-color 0.3s}
@@ -310,7 +315,7 @@
   <span class="status-msg" id="statusMsg"></span>
 </div>
 
-<div class="stats-row">
+<div class="stats-row skeleton">
   <div class="stat-card bankroll">
     <div class="stat-label">Bankroll</div>
     <div class="stat-value cyan" id="bankroll">—</div>
@@ -341,9 +346,22 @@
     <div class="stat-value" id="unrealPnl">—</div>
     <div class="stat-sub" id="unrealSub">open value</div>
   </div>
+  <div class="stat-card sharpe">
+    <div class="stat-label">Sharpe</div>
+    <div class="stat-value accent2" id="sharpe">—</div>
+    <div class="stat-sub">risk-adjusted</div>
+  </div>
+  <div class="stat-card hold">
+    <div class="stat-label">Avg Hold</div>
+    <div class="stat-value accent2" id="avgHold">—</div>
+    <div class="stat-sub">days per trade</div>
+  </div>
+  <div class="stat-card risk">
+    <div class="stat-label">At Risk</div>
+    <div class="stat-value red" id="capitalRisk">—</div>
+    <div class="stat-sub" id="riskSub">% of bankroll</div>
+  </div>
 </div>
-<!-- Hidden but still rendered by JS -->
-<div style="display:none"><span id="sharpe"></span><span id="avgHold"></span><span id="capitalRisk"></span><span id="riskSub"></span></div>
 
 <!-- Risk Guards -->
 <div class="section-card" id="riskGuardsCard" style="margin-bottom:24px">
@@ -559,6 +577,7 @@ async function loadAll() {
     renderHistory(histRes, liveRes);
     if (archRes) renderArchetypeBreakdown(archRes, archPnlRes);
     renderResolveLog(resolveLogRes);
+    document.querySelector('.stats-row.skeleton')?.classList.remove('skeleton');
     document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
   } catch(e) {
     console.error('Load failed:', e);

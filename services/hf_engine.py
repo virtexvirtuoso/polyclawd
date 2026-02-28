@@ -26,7 +26,16 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 from pathlib import Path
 
+import aiomcache
 import websockets
+
+from services.hf_enrichment import get_enrichment_reader
+from services.hf_velocity import (
+    ImbalanceVelocityTracker,
+    CVDAccelerationTracker,
+    LiquidationProximityTracker,
+)
+from services.hf_triggers import evaluate_edge, build_edge_payload
 
 logger = logging.getLogger("hf_engine")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
@@ -443,6 +452,103 @@ async def start_http_server():
 
 
 # ============================================================================
+# Trigger Evaluation Loop
+# ============================================================================
+
+# Velocity trackers (persistent across cycles)
+_velocity_trackers = {
+    "imbalance": ImbalanceVelocityTracker(window_size=12),
+    "cvd": CVDAccelerationTracker(window_size=12),
+    "liquidation": LiquidationProximityTracker(price_window=30),
+}
+
+# Memcached client for writing edge decisions
+_mc_client: Optional[aiomcache.Client] = None
+
+
+async def _get_mc_client() -> aiomcache.Client:
+    global _mc_client
+    if _mc_client is None:
+        _mc_client = aiomcache.Client("localhost", 11211, pool_size=2)
+    return _mc_client
+
+
+async def trigger_evaluation_loop():
+    """Evaluate predictive triggers every ~1 second.
+
+    Reads Virtuoso enrichment data from memcached, updates velocity trackers
+    with both enrichment + fast Binance/oracle data, evaluates triggers, and
+    writes the edge decision back to memcached for Virtuoso API to read.
+    """
+    logger.info("🎯 Starting trigger evaluation loop...")
+    reader = get_enrichment_reader()
+
+    # Wait for Binance WS to populate initial prices
+    await asyncio.sleep(5)
+
+    while True:
+        try:
+            # Read Virtuoso enrichment data
+            enrichment = await reader.read_enrichment("BTCUSDT")
+
+            # Build fast data dict from global _state
+            btc = _state["BTC"]
+            fast = {
+                "symbol": "BTCUSDT",
+                "binance_price": btc.binance_price,
+                "oracle_price": btc.oracle_price,
+                "price_change_3m_pct": 0.0,  # TODO: compute from price history
+            }
+
+            # Update velocity trackers from enrichment data
+            ob = reader.get_orderbook_depth(enrichment, "BTCUSDT")
+            if ob:
+                bid_d = ob.get("bid_depth", ob.get("bids_total", 0))
+                ask_d = ob.get("ask_depth", ob.get("asks_total", 0))
+                if bid_d > 0 and ask_d > 0:
+                    _velocity_trackers["imbalance"].update(bid_d, ask_d)
+
+            cvd_data = reader.get_cvd_data(enrichment, "BTCUSDT")
+            if cvd_data:
+                cvd_val = cvd_data.get("cvd", cvd_data.get("cumulative_delta", 0))
+                if cvd_val:
+                    _velocity_trackers["cvd"].update(float(cvd_val))
+
+            if btc.binance_price > 0:
+                _velocity_trackers["liquidation"].update_price(btc.binance_price)
+
+            # Evaluate triggers
+            decision = evaluate_edge(enrichment, fast, _velocity_trackers)
+
+            # Build payload with oracle state
+            oracle_state = {
+                "binance_price": btc.binance_price,
+                "oracle_price": btc.oracle_price,
+                "divergence_pct": btc.divergence_pct,
+                "latency_signal": btc.latency_signal,
+            }
+            payload = build_edge_payload(decision, oracle_state)
+
+            # Write to memcached for Virtuoso API
+            mc = await _get_mc_client()
+            payload_bytes = json.dumps(payload).encode()
+            await mc.set(b"polymarket:edge:BTCUSDT", payload_bytes, exptime=30)
+
+            if decision.action == "TRADE":
+                logger.info(
+                    f"🎯 EDGE SIGNAL: {decision.direction} "
+                    f"conf={decision.confidence:.1%} "
+                    f"trigger={decision.trigger_type} "
+                    f"size=${decision.sizing.get('recommended_usd', 0):.0f}"
+                )
+
+        except Exception as e:
+            logger.debug(f"Trigger eval error: {e}")
+
+        await asyncio.sleep(1)
+
+
+# ============================================================================
 # Main Entry Point
 # ============================================================================
 
@@ -466,6 +572,7 @@ async def main():
         binance_ws_loop(),
         oracle_poller_loop(),
         start_http_server(),
+        trigger_evaluation_loop(),
     )
 
 
