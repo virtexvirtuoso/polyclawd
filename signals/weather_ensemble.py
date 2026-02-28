@@ -139,11 +139,18 @@ def _c_to_f(c: float) -> float:
 
 # ── Source 1: Open-Meteo Ensemble (PRIMARY — no key needed) ─────────────
 
+# Circuit breaker: skip Open-Meteo if rate limited (resets after 1h)
+_open_meteo_blocked = False
+_open_meteo_blocked_ts = 0.0
+
 def _fetch_open_meteo_ensemble(lat: float, lon: float, date: str) -> Optional[dict]:
     """
     Fetch ensemble forecasts from multiple independent models.
     Returns dict with high temps from each ensemble member.
     """
+    global _open_meteo_blocked, _open_meteo_blocked_ts
+    if _open_meteo_blocked and (time.time() - _open_meteo_blocked_ts) < 3600:
+        return None
     models_param = ",".join(ENSEMBLE_MODELS)
     url = (
         f"https://ensemble-api.open-meteo.com/v1/ensemble"
@@ -155,7 +162,11 @@ def _fetch_open_meteo_ensemble(lat: float, lon: float, date: str) -> Optional[di
     )
     data = _fetch_json(url, timeout=15)
     if not data:
-        return _fetch_open_meteo_ensemble_fallback(lat, lon, date)
+
+        _open_meteo_blocked = True
+        _open_meteo_blocked_ts = time.time()
+        logger.info("Open-Meteo circuit breaker tripped (likely 429)")
+        return None
 
     highs_c = []
     lows_c = []
