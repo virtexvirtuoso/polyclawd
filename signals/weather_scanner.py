@@ -519,19 +519,6 @@ def _try_ensemble_evaluate(title: str, market_price: float, city: str, target_da
         logger.debug("weather_ensemble not available, using legacy")
         return None
 
-    # Skip ensemble if no API keys configured (saves rate-limited Open-Meteo calls)
-    try:
-        health = source_health()
-        has_keys = any(
-            health.get(src, {}).get('key_set', False)
-            for src in ('pirate_weather', 'tomorrow_io', 'weatherapi')
-        )
-        if not has_keys:
-            logger.debug("No ensemble API keys configured, using legacy path")
-            return None
-    except Exception:
-        pass
-
     if not temp_info:
         return None
 
@@ -906,6 +893,18 @@ def scan_polymarket_weather() -> List[dict]:
     # Pre-load all forecasts in one batch (uses cache, avoids per-market API calls)
     preload_forecasts(days=3)
 
+    # Pre-warm ensemble cache: one call per city warms all dates (multi-day response)
+    try:
+        from signals.weather_ensemble import get_ensemble_forecast
+        tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+        for city_slug in WEATHER_CITIES_SLUG:
+            city_name = city_slug.replace('-', ' ')
+            get_ensemble_forecast(city_name, tomorrow)
+            time.sleep(0.1)  # Rate limit spacing
+        logger.info("Ensemble cache pre-warmed for %d cities", len(WEATHER_CITIES_SLUG))
+    except Exception as e:
+        logger.warning("Ensemble pre-warm failed: %s", e)
+
     # Check today + next 2 days
     dates_to_check = [(now + timedelta(days=d)) for d in range(3)]
     month_names = {
@@ -1131,12 +1130,23 @@ def get_weather_portfolio_signals(min_edge: float = 10.0, max_signals: int = 5) 
     if not raw_signals:
         return []
     
+    # Filter: actionable signals only (meaningful price, not garbage contracts)
+    filtered = []
+    for s in raw_signals:
+        edge = s.get("edge_pct", 0)
+        mp = s.get("market_price", 0)
+        side = s.get("side", "YES")
+        effective_price = mp if side == "YES" else (1 - mp)
+        # Skip garbage contracts (<5¢) and near-certain (>95¢) — no edge in these
+        if edge >= min_edge and 0.05 <= effective_price <= 0.95:
+            filtered.append(s)
+    
     # Deduplicate: pick best signal per city+date (don't bet multiple brackets)
     best_per_event = {}
-    for s in raw_signals:
+    for s in filtered:
         key = f"{s.get('city', '')}_{s.get('target_date', '')}"
         edge = s.get("edge_pct", 0)
-        if edge >= min_edge and (key not in best_per_event or edge > best_per_event[key].get("edge_pct", 0)):
+        if key not in best_per_event or edge > best_per_event[key].get("edge_pct", 0):
             best_per_event[key] = s
     
     # Sort by edge, take top N
