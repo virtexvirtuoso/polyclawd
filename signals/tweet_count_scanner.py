@@ -159,6 +159,37 @@ def get_daily_counts(posts: List[dict], rolling_days: int = 28) -> List[int]:
     return counts
 
 
+def get_daily_counts_by_dow(posts: List[dict], rolling_days: int = 28) -> Dict[int, List[int]]:
+    """Like get_daily_counts but bucketed by day-of-week (0=Mon, 6=Sun).
+    
+    Returns {dow: [count, count, ...]} for sampling by matching DOW.
+    """
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    cutoff = today - timedelta(days=rolling_days)
+
+    daily = {}
+    for p in posts:
+        created = p.get("createdAt", "")
+        if not created:
+            continue
+        try:
+            dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            d = dt.date()
+            if cutoff <= d < today:
+                daily[d] = daily.get(d, 0) + 1
+        except (ValueError, TypeError):
+            continue
+
+    by_dow: Dict[int, List[int]] = {i: [] for i in range(7)}
+    current = cutoff
+    while current < today:
+        by_dow[current.weekday()].append(daily.get(current, 0))
+        current += timedelta(days=1)
+
+    return by_dow
+
+
 def count_posts_in_window(posts: List[dict], start: datetime, end: datetime) -> int:
     """Count posts within a specific time window."""
     count = 0
@@ -181,15 +212,19 @@ def count_posts_in_window(posts: List[dict], start: datetime, end: datetime) -> 
 
 def run_monte_carlo(daily_counts: List[int], window_days: float,
                     posts_so_far: int = 0, days_elapsed: float = 0,
-                    simulations: int = MC_SIMULATIONS) -> Dict[str, float]:
+                    simulations: int = MC_SIMULATIONS,
+                    counts_by_dow: Optional[Dict[int, List[int]]] = None,
+                    window_start: Optional[datetime] = None) -> Dict[str, float]:
     """Run Monte Carlo simulation for tweet count bracket probabilities.
     
     Args:
-        daily_counts: Historical daily post counts (for sampling)
+        daily_counts: Historical daily post counts (fallback pool)
         window_days: Total window length in days
         posts_so_far: Posts already counted in current window
         days_elapsed: Days already elapsed in current window
         simulations: Number of MC runs
+        counts_by_dow: {dow: [counts]} for DOW-aware sampling (0=Mon, 6=Sun)
+        window_start: Window start datetime (needed for DOW-aware sampling)
     
     Returns:
         Dict of bracket_key → probability (e.g. {"280-299": 0.144})
@@ -201,18 +236,67 @@ def run_monte_carlo(daily_counts: List[int], window_days: float,
     remaining_whole = int(remaining_days)
     remaining_frac = remaining_days - remaining_whole
 
+    # Build per-day sampling pools (DOW-aware if available)
+    # Figure out what DOW each remaining day falls on
+    day_pools = []
+    if counts_by_dow and window_start:
+        first_remaining = window_start + timedelta(days=int(days_elapsed) + (1 if days_elapsed % 1 > 0.5 else 0))
+        for i in range(remaining_whole + (1 if remaining_frac > 0.1 else 0)):
+            d = (first_remaining + timedelta(days=i)).date()
+            dow = d.weekday()
+            pool = counts_by_dow.get(dow, [])
+            # Fall back to full pool if DOW bucket too small (<4 samples)
+            day_pools.append(pool if len(pool) >= 4 else daily_counts)
+    else:
+        day_pools = [daily_counts] * (remaining_whole + (1 if remaining_frac > 0.1 else 0))
+
+    # Pace blending: if mid-week pace differs from historical mean by >1σ,
+    # shift sampling toward current pace via weighted resampling
+    pace_weights = None
+    if days_elapsed >= 1.5 and len(daily_counts) > 3:
+        current_pace = posts_so_far / days_elapsed
+        hist_mean = sum(daily_counts) / len(daily_counts)
+        hist_stdev = (sum((x - hist_mean) ** 2 for x in daily_counts) / len(daily_counts)) ** 0.5
+        if hist_stdev > 0:
+            z = (current_pace - hist_mean) / hist_stdev
+            if abs(z) > 1.0:
+                # Blend: weight samples closer to current pace higher
+                # Soft blend — doesn't replace distribution, just tilts it
+                pace_weights = {}
+                for pool_idx, pool in enumerate(day_pools):
+                    weights = []
+                    for c in pool:
+                        dist = abs(c - current_pace)
+                        w = 1.0 / (1.0 + dist / (hist_stdev + 1))  # Closer to pace = higher weight
+                        weights.append(w)
+                    total_w = sum(weights)
+                    pace_weights[pool_idx] = [w / total_w for w in weights] if total_w > 0 else None
+
     rng = random.Random(MC_SEED)
     bracket_hits: Dict[str, int] = {}
 
     for _ in range(simulations):
-        # Sample remaining full days from historical distribution
         total = posts_so_far
-        for _ in range(remaining_whole):
-            total += rng.choice(daily_counts)
+        for day_i in range(remaining_whole):
+            pool = day_pools[day_i] if day_i < len(day_pools) else daily_counts
+            if pace_weights and day_i in pace_weights and pace_weights[day_i]:
+                # Weighted random choice
+                r = rng.random()
+                cumulative = 0.0
+                chosen = pool[-1]
+                for idx, w in enumerate(pace_weights[day_i]):
+                    cumulative += w
+                    if r <= cumulative:
+                        chosen = pool[idx]
+                        break
+                total += chosen
+            else:
+                total += rng.choice(pool)
 
         # Partial day: sample and scale
         if remaining_frac > 0.1:
-            total += int(rng.choice(daily_counts) * remaining_frac)
+            frac_pool = day_pools[remaining_whole] if remaining_whole < len(day_pools) else daily_counts
+            total += int(rng.choice(frac_pool) * remaining_frac)
 
         # Map to bracket
         bracket_start = (total // BRACKET_WIDTH) * BRACKET_WIDTH
@@ -230,7 +314,7 @@ def run_monte_carlo(daily_counts: List[int], window_days: float,
 # Market Discovery
 # ============================================================================
 
-def discover_tweet_markets(handle: str = "elonmusk") -> List[dict]:
+def discover_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optional[list] = None) -> List[dict]:
     """Find active tweet count bracket markets on Polymarket.
     
     Two-pass discovery:
@@ -320,7 +404,8 @@ def discover_tweet_markets(handle: str = "elonmusk") -> List[dict]:
                         markets.extend(_extract_event_markets(event))
 
     # Pass 2: Volume-based scan (catch any events slug discovery missed)
-    data = _fetch_json(
+    # Use pre-fetched cache if available (avoids 1 HTTP call per account)
+    data = gamma_volume_cache if gamma_volume_cache is not None else _fetch_json(
         f"{GAMMA_API}/events?active=true&closed=false&limit=50"
         f"&order=volume24hr&ascending=false"
     )
@@ -416,7 +501,7 @@ def _parse_window_from_event(event_slug: str, event_end_date: str) -> Tuple[Opti
 # Signal Generation
 # ============================================================================
 
-def scan_tweet_markets(handle: str = "elonmusk") -> List[dict]:
+def scan_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optional[list] = None) -> List[dict]:
     """Full scan pipeline for a single account.
     
     1. Fetch post history from xtracker
@@ -436,17 +521,22 @@ def scan_tweet_markets(handle: str = "elonmusk") -> List[dict]:
         return []
 
     daily_counts = get_daily_counts(posts, rolling_days=rolling_days)
+    counts_by_dow = get_daily_counts_by_dow(posts, rolling_days=rolling_days)
     if len(daily_counts) < 7:
         logger.warning("Only %d days of data for @%s — need 7+", len(daily_counts), handle)
         return []
 
     mean_daily = statistics.mean(daily_counts)
     stdev_daily = statistics.stdev(daily_counts) if len(daily_counts) > 1 else 0
-    logger.info("@%s: %d days, mean=%.1f/day, stdev=%.1f, median=%.0f",
-                handle, len(daily_counts), mean_daily, stdev_daily, statistics.median(daily_counts))
+    # Log DOW breakdown
+    dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    dow_means = {dow_names[d]: round(statistics.mean(c), 1) if c else 0 for d, c in counts_by_dow.items()}
+    logger.info("@%s: %d days, mean=%.1f/day, stdev=%.1f, median=%.0f | DOW: %s",
+                handle, len(daily_counts), mean_daily, stdev_daily, statistics.median(daily_counts),
+                " ".join(f"{k}={v}" for k, v in dow_means.items()))
 
     # 2. Discover markets
-    markets = discover_tweet_markets(handle)
+    markets = discover_tweet_markets(handle, gamma_volume_cache=gamma_volume_cache)
     if not markets:
         logger.info("No active markets for @%s", handle)
         return []
@@ -486,11 +576,13 @@ def scan_tweet_markets(handle: str = "elonmusk") -> List[dict]:
         logger.info("Event %s: %.1f/%.1f days elapsed, %d posts so far",
                      slug[:40], days_elapsed, window_days, posts_so_far)
 
-        # Run Monte Carlo
+        # Run Monte Carlo (DOW-aware + pace-conditioned)
         mc_probs = run_monte_carlo(
             daily_counts, window_days,
             posts_so_far=posts_so_far,
             days_elapsed=days_elapsed,
+            counts_by_dow=counts_by_dow,
+            window_start=start,
         )
 
         if not mc_probs:
@@ -571,9 +663,15 @@ def scan_all_tweet_markets() -> Dict[str, any]:
     all_signals = []
     account_stats = {}
 
+    # Pre-fetch Gamma volume scan once (shared across all accounts)
+    _gamma_volume_cache = _fetch_json(
+        f"{GAMMA_API}/events?active=true&closed=false&limit=50"
+        f"&order=volume24hr&ascending=false"
+    )
+
     for handle in TRACKED_ACCOUNTS:
         try:
-            signals = scan_tweet_markets(handle)
+            signals = scan_tweet_markets(handle, gamma_volume_cache=_gamma_volume_cache)
             all_signals.extend(signals)
             account_stats[handle] = {
                 "signals": len(signals),
