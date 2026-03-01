@@ -449,36 +449,25 @@ def _markets_match(title_a: str, title_b: str) -> bool:
 def _check_polymarket_resolution(condition_id: str) -> str:
     """Check if a Polymarket condition has resolved.
     Returns 'YES' or 'NO' if resolved, None if still open.
+    Uses CLOB API only — Gamma condition_id search returns wrong markets.
     """
-    # Try gamma API (has resolution info)
-    data = _fetch_json(f"{GAMMA_API}/markets?condition_id={condition_id}", timeout=10)
-    if data and isinstance(data, list) and len(data) > 0:
-        market = data[0]
-        if market.get("closed") or market.get("resolved"):
-            outcome = market.get("outcome")
-            if outcome:
-                return outcome.upper()
-            prices = market.get("outcomePrices")
-            if prices:
-                try:
-                    price_list = json.loads(prices) if isinstance(prices, str) else prices
-                    if len(price_list) >= 2:
-                        if float(price_list[0]) > 0.9:
-                            return "YES"
-                        elif float(price_list[1]) > 0.9:
-                            return "NO"
-                except Exception:
-                    pass
-    
-    # Try CLOB API
     data = _fetch_json(f"{POLYMARKET_CLOB}/markets/{condition_id}", timeout=10)
     if data:
         if data.get("closed") or data.get("resolved"):
             tokens = data.get("tokens", [])
+            # Check for explicit winner flag
             for token in tokens:
-                if token.get("outcome") == "Yes" and token.get("price", 0) > 0.9:
+                if token.get("winner") is True:
+                    outcome = (token.get("outcome") or "").upper()
+                    if outcome in ("YES", "NO"):
+                        return outcome
+                    # Named outcomes: first token winning = YES
+                    return "YES" if token == tokens[0] else "NO"
+            # Fallback: price-based
+            for token in tokens:
+                if token.get("outcome") == "Yes" and float(token.get("price", 0)) > 0.9:
                     return "YES"
-                elif token.get("outcome") == "No" and token.get("price", 0) > 0.9:
+                elif token.get("outcome") == "No" and float(token.get("price", 0)) > 0.9:
                     return "NO"
     
     return None

@@ -103,10 +103,13 @@ def fetch_wallet_positions(address: str) -> List[Dict]:
 
 
 def _resolve_condition_to_question(condition_id: str) -> str:
-    """Look up market question from condition ID via Gamma API."""
-    data = _fetch(f"{GAMMA_API}/markets", {"condition_id": condition_id})
-    if data and isinstance(data, list) and data:
-        return data[0].get("question", "")[:100]
+    """Look up market question from condition ID via CLOB API.
+    Gamma condition_id search returns wrong markets — use CLOB exact lookup.
+    """
+    CLOB = "https://clob.polymarket.com"
+    data = _fetch(f"{CLOB}/markets/{condition_id}", {})
+    if data and isinstance(data, dict):
+        return (data.get("question") or data.get("description") or "")[:100]
     return ""
 
 

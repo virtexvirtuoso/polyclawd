@@ -564,26 +564,31 @@ def resolve_hf_positions() -> Dict:
         for trade in open_trades:
             market_id = trade["market_id"]
             
-            # Check if market has resolved via Gamma API
+            # Check if market has resolved via CLOB API (exact lookup)
+            # Gamma condition_id search returns wrong markets — never use for resolution
             try:
-                url = f"{GAMMA_API}/markets?conditionId={market_id}&closed=true"
+                CLOB_URL = "https://clob.polymarket.com"
+                url = f"{CLOB_URL}/markets/{market_id}"
                 req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd-HF/1.0"})
                 with urllib.request.urlopen(req, timeout=10) as resp:
-                    markets = json.loads(resp.read().decode())
+                    market = json.loads(resp.read().decode())
                 
-                if not markets:
+                if not market or not market.get("closed"):
                     continue
                 
-                market = markets[0]
-                prices = json.loads(market.get("outcomePrices", "[0,0]"))
-                outcomes = json.loads(market.get("outcomes", '["Yes","No"]'))
+                tokens = market.get("tokens", [])
                 
-                # Determine winner
+                # Determine winner from token winner flag or price
                 winner = None
-                for i, p in enumerate(prices):
-                    if float(p) > 0.95:
-                        winner = outcomes[i] if i < len(outcomes) else None
+                for t in tokens:
+                    if t.get("winner") is True:
+                        winner = (t.get("outcome") or "").capitalize()
                         break
+                if winner is None:
+                    for t in tokens:
+                        if float(t.get("price", 0)) > 0.95:
+                            winner = (t.get("outcome") or "").capitalize()
+                            break
                 
                 if winner is None:
                     continue
