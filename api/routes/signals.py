@@ -2008,6 +2008,20 @@ async def scan_weather():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/signals/tweets")
+async def scan_tweet_counts():
+    """Scan tweet count bracket markets using Monte Carlo vs xtracker data."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from tweet_count_scanner import scan_all_tweet_markets
+        return scan_all_tweet_markets()
+    except Exception as e:
+        logger.exception(f"Tweet count scan failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ─── Confidence Redesign: Archetype & Kill Rules ─────────────────────
 
 @router.get("/archetype/classify")
