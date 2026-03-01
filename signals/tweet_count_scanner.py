@@ -54,6 +54,12 @@ TRACKED_ACCOUNTS = {
         "slug_search": "andrew-tate-of-tweets-",
         "rolling_days": 28,
     },
+    "realDonaldTrump": {
+        "name": "Donald Trump",
+        "slug_pattern": "donald-trump-of-truth-social-posts-{slug_dates}",
+        "slug_search": "donald-trump-of-truth-social-posts-",
+        "rolling_days": 28,
+    },
 }
 
 # Bracket width (Polymarket uses 20-tweet increments)
