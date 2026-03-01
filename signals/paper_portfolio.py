@@ -1210,6 +1210,17 @@ def resolve_open_positions() -> dict:
                         first_won = tokens[0].get("winner") is True
                         return "YES" if first_won else "NO"
 
+                # Closed but no winner flag — resolve via final token prices
+                # (CLOB sometimes sets closed=True before setting winner on tokens)
+                if len(tokens) >= 2:
+                    yes_p = float(tokens[0].get("price", 0.5))
+                    if yes_p > 0.95:
+                        logger.info(f"Resolve {market_id[:16]}... YES (closed, price={yes_p:.2f}, no winner flag)")
+                        return "YES"
+                    elif yes_p < 0.05:
+                        logger.info(f"Resolve {market_id[:16]}... NO (closed, price={yes_p:.2f}, no winner flag)")
+                        return "NO"
+
         # Gamma API fallback REMOVED — condition_id search returns wrong markets
         # (e.g. different bracket/city for weather markets). CLOB is primary,
         # force-resolve below is the backstop. See 2026-02-28 session notes.
