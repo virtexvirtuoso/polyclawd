@@ -647,7 +647,27 @@ def close_position(market_id: str, outcome: str, exit_price: float = None) -> di
     
     _save_state(conn, bankroll, pnl)
     conn.close()
-    
+
+    # Log resolution for learning system (tweet_count_mc, weather_ensemble)
+    strategy = pos["strategy"] or ""
+    if strategy in ("tweet_count_mc", "weather_ensemble"):
+        try:
+            from signals.resolution_logger import log_resolution
+            mc_prob = pos["confidence"] or 0.5  # confidence = our MC probability
+            log_resolution(strategy, {
+                "market_id": market_id,
+                "market_title": pos["market_title"] or "",
+                "side": side,
+                "mc_prob": round(mc_prob, 4),
+                "market_price": round(entry_price, 4),
+                "edge_pct": round(pos["edge_pct"] or 0, 2),
+                "archetype": pos["archetype"] or "",
+                "won": outcome == "won",
+                "pnl": round(pnl, 2),
+            })
+        except Exception as e:
+            logger.warning("Resolution logging failed: %s", e)
+
     return {"closed": True, "market_id": market_id, "pnl": round(pnl, 2), "new_bankroll": round(bankroll, 2)}
 
 
@@ -1190,26 +1210,9 @@ def resolve_open_positions() -> dict:
                         first_won = tokens[0].get("winner") is True
                         return "YES" if first_won else "NO"
 
-        # Fallback: Gamma API (sometimes resolves before CLOB updates)
-        gamma_data = _fetch(f"https://gamma-api.polymarket.com/markets?condition_id={market_id}")
-        if gamma_data and isinstance(gamma_data, list) and gamma_data:
-            gm = gamma_data[0]
-            if gm.get("closed") or gm.get("resolved"):
-                outcome_prices = gm.get("outcomePrices", "")
-                try:
-                    if isinstance(outcome_prices, str):
-                        import json as _json
-                        outcome_prices = _json.loads(outcome_prices)
-                    if isinstance(outcome_prices, list) and len(outcome_prices) >= 2:
-                        yes_p = float(outcome_prices[0])
-                        no_p = float(outcome_prices[1])
-                        # Resolved markets have prices at 0 or 1
-                        if yes_p > 0.99:
-                            return "YES"
-                        elif no_p > 0.99:
-                            return "NO"
-                except Exception:
-                    pass
+        # Gamma API fallback REMOVED — condition_id search returns wrong markets
+        # (e.g. different bracket/city for weather markets). CLOB is primary,
+        # force-resolve below is the backstop. See 2026-02-28 session notes.
 
         # Check if market expired (end_date passed) — force-resolve via price
         if data and not data.get("closed"):

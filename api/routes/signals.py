@@ -2022,6 +2022,24 @@ async def scan_tweet_counts():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/signals/scorecard/{strategy}")
+async def get_strategy_scorecard(strategy: str):
+    """Get calibration scorecard for a learning strategy (tweet_count_mc, weather_ensemble)."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from resolution_logger import get_scorecard, load_resolutions
+        card = get_scorecard(strategy)
+        n = len(load_resolutions(strategy))
+        if card:
+            return card
+        return {"strategy": strategy, "n": n, "message": f"Need 20+ resolutions for scorecard (have {n})"}
+    except Exception as e:
+        logger.exception(f"Scorecard failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ─── Confidence Redesign: Archetype & Kill Rules ─────────────────────
 
 @router.get("/archetype/classify")
