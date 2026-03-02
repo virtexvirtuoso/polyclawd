@@ -341,7 +341,11 @@ def evaluate_signal(signal: dict) -> dict:
         return {"eligible": False, "reason": f"Price {effective_price:.1%} above ceiling {MAX_PRICE:.0%} — no edge", "edge": 0, "kelly_pct": 0, "bet_size": 0}
     
     # ─── Source Staleness Check ─────────────────────────────
-    if HAS_SOURCE_HEALTH:
+    # Skip for weather/tweet signals — they fetch their own fresh data,
+    # not dependent on Gamma scanner freshness.
+    strategy = signal.get("strategy", "")
+    self_sourced = strategy in ("tweet_count_mc", "weather_ensemble", "weather")
+    if HAS_SOURCE_HEALTH and not self_sourced:
         import time as _time
         platform = (signal.get("platform") or "kalshi").lower()
         source_map = {"kalshi": "kalshi", "polymarket": "polymarket_gamma", "manifold": "manifold"}
