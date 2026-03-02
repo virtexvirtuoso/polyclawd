@@ -193,6 +193,7 @@ MIN_PRICE = 0.05  # Price floor — reject garbage contracts below 5 cents
 MAX_PRICE = 0.95  # Price ceiling — reject near-certain markets (no edge)
 MIN_BET = 100.0  # Bootstrap: meaningful minimum bet size
 MAX_BET = 1000.0  # Scaled for $10K bankroll
+MAX_RESOLUTION_DAYS = 14  # Reject markets resolving >14 days out — capital drag
 
 # Archetype filters — data-driven from resolved trades
 ARCHETYPE_BLOCKLIST = {"price_above", "sports_winner"}  # 0% WR, -100% ROI across 7 trades
@@ -392,6 +393,38 @@ def evaluate_signal(signal: dict) -> dict:
     if archetype in ARCHETYPE_BLOCKLIST:
         logger.info("🚫 BLOCKED archetype=%s market=%s (0%% WR, -100%% ROI)", archetype, signal.get("market", "")[:40])
         return {"eligible": False, "reason": f"Blocked archetype: {archetype} (0% historical WR)", "edge": edge, "kelly_pct": 0, "bet_size": 0}
+
+    # ─── Resolution Horizon Gate ──────────────────────────────
+    # Reject markets that resolve too far in the future (capital drag)
+    from datetime import datetime, timezone, timedelta
+    end_date_str = signal.get("end_date") or signal.get("resolves_at") or signal.get("resolution_date") or ""
+    if end_date_str:
+        try:
+            if isinstance(end_date_str, str):
+                end_dt = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+            else:
+                end_dt = end_date_str
+            days_out = (end_dt - datetime.now(timezone.utc)).days
+            if days_out > MAX_RESOLUTION_DAYS:
+                logger.info("🚫 BLOCKED horizon=%dd (>%dd) market=%s", days_out, MAX_RESOLUTION_DAYS, signal.get("market", "")[:40])
+                return {"eligible": False, "reason": f"Resolution too far: {days_out}d (max {MAX_RESOLUTION_DAYS}d)", "edge": edge, "kelly_pct": 0, "bet_size": 0}
+        except Exception as e:
+            logger.debug("Could not parse end_date %r: %s", end_date_str, e)
+
+    # Also check market title for year-scale bets (fallback heuristic)
+    import re
+    title = (signal.get("market") or signal.get("market_title") or signal.get("title") or "").lower()
+    far_patterns = [r"before 20[2-3]\d", r"by 20[2-3]\d", r"in 20[2-3]\d", r"end of 20[2-3]\d"]
+    for pat in far_patterns:
+        m = re.search(pat, title)
+        if m:
+            try:
+                year = int(re.search(r"20[2-3]\d", m.group()).group())
+                if year > datetime.now().year:
+                    logger.info("🚫 BLOCKED long-dated title pattern '%s' market=%s", m.group(), title[:40])
+                    return {"eligible": False, "reason": f"Long-dated market ({m.group()})", "edge": edge, "kelly_pct": 0, "bet_size": 0}
+            except Exception:
+                pass
 
     # Minimum NO implied probability — reject if market is too efficient
     if side == "NO" and effective_price < MIN_NO_IMPLIED_PROB:
