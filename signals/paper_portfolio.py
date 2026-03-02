@@ -54,8 +54,8 @@ CORRELATION_GROUPS = {
     "election": "geopolitical", "geopolitical": "geopolitical",
     "deadline_binary": "politics",
     "financial_price": "finance",
-    "entertainment": "culture", "ai_model": "culture",
-    "social_count": "culture", "weather": "weather",
+    "entertainment": "entertainment", "ai_model": "culture",
+    "social_count": "social_count", "weather": "weather",
     "parlay": "other", "other": "other",
 }
 MAX_PER_GROUP = 3
