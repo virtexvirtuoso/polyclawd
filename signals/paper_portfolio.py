@@ -353,9 +353,11 @@ def evaluate_signal(signal: dict) -> dict:
         ts = _get_source_ts(primary_source)
         if ts:
             age = _time.time() - ts
-            if age > 3600:
+            if age > 86400:  # 24h — only block if source truly dead, not just stale cache
                 logger.debug("Staleness reject: %s data is %.0fs old", primary_source, age)
-                return {"eligible": False, "reason": f"Stale data: {primary_source} is {age:.0f}s old (>3600s)", "edge": 0, "kelly_pct": 0, "bet_size": 0}
+                return {"eligible": False, "reason": f"Stale data: {primary_source} is {age:.0f}s old (>24h)", "edge": 0, "kelly_pct": 0, "bet_size": 0}
+            elif age > 3600:
+                logger.info("Staleness warning: %s data is %.0fs old — proceeding anyway", primary_source, age)
     
     # ─── Phase 1: Empirical Confidence Override ─────────────
     empirical_result = None

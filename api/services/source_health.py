@@ -83,6 +83,24 @@ def record_success(source: str, latency_ms: float):
     conn.close()
 
 
+def touch_source(source: str):
+    """Lightweight: update last_success timestamp without changing latency stats.
+    Call from watchdog/scanners that successfully fetch from a source
+    but don't go through resilient_fetch."""
+    conn = _get_db()
+    now = datetime.now(timezone.utc).isoformat()
+    row = conn.execute("SELECT 1 FROM source_health WHERE source=?", (source,)).fetchone()
+    if row:
+        conn.execute("UPDATE source_health SET last_success=?, consecutive_failures=0 WHERE source=?", (now, source))
+    else:
+        conn.execute(
+            "INSERT INTO source_health (source, last_success, consecutive_failures, total_successes, total_failures, avg_latency_ms, last_latency_ms) VALUES (?, ?, 0, 0, 0, 0, 0)",
+            (source, now))
+    conn.commit()
+    conn.close()
+    logger.debug("source_health: %s TOUCHED at %s", source, now)
+
+
 def record_failure(source: str, error_msg: str):
     """Record a failed fetch for a source."""
     logger.debug("source_health: %s FAILURE error=%s", source, error_msg[:100])
