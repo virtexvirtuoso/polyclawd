@@ -874,16 +874,15 @@ def scan_kalshi_weather() -> List[dict]:
     return signals
 
 
-# US-only cities: Weather Underground resolution data is reliable for US stations.
-# International cities DISABLED (2026-03-02): WU has data gaps (Buenos Aires showed
-# "No data recorded"), Open-Meteo coords can be wrong for international cities
-# (20°C forecast vs 28°C actual for BA), and markets can resolve incorrectly
-# against absent data. Lost $90 on 2 BA positions from these issues.
+# All Polymarket weather cities — international RE-ENABLED (2026-03-02).
+# Weather.com API added to ensemble as Source 5 with 1.5x weight.
+# This is the exact backend Polymarket/WU resolves against, fixing the
+# Buenos Aires data mismatch that cost us $90 (Open-Meteo said 20°C,
+# actual resolution source said 32°C).
 WEATHER_CITIES_SLUG = [
     'nyc', 'miami', 'dallas', 'atlanta', 'seattle', 'chicago',
-    # International — DISABLED until WU station validation is built
-    # 'london', 'buenos-aires', 'wellington', 'sao-paulo', 'toronto',
-    # 'seoul', 'paris', 'sydney', 'tokyo',
+    'london', 'buenos-aires', 'wellington', 'sao-paulo', 'toronto',
+    'seoul', 'paris', 'sydney', 'tokyo',
 ]
 
 # Max position size for weather trades (small, uncorrelated bets)

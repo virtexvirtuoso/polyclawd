@@ -2,10 +2,12 @@
 Weather Ensemble — multi-source forecast aggregator with calibrated probabilities.
 
 Sources:
-  1. Open-Meteo Ensemble (30+ models, no key) — PRIMARY
+  1. Open-Meteo Ensemble (30+ models, no key)
   2. Pirate Weather (GEFS/ECMWF/HRRR, free key)
   3. Tomorrow.io (proprietary AI, free key)
   4. WeatherAPI.com (station blend, free key)
+  5. Weather.com / TWC (resolution source, 2x weight) — HIGHEST PRIORITY
+     This is the exact backend Polymarket resolves against via Weather Underground.
 
 Produces probability distributions for temperature markets instead of
 hardcoded fair-value buckets.
@@ -408,6 +410,95 @@ def _fetch_weatherapi(lat: float, lon: float, date: str) -> Optional[dict]:
     return city_days.get(date)
 
 
+# ── Source 5: Weather.com / TWC (resolution source — highest weight) ─────
+# This is the EXACT data Polymarket resolves against (Weather Underground backend).
+# Free public API key, ICAO station codes, 5-day forecast + historical.
+# Double-weighted in ensemble because it IS the judge.
+
+TWC_API_KEY = "e1f10a1e78da46f5b10a1e78da96f525"  # Public key from WU website
+
+# ICAO station codes for Polymarket weather cities
+# These match the stations in Polymarket market descriptions
+CITY_ICAO: Dict[str, str] = {
+    "nyc": "KJFK", "new york": "KJFK",
+    "miami": "KMIA",
+    "dallas": "KDFW",
+    "atlanta": "KATL",
+    "seattle": "KSEA",
+    "chicago": "KORD",
+    "london": "EGLL",
+    "buenos aires": "SAEZ",
+    "wellington": "NZWN",
+    "sao paulo": "SBGR", "são paulo": "SBGR",
+    "toronto": "CYYZ",
+    "seoul": "RKSS",
+    "paris": "LFPG",
+    "sydney": "YSSY",
+    "tokyo": "RJTT",
+    "los angeles": "KLAX",
+    "houston": "KIAH",
+    "phoenix": "KPHX",
+    "denver": "KDEN",
+    "boston": "KBOS",
+    "san francisco": "KSFO",
+    "washington": "KIAD", "dc": "KIAD",
+}
+
+_twc_cache: Dict[str, dict] = {}
+_twc_cache_ts: Dict[str, float] = {}
+
+def _fetch_weather_com(lat: float, lon: float, date: str, city: str = "") -> Optional[dict]:
+    """Fetch forecast from Weather.com (TWC) API — the WU resolution source.
+    
+    Uses ICAO station code for exact station match. Falls back to lat/lon.
+    """
+    city_lower = city.lower().strip()
+    icao = CITY_ICAO.get(city_lower, "")
+    if not icao:
+        return None
+
+    cache_key = icao
+    if cache_key in _twc_cache and (time.time() - _twc_cache_ts.get(cache_key, 0)) < CACHE_TTL:
+        return _twc_cache[cache_key].get(date)
+
+    url = (
+        f"https://api.weather.com/v3/wx/forecast/daily/5day"
+        f"?icaoCode={icao}&units=e&language=en-US&format=json"
+        f"&apiKey={TWC_API_KEY}"
+    )
+    data = _fetch_json(url, timeout=10)
+    if not data:
+        return None
+
+    highs = data.get("temperatureMax", [])
+    lows = data.get("temperatureMin", [])
+    valid_times = data.get("validTimeLocal", [])
+
+    city_days = {}
+    for i, ts in enumerate(valid_times):
+        if not ts:
+            continue
+        # validTimeLocal format: "2026-03-02T07:00:00-0500"
+        day_str = ts[:10]
+        h = highs[i] if i < len(highs) and highs[i] is not None else None
+        l = lows[i] if i < len(lows) and lows[i] is not None else None
+        if h is not None:
+            city_days[day_str] = {
+                "source": "weather_com",
+                "high_f": round(float(h), 1),
+                "high_std_f": None,
+                "low_f": round(float(l), 1) if l is not None else None,
+                "model": f"TWC_{icao}",
+                "icao": icao,
+                "is_resolution_source": True,
+            }
+
+    _twc_cache[cache_key] = city_days
+    _twc_cache_ts[cache_key] = time.time()
+    logger.debug("Weather.com %s: %d days fetched", icao, len(city_days))
+    return city_days.get(date)
+
+
 # ── Ensemble aggregation ─────────────────────────────────────────────────
 
 def _resolve_city(city: str) -> Optional[Tuple[float, float, str]]:
@@ -478,30 +569,42 @@ def get_ensemble_forecast(city: str, date: str) -> Optional[dict]:
     if wa:
         sources["weatherapi"] = wa
 
+    # Source 5: Weather.com / TWC (resolution source — double weight)
+    twc = _fetch_weather_com(lat, lon, date, city=city)
+    if twc:
+        sources["weather_com"] = twc
+
     if not sources:
         logger.warning("No sources returned data for %s/%s", city, date)
         return None
 
     # ── Aggregate ────────────────────────────────────────────────────
-    all_highs_f = []
+    # Weighted lists: (value, weight) — Weather.com gets 1.5x as resolution source
+    weighted_highs = []  # [(temp_f, weight), ...]
+    weighted_lows = []
+    all_highs_f = []  # Flat list for std/spread calculations
     all_lows_f = []
     n_models = 0
 
     for name, src in sources.items():
+        w = 1.5 if src.get("is_resolution_source") else 1.0
         h = src.get("high_f")
         if h is not None and h != 0:
+            weighted_highs.append((h, w))
             all_highs_f.append(h)
         l = src.get("low_f")
         if l is not None and l != 0:
+            weighted_lows.append((l, w))
             all_lows_f.append(l)
-        # Count models
         nm = src.get("n_members", 1)
         n_models += nm
 
     if not all_highs_f:
         return None
 
-    high_mean = sum(all_highs_f) / len(all_highs_f)
+    # Weighted mean (Weather.com 1.5x, others 1.0x)
+    total_w = sum(w for _, w in weighted_highs)
+    high_mean = sum(h * w for h, w in weighted_highs) / total_w if total_w > 0 else all_highs_f[0]
     
     # Std from cross-source disagreement
     cross_std = (
@@ -521,7 +624,8 @@ def get_ensemble_forecast(city: str, date: str) -> Optional[dict]:
         logger.debug("Source disagreement >3°F for %s/%s: widening std %.1f → %.1f",
                       city, date, cross_std, combined_std)
 
-    low_mean = sum(all_lows_f) / len(all_lows_f) if all_lows_f else None
+    low_total_w = sum(w for _, w in weighted_lows)
+    low_mean = sum(l * w for l, w in weighted_lows) / low_total_w if low_total_w > 0 else None
 
     # Source agreement: 1.0 if all sources within 1°F, decays with spread
     spread = max(all_highs_f) - min(all_highs_f) if len(all_highs_f) > 1 else 0
