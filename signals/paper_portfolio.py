@@ -58,7 +58,7 @@ CORRELATION_GROUPS = {
     "social_count": "social_count", "weather": "weather",
     "parlay": "other", "other": "other",
 }
-MAX_PER_GROUP = 3
+MAX_PER_GROUP = 10
 
 
 def _check_correlation_cap(archetype: str, conn) -> Optional[str]:
