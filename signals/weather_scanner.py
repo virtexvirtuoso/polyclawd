@@ -874,10 +874,16 @@ def scan_kalshi_weather() -> List[dict]:
     return signals
 
 
+# US-only cities: Weather Underground resolution data is reliable for US stations.
+# International cities DISABLED (2026-03-02): WU has data gaps (Buenos Aires showed
+# "No data recorded"), Open-Meteo coords can be wrong for international cities
+# (20°C forecast vs 28°C actual for BA), and markets can resolve incorrectly
+# against absent data. Lost $90 on 2 BA positions from these issues.
 WEATHER_CITIES_SLUG = [
-    'nyc', 'london', 'buenos-aires', 'wellington', 'miami', 'dallas',
-    'atlanta', 'sao-paulo', 'toronto', 'seoul', 'seattle', 'chicago',
-    'paris', 'sydney', 'tokyo',
+    'nyc', 'miami', 'dallas', 'atlanta', 'seattle', 'chicago',
+    # International — DISABLED until WU station validation is built
+    # 'london', 'buenos-aires', 'wellington', 'sao-paulo', 'toronto',
+    # 'seoul', 'paris', 'sydney', 'tokyo',
 ]
 
 # Max position size for weather trades (small, uncorrelated bets)
