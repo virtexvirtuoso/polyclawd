@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 WEBHOOK_URL = "https://discord.com/api/webhooks/1478409757386870875/ROLCqrUiJzbzDQj6bJu3RgbPEY-5pyFLqL2kfLV_GAeTlxkHh1D3JB1QiJNoICiTLuq-"
 BOT_NAME = "VPredict"
-AVATAR_URL = "https://virtuosocrypto.com/polyclawd/assets/logo.png"
+AVATAR_URL = "https://virtuosocrypto.com/polyclawd/icons/icon-192.png"
 
 # Colors
 COLOR_GREEN = 0x2ECC71   # win / new position
