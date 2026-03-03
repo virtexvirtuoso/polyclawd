@@ -13,7 +13,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 WEBHOOK_URL = "https://discord.com/api/webhooks/1478409757386870875/ROLCqrUiJzbzDQj6bJu3RgbPEY-5pyFLqL2kfLV_GAeTlxkHh1D3JB1QiJNoICiTLuq-"
-BOT_NAME = "Polyclawd"
+BOT_NAME = "VPredict"
 AVATAR_URL = "https://virtuosocrypto.com/polyclawd/assets/logo.png"
 
 # Colors
@@ -313,7 +313,7 @@ def alert_api_down(consecutive_failures: int, last_error: str = "",
         fields.append({"name": "Last Error", "value": f"```{last_error[:200]}```", "inline": False})
 
     return _send([{
-        "title": "🚨 Polyclawd API DOWN",
+        "title": "🚨 VPredict API DOWN",
         "description": f"Health check failed {consecutive_failures} consecutive times",
         "color": COLOR_RED,
         "fields": fields,
@@ -325,7 +325,7 @@ def alert_api_down(consecutive_failures: int, last_error: str = "",
 def alert_api_recovered(**kwargs) -> bool:
     """Alert when API comes back online after downtime."""
     return _send([{
-        "title": "✅ Polyclawd API Recovered",
+        "title": "✅ VPredict API Recovered",
         "description": "Health check passing again",
         "color": COLOR_GREEN,
         "timestamp": datetime.now(timezone.utc).isoformat(),
