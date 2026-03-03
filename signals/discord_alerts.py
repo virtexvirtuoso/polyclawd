@@ -173,6 +173,135 @@ def alert_daily_summary(bankroll: float, open_positions: int,
     }])
 
 
+def alert_weekly_recap(bankroll: float, start_bankroll: float,
+                        week_resolved: int, week_wins: int, week_pnl: float,
+                        best_trade: Optional[dict] = None,
+                        worst_trade: Optional[dict] = None,
+                        open_positions: int = 0, **kwargs) -> bool:
+    """Weekly P&L recap — Sunday summary."""
+    pnl_pct = (week_pnl / start_bankroll * 100) if start_bankroll else 0
+    streak_emoji = "🔥" if week_wins > week_resolved / 2 else "🧊"
+    wr = (week_wins / week_resolved * 100) if week_resolved else 0
+
+    fields = [
+        {"name": "Bankroll", "value": f"**${bankroll:,.2f}**", "inline": True},
+        {"name": "Week P&L", "value": f"{'+'if week_pnl>=0 else ''}${week_pnl:.2f} ({pnl_pct:+.1f}%)", "inline": True},
+        {"name": "Record", "value": f"{streak_emoji} {week_wins}W/{week_resolved - week_wins}L ({wr:.0f}%)", "inline": True},
+        {"name": "Open Positions", "value": str(open_positions), "inline": True},
+    ]
+
+    if best_trade:
+        fields.append({
+            "name": "🏆 Best Trade",
+            "value": f"+${best_trade.get('pnl', 0):.2f} — {best_trade.get('market_title', '?')[:50]}",
+            "inline": False,
+        })
+    if worst_trade:
+        fields.append({
+            "name": "💀 Worst Trade",
+            "value": f"-${abs(worst_trade.get('pnl', 0)):.2f} — {worst_trade.get('market_title', '?')[:50]}",
+            "inline": False,
+        })
+
+    return _send([{
+        "title": "📊 Weekly P&L Recap",
+        "color": COLOR_GREEN if week_pnl >= 0 else COLOR_RED,
+        "fields": fields,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "Paper Portfolio — Weekly"},
+    }])
+
+
+def alert_weather_shift(market_title: str, city: str, side: str,
+                         old_forecast: float, new_forecast: float,
+                         threshold: float, entry_price: float,
+                         shift_f: float, **kwargs) -> bool:
+    """Alert when weather forecast shifts significantly on an open position."""
+    direction = "↑" if new_forecast > old_forecast else "↓"
+    danger = abs(shift_f) >= 5.0
+
+    # Assess impact on our position
+    if "higher" in market_title.lower() or "or higher" in market_title.lower():
+        # YES = above threshold. If forecast drops below, YES loses
+        if side == "YES" and new_forecast < threshold:
+            impact = "⚠️ **EDGE LOST** — forecast now below threshold"
+        elif side == "NO" and new_forecast >= threshold:
+            impact = "⚠️ **EDGE LOST** — forecast now above threshold"
+        else:
+            impact = "✅ Edge intact"
+    elif "between" in market_title.lower():
+        impact = f"Forecast moved {direction} — check bracket fit"
+    else:
+        impact = f"Forecast shifted {direction}{abs(shift_f):.1f}°F"
+
+    fields = [
+        {"name": "City", "value": city.title(), "inline": True},
+        {"name": "Our Side", "value": f"**{side}** @ {entry_price:.0%}", "inline": True},
+        {"name": "Shift", "value": f"{direction} {abs(shift_f):.1f}°F", "inline": True},
+        {"name": "Forecast", "value": f"{old_forecast:.1f}°F → **{new_forecast:.1f}°F**", "inline": True},
+        {"name": "Threshold", "value": f"{threshold:.0f}°F", "inline": True},
+        {"name": "Impact", "value": impact, "inline": False},
+    ]
+
+    return _send([{
+        "title": f"🌡️ Weather Forecast Shift — {city.title()}",
+        "description": market_title[:200],
+        "color": COLOR_RED if danger else COLOR_GOLD,
+        "fields": fields,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "Weather Ensemble"},
+    }])
+
+
+def alert_tweet_pace(handle: str, market_title: str, side: str,
+                      entry_price: float, posts_so_far: int,
+                      projected_total: int, bracket_low: int, bracket_high: int,
+                      daily_mean: float, current_pace: float,
+                      sigma_deviation: float, days_left: float,
+                      **kwargs) -> bool:
+    """Alert when tweet pace diverges >2σ from MC projection."""
+    if projected_total >= bracket_low and projected_total <= bracket_high:
+        in_bracket = True
+    else:
+        in_bracket = False
+
+    # Assess danger to our position
+    if side == "YES" and not in_bracket:
+        impact = "⚠️ **Pace moving AWAY from bracket** — YES position at risk"
+        color = COLOR_RED
+    elif side == "NO" and in_bracket:
+        impact = "⚠️ **Pace moving INTO bracket** — NO position at risk"
+        color = COLOR_RED
+    elif side == "YES" and in_bracket:
+        impact = "✅ Pace confirms bracket — YES position strengthening"
+        color = COLOR_GREEN
+    else:
+        impact = "✅ Pace outside bracket — NO position strengthening"
+        color = COLOR_GREEN
+
+    pace_dir = "🔥 Hot" if current_pace > daily_mean else "🧊 Cold"
+
+    fields = [
+        {"name": "Account", "value": f"@{handle}", "inline": True},
+        {"name": "Our Side", "value": f"**{side}** @ {entry_price:.0%}", "inline": True},
+        {"name": "Bracket", "value": f"{bracket_low}-{bracket_high}", "inline": True},
+        {"name": "Posts So Far", "value": str(posts_so_far), "inline": True},
+        {"name": "Projected Total", "value": f"**{projected_total}**", "inline": True},
+        {"name": "Days Left", "value": f"{days_left:.1f}", "inline": True},
+        {"name": "Pace", "value": f"{pace_dir} ({current_pace:.0f}/day vs {daily_mean:.0f} avg, {sigma_deviation:+.1f}σ)", "inline": False},
+        {"name": "Impact", "value": impact, "inline": False},
+    ]
+
+    return _send([{
+        "title": f"🐦 Tweet Pace Alert — @{handle}",
+        "description": market_title[:200],
+        "color": color,
+        "fields": fields,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "Tweet Count Scanner"},
+    }])
+
+
 if __name__ == "__main__":
     # Test all alert types
     print("Testing alerts...")
