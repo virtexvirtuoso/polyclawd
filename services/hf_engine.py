@@ -45,7 +45,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 # ============================================================================
 
 BINANCE_WS = "wss://stream.binance.com:9443/ws"
-POLYGON_RPC = os.getenv("POLYGON_RPC", "https://polygon.drpc.org")
+POLYGON_RPC_LIST = [
+    os.getenv("POLYGON_RPC", "https://polygon.drpc.org"),
+    "https://polygon-bor-rpc.publicnode.com",
+]
+POLYGON_RPC = POLYGON_RPC_LIST[0]
+_rpc_index = 0  # current active RPC
+_rpc_consecutive_errors = 0
 
 # Chainlink Price Feed Aggregator contracts on Polygon
 CHAINLINK_FEEDS = {
@@ -139,43 +145,68 @@ async def poll_chainlink_oracle(asset: str) -> Optional[Dict]:
         "id": 1,
     })
     
-    try:
-        # Use asyncio subprocess to not block
-        proc = await asyncio.create_subprocess_exec(
-            "curl", "-s", "-X", "POST", POLYGON_RPC,
-            "-H", "Content-Type: application/json",
-            "-d", payload,
-            "--max-time", "5",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
-        
-        result = json.loads(stdout.decode())
-        hex_data = result.get("result", "")
-        
-        if not hex_data or len(hex_data) < 322:
+    global _rpc_index, _rpc_consecutive_errors
+
+    for attempt in range(len(POLYGON_RPC_LIST)):
+        rpc_url = POLYGON_RPC_LIST[_rpc_index]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "curl", "-s", "-X", "POST", rpc_url,
+                "-H", "Content-Type: application/json",
+                "-d", payload,
+                "--max-time", "5",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
+
+            result = json.loads(stdout.decode())
+
+            # Check for RPC error (quota exceeded, unauthorized, etc.)
+            if result.get("error"):
+                err_msg = result["error"].get("message", "")
+                logger.warning(f"RPC error on {rpc_url}: {err_msg}")
+                _rpc_consecutive_errors += 1
+                if _rpc_consecutive_errors >= 3:
+                    _rpc_index = (_rpc_index + 1) % len(POLYGON_RPC_LIST)
+                    _rpc_consecutive_errors = 0
+                    logger.warning(f"Switching RPC to {POLYGON_RPC_LIST[_rpc_index]}")
+                    continue
+                return None
+
+            hex_data = result.get("result", "")
+
+            if not hex_data or len(hex_data) < 322:
+                return None
+
+            # Decode: (roundId, answer, startedAt, updatedAt, answeredInRound)
+            data = hex_data[2:]
+            chunks = [data[i:i+64] for i in range(0, len(data), 64)]
+
+            answer = int(chunks[1], 16)
+            updated_at = int(chunks[3], 16)
+
+            price = answer / 1e8  # Chainlink uses 8 decimals
+
+            _rpc_consecutive_errors = 0
+            return {
+                "price": price,
+                "updated_at": updated_at,
+                "fetched_at": time.time(),
+            }
+
+        except Exception as e:
+            logger.error(f"Chainlink poll error ({asset}) on {rpc_url}: {e}")
+            _stats["errors"] += 1
+            _rpc_consecutive_errors += 1
+            if _rpc_consecutive_errors >= 3:
+                _rpc_index = (_rpc_index + 1) % len(POLYGON_RPC_LIST)
+                _rpc_consecutive_errors = 0
+                logger.warning(f"Switching RPC to {POLYGON_RPC_LIST[_rpc_index]}")
+                continue
             return None
-        
-        # Decode: (roundId, answer, startedAt, updatedAt, answeredInRound)
-        data = hex_data[2:]
-        chunks = [data[i:i+64] for i in range(0, len(data), 64)]
-        
-        answer = int(chunks[1], 16)
-        updated_at = int(chunks[3], 16)
-        
-        price = answer / 1e8  # Chainlink uses 8 decimals
-        
-        return {
-            "price": price,
-            "updated_at": updated_at,
-            "fetched_at": time.time(),
-        }
-    
-    except Exception as e:
-        logger.error(f"Chainlink poll error ({asset}): {e}")
-        _stats["errors"] += 1
-        return None
+
+    return None
 
 
 async def oracle_poller_loop():
