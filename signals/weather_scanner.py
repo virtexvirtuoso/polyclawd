@@ -900,18 +900,32 @@ def scan_polymarket_weather() -> List[dict]:
     # Pre-load all forecasts in one batch (uses cache, avoids per-market API calls)
     preload_forecasts(days=3)
 
-    # Pre-warm ensemble cache in parallel (was sequential with 0.1s sleep each)
+    # Pre-warm ensemble cache in parallel — skip if file cache is fresh (<2h)
     try:
-        from signals.weather_ensemble import get_ensemble_forecast
-        tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+        from signals.weather_ensemble import get_ensemble_forecast, _cache, _cache_ts
+        import time as _time
 
-        def _warm_city(city_slug):
+        # Check if any city has a warm cache already (watchdog runs every 5min)
+        cache_warm = False
+        for city_slug in WEATHER_CITIES_SLUG[:3]:  # spot check first 3
             city_name = city_slug.replace('-', ' ')
-            get_ensemble_forecast(city_name, tomorrow)
+            cache_key = f"{city_name}"
+            if cache_key in _cache and (_time.time() - _cache_ts.get(cache_key, 0)) < 7200:
+                cache_warm = True
+                break
 
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            list(pool.map(_warm_city, WEATHER_CITIES_SLUG))
-        logger.info("Ensemble cache pre-warmed for %d cities (parallel)", len(WEATHER_CITIES_SLUG))
+        if not cache_warm:
+            tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+
+            def _warm_city(city_slug):
+                city_name = city_slug.replace('-', ' ')
+                get_ensemble_forecast(city_name, tomorrow)
+
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                list(pool.map(_warm_city, WEATHER_CITIES_SLUG))
+            logger.info("Ensemble cache pre-warmed for %d cities (parallel)", len(WEATHER_CITIES_SLUG))
+        else:
+            logger.info("Ensemble cache already warm — skipping pre-warm")
     except Exception as e:
         logger.warning("Ensemble pre-warm failed: %s", e)
 

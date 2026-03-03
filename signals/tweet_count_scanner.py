@@ -347,6 +347,10 @@ def discover_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optiona
             except (json.JSONDecodeError, IndexError, TypeError):
                 yes_price = 0
 
+            # Skip resolved markets (prices are 0/1 or market is closed)
+            if m.get("closed", False) or yes_price <= 0.001 or yes_price >= 0.999:
+                continue
+
             volume = m.get("volumeNum", 0)
             bracket = _extract_bracket(question)
             if not bracket:

@@ -59,7 +59,7 @@ def _scrape_vegasinsider_sync() -> dict:
             if r.status_code != 200:
                 raise RuntimeError(f"VegasInsider soccer returned {r.status_code}")
             return r
-        resp = resilient_call("vegas", _fetch_soccer, retries=2, backoff_base=2.0) if HAS_RESILIENT else requests.get("https://www.vegasinsider.com/soccer/odds/futures/", headers=headers, timeout=30)
+        resp = resilient_call("vegas", _fetch_soccer, retries=1, backoff_base=1.0) if HAS_RESILIENT else requests.get("https://www.vegasinsider.com/soccer/odds/futures/", headers=headers, timeout=15)
         if resp and resp.status_code == 200:
             text = resp.text
             now = datetime.utcnow().isoformat()
