@@ -302,6 +302,62 @@ def alert_tweet_pace(handle: str, market_title: str, side: str,
     }])
 
 
+def alert_api_down(consecutive_failures: int, last_error: str = "",
+                    restart_attempted: bool = False, **kwargs) -> bool:
+    """Alert when API health check fails 3+ times."""
+    fields = [
+        {"name": "Consecutive Failures", "value": f"**{consecutive_failures}**", "inline": True},
+        {"name": "Restart Attempted", "value": "Yes" if restart_attempted else "No", "inline": True},
+    ]
+    if last_error:
+        fields.append({"name": "Last Error", "value": f"```{last_error[:200]}```", "inline": False})
+
+    return _send([{
+        "title": "🚨 Polyclawd API DOWN",
+        "description": f"Health check failed {consecutive_failures} consecutive times",
+        "color": COLOR_RED,
+        "fields": fields,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "Watchdog Monitor"},
+    }])
+
+
+def alert_api_recovered(**kwargs) -> bool:
+    """Alert when API comes back online after downtime."""
+    return _send([{
+        "title": "✅ Polyclawd API Recovered",
+        "description": "Health check passing again",
+        "color": COLOR_GREEN,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "Watchdog Monitor"},
+    }])
+
+
+def alert_scorecard_milestone(strategy: str, n: int, wins: int,
+                                win_rate: float, brier: Optional[float] = None,
+                                **kwargs) -> bool:
+    """Alert when a strategy hits its first scorecard milestone (20 resolutions)."""
+    label = {"tweet_count_mc": "Tweet MC", "weather_ensemble": "Weather"}.get(strategy, strategy)
+
+    fields = [
+        {"name": "Strategy", "value": f"**{label}**", "inline": True},
+        {"name": "Resolutions", "value": f"🏆 **{n}**", "inline": True},
+        {"name": "Record", "value": f"{wins}W/{n - wins}L ({win_rate:.0%})", "inline": True},
+    ]
+    if brier is not None:
+        grade = "🟢 Excellent" if brier < 0.15 else "🟡 Fair" if brier < 0.25 else "🔴 Poor"
+        fields.append({"name": "Brier Score", "value": f"{brier:.3f} — {grade}", "inline": True})
+
+    return _send([{
+        "title": "🏆 Scorecard Milestone — First 20 Resolutions!",
+        "description": f"**{label}** has enough data for calibration analysis",
+        "color": COLOR_GOLD,
+        "fields": fields,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "Learning System"},
+    }])
+
+
 if __name__ == "__main__":
     # Test all alert types
     print("Testing alerts...")
