@@ -45,7 +45,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 # ============================================================================
 
 BINANCE_WS = "wss://stream.binance.com:9443/ws"
-POLYGON_RPC = os.getenv("POLYGON_RPC", "https://1rpc.io/matic")
+POLYGON_RPC = os.getenv("POLYGON_RPC", "https://polygon.drpc.org")
 
 # Chainlink Price Feed Aggregator contracts on Polygon
 CHAINLINK_FEEDS = {

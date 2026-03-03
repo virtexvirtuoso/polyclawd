@@ -258,7 +258,7 @@ def open_hf_paper_position(
             _log_hf_trade(market, direction, trigger_type, confidence,
                          edge_pct, bet_size, entry_price, strength)
             
-            # Telegram alert
+            # Discord + Telegram alerts
             if confidence >= ALERT_MIN_CONFIDENCE:
                 arrow = "🟢" if direction == "UP" else "🔴"
                 _send_alert(
@@ -269,6 +269,16 @@ def open_hf_paper_position(
                     f"⏱ {market.get('question', '')[:60]}",
                     silent=(strength == "low"),
                 )
+                try:
+                    from signals.discord_alerts import alert_position_opened
+                    slug = market.get("slug", "")
+                    mkt_url = f"https://polymarket.com/event/{slug}" if slug else ""
+                    alert_position_opened(
+                        market["question"], "YES" if direction == "UP" else "NO",
+                        entry_price, bet_size, f"hf_{trigger_type}",
+                        round(edge_pct * 100, 1), market_url=mkt_url)
+                except Exception:
+                    pass
         
         return result
     
@@ -422,7 +432,62 @@ def process_hf_signals() -> Dict:
         except Exception as e:
             logger.debug(f"Bridge signal check error ({asset}): {e}")
     
-    # ---- Source 3: Negative vig (risk-free) ----
+    # ---- Source 3: HF engine latency divergence ----
+    try:
+        engine_state = get_hf_engine_state()
+        if engine_state:
+            for asset_key, price_data in engine_state.get("prices", {}).items():
+                signal_strength = price_data.get("signal_strength", "none")
+                latency_signal = price_data.get("latency_signal", "NONE")
+                divergence = abs(price_data.get("divergence_pct", 0))
+
+                # Only trade on medium+ strength with fresh oracle
+                if signal_strength in ("medium", "high", "extreme") and latency_signal != "STALE":
+                    results["signals_checked"] += 1
+                    asset = asset_key  # "BTC" or "ETH"
+
+                    # Divergence direction: if Binance < Oracle, price dropped → DOWN
+                    # If Binance > Oracle, price rose → UP
+                    binance_p = price_data.get("binance_price", 0)
+                    oracle_p = price_data.get("oracle_price", 0)
+                    if binance_p and oracle_p:
+                        direction = "UP" if binance_p > oracle_p else "DOWN"
+                    else:
+                        continue
+
+                    # Confidence scales with divergence: 0.3% → 55%, 0.5% → 65%, 1% → 80%
+                    confidence = min(0.85, 0.50 + divergence * 0.30)
+
+                    market = find_tradeable_market(asset, direction)
+                    if market:
+                        result = open_hf_paper_position(
+                            market=market,
+                            direction=direction,
+                            trigger_type="latency_divergence",
+                            confidence=confidence,
+                            edge_pct=confidence - 0.50,
+                            kelly_fraction=min(0.10, divergence * 0.15),
+                            strength=signal_strength,
+                        )
+
+                        if result.get("opened"):
+                            results["positions_opened"] += 1
+                        else:
+                            results["positions_skipped"] += 1
+
+                        results["details"].append({
+                            "source": "latency_divergence",
+                            "asset": asset,
+                            "direction": direction,
+                            "divergence_pct": round(divergence, 4),
+                            "signal_strength": signal_strength,
+                            "confidence": round(confidence, 3),
+                            "result": "opened" if result.get("opened") else result.get("reason", "skipped"),
+                        })
+    except Exception as e:
+        logger.debug(f"Latency divergence check error: {e}")
+
+    # ---- Source 4: Negative vig (risk-free) ----
     neg_vig_opps = get_neg_vig_opportunities()
     for opp in neg_vig_opps[:3]:  # Max 3 neg vig positions
         results["signals_checked"] += 1
