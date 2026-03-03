@@ -129,6 +129,29 @@ def alert_edge_signal(market_title: str, side: str, edge_pct: float,
     }])
 
 
+def alert_edge_batch(signals: list) -> bool:
+    """Batched edge alert — single embed with top signals as fields."""
+    if not signals:
+        return False
+
+    fields = []
+    for s in signals[:5]:
+        strategy_label = {"tweet_count_mc": "🐦", "weather_ensemble": "🌡️"}.get(s.get("strategy", ""), "📊")
+        fields.append({
+            "name": f"{strategy_label} {s['side']} @ {s.get('price', 0):.0%} — +{s['edge']:.0f}pp",
+            "value": s.get("market", "?")[:80],
+            "inline": False,
+        })
+
+    return _send([{
+        "title": f"🎯 Top Edge Signals ({len(signals)})",
+        "color": COLOR_BLUE,
+        "fields": fields,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "Signal Scanner — 30min scan"},
+    }])
+
+
 def alert_scorecard(strategy: str, n: int, brier: float, win_rate: float,
                      avg_edge: float = 0, **kwargs) -> bool:
     """Alert with calibration scorecard summary."""
