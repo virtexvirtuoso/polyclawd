@@ -55,10 +55,14 @@ def _send(embeds: list, content: str = "") -> bool:
 
 def alert_position_opened(market_title: str, side: str, entry_price: float,
                           bet_size: float, strategy: str, edge_pct: float = 0,
-                          **kwargs) -> bool:
+                          market_url: str = "", **kwargs) -> bool:
     """Alert when a new paper position is opened."""
     emoji = "📈" if side == "YES" else "📉"
     color = COLOR_GREEN
+
+    description = market_title[:200]
+    if market_url:
+        description = f"[{description}]({market_url})"
 
     fields = [
         {"name": "Side", "value": f"**{side}**", "inline": True},
@@ -70,7 +74,7 @@ def alert_position_opened(market_title: str, side: str, entry_price: float,
 
     return _send([{
         "title": f"{emoji} Position Opened",
-        "description": market_title[:200],
+        "description": description,
         "color": color,
         "fields": fields,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -137,9 +141,15 @@ def alert_edge_batch(signals: list) -> bool:
     fields = []
     for s in signals[:5]:
         strategy_label = {"tweet_count_mc": "🐦", "weather_ensemble": "🌡️"}.get(s.get("strategy", ""), "📊")
+        price = s.get("price", 0)
+        price_str = f"{price:.0%}" if price and price > 0.005 else "—"
+        url = s.get("url", "")
+        market_text = s.get("market", "?")[:80]
+        if url:
+            market_text = f"[{market_text}]({url})"
         fields.append({
-            "name": f"{strategy_label} {s['side']} @ {s.get('price', 0):.0%} — +{s['edge']:.0f}pp",
-            "value": s.get("market", "?")[:80],
+            "name": f"{strategy_label} {s['side']} @ {price_str} — +{s['edge']:.0f}pp",
+            "value": market_text,
             "inline": False,
         })
 

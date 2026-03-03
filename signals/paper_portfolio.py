@@ -656,7 +656,9 @@ def open_position(signal: dict) -> dict:
     # Discord alert
     try:
         from signals.discord_alerts import alert_position_opened
-        alert_position_opened(market_title, side, market_price, bet_size, strategy, eval_result.get("edge", 0) * 100)
+        slug = signal.get("event_slug") or signal.get("slug") or ""
+        mkt_url = f"https://polymarket.com/event/{slug}" if slug else ""
+        alert_position_opened(market_title, side, market_price, bet_size, strategy, eval_result.get("edge", 0) * 100, market_url=mkt_url)
     except Exception as e:
         logger.debug("Discord alert failed: %s", e)
 
