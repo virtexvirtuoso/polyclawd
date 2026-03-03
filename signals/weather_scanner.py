@@ -892,21 +892,26 @@ WEATHER_MIN_BET = 5.0
 
 def scan_polymarket_weather() -> List[dict]:
     """Scan Polymarket for weather temperature markets via slug-based discovery."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     signals = []
     now = datetime.now(timezone.utc)
 
     # Pre-load all forecasts in one batch (uses cache, avoids per-market API calls)
     preload_forecasts(days=3)
 
-    # Pre-warm ensemble cache: one call per city warms all dates (multi-day response)
+    # Pre-warm ensemble cache in parallel (was sequential with 0.1s sleep each)
     try:
         from signals.weather_ensemble import get_ensemble_forecast
         tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-        for city_slug in WEATHER_CITIES_SLUG:
+
+        def _warm_city(city_slug):
             city_name = city_slug.replace('-', ' ')
             get_ensemble_forecast(city_name, tomorrow)
-            time.sleep(0.1)  # Rate limit spacing
-        logger.info("Ensemble cache pre-warmed for %d cities", len(WEATHER_CITIES_SLUG))
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            list(pool.map(_warm_city, WEATHER_CITIES_SLUG))
+        logger.info("Ensemble cache pre-warmed for %d cities (parallel)", len(WEATHER_CITIES_SLUG))
     except Exception as e:
         logger.warning("Ensemble pre-warm failed: %s", e)
 
@@ -918,48 +923,80 @@ def scan_polymarket_weather() -> List[dict]:
         9: 'september', 10: 'october', 11: 'november', 12: 'december',
     }
 
+    # Build all slug lookups, then fetch in parallel
+    slug_jobs = []
     for city in WEATHER_CITIES_SLUG:
         for dt in dates_to_check:
             month = month_names[dt.month]
             day = dt.day
             slug = f"highest-temperature-in-{city}-on-{month}-{day}-{dt.year}"
-            url = f"{GAMMA_API}/events?slug={slug}"
-            data = _fetch_json(url)
-            if not data or not isinstance(data, list) or len(data) == 0:
+            slug_jobs.append(slug)
+
+    def _fetch_slug(slug):
+        url = f"{GAMMA_API}/events?slug={slug}"
+        data = _fetch_json(url)
+        if not data or not isinstance(data, list) or len(data) == 0:
+            return []
+        event = data[0]
+        return event.get("markets", [])
+
+    # Parallel Gamma slug lookups (8 workers — respectful but fast)
+    slug_results = {}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        future_map = {pool.submit(_fetch_slug, s): s for s in slug_jobs}
+        for future in as_completed(future_map):
+            slug = future_map[future]
+            try:
+                slug_results[slug] = future.result()
+            except Exception as e:
+                logger.debug("Slug fetch failed %s: %s", slug, e)
+                slug_results[slug] = []
+
+    # Collect all markets to evaluate
+    eval_jobs = []
+    for slug, markets in slug_results.items():
+        for market in markets:
+            question = market.get("question", "")
+            prices = market.get("outcomePrices", "")
+            if isinstance(prices, str):
+                try:
+                    prices = json.loads(prices)
+                except Exception:
+                    continue
+            if not prices or len(prices) < 1:
                 continue
 
-            event = data[0]
-            markets = event.get("markets", [])
-            logger.debug("Weather: %s → %d markets", slug, len(markets))
+            yes_price = float(prices[0])
+            volume = float(market.get("volumeNum", 0) or market.get("volume", 0) or 0)
+            liquidity = float(market.get("liquidityNum", 0) or 0)
+            condition_id = market.get("conditionId", market.get("id", ""))
+            eval_jobs.append((question, yes_price, volume, liquidity, condition_id, market.get("slug", "")))
 
-            for market in markets:
-                question = market.get("question", "")
-                prices = market.get("outcomePrices", "")
-                if isinstance(prices, str):
-                    try:
-                        prices = json.loads(prices)
-                    except Exception:
-                        continue
-                if not prices or len(prices) < 1:
-                    continue
+    # Evaluate all markets in parallel (ensemble calls are mostly cache hits after pre-warm)
+    def _eval_market(job):
+        question, yes_price, volume, liquidity, condition_id, mslug = job
+        try:
+            result = evaluate_weather_market(question, yes_price)
+            if result:
+                result["platform"] = "polymarket"
+                result["market_id"] = condition_id
+                result["market"] = question[:200]
+                result["volume"] = volume
+                result["liquidity"] = liquidity
+                result["slug"] = mslug
+                result["archetype"] = "weather"
+                return result
+        except Exception as e:
+            logger.debug("Eval failed for %s: %s", question[:40], e)
+        return None
 
-                yes_price = float(prices[0])
-                volume = float(market.get("volumeNum", 0) or market.get("volume", 0) or 0)
-                liquidity = float(market.get("liquidityNum", 0) or 0)
-                condition_id = market.get("conditionId", market.get("id", ""))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = pool.map(_eval_market, eval_jobs)
+        for r in results:
+            if r:
+                signals.append(r)
 
-                result = evaluate_weather_market(question, yes_price)
-                if result:
-                    result["platform"] = "polymarket"
-                    result["market_id"] = condition_id
-                    result["market"] = question[:200]
-                    result["volume"] = volume
-                    result["liquidity"] = liquidity
-                    result["slug"] = market.get("slug", "")
-                    result["archetype"] = "weather"
-                    signals.append(result)
-
-    logger.info("Weather scan: %d signals from %d cities × %d dates",
+    logger.info("Weather scan: %d signals from %d cities × %d dates (parallel)",
                 len(signals), len(WEATHER_CITIES_SLUG), len(dates_to_check))
     return signals
 

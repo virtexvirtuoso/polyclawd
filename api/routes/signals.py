@@ -1997,12 +1997,14 @@ async def get_source_weights():
 @router.get("/signals/weather")
 async def scan_weather():
     """Scan weather markets on Kalshi + Polymarket against Open-Meteo forecasts."""
+    import asyncio
     try:
         signals_path = _get_signals_path()
         if signals_path not in sys.path:
             sys.path.insert(0, signals_path)
         from weather_scanner import scan_all_weather
-        return scan_all_weather()
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, scan_all_weather)
     except Exception as e:
         logger.exception(f"Weather scan failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
