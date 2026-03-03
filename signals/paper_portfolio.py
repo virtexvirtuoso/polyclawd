@@ -644,19 +644,19 @@ def open_position(signal: dict) -> dict:
         conn.close()
         return {"opened": False, "reason": cap_reason, "archetype": archetype, "edge": eval_result["edge"]}
 
+    slug = signal.get("event_slug") or signal.get("slug") or ""
     conn.execute("""INSERT INTO paper_positions
-        (opened_at, market_id, market_title, platform, side, entry_price, bet_size, potential_payout, confidence, edge_pct, status, archetype, strategy)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)""",
+        (opened_at, market_id, market_title, platform, side, entry_price, bet_size, potential_payout, confidence, edge_pct, status, archetype, strategy, market_slug)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)""",
         (datetime.now(timezone.utc).isoformat(), market_id, market_title,
          signal.get("platform", "kalshi"), side, market_price, bet_size,
-         round(potential_payout, 2), confidence, eval_result["edge"], archetype, strategy))
+         round(potential_payout, 2), confidence, eval_result["edge"], archetype, strategy, slug))
     conn.commit()
     conn.close()
 
     # Discord alert
     try:
         from signals.discord_alerts import alert_position_opened
-        slug = signal.get("event_slug") or signal.get("slug") or ""
         mkt_url = f"https://polymarket.com/event/{slug}" if slug else ""
         alert_position_opened(market_title, side, market_price, bet_size, strategy, eval_result.get("edge", 0) * 100, market_url=mkt_url)
     except Exception as e:

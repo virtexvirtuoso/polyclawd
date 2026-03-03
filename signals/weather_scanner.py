@@ -984,7 +984,7 @@ def scan_polymarket_weather() -> List[dict]:
             volume = float(market.get("volumeNum", 0) or market.get("volume", 0) or 0)
             liquidity = float(market.get("liquidityNum", 0) or 0)
             condition_id = market.get("conditionId", market.get("id", ""))
-            eval_jobs.append((question, yes_price, volume, liquidity, condition_id, market.get("slug", "")))
+            eval_jobs.append((question, yes_price, volume, liquidity, condition_id, slug))
 
     # Evaluate all markets in parallel (ensemble calls are mostly cache hits after pre-warm)
     def _eval_market(job):
