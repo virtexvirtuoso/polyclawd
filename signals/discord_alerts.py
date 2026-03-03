@@ -5,6 +5,7 @@ Sends trade opens, resolutions, edge alerts, and scorecards to #prediction-alert
 
 import json
 import logging
+import os
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
@@ -12,7 +13,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-WEBHOOK_URL = "https://discord.com/api/webhooks/1478409757386870875/ROLCqrUiJzbzDQj6bJu3RgbPEY-5pyFLqL2kfLV_GAeTlxkHh1D3JB1QiJNoICiTLuq-"
+WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 BOT_NAME = "VPredict"
 AVATAR_URL = "https://virtuosocrypto.com/polyclawd/icons/icon-192.png"
 
