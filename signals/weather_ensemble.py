@@ -76,7 +76,7 @@ ENSEMBLE_MODELS = [
 # ── Cache ────────────────────────────────────────────────────────────────
 _cache: Dict[str, dict] = {}
 _cache_ts: Dict[str, float] = {}
-CACHE_TTL = 3600  # 1 hour — forecasts update every 3-12h, no need to poll faster
+CACHE_TTL = 900  # 15 min — faster refresh catches forecast updates sooner (edge decays quickly)
 
 # Rate limit tracking per source
 _rate_limits = {
@@ -618,7 +618,8 @@ def get_ensemble_forecast(city: str, date: str) -> Optional[dict]:
     
     # Combined std: max of cross-source disagreement and internal ensemble spread
     # If sources disagree by >3°F, widen the distribution
-    combined_std = max(cross_std, internal_std, 0.8)  # Floor 0.8°F
+    # Floor 1.5°F — forecasts are never that precise (prevents overconfident signals)
+    combined_std = max(cross_std, internal_std, 1.5)
     if cross_std > 3.0:
         combined_std *= 1.3  # Fat tail penalty for disagreement
         logger.debug("Source disagreement >3°F for %s/%s: widening std %.1f → %.1f",

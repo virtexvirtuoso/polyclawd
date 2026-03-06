@@ -4,7 +4,8 @@ Polyclawd Scheduler Service — replaces cron watchdog
 Persistent asyncio service that orchestrates all periodic tasks:
 - 30s:   HF signal processing + resolution
 - 5min:  health check, paper resolution, shadow resolution, weather reeval, alerts, calibration
-- 30min: signal scans (category, weather, tweets), edge alerts, source_health touch
+- 5min:  weather signal scan (fast loop — edge decays quickly)
+- 30min: signal scans (category, tweets), edge alerts, source_health touch
 - 6h:    arena snapshots
 - daily:  Discord summary (22:00 UTC)
 - weekly: Discord recap + scorecard (Sunday 23:50 UTC)
@@ -172,6 +173,26 @@ def task_weather_reeval():
     reeval_weather_positions()
 
 
+def task_weather_fast_scan():
+    """Fast weather scan every 5min — edge decays fast, scan often.
+
+    Lower min_edge (8%), higher max_signals (8), includes liquidity filter.
+    Also checks for take-profit opportunities on open positions.
+    """
+    from signals.paper_portfolio import process_signals
+
+    try:
+        from signals.weather_scanner import get_weather_portfolio_signals
+        signals = get_weather_portfolio_signals(min_edge=8.0, max_signals=8)
+        if signals:
+            opened = process_signals(signals)
+            n = opened.get("opened", 0) if isinstance(opened, dict) else 0
+            if n > 0:
+                logger.info("Weather fast scan: opened %d positions", n)
+    except Exception as e:
+        logger.error("Weather fast scan failed: %s", e)
+
+
 def task_weather_shift_alerts():
     """Alert on significant forecast shifts for open weather positions."""
     conn = _db()
@@ -329,7 +350,7 @@ def task_calibration_check():
 
 
 def task_signal_scan():
-    """30-min signal scan: category + weather + tweet → paper portfolio."""
+    """30-min signal scan: category + tweet → paper portfolio. (Weather moved to 5-min fast loop.)"""
     from signals.paper_portfolio import process_signals
 
     # Category signals
@@ -341,15 +362,6 @@ def task_signal_scan():
             process_signals(signals)
     except Exception as e:
         logger.error("Category scan failed: %s", e)
-
-    # Weather signals
-    try:
-        from signals.weather_scanner import get_weather_portfolio_signals
-        signals = get_weather_portfolio_signals(min_edge=15.0, max_signals=3)
-        if signals:
-            process_signals(signals)
-    except Exception as e:
-        logger.error("Weather scan failed: %s", e)
 
     # Tweet count signals
     try:
@@ -586,13 +598,14 @@ async def tick_30s():
 
 
 async def tick_5min():
-    """Every 5 minutes: health, resolution, reeval, alerts, calibration."""
+    """Every 5 minutes: health, resolution, reeval, weather scan, alerts, calibration."""
     while True:
         await run_in_thread(_run_safe, "health_check", task_health_check)
         await run_in_thread(_run_safe, "shadow_resolution", task_shadow_resolution)
         await run_in_thread(_run_safe, "paper_resolution", task_paper_resolution)
         await run_in_thread(_run_safe, "resolution_scanner", task_resolution_scanner)
         await run_in_thread(_run_safe, "weather_reeval", task_weather_reeval)
+        await run_in_thread(_run_safe, "weather_fast_scan", task_weather_fast_scan)
         await run_in_thread(_run_safe, "weather_shift_alerts", task_weather_shift_alerts)
         await run_in_thread(_run_safe, "tweet_pace_alerts", task_tweet_pace_alerts)
         await run_in_thread(_run_safe, "calibration_check", task_calibration_check)

@@ -347,7 +347,7 @@ _forecast_cache_ts: float = 0
 
 # File-based forecast cache for persistence across restarts (2h TTL)
 _FORECAST_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'storage', 'weather_forecast_cache.json')
-_FORECAST_CACHE_TTL = 7200  # 2 hours — forecasts update every 6-12h
+_FORECAST_CACHE_TTL = 1800  # 30 min — faster refresh catches forecast shifts sooner
 
 
 def _load_file_cache() -> Dict:
@@ -910,7 +910,7 @@ def scan_polymarket_weather() -> List[dict]:
         for city_slug in WEATHER_CITIES_SLUG[:3]:  # spot check first 3
             city_name = city_slug.replace('-', ' ')
             cache_key = f"{city_name}"
-            if cache_key in _cache and (_time.time() - _cache_ts.get(cache_key, 0)) < 7200:
+            if cache_key in _cache and (_time.time() - _cache_ts.get(cache_key, 0)) < 900:
                 cache_warm = True
                 break
 
@@ -1136,24 +1136,38 @@ def reeval_weather_positions() -> dict:
         }
         
         # EXIT CRITERIA:
-        # 1. Edge has flipped negative by >10% (forecast shifted against us)
-        # 2. Same-day: edge flipped negative at all (no time to recover)
+        # 1. Edge has flipped negative by >5% same-day (no time to recover)
+        # 2. Edge badly flipped >10% multi-day
+        # 3. TAKE PROFIT: market has repriced in our favor, edge < 3% remaining
+        #    (market caught up to our forecast — capture the move, don't hold to resolution)
         should_close = False
         close_reason = ""
+        close_status = "lost"  # default
         
-        if hours_until < 12 and current_edge < -0.05:
-            # Same-day, edge gone — cut losses
+        # Calculate how much the market has moved in our favor
+        original_edge = pos.get("edge_pct") or 0  # edge at entry (stored as 0-100 decimal)
+        if isinstance(original_edge, (int, float)) and original_edge > 1:
+            original_edge = original_edge / 100  # normalize to 0-1
+        
+        if hours_until < 12 and current_edge < -0.03:
+            # Same-day, edge gone — cut losses (tightened from -5% to -3%)
             should_close = True
             close_reason = f"weather-reeval: same-day edge flipped to {current_edge*100:.1f}%"
-        elif current_edge < -0.15:
-            # Multi-day but edge badly flipped (>15% against us)
+        elif current_edge < -0.10:
+            # Multi-day but edge badly flipped (>10% against us, tightened from 15%)
             should_close = True
             close_reason = f"weather-reeval: edge flipped to {current_edge*100:.1f}%"
+        elif current_edge >= 0 and current_edge < 0.03 and hours_until > 6:
+            # TAKE PROFIT: Market repriced in our favor, edge nearly gone (<3%)
+            # The move happened — lock it in, don't wait for resolution risk
+            should_close = True
+            close_status = "won"
+            close_reason = f"weather-reeval: take-profit, edge converged to {current_edge*100:.1f}% (was ~{original_edge*100:.0f}%)"
         
         if should_close:
             try:
                 from signals.paper_portfolio import close_position
-                close_result = close_position(pos["market_id"], "lost", exit_price=None)
+                close_result = close_position(pos["market_id"], close_status, exit_price=None)
                 detail["action"] = "closed"
                 detail["close_reason"] = close_reason
                 results["closed"] += 1
@@ -1176,15 +1190,18 @@ def reeval_weather_positions() -> dict:
     return results
 
 
-def get_weather_portfolio_signals(min_edge: float = 10.0, max_signals: int = 5) -> List[dict]:
+def get_weather_portfolio_signals(min_edge: float = 8.0, max_signals: int = 8) -> List[dict]:
     """Get weather signals formatted for paper_portfolio.process_signals().
     
     Returns top signals (by edge) adapted to the portfolio signal dict format.
     Deduplicates: only the best bracket per city/date combo.
+    Filters: min edge, price range, liquidity floor.
     """
     raw_signals = scan_polymarket_weather()
     if not raw_signals:
         return []
+    
+    MIN_LIQUIDITY = 200  # $200 minimum liquidity — below this, can't exit
     
     # Filter: actionable signals only (meaningful price, not garbage contracts)
     filtered = []
@@ -1193,9 +1210,14 @@ def get_weather_portfolio_signals(min_edge: float = 10.0, max_signals: int = 5) 
         mp = s.get("market_price", 0)
         side = s.get("side", "YES")
         effective_price = mp if side == "YES" else (1 - mp)
+        liquidity = s.get("liquidity", 0)
         # Skip garbage contracts (<5¢) and near-certain (>95¢) — no edge in these
-        if edge >= min_edge and 0.05 <= effective_price <= 0.95:
+        # Skip illiquid markets — can't exit positions
+        if edge >= min_edge and 0.05 <= effective_price <= 0.95 and liquidity >= MIN_LIQUIDITY:
             filtered.append(s)
+        elif edge >= min_edge and liquidity < MIN_LIQUIDITY:
+            logger.debug("Weather: skipping %s — liquidity $%.0f < $%d",
+                        s.get("market", "")[:40], liquidity, MIN_LIQUIDITY)
     
     # Deduplicate: pick best signal per city+date (don't bet multiple brackets)
     best_per_event = {}
