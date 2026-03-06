@@ -7,12 +7,12 @@
 <script src="auth.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
   /* Dark mode (default) */
   :root, [data-theme="dark"] {
-    --bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a26;--border:#2a2a3a;
-    --accent:#6c5ce7;--accent2:#a29bfe;--green:#00c853;--red:#ff5252;
-    --orange:#ffab40;--cyan:#18ffff;--text:#e8e8f0;--text2:#8888a0;--gold:#ffd700;
+    --bg:#0a0a0f;--surface:#111118;--surface2:#161620;--border:#1f1f2e;
+    --accent:#6c5ce7;--accent2:#a29bfe;--green:#00d68f;--red:#f65164;
+    --orange:#f0a050;--cyan:#4ecdc4;--text:#e8e8f0;--text2:#6b6b85;--gold:#ffd700;
     --noise-opacity:0.03;--shadow:rgba(0,0,0,0.3);
   }
   /* Light mode */
@@ -40,16 +40,16 @@
   .container{max-width:1200px;margin:0 auto;padding:40px 24px;position:relative;z-index:1}
 
   /* Header */
-  header{text-align:center;margin-bottom:48px;position:relative}
+  header{text-align:center;margin-bottom:32px;position:relative}
   header::before{content:'';position:absolute;top:-100px;left:50%;transform:translateX(-50%);width:600px;height:600px;background:radial-gradient(circle,rgba(108,92,231,0.08) 0%,transparent 70%);pointer-events:none}
-  .logo{font-size:13px;letter-spacing:6px;text-transform:uppercase;color:var(--accent2);margin-bottom:16px;font-weight:500}
+  .logo{font-size:11px;letter-spacing:8px;text-transform:uppercase;color:var(--accent2);margin-bottom:16px;font-weight:500}
   .logo span{color:var(--gold)}
-  h1{font-size:42px;font-weight:700;letter-spacing:-1px;background:linear-gradient(135deg,var(--text) 0%,var(--accent2) 50%,var(--cyan) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:12px}
-  .subtitle{color:var(--text2);font-size:15px;font-weight:300}
+  h1{font-size:28px;font-weight:700;letter-spacing:-1px;background:linear-gradient(135deg,var(--text) 0%,var(--accent2) 50%,var(--cyan) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:12px}
+  .subtitle{color:var(--text2);font-size:13px;font-weight:300}
   .subtitle strong{color:var(--green);font-weight:500}
-  .timestamp{display:inline-block;margin-top:16px;padding:6px 16px;background:var(--surface);border:1px solid var(--border);border-radius:20px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text2)}
-  .live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:6px;animation:pulse 2s infinite}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+  .timestamp{display:inline-block;margin-top:16px;padding:6px 16px;background:rgba(0,214,143,0.06);border:1px solid rgba(0,214,143,0.15);border-radius:20px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text2)}
+  .live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:6px;animation:pulse 2s infinite;box-shadow:0 0 8px rgba(0,214,143,0.6),0 0 20px rgba(0,214,143,0.2)}
+  @keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 8px rgba(0,214,143,0.6),0 0 20px rgba(0,214,143,0.2)}50%{opacity:0.4;box-shadow:0 0 4px rgba(0,214,143,0.3),0 0 10px rgba(0,214,143,0.1)}}
 
   /* Controls */
   .controls{display:flex;gap:12px;align-items:center;justify-content:center;margin-bottom:40px}
@@ -63,7 +63,7 @@
 
   /* Stats Row */
   .stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:48px}
-  .stat-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 20px;position:relative;overflow:hidden;transition:border-color 0.3s}
+  .stat-card{background:linear-gradient(135deg, rgba(17,17,24,0.8), rgba(22,22,32,0.6));backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.04);box-shadow:0 2px 8px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.03);border-radius:12px;padding:18px 20px;position:relative;overflow:hidden;transition:border-color 0.3s}
   .stat-card:hover{border-color:var(--accent)}
   .stat-card::after{content:'';position:absolute;top:0;left:0;right:0;height:2px}
   .stat-card.bankroll::after{background:linear-gradient(90deg,var(--accent),var(--cyan))}
@@ -76,8 +76,8 @@
   .stat-card.hold::after{background:var(--accent2)}
   .stat-card.unreal::after{background:linear-gradient(90deg,var(--green),var(--orange))}
   .stat-card.risk::after{background:var(--red)}
-  .stat-label{font-size:10px;text-transform:uppercase;letter-spacing:2px;color:var(--text2);margin-bottom:6px}
-  .stat-value{font-size:24px;font-weight:700;font-family:'JetBrains Mono',monospace}
+  .stat-label{font-size:10px;text-transform:uppercase;letter-spacing:2.5px;color:var(--text2);margin-bottom:8px;font-weight:600}
+  .stat-value{font-size:26px;font-weight:800;font-family:'JetBrains Mono',monospace;letter-spacing:-0.5px}
   .stat-sub{font-size:11px;color:var(--text2);margin-top:4px}
   .green{color:var(--green)}.red{color:var(--red)}.gold{color:var(--gold)}.cyan{color:var(--cyan)}.accent{color:var(--accent2)}.accent2{color:var(--accent2)}.orange{color:var(--orange)}
 
@@ -87,26 +87,32 @@
   .stats-row.skeleton .stat-sub{color:transparent!important;background:linear-gradient(90deg,var(--surface2) 25%,var(--border) 50%,var(--surface2) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:4px;min-height:1em}
 
   /* Section Cards */
-  .section-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;margin-bottom:32px;overflow:hidden;transition:border-color 0.3s}
+  .section-card{background:linear-gradient(135deg, rgba(17,17,24,0.8), rgba(22,22,32,0.6));backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.04);box-shadow:0 2px 8px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.03);border-radius:16px;margin-bottom:32px;overflow:hidden;transition:border-color 0.3s}
   .section-card:hover{border-color:var(--accent)}
-  .section-header{display:flex;align-items:center;justify-content:space-between;padding:20px 28px;border-bottom:1px solid var(--border);background:var(--surface2)}
-  .section-title{display:flex;align-items:center;gap:12px}
-  .section-icon{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;font-size:14px}
+  .section-header{display:flex;align-items:center;justify-content:space-between;padding:20px 28px;border-bottom:1px solid var(--border);background:var(--surface2);position:relative}
+  .section-title{display:flex;align-items:center;gap:12px;position:relative}
+  .section-title::before{content:'';position:absolute;left:0;top:12px;bottom:12px;width:3px;border-radius:2px;background:var(--accent)}
+  .section-title h2{font-size:14px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;color:var(--text2);padding-left:18px}
+  .section-icon{display:none;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;font-size:14px}
   .section-icon.positions{background:rgba(0,230,118,0.15)}
   .section-icon.signals{background:rgba(108,92,231,0.15)}
   .section-icon.history{background:rgba(24,255,255,0.15)}
   .section-icon.equity{background:rgba(255,215,0,0.15)}
-  .section-title h2{font-size:18px;font-weight:600}
   .section-count{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text2);padding:4px 12px;background:var(--surface);border:1px solid var(--border);border-radius:20px}
   .section-body{padding:24px 28px}
 
   /* Positions Grid */
   .positions-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
-  .pos-card{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:18px 20px;position:relative;overflow:hidden;transition:all 0.3s}
-  .pos-card:hover{border-color:var(--accent);transform:translateY(-2px)}
+  .pos-card{background:var(--surface2);border:1px solid var(--border);border-left:3px solid var(--border);border-radius:12px;padding:18px 20px;position:relative;overflow:hidden;transition:all 0.3s}
+  .pos-card:hover{transform:translateY(-3px);box-shadow:0 12px 40px rgba(0,0,0,0.3),0 0 0 1px rgba(108,92,231,0.1)}
+  .pos-card.yes:hover{box-shadow:0 12px 40px rgba(0,0,0,0.3),0 0 0 1px rgba(0,214,143,0.1)}
+  .pos-card.no:hover{box-shadow:0 12px 40px rgba(0,0,0,0.3),0 0 0 1px rgba(246,81,100,0.1)}
   .pos-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
   .pos-card.yes::before{background:var(--green)}
   .pos-card.no::before{background:var(--red)}
+  .pos-card.unreal-up{border-left-color:var(--green)}
+  .pos-card.unreal-down{border-left-color:var(--red)}
+  .pos-card.unreal-neutral{border-left-color:var(--border)}
   .pos-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px}
   .pos-market{font-size:14px;font-weight:500;line-height:1.4;flex:1;margin-right:12px}
   .badge{padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;white-space:nowrap}
@@ -135,13 +141,14 @@
   table{width:100%;border-collapse:collapse}
   th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text2);padding:10px 14px;border-bottom:1px solid var(--border);font-weight:500}
   td{padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px}
+  tr:nth-child(even) td{background:rgba(255,255,255,0.015)}
   tr:hover td{background:rgba(108,92,231,0.03)}
   .mono{font-family:'JetBrains Mono',monospace}
-  .result-won{color:var(--green);font-weight:600}
-  .result-lost{color:var(--red);font-weight:600}
+  .result-won{color:var(--green);font-weight:700;text-shadow:0 0 12px rgba(0,214,143,0.4)}
+  .result-lost{color:var(--red);font-weight:700;text-shadow:0 0 12px rgba(246,81,100,0.4)}
 
   /* Chart */
-  .chart-container{height:280px;position:relative}
+  .chart-container{height:280px;position:relative;border:1px solid var(--border);border-radius:10px;padding:16px;background:rgba(10,10,15,0.5)}
 
   /* Empty state */
   .empty{color:var(--text2);text-align:center;padding:40px;font-size:14px}
@@ -194,6 +201,14 @@
   .resolve-row:last-child{border:none}
   .resolve-time{font-family:'JetBrains Mono',monospace;color:var(--text2);white-space:nowrap;font-size:11px}
   .resolve-market{flex:1;font-weight:500}
+
+  /* Hero stats toggle */
+  .stats-primary{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:16px}
+  .stats-details{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:0;overflow:hidden;transition:max-height 0.3s ease-out,margin-top 0.3s ease-out,opacity 0.3s ease-out}
+  .stats-details.hidden{max-height:0!important;margin-top:0!important;opacity:0}
+  .stats-toggle{display:block;text-align:center;margin-bottom:32px;padding:10px 20px;background:transparent;border:1px solid var(--border);border-radius:8px;color:var(--text2);font-family:'Inter',sans-serif;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.2s;letter-spacing:1px;text-transform:uppercase}
+  .stats-toggle:hover{border-color:var(--accent);color:var(--text)}
+  .stats-toggle:active{transform:scale(0.98)}
 
   /* Collapsible sections */
   .section-card[data-collapsible] .section-header{cursor:pointer;user-select:none;-webkit-user-select:none}
@@ -315,14 +330,34 @@
   <span class="status-msg" id="statusMsg"></span>
 </div>
 
-<div class="stats-row skeleton">
+<div class="stats-primary skeleton">
   <div class="stat-card bankroll">
     <div class="stat-label">Bankroll</div>
     <div class="stat-value cyan" id="bankroll">—</div>
     <div class="stat-sub" id="bankrollSub">starting capital</div>
   </div>
+  <div class="stat-card unreal" id="unrealCard">
+    <div class="stat-label">Unrealized P&L</div>
+    <div class="stat-value" id="unrealPnl">—</div>
+    <div class="stat-sub" id="unrealSub">open value</div>
+  </div>
+  <div class="stat-card trades">
+    <div class="stat-label">Open Positions</div>
+    <div class="stat-value cyan" id="tradeCount">—</div>
+    <div class="stat-sub">open / max</div>
+  </div>
+  <div class="stat-card risk">
+    <div class="stat-label">Capital at Risk</div>
+    <div class="stat-value red" id="capitalRisk">—</div>
+    <div class="stat-sub" id="riskSub">% of bankroll</div>
+  </div>
+</div>
+
+<button class="stats-toggle" onclick="toggleStatsDetails()" id="statsToggle">Show Details ▾</button>
+
+<div class="stats-details hidden" id="statsDetails">
   <div class="stat-card pnl-pos" id="pnlCard">
-    <div class="stat-label">P&L</div>
+    <div class="stat-label">Realized P&L</div>
     <div class="stat-value" id="totalPnl">—</div>
     <div class="stat-sub" id="pnlSub">0 resolved</div>
   </div>
@@ -332,36 +367,24 @@
     <div class="stat-sub" id="wrSub">W / L</div>
   </div>
   <div class="stat-card dd">
-    <div class="stat-label">Drawdown</div>
+    <div class="stat-label">Max Drawdown</div>
     <div class="stat-value orange" id="maxDD">—</div>
     <div class="stat-sub" id="ddSub">from peak</div>
   </div>
-  <div class="stat-card trades">
-    <div class="stat-label">Positions</div>
-    <div class="stat-value cyan" id="tradeCount">—</div>
-    <div class="stat-sub">open / max</div>
-  </div>
-  <div class="stat-card unreal" id="unrealCard">
-    <div class="stat-label">Unrealized</div>
-    <div class="stat-value" id="unrealPnl">—</div>
-    <div class="stat-sub" id="unrealSub">open value</div>
-  </div>
   <div class="stat-card sharpe">
-    <div class="stat-label">Sharpe</div>
+    <div class="stat-label">Sharpe Ratio</div>
     <div class="stat-value accent2" id="sharpe">—</div>
     <div class="stat-sub">risk-adjusted</div>
   </div>
   <div class="stat-card hold">
-    <div class="stat-label">Avg Hold</div>
+    <div class="stat-label">Avg Hold Time</div>
     <div class="stat-value accent2" id="avgHold">—</div>
     <div class="stat-sub">days per trade</div>
   </div>
-  <div class="stat-card risk">
-    <div class="stat-label">At Risk</div>
-    <div class="stat-value red" id="capitalRisk">—</div>
-    <div class="stat-sub" id="riskSub">% of bankroll</div>
-  </div>
 </div>
+
+<!-- Risk Exposure -->
+<div id="riskExposure" style="margin-bottom:32px"></div>
 
 <!-- Open Positions -->
 <div class="section-card">
@@ -379,20 +402,17 @@
   </div>
 </div>
 
-<!-- Signals section removed — watchdog auto-processes -->
-<div style="display:none"><span id="signalCount"></span><span id="recentSignals"></span></div>
-
-<!-- Trade History -->
-<div class="section-card">
-  <div class="section-header">
+<!-- Resolve Log -->
+<div class="section-card" data-collapsible>
+  <div class="section-header" onclick="toggleSection(this)">
     <div class="section-title">
-      <span class="section-icon history">📋</span>
-      <h2>Trade History</h2>
+      <span class="section-icon history">🔄</span>
+      <h2>Resolve Log</h2>
     </div>
-    <span class="section-count" id="historyCount">0 trades</span>
+    <span class="section-count" id="resolveCount">—</span>
   </div>
-  <div class="section-body" id="tradeHistory">
-    <div class="empty"><div class="empty-icon">⏳</div>No closed trades yet — waiting for market resolutions</div>
+  <div class="section-body" id="resolveLog">
+    <div class="empty"><div class="empty-icon">🔄</div>No resolutions yet</div>
   </div>
 </div>
 
@@ -409,8 +429,22 @@
   </div>
 </div>
 
+<!-- Trade History -->
+<div class="section-card" data-collapsible data-collapse-mobile>
+  <div class="section-header" onclick="toggleSection(this)">
+    <div class="section-title">
+      <span class="section-icon history">📋</span>
+      <h2>Trade History</h2>
+    </div>
+    <span class="section-count" id="historyCount">0 trades</span>
+  </div>
+  <div class="section-body" id="tradeHistory">
+    <div class="empty"><div class="empty-icon">⏳</div>No closed trades yet — waiting for market resolutions</div>
+  </div>
+</div>
+
 <!-- Archetype Breakdown -->
-<div class="section-card" data-collapsible>
+<div class="section-card" data-collapsible data-collapse-mobile>
   <div class="section-header" onclick="toggleSection(this)">
     <div class="section-title">
       <span class="section-icon signals">🧬</span>
@@ -424,7 +458,7 @@
 </div>
 
 <!-- Risk Guards -->
-<div class="section-card" id="riskGuardsCard" data-collapsible>
+<div class="section-card" id="riskGuardsCard" data-collapsible data-collapse-mobile>
   <div class="section-header" onclick="toggleSection(this)">
     <div class="section-title">
       <span class="section-icon" style="background:rgba(108,92,231,0.15)">🛡️</span>
@@ -448,22 +482,8 @@
   </div>
 </div>
 
-<!-- Risk Exposure -->
-<div id="riskExposure" style="margin-bottom:32px"></div>
-
-<!-- Resolve Log -->
-<div class="section-card" data-collapsible>
-  <div class="section-header" onclick="toggleSection(this)">
-    <div class="section-title">
-      <span class="section-icon history">🔄</span>
-      <h2>Resolve Log</h2>
-    </div>
-    <span class="section-count" id="resolveCount">—</span>
-  </div>
-  <div class="section-body" id="resolveLog">
-    <div class="empty"><div class="empty-icon">🔄</div>No resolutions yet</div>
-  </div>
-</div>
+<!-- Signals section removed — watchdog auto-processes -->
+<div style="display:none"><span id="signalCount"></span><span id="recentSignals"></span></div>
 
 <footer>
   <p><span class="brand">Virtuoso Prediction</span> · dynamic Kelly · edge trading</p>
@@ -483,6 +503,9 @@
 const API = '/polyclawd/api';
 let equityChart = null;
 let cachedUnrealizedPnl = 0;
+let autoRefreshInterval = null;
+let countdownInterval = null;
+let secondsUntilRefresh = 60;
 
 // Theme-aware helpers for Chart.js (can't read CSS vars directly)
 function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
@@ -531,10 +554,24 @@ function toggleSection(headerEl) {
     requestAnimationFrame(() => { card.classList.add('collapsed'); });
   }
 }
-// Auto-collapse sections on mobile
+// Stats details toggle
+function toggleStatsDetails() {
+  const details = document.getElementById('statsDetails');
+  const toggle = document.getElementById('statsToggle');
+  if (details.classList.contains('hidden')) {
+    details.classList.remove('hidden');
+    details.style.marginTop = '16px';
+    toggle.textContent = 'Hide Details ▴';
+  } else {
+    details.classList.add('hidden');
+    toggle.textContent = 'Show Details ▾';
+  }
+}
+
+// Auto-collapse sections on mobile (only those with data-collapse-mobile)
 function initCollapsible() {
   if (window.innerWidth > 768) return;
-  document.querySelectorAll('.section-card[data-collapsible]').forEach(card => {
+  document.querySelectorAll('.section-card[data-collapse-mobile]').forEach(card => {
     card.classList.add('collapsed');
   });
 }
@@ -553,8 +590,38 @@ function marketUrl(p) {
   return '';
 }
 
+// Auto-refresh countdown
+function updateCountdown() {
+  const timestampEl = document.getElementById('lastUpdate');
+  const lastUpdate = timestampEl.textContent;
+  if (secondsUntilRefresh > 0) {
+    timestampEl.textContent = `${lastUpdate.split(' · ')[0]} · refreshing in ${secondsUntilRefresh}s`;
+    secondsUntilRefresh--;
+  }
+}
+
+function startAutoRefresh() {
+  // Clear existing intervals
+  if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+  if (countdownInterval) clearInterval(countdownInterval);
+  
+  // Reset countdown
+  secondsUntilRefresh = 60;
+  
+  // Auto-refresh every 60 seconds
+  autoRefreshInterval = setInterval(() => {
+    loadAll();
+  }, 60000);
+  
+  // Update countdown every second
+  countdownInterval = setInterval(updateCountdown, 1000);
+}
+
 async function loadAll() {
   try {
+    // Reset countdown on manual refresh
+    secondsUntilRefresh = 60;
+    
     // Auto-resolve stale positions first (fire-and-forget)
     fetch(`${API}/portfolio/resolve`, { method: 'POST' }).catch(() => {});
 
@@ -577,7 +644,7 @@ async function loadAll() {
     renderHistory(histRes, liveRes);
     if (archRes) renderArchetypeBreakdown(archRes, archPnlRes);
     renderResolveLog(resolveLogRes);
-    document.querySelector('.stats-row.skeleton')?.classList.remove('skeleton');
+    document.querySelector('.stats-primary.skeleton')?.classList.remove('skeleton');
     document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
   } catch(e) {
     console.error('Load failed:', e);
@@ -727,13 +794,28 @@ function renderPositions(positions) {
     el.innerHTML = '<div class="empty"><div class="empty-icon">📭</div>No open positions — process signals to start trading</div>';
     return;
   }
-  el.innerHTML = positions.map(p => {
+  
+  // Sort by unrealized P&L magnitude descending (worst first)
+  const sorted = [...positions].sort((a, b) => {
+    const aUnreal = a.unrealized_pnl || 0;
+    const bUnreal = b.unrealized_pnl || 0;
+    return aUnreal - bUnreal;  // Negative values (losses) come first
+  });
+  
+  el.innerHTML = sorted.map(p => {
     const days = p.hold_days != null ? p.hold_days : Math.max(0, Math.floor((Date.now() - new Date(p.opened_at).getTime()) / 86400000));
     const isStale = p.stale === true;  // Only mark stale if API says price data is stale
     const sideClass = (p.side || '').toLowerCase();
     const payout = p.potential_payout || 0;
     const roi = p.bet_size ? ((payout / p.bet_size - 1) * 100).toFixed(0) : '0';
     const unreal = p.unrealized_pnl;
+    
+    // Border color class based on unrealized P&L
+    let borderClass = 'unreal-neutral';
+    if (unreal != null) {
+      borderClass = unreal > 0 ? 'unreal-up' : unreal < 0 ? 'unreal-down' : 'unreal-neutral';
+    }
+    
     const unrealHtml = unreal != null
       ? `<div class="unrealized ${unreal >= 0 ? 'up' : 'down'}">${unreal >= 0 ? '+' : ''}$${unreal.toFixed(2)} unrealized</div>`
       : '';
@@ -744,7 +826,7 @@ function renderPositions(positions) {
     const mUrl = marketUrl(p);
     const titleText = (p.market_title || '').substring(0, 80);
     const titleHtml = mUrl ? `<a href="${mUrl}" target="_blank" rel="noopener" class="market-link">${titleText} ↗</a>` : titleText;
-    return `<div class="pos-card ${sideClass}${isStale ? ' stale' : ''}">
+    return `<div class="pos-card ${sideClass} ${borderClass}${isStale ? ' stale' : ''}">
       <div class="pos-top">
         <div class="pos-market">${titleHtml}</div>
         <span class="badge badge-${sideClass}">${p.side}</span>
@@ -760,19 +842,18 @@ function renderPositions(positions) {
           <div class="pos-stat-value">$${(p.bet_size || 0).toFixed(2)}</div>
         </div>
         <div class="pos-stat">
-          <div class="pos-stat-label">Payout</div>
-          <div class="pos-stat-value green">$${payout.toFixed(2)}</div>
+          <div class="pos-stat-label">Unrealized</div>
+          <div class="pos-stat-value ${unreal != null ? (unreal >= 0 ? 'green' : 'red') : ''}">${unreal != null ? (unreal >= 0 ? '+' : '') + '$' + unreal.toFixed(2) : '—'}</div>
         </div>
-        <div class="pos-stat">
+        <div class="pos-stat" style="opacity:0.5">
           <div class="pos-stat-label">Confidence</div>
-          <div class="pos-stat-value">${((p.confidence || 0) > 1 ? (p.confidence || 0) : (p.confidence || 0) * 100).toFixed(0)}%</div>
+          <div class="pos-stat-value" style="font-size:12px">${((p.confidence || 0) > 1 ? (p.confidence || 0) : (p.confidence || 0) * 100).toFixed(0)}%</div>
         </div>
-        <div class="pos-stat">
+        <div class="pos-stat" style="opacity:0.5">
           <div class="pos-stat-label">Edge</div>
-          <div class="pos-stat-value green">${((p.edge_pct || 0) > 1 ? (p.edge_pct || 0) : (p.edge_pct || 0) * 100).toFixed(1)}%</div>
+          <div class="pos-stat-value" style="font-size:12px">${((p.edge_pct || 0) > 1 ? (p.edge_pct || 0) : (p.edge_pct || 0) * 100).toFixed(1)}%</div>
         </div>
       </div>
-      ${unrealHtml}
       <div class="pos-platform">
         <span class="platform-tag">${(p.platform || 'polymarket').toUpperCase()}</span>
         <span class="pos-days${isStale ? ' orange' : ''}">${days}d open</span>
@@ -838,7 +919,8 @@ function updateEquityChart(history, liveRes) {
 
   const ctx = document.getElementById('equityChart').getContext('2d');
   const gradient = ctx.createLinearGradient(0, 0, 0, 280);
-  gradient.addColorStop(0, 'rgba(108,92,231,0.2)');
+  gradient.addColorStop(0, 'rgba(108,92,231,0.15)');
+  gradient.addColorStop(0.5, 'rgba(108,92,231,0.05)');
   gradient.addColorStop(1, 'rgba(108,92,231,0)');
 
   const datasets = [{
@@ -881,6 +963,10 @@ function updateEquityChart(history, liveRes) {
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      interaction: {
+        mode: 'index',
+        intersect: false
+      },
       plugins: {
         legend: { display: datasets.length > 1, labels: { color: chartText(), font: { size: 11 } } },
         tooltip: {
@@ -1062,7 +1148,7 @@ function renderSignals(signals) {
 
 // Init
 loadAll();
-setInterval(loadAll, 60000);
+startAutoRefresh();
 </script>
 </body>
 </html>
