@@ -148,7 +148,18 @@
   .result-lost{color:var(--red);font-weight:700;text-shadow:0 0 12px rgba(246,81,100,0.4)}
 
   /* Chart */
-  .chart-container{height:280px;position:relative;border:1px solid var(--border);border-radius:10px;padding:16px;background:rgba(10,10,15,0.5)}
+  .chart-container{height:300px;position:relative;border:1px solid var(--border);border-radius:10px;padding:20px 16px 12px;background:rgba(10,10,15,0.5)}
+
+  /* Equity summary strip above chart */
+  .equity-summary{display:flex;gap:24px;align-items:baseline;margin-bottom:16px;padding:0 4px;flex-wrap:wrap}
+  .equity-hero{font-size:28px;font-weight:800;font-family:'JetBrains Mono',monospace;letter-spacing:-0.5px}
+  .equity-delta{font-size:14px;font-weight:600;font-family:'JetBrains Mono',monospace;padding:4px 10px;border-radius:6px}
+  .equity-delta.up{background:rgba(0,214,143,0.1);color:var(--green)}
+  .equity-delta.down{background:rgba(246,81,100,0.1);color:var(--red)}
+  .equity-meta{font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace;margin-left:auto}
+  .equity-range{display:flex;gap:16px;font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace;padding:0 4px}
+  .equity-range span{display:flex;align-items:center;gap:4px}
+  .equity-range .dot{width:6px;height:6px;border-radius:50%;display:inline-block}
 
   /* Empty state */
   .empty{color:var(--text2);text-align:center;padding:40px;font-size:14px}
@@ -246,7 +257,11 @@
     .section-title h2{font-size:15px}
     .section-body{padding:14px 16px}
     .section-card{margin-bottom:20px}
-    .chart-container{height:200px}
+    .chart-container{height:220px}
+    .equity-hero{font-size:22px}
+    .equity-delta{font-size:12px}
+    .equity-summary{gap:12px}
+    .equity-meta{margin-left:0;flex-basis:100%}
     /* Table horizontal scroll fallback */
     .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -16px;padding:0 16px}
     th,td{padding:8px 10px;font-size:12px}
@@ -282,6 +297,8 @@
     .pos-grid{grid-template-columns:repeat(2,1fr)}
     .signal-row{flex-wrap:wrap;gap:6px}
     .chart-container{height:180px}
+    .equity-hero{font-size:20px}
+    .equity-range{flex-wrap:wrap;gap:8px}
     /* Resolve log mobile */
     .resolve-row{flex-wrap:wrap;gap:4px;padding:10px 0}
     .resolve-market{flex-basis:100%;font-size:12px}
@@ -425,7 +442,9 @@
     </div>
   </div>
   <div class="section-body">
+    <div class="equity-summary" id="equitySummary"></div>
     <div class="chart-container"><canvas id="equityChart"></canvas></div>
+    <div class="equity-range" id="equityRange"></div>
   </div>
 </div>
 
@@ -895,9 +914,10 @@ function renderHistory(history, liveRes) {
 
 function updateEquityChart(history, liveRes) {
   const sorted = [...history].reverse();
-  let bankroll = 10000;
+  const START = 10000;
+  let bankroll = START;
   const labels = ['Start'];
-  const data = [10000];
+  const data = [START];
 
   sorted.forEach((t, i) => {
     bankroll += (t.pnl || 0);
@@ -906,92 +926,156 @@ function updateEquityChart(history, liveRes) {
     data.push(Math.round(bankroll * 100) / 100);
   });
 
-  // Add unrealized P&L as final dotted point
-  const unrealData = [...data];
-  const unrealLabels = [...labels];
   const totalUnreal = liveRes ? (liveRes.total_unrealized_pnl || 0) : 0;
+  const projected = Math.round((bankroll + totalUnreal) * 100) / 100;
+
+  // --- Equity summary strip ---
+  const summaryEl = document.getElementById('equitySummary');
+  const rangeEl = document.getElementById('equityRange');
+  const realPnl = bankroll - START;
+  const realPct = ((realPnl / START) * 100).toFixed(1);
+  const high = Math.max(...data);
+  const low = Math.min(...data);
+  summaryEl.innerHTML = `
+    <span class="equity-hero" style="color:${bankroll >= START ? 'var(--green)' : 'var(--red)'}">$${bankroll.toLocaleString('en-US',{minimumFractionDigits:2})}</span>
+    <span class="equity-delta ${realPnl >= 0 ? 'up' : 'down'}">${realPnl >= 0 ? '+' : ''}$${realPnl.toFixed(2)} (${realPnl >= 0 ? '+' : ''}${realPct}%)</span>
+    ${totalUnreal !== 0 ? `<span class="equity-meta">unrealized: <span style="color:${totalUnreal >= 0 ? 'var(--green)' : 'var(--red)'}">${totalUnreal >= 0 ? '+' : ''}$${totalUnreal.toFixed(2)}</span></span>` : ''}
+  `;
+  rangeEl.innerHTML = `
+    <span><span class="dot" style="background:var(--green)"></span> High: $${high.toLocaleString('en-US',{minimumFractionDigits:2})}</span>
+    <span><span class="dot" style="background:var(--red)"></span> Low: $${low.toLocaleString('en-US',{minimumFractionDigits:2})}</span>
+    <span style="margin-left:auto">${data.length - 1} trade${data.length - 1 !== 1 ? 's' : ''}</span>
+  `;
+
+  // Unrealized projection
+  const finalLabels = [...labels];
   if (totalUnreal !== 0 && data.length > 1) {
-    unrealLabels.push('now');
-    unrealData.push(Math.round((bankroll + totalUnreal) * 100) / 100);
+    finalLabels.push('now');
   }
 
   if (equityChart) equityChart.destroy();
 
   const ctx = document.getElementById('equityChart').getContext('2d');
-  const gradient = ctx.createLinearGradient(0, 0, 0, 280);
-  gradient.addColorStop(0, 'rgba(108,92,231,0.15)');
-  gradient.addColorStop(0.5, 'rgba(108,92,231,0.05)');
-  gradient.addColorStop(1, 'rgba(108,92,231,0)');
+  const chartH = ctx.canvas.parentElement.clientHeight || 300;
+  const gradient = ctx.createLinearGradient(0, 0, 0, chartH);
+  const isUp = bankroll >= START;
+  gradient.addColorStop(0, isUp ? 'rgba(0,214,143,0.12)' : 'rgba(246,81,100,0.12)');
+  gradient.addColorStop(0.6, isUp ? 'rgba(0,214,143,0.03)' : 'rgba(246,81,100,0.03)');
+  gradient.addColorStop(1, 'transparent');
+
+  const lineColor = isUp ? (cssVar('--green') || '#00d68f') : (cssVar('--red') || '#f65164');
 
   const datasets = [{
-    label: 'Realized',
+    label: 'Equity',
     data,
-    borderColor: cssVar('--accent2') || '#a29bfe',
+    borderColor: lineColor,
     backgroundColor: gradient,
     fill: true,
-    tension: 0.35,
-    pointRadius: data.length > 20 ? 0 : 4,
-    pointBackgroundColor: cssVar('--accent2') || '#a29bfe',
+    tension: 0.3,
+    pointRadius: data.length > 20 ? 0 : 3,
+    pointHoverRadius: 6,
+    pointBackgroundColor: lineColor,
     pointBorderColor: cssVar('--bg') || '#0a0a0f',
     pointBorderWidth: 2,
-    borderWidth: 2,
+    borderWidth: 2.5,
   }];
 
-  // Dotted unrealized line: from last realized point to projected point
+  // Dotted unrealized projection
   if (totalUnreal !== 0 && data.length > 1) {
     const unrealLine = new Array(data.length - 1).fill(null);
     unrealLine.push(data[data.length - 1]);
-    unrealLine.push(Math.round((bankroll + totalUnreal) * 100) / 100);
+    unrealLine.push(projected);
     datasets.push({
       label: 'Unrealized',
       data: unrealLine,
-      borderColor: totalUnreal >= 0 ? 'rgba(0,230,118,0.6)' : 'rgba(255,82,82,0.6)',
+      borderColor: totalUnreal >= 0 ? 'rgba(0,214,143,0.5)' : 'rgba(246,81,100,0.5)',
       borderDash: [6, 4],
       fill: false,
       tension: 0,
-      pointRadius: [0, 6],
-      pointBackgroundColor: totalUnreal >= 0 ? '#00e676' : '#ff5252',
+      pointRadius: [0, 5],
+      pointHoverRadius: 7,
+      pointBackgroundColor: totalUnreal >= 0 ? 'var(--green)' : 'var(--red)',
       pointBorderColor: cssVar('--bg') || '#0a0a0f',
       pointBorderWidth: 2,
       borderWidth: 2,
     });
   }
 
+  // $10K baseline annotation
+  const baselinePlugin = {
+    id: 'baseline',
+    beforeDraw(chart) {
+      const yScale = chart.scales.y;
+      const yPixel = yScale.getPixelForValue(START);
+      if (yPixel == null) return;
+      const {ctx: c, chartArea: {left, right}} = chart;
+      c.save();
+      c.strokeStyle = 'rgba(136,136,160,0.2)';
+      c.lineWidth = 1;
+      c.setLineDash([4, 4]);
+      c.beginPath();
+      c.moveTo(left, yPixel);
+      c.lineTo(right, yPixel);
+      c.stroke();
+      c.setLineDash([]);
+      // Label
+      c.fillStyle = 'rgba(136,136,160,0.4)';
+      c.font = '10px JetBrains Mono';
+      c.textAlign = 'right';
+      c.fillText('$10K start', right - 4, yPixel - 6);
+      c.restore();
+    }
+  };
+
   equityChart = new Chart(ctx, {
     type: 'line',
-    data: { labels: totalUnreal !== 0 && data.length > 1 ? unrealLabels : labels, datasets },
+    data: { labels: totalUnreal !== 0 && data.length > 1 ? finalLabels : labels, datasets },
+    plugins: [baselinePlugin],
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      interaction: {
-        mode: 'index',
-        intersect: false
-      },
+      interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { display: datasets.length > 1, labels: { color: chartText(), font: { size: 11 } } },
+        legend: { display: false },
         tooltip: {
-          backgroundColor: cssVar('--surface2') || '#1a1a26',
-          borderColor: cssVar('--border') || '#2a2a3a',
+          backgroundColor: 'rgba(17,17,24,0.95)',
+          borderColor: 'rgba(255,255,255,0.06)',
           borderWidth: 1,
-          titleFont: { family: 'JetBrains Mono' },
-          bodyFont: { family: 'JetBrains Mono' },
+          padding: 12,
+          cornerRadius: 8,
+          titleFont: { family: 'JetBrains Mono', size: 11, weight: '500' },
+          bodyFont: { family: 'JetBrains Mono', size: 13, weight: '700' },
+          displayColors: false,
           callbacks: {
-            label: ctx => `$${ctx.parsed.y.toFixed(2)}`
+            title: (items) => items[0]?.label || '',
+            label: (item) => {
+              const v = item.parsed.y;
+              const diff = v - START;
+              return `$${v.toLocaleString('en-US',{minimumFractionDigits:2})}  ${diff >= 0 ? '+' : ''}$${diff.toFixed(2)}`;
+            }
           }
         }
       },
       scales: {
         x: {
-          ticks: { color: chartText(), font: { size: 11, family: 'JetBrains Mono' } },
-          grid: { color: chartGrid() },
+          ticks: {
+            color: chartText(),
+            font: { size: 10, family: 'JetBrains Mono' },
+            maxRotation: 0,
+            maxTicksLimit: 10,
+          },
+          grid: { display: false },
+          border: { display: false },
         },
         y: {
           ticks: {
             color: chartText(),
-            font: { size: 11, family: 'JetBrains Mono' },
-            callback: v => '$' + v
+            font: { size: 10, family: 'JetBrains Mono' },
+            callback: v => '$' + (v >= 1000 ? (v/1000).toFixed(1) + 'K' : v),
+            maxTicksLimit: 6,
           },
-          grid: { color: chartGrid() },
+          grid: { color: 'rgba(255,255,255,0.03)', drawBorder: false },
+          border: { display: false },
         }
       }
     }
