@@ -363,34 +363,6 @@
   </div>
 </div>
 
-<!-- Risk Guards -->
-<div class="section-card" id="riskGuardsCard" style="margin-bottom:24px">
-  <div class="section-header">
-    <div class="section-title">
-      <span class="section-icon" style="background:rgba(108,92,231,0.15)">🛡️</span>
-      <h2>Risk Guards</h2>
-    </div>
-    <span class="section-count" id="guardStatus">loading…</span>
-  </div>
-  <div class="section-body">
-    <div class="stats-row" id="riskGuards" style="margin-bottom:0">
-      <div class="stat-card">
-        <div class="stat-label">Kelly Mode</div>
-        <div class="stat-value" id="kellyMode" style="font-size:16px">—</div>
-        <div class="stat-sub" id="kellySub">—</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Correlation Cap</div>
-        <div class="stat-value" id="corrStatus" style="font-size:14px">—</div>
-        <div class="stat-sub" id="corrSub">max 3 per group</div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- Risk Exposure -->
-<div id="riskExposure" style="margin-bottom:32px"></div>
-
 <!-- Open Positions -->
 <div class="section-card">
   <div class="section-header">
@@ -450,6 +422,34 @@
     <div class="empty"><div class="empty-icon">🧬</div>No resolved trades yet — breakdown appears after positions close</div>
   </div>
 </div>
+
+<!-- Risk Guards -->
+<div class="section-card" id="riskGuardsCard" data-collapsible>
+  <div class="section-header" onclick="toggleSection(this)">
+    <div class="section-title">
+      <span class="section-icon" style="background:rgba(108,92,231,0.15)">🛡️</span>
+      <h2>Risk Guards</h2>
+    </div>
+    <span class="section-count" id="guardStatus">loading…</span>
+  </div>
+  <div class="section-body">
+    <div class="stats-row" id="riskGuards" style="margin-bottom:0">
+      <div class="stat-card">
+        <div class="stat-label">Kelly Mode</div>
+        <div class="stat-value" id="kellyMode" style="font-size:16px">—</div>
+        <div class="stat-sub" id="kellySub">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Correlation Cap</div>
+        <div class="stat-value" id="corrStatus" style="font-size:14px">—</div>
+        <div class="stat-sub" id="corrSub">max 3 per group</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Risk Exposure -->
+<div id="riskExposure" style="margin-bottom:32px"></div>
 
 <!-- Resolve Log -->
 <div class="section-card" data-collapsible>
