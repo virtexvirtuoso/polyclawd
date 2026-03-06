@@ -446,6 +446,123 @@ CITY_ICAO: Dict[str, str] = {
 
 _twc_cache: Dict[str, dict] = {}
 _twc_cache_ts: Dict[str, float] = {}
+_actuals_cache: Dict[str, dict] = {}
+_actuals_cache_ts: Dict[str, float] = {}
+ACTUALS_CACHE_TTL = 3600  # 1h — actuals don't change
+
+
+def _fetch_twc_actuals(city: str, date: str) -> Optional[dict]:
+    """Fetch actual observed high/low from TWC historical observations.
+    
+    Used when the target date has already ended in the city's local timezone.
+    Returns the REAL temperature — no forecast uncertainty, zero std.
+    This is what Weather Underground will use to resolve the market.
+    """
+    city_lower = city.lower().strip()
+    icao = CITY_ICAO.get(city_lower, "")
+    if not icao:
+        return None
+
+    cache_key = f"{icao}:{date}"
+    if cache_key in _actuals_cache and (time.time() - _actuals_cache_ts.get(cache_key, 0)) < ACTUALS_CACHE_TTL:
+        return _actuals_cache[cache_key]
+
+    # Country code lookup for the API URL
+    icao_country = {
+        "K": "US", "C": "CA", "E": "GB", "L": "FR", "S": "AR",
+        "N": "NZ", "Y": "AU", "R": "KR",
+    }
+    prefix = icao[0] if icao else ""
+    # For SBGR (Brazil) use first 2 chars
+    if icao.startswith("SB"):
+        cc = "BR"
+    elif icao.startswith("SA"):
+        cc = "AR"
+    else:
+        cc = icao_country.get(prefix, "US")
+
+    date_compact = date.replace("-", "")  # "20260305"
+    url = (
+        f"https://api.weather.com/v1/location/{icao}:9:{cc}"
+        f"/observations/historical.json"
+        f"?apiKey={TWC_API_KEY}&units=e"
+        f"&startDate={date_compact}&endDate={date_compact}"
+    )
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read())
+        obs = data.get("observations", [])
+        if not obs:
+            return None
+
+        temps = [o.get("temp") for o in obs if o.get("temp") is not None]
+        if not temps:
+            return None
+
+        actual_high = max(temps)
+        actual_low = min(temps)
+
+        result = {
+            "source": "twc_actuals",
+            "high_f": round(float(actual_high), 1),
+            "high_std_f": 0.0,  # Zero uncertainty — this is the real number
+            "low_f": round(float(actual_low), 1),
+            "model": f"TWC_OBS_{icao}",
+            "icao": icao,
+            "is_actual": True,
+            "is_resolution_source": True,
+            "n_observations": len(temps),
+        }
+
+        _actuals_cache[cache_key] = result
+        _actuals_cache_ts[cache_key] = time.time()
+        logger.info("TWC actuals %s/%s: high=%.1f°F low=%.1f°F (%d obs)",
+                     icao, date, actual_high, actual_low, len(temps))
+        return result
+
+    except Exception as e:
+        logger.debug("TWC actuals fetch failed for %s/%s: %s", icao, date, e)
+        return None
+
+
+def _date_has_ended(city: str, date: str) -> bool:
+    """Check if the target date has fully ended in the city's local timezone."""
+    coords = _resolve_city(city)
+    if not coords:
+        return False
+    _, _, tz_name = coords
+
+    try:
+        # Get current time in city's timezone
+        # Using UTC offset calculation (no pytz dependency)
+        import subprocess
+        result = subprocess.run(
+            ["date", "+%Y-%m-%d", f"--date=TZ=\"{tz_name}\" now"],
+            capture_output=True, text=True, timeout=2
+        )
+        if result.returncode == 0:
+            local_today = result.stdout.strip()
+            return date < local_today
+    except Exception:
+        pass
+
+    # Fallback: use known UTC offsets (approximate)
+    tz_offsets = {
+        "Pacific/Auckland": 13, "Australia/Sydney": 11, "Asia/Tokyo": 9,
+        "Asia/Seoul": 9, "Europe/Paris": 1, "Europe/Berlin": 1,
+        "Europe/London": 0, "America/Sao_Paulo": -3,
+        "America/Argentina/Buenos_Aires": -3, "America/New_York": -5,
+        "America/Toronto": -5, "America/Chicago": -6,
+        "America/Denver": -7, "America/Phoenix": -7,
+        "America/Los_Angeles": -8,
+    }
+    offset = tz_offsets.get(tz_name, 0)
+    local_now = datetime.now(timezone.utc) + timedelta(hours=offset)
+    local_today = local_now.strftime("%Y-%m-%d")
+    return date < local_today
+
 
 def _fetch_weather_com(lat: float, lon: float, date: str, city: str = "") -> Optional[dict]:
     """Fetch forecast from Weather.com (TWC) API — the WU resolution source.
@@ -516,6 +633,10 @@ def get_ensemble_forecast(city: str, date: str) -> Optional[dict]:
     """
     Get aggregated forecast from all available sources.
     
+    If the target date has already ended in the city's timezone, returns
+    actual observed temperatures from TWC (the resolution source) instead
+    of forecasts. This gives zero-uncertainty edge calculations.
+    
     Returns:
         {
             "city": "miami",
@@ -545,6 +666,34 @@ def get_ensemble_forecast(city: str, date: str) -> Optional[dict]:
         return None
 
     lat, lon, tz = coords
+
+    # ── Smart routing: actuals for past dates, forecasts for future ──
+    if _date_has_ended(city, date):
+        actuals = _fetch_twc_actuals(city, date)
+        if actuals:
+            result = {
+                "city": city.lower(),
+                "date": date,
+                "is_actual": True,
+                "sources": {"twc_actuals": actuals},
+                "ensemble": {
+                    "high_mean_f": actuals["high_f"],
+                    "high_std_f": 0.5,  # Near-zero but not exactly 0 (rounding/station variance)
+                    "high_min_f": actuals["high_f"],
+                    "high_max_f": actuals["high_f"],
+                    "low_mean_f": actuals["low_f"],
+                    "n_sources": 1,
+                    "n_models": 1,
+                    "source_agreement": 1.0,
+                    "is_actual": True,
+                },
+            }
+            _cache_set(city, date, result)
+            logger.info("Using TWC actuals for %s/%s: high=%.1f°F (date ended in local tz)",
+                        city, date, actuals["high_f"])
+            return result
+        # If actuals fetch failed, fall through to forecast (better than nothing)
+        logger.debug("Actuals unavailable for %s/%s, falling back to forecast", city, date)
 
     # Fetch all sources (synchronous — called from sync weather_scanner)
     sources = {}
