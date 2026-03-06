@@ -882,8 +882,9 @@ def scan_kalshi_weather() -> List[dict]:
 WEATHER_CITIES_SLUG = [
     'nyc', 'miami', 'dallas', 'atlanta', 'seattle', 'chicago',
     'london', 'buenos-aires', 'wellington', 'sao-paulo', 'toronto',
-    'seoul', 'paris', 'sydney', 'tokyo',
-]
+    'seoul', 'paris',
+]  # 13 cities with active Polymarket weather markets (checked 2026-03-06)
+# sydney, tokyo removed — no markets. ICAO codes kept in ensemble for future use.
 
 # Max position size for weather trades (small, uncorrelated bets)
 WEATHER_MAX_BET = 25.0
