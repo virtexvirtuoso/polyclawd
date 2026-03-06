@@ -2305,3 +2305,215 @@ async def strike_scanner():
     except Exception as e:
         logger.exception(f"Strike scanner failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Alert Analytics
+# ============================================================================
+
+ALERTS_LOG = STORAGE_DIR / "alerts.jsonl"
+
+
+def _load_alerts(days: int = 30) -> list:
+    """Load alert records from JSONL, filtered by recency."""
+    if not ALERTS_LOG.exists():
+        return []
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    alerts = []
+    try:
+        with open(ALERTS_LOG) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    ts = rec.get("ts", "")
+                    # Parse ISO timestamp (strip timezone for comparison)
+                    if ts and ts[:10] >= cutoff.strftime("%Y-%m-%d"):
+                        alerts.append(rec)
+                except json.JSONDecodeError:
+                    continue
+    except Exception:
+        pass
+    return alerts
+
+
+def _match_outcomes(alerts: list) -> list:
+    """Cross-reference position alerts with paper_positions outcomes."""
+    import sqlite3
+    db_path = STORAGE_DIR / "shadow_trades.db"
+    if not db_path.exists():
+        return alerts
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+
+        # Get all resolved positions
+        rows = conn.execute("""
+            SELECT market_title, side, strategy, status, pnl, entry_price, exit_price,
+                   close_reason, opened_at, closed_at
+            FROM paper_positions
+            WHERE status IN ('won', 'lost', 'void')
+        """).fetchall()
+        conn.close()
+
+        # Build lookup: (market_title_prefix, side, strategy) -> outcome
+        outcomes = {}
+        for r in rows:
+            key = (r["market_title"][:80] if r["market_title"] else "", r["side"], r["strategy"])
+            outcomes[key] = {
+                "status": r["status"],
+                "pnl": r["pnl"],
+                "exit_price": r["exit_price"],
+                "close_reason": r["close_reason"],
+                "closed_at": r["closed_at"],
+            }
+
+        # Enrich position_opened alerts with outcomes
+        for a in alerts:
+            if a.get("type") == "position_opened":
+                market = a.get("market", "")[:80]
+                key = (market, a.get("side"), a.get("strategy"))
+                if key in outcomes:
+                    a["outcome"] = outcomes[key]
+
+    except Exception:
+        pass
+
+    return alerts
+
+
+@router.get("/alerts/stats")
+async def alert_stats(days: int = Query(30, ge=1, le=365)):
+    """Alert analytics — counts, win rates, conversion rates by alert type."""
+    alerts = _load_alerts(days)
+    if not alerts:
+        return {"status": "ok", "message": "No alerts logged yet", "days": days, "total": 0}
+
+    alerts = _match_outcomes(alerts)
+
+    # ── Counts by type ──
+    by_type = {}
+    for a in alerts:
+        t = a.get("type", "unknown")
+        if t not in by_type:
+            by_type[t] = {"count": 0, "sent": 0, "failed": 0}
+        by_type[t]["count"] += 1
+        if a.get("sent"):
+            by_type[t]["sent"] += 1
+        else:
+            by_type[t]["failed"] += 1
+
+    # ── Time buckets (24h, 7d, 30d) ──
+    now = datetime.utcnow()
+    buckets = {"24h": 0, "7d": 0, "30d": 0}
+    for a in alerts:
+        ts = a.get("ts", "")
+        if not ts:
+            continue
+        try:
+            # Handle both Z and +00:00 suffixes
+            ts_clean = ts.replace("+00:00", "").replace("Z", "")
+            if "." in ts_clean:
+                dt = datetime.fromisoformat(ts_clean)
+            else:
+                dt = datetime.fromisoformat(ts_clean)
+            age = now - dt
+            if age.total_seconds() < 86400:
+                buckets["24h"] += 1
+            if age.days < 7:
+                buckets["7d"] += 1
+            buckets["30d"] += 1
+        except Exception:
+            buckets["30d"] += 1
+
+    # ── Position alert performance ──
+    opened = [a for a in alerts if a.get("type") == "position_opened"]
+    with_outcome = [a for a in opened if "outcome" in a]
+    wins = [a for a in with_outcome if a["outcome"]["status"] == "won"]
+    losses = [a for a in with_outcome if a["outcome"]["status"] == "lost"]
+
+    # By strategy
+    strategy_stats = {}
+    for a in with_outcome:
+        strat = a.get("strategy", "unknown")
+        if strat not in strategy_stats:
+            strategy_stats[strat] = {"opened": 0, "won": 0, "lost": 0, "void": 0,
+                                     "total_pnl": 0.0, "edges_at_entry": []}
+        s = strategy_stats[strat]
+        s["opened"] += 1
+        status = a["outcome"]["status"]
+        s[status] = s.get(status, 0) + 1
+        pnl = a["outcome"].get("pnl") or 0
+        s["total_pnl"] += float(pnl)
+        edge = a.get("edge_pct")
+        if edge is not None:
+            s["edges_at_entry"].append(float(edge))
+
+    # Compute derived metrics
+    for strat, s in strategy_stats.items():
+        resolved = s["won"] + s["lost"]
+        s["win_rate"] = round(s["won"] / resolved, 3) if resolved else None
+        s["avg_pnl"] = round(s["total_pnl"] / resolved, 2) if resolved else None
+        s["avg_edge_at_entry"] = round(sum(s["edges_at_entry"]) / len(s["edges_at_entry"]), 1) if s["edges_at_entry"] else None
+        del s["edges_at_entry"]  # Don't expose raw list
+
+    # ── Signal alert performance (whale, weather, tweet) ──
+    signal_types = {}
+    for alert_type in ["whale_wall", "weather_shift", "tweet_pace", "edge_signal"]:
+        type_alerts = [a for a in alerts if a.get("type") == alert_type]
+        if not type_alerts:
+            continue
+        # Count unique markets alerted
+        markets = set()
+        for a in type_alerts:
+            m = a.get("market", "")[:80]
+            if m:
+                markets.add(m)
+        signal_types[alert_type] = {
+            "total_alerts": len(type_alerts),
+            "unique_markets": len(markets),
+            "avg_per_day": round(len(type_alerts) / max(days, 1), 1),
+        }
+        # For whale walls, add avg imbalance
+        if alert_type == "whale_wall":
+            ratios = [a.get("imbalance_ratio", 0) for a in type_alerts if a.get("imbalance_ratio")]
+            if ratios:
+                signal_types[alert_type]["avg_imbalance"] = round(sum(ratios) / len(ratios), 1)
+                signal_types[alert_type]["max_imbalance"] = round(max(ratios), 1)
+
+    # ── Hourly distribution ──
+    hour_dist = [0] * 24
+    for a in alerts:
+        ts = a.get("ts", "")
+        try:
+            h = int(ts[11:13])
+            hour_dist[h] += 1
+        except Exception:
+            pass
+
+    total_resolved = len(wins) + len(losses)
+
+    return {
+        "status": "ok",
+        "days": days,
+        "total_alerts": len(alerts),
+        "volume": buckets,
+        "by_type": by_type,
+        "positions": {
+            "opened": len(opened),
+            "resolved": total_resolved,
+            "pending": len(opened) - len(with_outcome),
+            "won": len(wins),
+            "lost": len(losses),
+            "win_rate": round(len(wins) / total_resolved, 3) if total_resolved else None,
+            "total_pnl": round(sum(float(a["outcome"].get("pnl", 0)) for a in with_outcome), 2),
+        },
+        "by_strategy": strategy_stats,
+        "signal_alerts": signal_types,
+        "hourly_distribution": hour_dist,
+        "delivery_rate": round(sum(1 for a in alerts if a.get("sent")) / len(alerts), 3) if alerts else 1.0,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    }
