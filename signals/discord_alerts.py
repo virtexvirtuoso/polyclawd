@@ -31,6 +31,7 @@ BOT_NAME = "VPredict"
 AVATAR_URL = "https://virtuosocrypto.com/polyclawd/icons/icon-192.png"
 DASHBOARD_URL = "https://virtuosocrypto.com/polyclawd/portfolio.html"
 DB_PATH = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
+ALERTS_LOG = Path(__file__).parent.parent / "storage" / "alerts.jsonl"
 
 # Colors — matched to dashboard palette
 COLOR_GREEN = 0x00D68F   # win / position opened
@@ -42,36 +43,58 @@ COLOR_ORANGE = 0xF0A050  # warning / shift
 COLOR_GRAY = 0x6B6B85    # void / neutral
 
 
-def _send(embeds: list, content: str = "") -> bool:
-    """Send a Discord webhook message with embeds."""
+def _log_alert(alert_type: str, metadata: dict, sent: bool) -> None:
+    """Append alert record to JSONL log."""
+    try:
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": alert_type,
+            "sent": sent,
+            **metadata,
+        }
+        with open(ALERTS_LOG, "a") as f:
+            f.write(json.dumps(record, default=str) + "\n")
+    except Exception as e:
+        logger.debug("Alert log write failed: %s", e)
+
+
+def _send(embeds: list, content: str = "", alert_type: str = "",
+          alert_meta: Optional[dict] = None) -> bool:
+    """Send a Discord webhook message with embeds and log it."""
+    sent = False
     if not WEBHOOK_URL:
         logger.debug("Discord webhook URL not set, skipping alert")
-        return False
-    payload = {
-        "username": BOT_NAME,
-        "avatar_url": AVATAR_URL,
-        "embeds": embeds,
-    }
-    if content:
-        payload["content"] = content
+    else:
+        payload = {
+            "username": BOT_NAME,
+            "avatar_url": AVATAR_URL,
+            "embeds": embeds,
+        }
+        if content:
+            payload["content"] = content
 
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        WEBHOOK_URL,
-        data=data,
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": "Polyclawd/1.0 (Discord Webhook)",
-        },
-        method="POST",
-    )
-    try:
-        resp = urllib.request.urlopen(req, timeout=10)
-        logger.debug("Discord alert sent: %d", resp.status)
-        return True
-    except Exception as e:
-        logger.warning("Discord alert failed: %s", e)
-        return False
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            WEBHOOK_URL,
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "Polyclawd/1.0 (Discord Webhook)",
+            },
+            method="POST",
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=10)
+            logger.debug("Discord alert sent: %d", resp.status)
+            sent = True
+        except Exception as e:
+            logger.warning("Discord alert failed: %s", e)
+
+    # Always log (even if send failed or webhook not set)
+    if alert_type:
+        _log_alert(alert_type, alert_meta or {}, sent)
+
+    return sent
 
 
 def _portfolio_context() -> dict:
@@ -173,7 +196,11 @@ def alert_position_opened(market_title: str, side: str, entry_price: float,
         "fields": fields,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "footer": {"text": f"💰 ${ctx['bankroll']:,.0f} · {ctx['open']} open · {risk_pct:.0f}% at risk · {ctx['record']}"},
-    }])
+    }], alert_type="position_opened", alert_meta={
+        "market": market_title[:200], "side": side, "entry_price": entry_price,
+        "bet_size": bet_size, "strategy": strategy, "edge_pct": edge_pct,
+        "confidence": confidence, "bankroll": ctx["bankroll"],
+    })
 
 
 def alert_position_closed(market_title: str, side: str, outcome: str,
@@ -228,7 +255,11 @@ def alert_position_closed(market_title: str, side: str, outcome: str,
         "fields": fields,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "footer": {"text": f"💰 ${ctx['bankroll']:,.0f} · {ctx['open']} open · {ctx['record']}"},
-    }])
+    }], alert_type="position_closed", alert_meta={
+        "market": market_title[:200], "side": side, "outcome": outcome,
+        "pnl": pnl, "entry_price": entry_price, "exit_price": exit_price,
+        "strategy": strategy, "close_reason": close_reason, "bankroll": ctx["bankroll"],
+    })
 
 
 # ── Edge Signals ─────────────────────────────────────────────────────────
@@ -253,7 +284,10 @@ def alert_edge_signal(market_title: str, side: str, edge_pct: float,
         "fields": fields,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "footer": {"text": "Signal Scanner"},
-    }])
+    }], alert_type="edge_signal", alert_meta={
+        "market": market_title[:200], "side": side, "edge_pct": edge_pct,
+        "price": price, "strategy": strategy, "platform": platform,
+    })
 
 
 def alert_edge_batch(signals: list) -> bool:
@@ -283,7 +317,10 @@ def alert_edge_batch(signals: list) -> bool:
         "fields": fields,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "footer": {"text": f"Signal Scanner · 💰 ${ctx['bankroll']:,.0f} · {ctx['open']} open"},
-    }])
+    }], alert_type="edge_batch", alert_meta={
+        "count": len(signals),
+        "signals": [{"market": s.get("market", "?")[:100], "side": s.get("side"), "edge": s.get("edge")} for s in signals[:5]],
+    })
 
 
 # ── Scorecard & Milestones ───────────────────────────────────────────────
@@ -309,7 +346,9 @@ def alert_scorecard(strategy: str, n: int, brier: float, win_rate: float,
         "fields": fields,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "footer": {"text": "Learning System"},
-    }])
+    }], alert_type="scorecard", alert_meta={
+        "strategy": strategy, "n": n, "brier": brier, "win_rate": win_rate, "avg_edge": avg_edge,
+    })
 
 
 def alert_scorecard_milestone(strategy: str, n: int, wins: int,
@@ -334,7 +373,9 @@ def alert_scorecard_milestone(strategy: str, n: int, wins: int,
         "fields": fields,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "footer": {"text": "Learning System"},
-    }])
+    }], alert_type="scorecard_milestone", alert_meta={
+        "strategy": strategy, "n": n, "wins": wins, "win_rate": win_rate, "brier": brier,
+    })
 
 
 # ── Daily & Weekly Summaries ─────────────────────────────────────────────
@@ -376,7 +417,10 @@ def alert_daily_summary(bankroll: float, open_positions: int,
         "fields": fields,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "footer": {"text": "Paper Portfolio · Daily"},
-    }])
+    }], alert_type="daily_summary", alert_meta={
+        "bankroll": bankroll, "open_positions": open_positions,
+        "today_resolved": today_resolved, "today_wins": today_wins, "today_pnl": today_pnl,
+    })
 
 
 def alert_weekly_recap(bankroll: float, start_bankroll: float,
@@ -438,7 +482,10 @@ def alert_weekly_recap(bankroll: float, start_bankroll: float,
         "fields": fields,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "footer": {"text": "Paper Portfolio · Weekly"},
-    }])
+    }], alert_type="weekly_recap", alert_meta={
+        "bankroll": bankroll, "week_pnl": week_pnl, "week_resolved": week_resolved,
+        "week_wins": week_wins, "open_positions": open_positions,
+    })
 
 
 # ── Weather Alerts ───────────────────────────────────────────────────────
@@ -480,7 +527,11 @@ def alert_weather_shift(market_title: str, city: str, side: str,
         "fields": fields,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "footer": {"text": "Weather Ensemble"},
-    }])
+    }], alert_type="weather_shift", alert_meta={
+        "market": market_title[:200], "city": city, "side": side,
+        "old_forecast": old_forecast, "new_forecast": new_forecast,
+        "threshold": threshold, "shift_f": shift_f,
+    })
 
 
 # ── Tweet Pace Alerts ────────────────────────────────────────────────────
@@ -528,7 +579,11 @@ def alert_tweet_pace(handle: str, market_title: str, side: str,
         "fields": fields,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "footer": {"text": "Tweet Count Scanner"},
-    }])
+    }], alert_type="tweet_pace", alert_meta={
+        "market": market_title[:200], "handle": handle, "side": side,
+        "posts_so_far": posts_so_far, "projected_total": projected_total,
+        "bracket": f"{bracket_low}-{bracket_high}", "sigma_deviation": sigma_deviation,
+    })
 
 
 # ── Whale Wall Alerts ────────────────────────────────────────────────────
@@ -566,7 +621,10 @@ def alert_whale_wall(market_title: str, side: str, imbalance_ratio: float,
         "fields": fields,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "footer": {"text": "Whale Wall Scanner"},
-    }])
+    }], alert_type="whale_wall", alert_meta={
+        "market": market_title[:200], "side": side, "imbalance_ratio": imbalance_ratio,
+        "bid_depth": bid_depth, "ask_depth": ask_depth, "volume_24h": volume_24h, "slug": slug,
+    })
 
 
 # ── System Health ────────────────────────────────────────────────────────
@@ -588,7 +646,9 @@ def alert_api_down(consecutive_failures: int, last_error: str = "",
         "fields": fields,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "footer": {"text": "Scheduler Monitor"},
-    }])
+    }], alert_type="api_down", alert_meta={
+        "consecutive_failures": consecutive_failures, "last_error": last_error[:200],
+    })
 
 
 def alert_api_recovered(**kwargs) -> bool:
@@ -599,7 +659,7 @@ def alert_api_recovered(**kwargs) -> bool:
         "color": COLOR_GREEN,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "footer": {"text": "Scheduler Monitor"},
-    }])
+    }], alert_type="api_recovered", alert_meta={})
 
 
 # ── Test ─────────────────────────────────────────────────────────────────
