@@ -841,7 +841,23 @@ def _get_positions_from_json(status: str = "all") -> dict:
     return {"positions": positions, "count": len(positions)}
 
 
+# --- Portfolio status cache (15s TTL) ---
+_status_cache = {"data": None, "ts": 0}
+_STATUS_CACHE_TTL = 15  # seconds
+
+
 def get_portfolio_status() -> dict:
+    import time as _time
+    now = _time.time()
+    if _status_cache["data"] is not None and (now - _status_cache["ts"]) < _STATUS_CACHE_TTL:
+        return _status_cache["data"]
+    result = _get_portfolio_status_uncached()
+    _status_cache["data"] = result
+    _status_cache["ts"] = _time.time()
+    return result
+
+
+def _get_portfolio_status_uncached() -> dict:
     conn = _get_db()
     total_rows = conn.execute("SELECT COUNT(*) as c FROM paper_positions").fetchone()["c"]
     state = conn.execute("SELECT * FROM paper_portfolio_state ORDER BY id DESC LIMIT 1").fetchone()
@@ -963,17 +979,36 @@ def process_signals(signals: list) -> dict:
     }
 
 
+# --- Live positions cache (30s TTL) ---
+_live_cache = {"data": None, "ts": 0}
+_LIVE_CACHE_TTL = 30  # seconds
+
+
 def get_live_positions() -> dict:
     """Get open positions enriched with current market prices and unrealized P&L.
 
-    Fetches live prices from Polymarket CLOB / Kalshi APIs.
+    Uses 30s server-side cache + parallel price fetches for speed.
     """
+    import time as _time
+    now = _time.time()
+    if _live_cache["data"] is not None and (now - _live_cache["ts"]) < _LIVE_CACHE_TTL:
+        return _live_cache["data"]
+
+    result = _fetch_live_positions()
+    _live_cache["data"] = result
+    _live_cache["ts"] = _time.time()
+    return result
+
+
+def _fetch_live_positions() -> dict:
+    """Actual live position fetch with parallel price lookups."""
     import urllib.request
+    from concurrent.futures import ThreadPoolExecutor
 
     CLOB_API = "https://clob.polymarket.com"
     KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 
-    def _fetch(url, timeout=8):
+    def _fetch(url, timeout=6):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -985,41 +1020,51 @@ def get_live_positions() -> dict:
     rows = conn.execute("SELECT * FROM paper_positions WHERE status='open' ORDER BY opened_at DESC").fetchall()
     conn.close()
 
-    positions = []
-    total_unrealized = 0.0
+    if not rows:
+        return {"positions": [], "count": 0, "total_unrealized_pnl": 0.0}
 
-    for pos in rows:
-        p = dict(pos)
-        market_id = p["market_id"]
-        platform = p.get("platform") or "kalshi"
-        side = p["side"]
-        entry_price = p["entry_price"]
-        bet_size = p["bet_size"]
-        current_price = None
-
-        # Fetch current YES price
+    # Parallel price fetch for all positions
+    def _fetch_price(pos_dict):
+        market_id = pos_dict["market_id"]
+        platform = pos_dict.get("platform") or "kalshi"
         if platform == "polymarket" or market_id.startswith("0x"):
             data = _fetch(f"{CLOB_API}/markets/{market_id}")
             if data:
                 tokens = data.get("tokens", [])
                 if tokens:
-                    # First token is YES side
-                    current_price = float(tokens[0].get("price", 0))
-                    p["market_slug"] = data.get("market_slug", "")
+                    return float(tokens[0].get("price", 0)), data.get("market_slug", "")
+            return None, ""
         else:
             data = _fetch(f"{KALSHI_API}/markets/{market_id}")
             if data:
                 market = data.get("market", data)
-                current_price = market.get("last_price")
-                if current_price and current_price > 1:
-                    current_price = current_price / 100
+                cp = market.get("last_price")
+                if cp and cp > 1:
+                    cp = cp / 100
+                return cp, ""
+            return None, ""
+
+    pos_dicts = [dict(r) for r in rows]
+
+    # Fetch all prices in parallel (max 8 workers)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        price_results = list(pool.map(_fetch_price, pos_dicts))
+
+    positions = []
+    total_unrealized = 0.0
+
+    for p, (current_price, slug) in zip(pos_dicts, price_results):
+        side = p["side"]
+        entry_price = p["entry_price"]
+        bet_size = p["bet_size"]
+
+        if slug:
+            p["market_slug"] = slug
 
         if current_price is not None:
             if side == "YES":
-                # Bought YES at entry_price, now worth current_price
                 unrealized = bet_size * (current_price / entry_price - 1)
             else:
-                # Bought NO at (1-entry_price), now worth (1-current_price)
                 no_entry = 1 - entry_price
                 no_current = 1 - current_price
                 unrealized = bet_size * (no_current / no_entry - 1) if no_entry > 0 else 0
@@ -1036,7 +1081,7 @@ def get_live_positions() -> dict:
                 opened = datetime.fromisoformat(p["opened_at"].replace("Z", "+00:00"))
                 hold_days = (datetime.now(timezone.utc) - opened).days
                 p["hold_days"] = hold_days
-                p["stale"] = False  # Staleness based on price data freshness, not hold time
+                p["stale"] = False
             except Exception:
                 p["hold_days"] = 0
                 p["stale"] = False
