@@ -1045,7 +1045,7 @@ def reeval_weather_positions() -> dict:
     conn.row_factory = sqlite3.Row
     
     positions = conn.execute(
-        "SELECT id, market_title, market_id, side, entry_price, bet_size, opened_at, archetype "
+        "SELECT id, market_title, market_id, side, entry_price, bet_size, opened_at, archetype, edge_pct "
         "FROM paper_positions WHERE status='open' AND archetype='weather'"
     ).fetchall()
     
@@ -1145,7 +1145,10 @@ def reeval_weather_positions() -> dict:
         close_status = "lost"  # default
         
         # Calculate how much the market has moved in our favor
-        original_edge = pos.get("edge_pct") or 0  # edge at entry (stored as 0-100 decimal)
+        try:
+            original_edge = pos["edge_pct"] or 0  # edge at entry
+        except (KeyError, IndexError):
+            original_edge = 0
         if isinstance(original_edge, (int, float)) and original_edge > 1:
             original_edge = original_edge / 100  # normalize to 0-1
         
