@@ -61,6 +61,9 @@ CITIES: Dict[str, Tuple[float, float, str]] = {
     "san diego": (32.72, -117.16, "America/Los_Angeles"),
     "austin": (30.27, -97.74, "America/Chicago"),
     "berlin": (52.52, 13.41, "Europe/Berlin"),
+    "ankara": (39.93, 32.86, "Europe/Istanbul"),
+    "lucknow": (26.85, 80.95, "Asia/Kolkata"),
+    "munich": (48.14, 11.58, "Europe/Berlin"),
 }
 
 # ── Ensemble models to request from Open-Meteo ──────────────────────────
@@ -446,6 +449,9 @@ CITY_ICAO: Dict[str, str] = {
     "berlin": "EDDB",
     "philadelphia": "KPHL",
     "san diego": "KSAN",
+    "ankara": "LTAC",
+    "lucknow": "VILK",
+    "munich": "EDDM",
 }
 
 _twc_cache: Dict[str, dict] = {}
@@ -476,6 +482,7 @@ def _fetch_twc_actuals(city: str, date: str) -> Optional[dict]:
     icao_cc_2 = {
         "SB": "BR", "SA": "AR", "EG": "GB", "ED": "DE", "LF": "FR",
         "NZ": "NZ", "YS": "AU", "RK": "KR", "RJ": "JP", "CY": "CA",
+        "LT": "TR", "VI": "IN",
     }
     icao_cc_1 = {"K": "US", "C": "CA", "N": "NZ", "Y": "AU", "R": "KR"}
     prefix2 = icao[:2] if len(icao) >= 2 else ""
@@ -558,6 +565,7 @@ def _date_has_ended(city: str, date: str) -> bool:
         "America/Toronto": -5, "America/Chicago": -6,
         "America/Denver": -7, "America/Phoenix": -7,
         "America/Los_Angeles": -8,
+        "Europe/Istanbul": 3, "Asia/Kolkata": 5,
     }
     offset = tz_offsets.get(tz_name, 0)
     local_now = datetime.now(timezone.utc) + timedelta(hours=offset)
