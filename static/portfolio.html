@@ -6,6 +6,7 @@
 <title>Virtuoso Prediction</title>
 <script src="auth.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://unpkg.com/lucide@latest"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
   /* Dark mode (default) */
@@ -93,11 +94,17 @@
   .section-title{display:flex;align-items:center;gap:12px;position:relative}
   .section-title::before{content:'';position:absolute;left:0;top:12px;bottom:12px;width:3px;border-radius:2px;background:var(--accent)}
   .section-title h2{font-size:14px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;color:var(--text2);padding-left:18px}
-  .section-icon{display:none;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;font-size:14px}
-  .section-icon.positions{background:rgba(0,230,118,0.15)}
-  .section-icon.signals{background:rgba(108,92,231,0.15)}
-  .section-icon.history{background:rgba(24,255,255,0.15)}
-  .section-icon.equity{background:rgba(255,215,0,0.15)}
+  .section-icon{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px}
+  .section-icon svg{width:16px;height:16px;stroke-width:2}
+  .section-icon.positions{background:rgba(0,214,143,0.12);color:var(--green)}
+  .section-icon.signals{background:rgba(108,92,231,0.12);color:var(--accent2)}
+  .section-icon.history{background:rgba(78,205,196,0.12);color:var(--cyan)}
+  .section-icon.equity{background:rgba(255,215,0,0.12);color:var(--gold)}
+  .section-icon.guards{background:rgba(108,92,231,0.12);color:var(--accent2)}
+  .section-icon.resolve{background:rgba(240,160,80,0.12);color:var(--orange)}
+  .empty-icon{margin-bottom:12px;opacity:0.5}
+  .empty-icon svg{width:32px;height:32px;stroke-width:1.5}
+  .lucide-inline{width:14px;height:14px;display:inline-block;vertical-align:-2px;stroke-width:2}
   .section-count{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text2);padding:4px 12px;background:var(--surface);border:1px solid var(--border);border-radius:20px}
   .section-body{padding:24px 28px}
 
@@ -334,7 +341,7 @@
 <div class="noise"></div>
 <div class="container">
 
-<nav style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px 0;gap:8px"><div style="display:flex;gap:8px;flex-wrap:wrap"><a href="analysis.html" class="nav-link">← Analysis</a><a href="how-it-works.html" class="nav-link">How It Works</a></div><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode" aria-label="Toggle theme">🌙</button></nav>
+<nav style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px 0;gap:8px"><div style="display:flex;gap:8px;flex-wrap:wrap"><a href="analysis.html" class="nav-link"><i data-lucide="arrow-left" style="width:14px;height:14px;vertical-align:-2px"></i> Analysis</a><a href="how-it-works.html" class="nav-link">How It Works</a></div><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode" aria-label="Toggle theme" id="themeBtn"><i data-lucide="moon" style="width:16px;height:16px"></i></button></nav>
 <header>
   <div class="logo">Virtuoso</div>
   <h1>Prediction</h1>
@@ -343,7 +350,7 @@
 </header>
 
 <div class="controls">
-  <button class="btn btn-secondary" onclick="loadAll()">↻ Refresh</button>
+  <button class="btn btn-secondary" onclick="loadAll()"><i data-lucide="refresh-cw" style="width:14px;height:14px"></i> Refresh</button>
   <span class="status-msg" id="statusMsg"></span>
 </div>
 
@@ -407,14 +414,14 @@
 <div class="section-card">
   <div class="section-header">
     <div class="section-title">
-      <span class="section-icon positions">📈</span>
+      <span class="section-icon positions"><i data-lucide="briefcase"></i></span>
       <h2>Open Positions</h2>
     </div>
     <span class="section-count" id="openCount">0 open</span>
   </div>
   <div class="section-body">
     <div class="positions-grid" id="openPositions">
-      <div class="empty"><div class="empty-icon">📭</div>No open positions — process signals to start trading</div>
+      <div class="empty"><div class="empty-icon"><i data-lucide="inbox"></i></div>No open positions — process signals to start trading</div>
     </div>
   </div>
 </div>
@@ -423,13 +430,13 @@
 <div class="section-card" data-collapsible>
   <div class="section-header" onclick="toggleSection(this)">
     <div class="section-title">
-      <span class="section-icon history">🔄</span>
+      <span class="section-icon resolve"><i data-lucide="rotate-ccw"></i></span>
       <h2>Resolve Log</h2>
     </div>
     <span class="section-count" id="resolveCount">—</span>
   </div>
   <div class="section-body" id="resolveLog">
-    <div class="empty"><div class="empty-icon">🔄</div>No resolutions yet</div>
+    <div class="empty"><div class="empty-icon"><i data-lucide="clock"></i></div>No resolutions yet</div>
   </div>
 </div>
 
@@ -437,7 +444,7 @@
 <div class="section-card" data-collapsible>
   <div class="section-header" onclick="toggleSection(this)">
     <div class="section-title">
-      <span class="section-icon equity">📉</span>
+      <span class="section-icon equity"><i data-lucide="trending-up"></i></span>
       <h2>Equity Curve</h2>
     </div>
   </div>
@@ -452,13 +459,13 @@
 <div class="section-card" data-collapsible data-collapse-mobile>
   <div class="section-header" onclick="toggleSection(this)">
     <div class="section-title">
-      <span class="section-icon history">📋</span>
+      <span class="section-icon history"><i data-lucide="scroll-text"></i></span>
       <h2>Trade History</h2>
     </div>
     <span class="section-count" id="historyCount">0 trades</span>
   </div>
   <div class="section-body" id="tradeHistory">
-    <div class="empty"><div class="empty-icon">⏳</div>No closed trades yet — waiting for market resolutions</div>
+    <div class="empty"><div class="empty-icon"><i data-lucide="hourglass"></i></div>No closed trades yet — waiting for market resolutions</div>
   </div>
 </div>
 
@@ -466,13 +473,13 @@
 <div class="section-card" data-collapsible data-collapse-mobile>
   <div class="section-header" onclick="toggleSection(this)">
     <div class="section-title">
-      <span class="section-icon signals">🧬</span>
+      <span class="section-icon signals"><i data-lucide="dna"></i></span>
       <h2>Archetype Breakdown</h2>
     </div>
     <span class="section-count" id="archCount">—</span>
   </div>
   <div class="section-body" id="archetypeBreakdown">
-    <div class="empty"><div class="empty-icon">🧬</div>No resolved trades yet — breakdown appears after positions close</div>
+    <div class="empty"><div class="empty-icon"><i data-lucide="dna"></i></div>No resolved trades yet — breakdown appears after positions close</div>
   </div>
 </div>
 
@@ -480,7 +487,7 @@
 <div class="section-card" id="riskGuardsCard" data-collapsible data-collapse-mobile>
   <div class="section-header" onclick="toggleSection(this)">
     <div class="section-title">
-      <span class="section-icon" style="background:rgba(108,92,231,0.15)">🛡️</span>
+      <span class="section-icon guards"><i data-lucide="shield-check"></i></span>
       <h2>Risk Guards</h2>
     </div>
     <span class="section-count" id="guardStatus">loading…</span>
@@ -514,8 +521,8 @@
 
 <!-- Bottom sticky bar (mobile) -->
 <div class="mobile-bar">
-  <button class="btn btn-primary" onclick="loadAll()">↻ Refresh</button>
-  <button class="btn btn-secondary" onclick="window.scrollTo({top:0,behavior:'smooth'})">↑ Top</button>
+  <button class="btn btn-primary" onclick="loadAll()"><i data-lucide="refresh-cw" style="width:14px;height:14px"></i> Refresh</button>
+  <button class="btn btn-secondary" onclick="window.scrollTo({top:0,behavior:'smooth'})"><i data-lucide="arrow-up" style="width:14px;height:14px"></i> Top</button>
 </div>
 
 <script>
@@ -525,6 +532,12 @@ let cachedUnrealizedPnl = 0;
 let autoRefreshInterval = null;
 let countdownInterval = null;
 let secondsUntilRefresh = 60;
+
+// Lucide icon helper for JS-rendered content
+function icon(name, size=16, cls='') {
+  return `<i data-lucide="${name}" ${cls ? `class="${cls}"` : ''} style="width:${size}px;height:${size}px"></i>`;
+}
+function reinitIcons() { if (window.lucide) lucide.createIcons(); }
 
 // Theme-aware helpers for Chart.js (can't read CSS vars directly)
 function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
@@ -536,7 +549,7 @@ function getTheme() { return localStorage.getItem('polyclawd-theme') || 'auto'; 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);
   const btn = document.querySelector('.theme-toggle');
-  if (btn) btn.textContent = t === 'light' ? '☀️' : t === 'dark' ? '🌙' : '🌓';
+  if (btn) { btn.innerHTML = `<i data-lucide="${t === 'light' ? 'sun' : t === 'dark' ? 'moon' : 'sun-moon'}" style="width:16px;height:16px"></i>`; reinitIcons(); }
   // Re-render charts with new colors
   if (equityChart) {
     equityChart.options.scales.x.ticks.color = chartText();
@@ -663,11 +676,12 @@ async function loadAll() {
     renderHistory(histRes, liveRes);
     if (archRes) renderArchetypeBreakdown(archRes, archPnlRes);
     renderResolveLog(resolveLogRes);
+    reinitIcons();
     document.querySelector('.stats-primary.skeleton')?.classList.remove('skeleton');
     document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
   } catch(e) {
     console.error('Load failed:', e);
-    document.getElementById('statusMsg').textContent = '⚠️ API unreachable';
+    document.getElementById('statusMsg').innerHTML = icon('alert-triangle', 14) + ' API unreachable'; reinitIcons();
   }
 }
 
@@ -727,19 +741,19 @@ function renderRiskGuards(g) {
   const kellyEl = document.getElementById('kellyMode');
   const kellySub = document.getElementById('kellySub');
   if (k.status === 'paused') {
-    kellyEl.textContent = '🛑 PAUSED';
+    kellyEl.innerHTML = icon('octagon', 14) + ' PAUSED';
     kellyEl.className = 'stat-value red';
     kellySub.textContent = `DD ${(k.drawdown_pct * 100).toFixed(1)}% — trading halted`;
   } else if (k.status === 'cold') {
-    kellyEl.textContent = '❄️ COLD';
+    kellyEl.innerHTML = icon('snowflake', 14) + ' COLD';
     kellyEl.className = 'stat-value orange';
     kellySub.textContent = `WR ${(k.rolling_wr * 100).toFixed(0)}% / ${k.rolling_trades} trades — half size`;
   } else if (k.status === 'bootstrap') {
-    kellyEl.textContent = '🚀 BOOTSTRAP';
+    kellyEl.innerHTML = icon('rocket', 14) + ' BOOTSTRAP';
     kellyEl.className = 'stat-value cyan';
     kellySub.textContent = `${k.rolling_trades}/20 trades — seeded 57% WR, 1/8 Kelly`;
   } else {
-    kellyEl.textContent = '✅ NORMAL';
+    kellyEl.innerHTML = icon('check-circle', 14) + ' NORMAL';
     kellyEl.className = 'stat-value green';
     kellySub.textContent = `WR ${(k.rolling_wr * 100).toFixed(0)}% / ${k.rolling_trades} trades — 1/6 Kelly`;
   }
@@ -759,7 +773,7 @@ function renderRiskGuards(g) {
       return `<span style="color:${color};margin-right:8px">${name} ${v.count}/3</span>`;
     }).join('');
     const fullGroups = groups.filter(([_, v]) => v.full);
-    corrSub.textContent = fullGroups.length > 0 ? `⚠️ ${fullGroups.map(g => g[0]).join(', ')} full` : 'all groups open';
+    corrSub.innerHTML = fullGroups.length > 0 ? icon('alert-triangle', 12) + ` ${fullGroups.map(g => g[0]).join(', ')} full` : 'all groups open'; reinitIcons();
   }
 
   // Overall status
@@ -767,7 +781,7 @@ function renderRiskGuards(g) {
   if (k.status === 'paused') alerts.push('PAUSED');
   if (k.status === 'cold') alerts.push('COLD');
   if (groups.some(([_, v]) => v.full)) alerts.push('CAP HIT');
-  statusEl.textContent = alerts.length > 0 ? '⚠️ ' + alerts.join(' · ') : '✅ all clear';
+  statusEl.innerHTML = alerts.length > 0 ? icon('alert-triangle', 12) + ' ' + alerts.join(' · ') : icon('check-circle', 12) + ' all clear'; reinitIcons();
 }
 
 function renderRiskExposure(s) {
@@ -810,7 +824,7 @@ function renderUnrealizedPnl(liveRes) {
 function renderPositions(positions) {
   const el = document.getElementById('openPositions');
   if (!positions.length) {
-    el.innerHTML = '<div class="empty"><div class="empty-icon">📭</div>No open positions — process signals to start trading</div>';
+    el.innerHTML = '<div class="empty"><div class="empty-icon">' + icon('inbox', 32) + '</div>No open positions — process signals to start trading</div>'; reinitIcons();
     return;
   }
   
@@ -888,7 +902,7 @@ function renderHistory(history, liveRes) {
   const items = Array.isArray(history) ? history : (history.positions || []);
   document.getElementById('historyCount').textContent = `${items.length} trade${items.length !== 1 ? 's' : ''}`;
   if (!items.length) {
-    el.innerHTML = '<div class="empty"><div class="empty-icon">⏳</div>No closed trades yet — waiting for market resolutions</div>';
+    el.innerHTML = '<div class="empty"><div class="empty-icon">' + icon('hourglass', 32) + '</div>No closed trades yet — waiting for market resolutions</div>'; reinitIcons();
     updateEquityChart([], liveRes);
     return;
   }
@@ -905,7 +919,7 @@ function renderHistory(history, liveRes) {
         <td data-label="Entry" class="mono">${((t.side === 'NO' ? 1 - (t.entry_price||0) : (t.entry_price||0))*100).toFixed(0)}¢</td>
         <td data-label="Bet" class="mono">$${(t.bet_size||0).toFixed(2)}</td>
         <td data-label="P&L" class="mono ${pnl >= 0 ? 'result-won' : 'result-lost'}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
-        <td data-label="Result">${t.status === 'won' ? '✅ Won' : '❌ Lost'}</td>
+        <td data-label="Result">${t.status === 'won' ? '<i data-lucide="circle-check" style="width:14px;height:14px;color:var(--green);vertical-align:-2px"></i> Won' : '<i data-lucide="circle-x" style="width:14px;height:14px;color:var(--red);vertical-align:-2px"></i> Lost'}</td>
       </tr>`;
     }).join('')}</tbody>
   </table></div>`;
@@ -1087,7 +1101,7 @@ function renderArchetypeBreakdown(archRes, archPnlRes) {
   const items = archRes.breakdown || [];
   document.getElementById('archCount').textContent = `${items.length} archetype${items.length !== 1 ? 's' : ''}`;
   if (!items.length) {
-    el.innerHTML = '<div class="empty"><div class="empty-icon">🧬</div>No resolved trades yet — breakdown appears after positions close</div>';
+    el.innerHTML = '<div class="empty"><div class="empty-icon">' + icon('dna', 32) + '</div>No resolved trades yet — breakdown appears after positions close</div>'; reinitIcons();
     return;
   }
   const pnlSeries = (archPnlRes && archPnlRes.series) || {};
@@ -1160,14 +1174,14 @@ function renderResolveLog(resolveLogRes) {
   const items = Array.isArray(resolveLogRes) ? resolveLogRes : [];
   document.getElementById('resolveCount').textContent = `${items.length} recent`;
   if (!items.length) {
-    el.innerHTML = '<div class="empty"><div class="empty-icon">🔄</div>No resolutions yet</div>';
+    el.innerHTML = '<div class="empty"><div class="empty-icon">' + icon('clock', 32) + '</div>No resolutions yet</div>'; reinitIcons();
     return;
   }
   el.innerHTML = items.map(r => {
     const pnl = r.pnl || 0;
     const ts = r.closed_at ? new Date(r.closed_at) : null;
     const timeStr = ts ? `${ts.getMonth()+1}/${ts.getDate()} ${ts.getHours()}:${String(ts.getMinutes()).padStart(2,'0')}` : '—';
-    const outcome = r.status === 'won' ? '✅' : '❌';
+    const outcome = r.status === 'won' ? icon('circle-check', 14) : icon('circle-x', 14);
     const reason = r.close_reason || 'auto-resolved';
     return `<div class="resolve-row">
       <span class="resolve-time">${timeStr}</span>
@@ -1195,11 +1209,11 @@ async function processSignals() {
     const killed = signals.filter(s => (s.reason || '').startsWith('Kill rule')).length;
     const lowEdge = signals.filter(s => (s.reason || '').includes('Edge')).length;
     const lowConf = signals.filter(s => (s.reason || '').includes('Confidence')).length;
-    msg.textContent = `✅ ${processed} scanned · ${opened} opened · ${killed} killed · ${skipped - killed} filtered`;
+    msg.innerHTML = icon('check-circle', 14) + ` ${processed} scanned · ${opened} opened · ${killed} killed · ${skipped - killed} filtered`; reinitIcons();
     renderSignals(signals);
     setTimeout(loadAll, 500);
   } catch(e) {
-    msg.textContent = '❌ Error: ' + e.message;
+    msg.innerHTML = icon('circle-x', 14) + ' Error: ' + e.message; reinitIcons();
   }
   btn.disabled = false;
 }
@@ -1208,7 +1222,7 @@ function renderSignals(signals) {
   const el = document.getElementById('recentSignals');
   document.getElementById('signalCount').textContent = `${signals.length} evaluated`;
   if (!signals.length) {
-    el.innerHTML = '<div class="empty"><div class="empty-icon">📡</div>No signals in latest scan</div>';
+    el.innerHTML = '<div class="empty"><div class="empty-icon">' + icon('radio', 32) + '</div>No signals in latest scan</div>'; reinitIcons();
     return;
   }
   el.innerHTML = signals.map(s => {
@@ -1224,13 +1238,14 @@ function renderSignals(signals) {
       <div class="signal-market">${(s.market || s.title || '').substring(0, 60)}</div>
       <span class="signal-edge ${isGood ? 'good' : 'low'}">${edgePct}% edge</span>
       <span class="signal-action ${isOpened ? 'opened' : 'skipped'}" ${isKilled ? 'style="color:var(--orange)"' : ''}>
-        ${isOpened ? `✅ $${(s.bet_size || 0).toFixed(0)}` : `⊘ ${reason.substring(0, 40)}`}
+        ${isOpened ? icon('check-circle', 12) + ` $${(s.bet_size || 0).toFixed(0)}` : icon('ban', 12) + ` ${reason.substring(0, 40)}`}
       </span>
     </div>`;
   }).join('');
 }
 
 // Init
+lucide.createIcons();
 loadAll();
 startAutoRefresh();
 </script>
