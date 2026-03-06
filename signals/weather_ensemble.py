@@ -442,6 +442,10 @@ CITY_ICAO: Dict[str, str] = {
     "boston": "KBOS",
     "san francisco": "KSFO",
     "washington": "KIAD", "dc": "KIAD",
+    "austin": "KAUS",
+    "berlin": "EDDB",
+    "philadelphia": "KPHL",
+    "san diego": "KSAN",
 }
 
 _twc_cache: Dict[str, dict] = {}
@@ -468,18 +472,15 @@ def _fetch_twc_actuals(city: str, date: str) -> Optional[dict]:
         return _actuals_cache[cache_key]
 
     # Country code lookup for the API URL
-    icao_country = {
-        "K": "US", "C": "CA", "E": "GB", "L": "FR", "S": "AR",
-        "N": "NZ", "Y": "AU", "R": "KR",
+    # 2-char prefix → country (checked first), then 1-char fallback
+    icao_cc_2 = {
+        "SB": "BR", "SA": "AR", "EG": "GB", "ED": "DE", "LF": "FR",
+        "NZ": "NZ", "YS": "AU", "RK": "KR", "RJ": "JP", "CY": "CA",
     }
-    prefix = icao[0] if icao else ""
-    # For SBGR (Brazil) use first 2 chars
-    if icao.startswith("SB"):
-        cc = "BR"
-    elif icao.startswith("SA"):
-        cc = "AR"
-    else:
-        cc = icao_country.get(prefix, "US")
+    icao_cc_1 = {"K": "US", "C": "CA", "N": "NZ", "Y": "AU", "R": "KR"}
+    prefix2 = icao[:2] if len(icao) >= 2 else ""
+    prefix1 = icao[0] if icao else ""
+    cc = icao_cc_2.get(prefix2) or icao_cc_1.get(prefix1, "US")
 
     date_compact = date.replace("-", "")  # "20260305"
     url = (
