@@ -655,7 +655,10 @@ def open_position(signal: dict) -> dict:
     try:
         from signals.discord_alerts import alert_position_opened
         mkt_url = f"https://polymarket.com/event/{slug}" if slug else ""
-        alert_position_opened(market_title, side, market_price, bet_size, strategy, eval_result.get("edge", 0) * 100, market_url=mkt_url)
+        alert_position_opened(market_title, side, market_price, bet_size, strategy,
+                              eval_result.get("edge", 0) * 100, market_url=mkt_url,
+                              confidence=confidence, archetype=archetype,
+                              potential_payout=round(potential_payout, 2))
     except Exception as e:
         logger.debug("Discord alert failed: %s", e)
 
@@ -716,8 +719,13 @@ def close_position(market_id: str, outcome: str, exit_price: float = None) -> di
     # Discord alert
     try:
         from signals.discord_alerts import alert_position_closed
+        try:
+            _slug = pos["market_slug"] or ""
+        except (KeyError, IndexError):
+            _slug = ""
         alert_position_closed(pos["market_title"] or market_id, side, outcome,
-                               round(pnl, 2), entry_price, exit_price or 0, strategy)
+                               round(pnl, 2), entry_price, exit_price or 0, strategy,
+                               close_reason=close_reason or "", slug=_slug)
     except Exception as e:
         logger.debug("Discord alert failed: %s", e)
 
