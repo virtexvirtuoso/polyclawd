@@ -890,12 +890,54 @@ WEATHER_MAX_BET = 25.0
 WEATHER_MIN_BET = 5.0
 
 
+def _discover_weather_cities() -> List[str]:
+    """Discover active weather cities from Gamma API using tag_id=103040 (Daily Temperature).
+    
+    Falls back to WEATHER_CITIES_SLUG if API fails.
+    This catches new cities Polymarket adds without code changes.
+    """
+    import re
+    try:
+        url = f"{GAMMA_API}/events?limit=100&closed=false&tag_id=103040"
+        data = _fetch_json(url)
+        if not data or not isinstance(data, list):
+            return list(WEATHER_CITIES_SLUG)
+
+        cities = set()
+        for event in data:
+            title = event.get("title", "")
+            m = re.search(r"temperature in (.+?)( on |$|\?)", title, re.IGNORECASE)
+            if m:
+                city = m.group(1).strip()
+                # Convert to slug format
+                slug = city.lower().replace(" ", "-")
+                cities.add(slug)
+
+        if cities:
+            # Log if we found new cities not in our list
+            known = set(WEATHER_CITIES_SLUG)
+            new_cities = cities - known
+            if new_cities:
+                logger.warning("New Polymarket weather cities discovered: %s", new_cities)
+            missing = known - cities
+            if missing:
+                logger.info("Cities in config but not active on Polymarket: %s", missing)
+            return sorted(cities)
+    except Exception as e:
+        logger.debug("Weather city discovery failed: %s", e)
+
+    return list(WEATHER_CITIES_SLUG)
+
+
 def scan_polymarket_weather() -> List[dict]:
     """Scan Polymarket for weather temperature markets via slug-based discovery."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     signals = []
     now = datetime.now(timezone.utc)
+
+    # Discover active cities (auto-detects new Polymarket additions)
+    active_cities = _discover_weather_cities()
 
     # Pre-load all forecasts in one batch (uses cache, avoids per-market API calls)
     preload_forecasts(days=3)
@@ -907,7 +949,7 @@ def scan_polymarket_weather() -> List[dict]:
 
         # Check if any city has a warm cache already (watchdog runs every 5min)
         cache_warm = False
-        for city_slug in WEATHER_CITIES_SLUG[:3]:  # spot check first 3
+        for city_slug in active_cities[:3]:  # spot check first 3
             city_name = city_slug.replace('-', ' ')
             cache_key = f"{city_name}"
             if cache_key in _cache and (_time.time() - _cache_ts.get(cache_key, 0)) < 900:
@@ -922,8 +964,8 @@ def scan_polymarket_weather() -> List[dict]:
                 get_ensemble_forecast(city_name, tomorrow)
 
             with ThreadPoolExecutor(max_workers=5) as pool:
-                list(pool.map(_warm_city, WEATHER_CITIES_SLUG))
-            logger.info("Ensemble cache pre-warmed for %d cities (parallel)", len(WEATHER_CITIES_SLUG))
+                list(pool.map(_warm_city, active_cities))
+            logger.info("Ensemble cache pre-warmed for %d cities (parallel)", len(active_cities))
         else:
             logger.info("Ensemble cache already warm — skipping pre-warm")
     except Exception as e:
@@ -939,7 +981,7 @@ def scan_polymarket_weather() -> List[dict]:
 
     # Build all slug lookups, then fetch in parallel
     slug_jobs = []
-    for city in WEATHER_CITIES_SLUG:
+    for city in active_cities:
         for dt in dates_to_check:
             month = month_names[dt.month]
             day = dt.day
@@ -1011,7 +1053,7 @@ def scan_polymarket_weather() -> List[dict]:
                 signals.append(r)
 
     logger.info("Weather scan: %d signals from %d cities × %d dates (parallel)",
-                len(signals), len(WEATHER_CITIES_SLUG), len(dates_to_check))
+                len(signals), len(active_cities), len(dates_to_check))
     return signals
 
 
