@@ -100,7 +100,7 @@ def _restart_service():
     except Exception:
         pass
 
-    subprocess.run(["systemctl", "restart", SERVICE_NAME], timeout=30)
+    subprocess.run(["sudo", "systemctl", "restart", SERVICE_NAME], timeout=30)
     logger.info("Service restarted")
 
 
@@ -237,7 +237,7 @@ def task_tweet_pace_alerts():
 
     import re
     from signals.tweet_count_scanner import (
-        fetch_all_posts, _extract_bracket, ACCOUNTS, scan_tweet_markets,
+        fetch_post_history, _extract_bracket, ACCOUNTS, scan_tweet_markets,
     )
     from signals.discord_alerts import alert_tweet_pace
 
