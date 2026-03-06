@@ -540,11 +540,8 @@ def evaluate_signal(signal: dict) -> dict:
         bet_size *= boost
         logger.info("🎯 Archetype boost: %s x%.1f bet_size=%.2f", archetype, boost, bet_size)
 
-    # Weather-specific sizing: $5-$50 (thin liquidity, uncorrelated small bets)
-    if archetype == "weather":
-        bet_size = max(5.0, min(50.0, bet_size))
-    else:
-        bet_size = max(MIN_BET, min(MAX_BET, bet_size))
+    # All archetypes use standard sizing (paper mode — liquidity irrelevant)
+    bet_size = max(MIN_BET, min(MAX_BET, bet_size))
     
     if bet_size > bankroll:
         return {"eligible": False, "reason": f"Insufficient bankroll ${bankroll:.2f}", "edge": edge, "kelly_pct": kelly_pct, "bet_size": 0}
