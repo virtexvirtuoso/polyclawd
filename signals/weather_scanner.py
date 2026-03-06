@@ -919,6 +919,17 @@ def _discover_weather_cities() -> List[str]:
             new_cities = cities - known
             if new_cities:
                 logger.warning("New Polymarket weather cities discovered: %s", new_cities)
+                try:
+                    from signals.discord_alerts import _send, COLOR_CYAN
+                    _send([{
+                        "title": "🌍 New Weather Cities Detected",
+                        "description": f"Polymarket added: **{', '.join(sorted(new_cities))}**\n\nAuto-scanning started. Add ICAO codes to `weather_ensemble.py` for TWC forecast/actuals support.",
+                        "color": COLOR_CYAN,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "footer": {"text": "Weather City Discovery"},
+                    }], alert_type="new_weather_city", alert_meta={"cities": sorted(new_cities)})
+                except Exception:
+                    pass
             missing = known - cities
             if missing:
                 logger.info("Cities in config but not active on Polymarket: %s", missing)
