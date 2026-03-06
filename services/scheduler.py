@@ -372,7 +372,54 @@ def task_signal_scan():
     except Exception as e:
         logger.error("Tweet scan failed: %s", e)
 
-    logger.info("Signal scan complete (category + weather + tweets)")
+    # Whale wall signals
+    try:
+        from signals.whale_wall_scanner import get_whale_portfolio_signals
+        signals = get_whale_portfolio_signals(min_imbalance=3.0, max_signals=3)
+        if signals:
+            process_signals(signals)
+    except Exception as e:
+        logger.error("Whale wall scan failed: %s", e)
+
+    logger.info("Signal scan complete (category + tweets + whale walls)")
+
+
+def task_whale_wall_alerts():
+    """Alert on new whale wall detections (dedup by market_id, 4h cooldown)."""
+    from signals.whale_wall_scanner import scan_whale_walls
+    from signals.discord_alerts import alert_whale_wall
+
+    COOLDOWN = 14400  # 4 hours
+    now = time.time()
+
+    if "whale_alert_sent" not in _state:
+        _state["whale_alert_sent"] = {}
+
+    scan = scan_whale_walls()
+    for m in scan.get("alerts", []):
+        key = m.get("market_id", "")
+        if not key:
+            continue
+        last_sent = _state["whale_alert_sent"].get(key, 0)
+        if now - last_sent < COOLDOWN:
+            continue
+
+        alert_whale_wall(
+            market_title=m.get("question", "")[:80],
+            side=m.get("signal_side", "YES"),
+            imbalance_ratio=m.get("imbalance_ratio", 0),
+            bid_depth=m.get("bid_depth_usd", 0),
+            ask_depth=m.get("ask_depth_usd", 0),
+            bid_walls=m.get("bid_walls", 0),
+            ask_walls=m.get("ask_walls", 0),
+            max_wall_usd=max(m.get("max_bid_wall_usd", 0), m.get("max_ask_wall_usd", 0)),
+            spread_cents=m.get("spread_cents", 0),
+            volume_24h=m.get("volume_24h", 0),
+            slug=m.get("slug", ""),
+        )
+        _state["whale_alert_sent"][key] = now
+        logger.info("Whale wall alert: %s %.1f:1 %s",
+                    m.get("question", "")[:40], m.get("imbalance_ratio", 0), m.get("signal_side", ""))
 
 
 def task_source_health_touch():
@@ -617,6 +664,7 @@ async def tick_30min():
     """Every 30 minutes: signal scans, edge alerts, source health."""
     while True:
         await run_in_thread(_run_safe, "signal_scan", task_signal_scan)
+        await run_in_thread(_run_safe, "whale_wall_alerts", task_whale_wall_alerts)
         await run_in_thread(_run_safe, "source_health_touch", task_source_health_touch)
         await run_in_thread(_run_safe, "edge_alerts", task_edge_alerts)
         logger.info("30-min tick complete")

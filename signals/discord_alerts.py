@@ -392,6 +392,38 @@ def alert_scorecard_milestone(strategy: str, n: int, wins: int,
     }])
 
 
+def alert_whale_wall(market_title: str, side: str, imbalance_ratio: float,
+                     bid_depth: float, ask_depth: float,
+                     bid_walls: int = 0, ask_walls: int = 0,
+                     max_wall_usd: float = 0, spread_cents: float = 0,
+                     volume_24h: float = 0, slug: str = "",
+                     **kwargs) -> bool:
+    """Alert on significant orderbook imbalance detection."""
+    direction = "BID" if side == "YES" else "ASK"
+    emoji = "🐋" if imbalance_ratio >= 5.0 else "🔔"
+    url = f"https://polymarket.com/event/{slug}" if slug else ""
+
+    fields = [
+        {"name": "Direction", "value": f"**{imbalance_ratio:.1f}:1 {direction}** → {side}", "inline": True},
+        {"name": "24h Volume", "value": f"${volume_24h:,.0f}", "inline": True},
+        {"name": "Spread", "value": f"{spread_cents:.1f}¢", "inline": True},
+        {"name": "Bid Depth", "value": f"${bid_depth:,.0f} ({bid_walls} walls)", "inline": True},
+        {"name": "Ask Depth", "value": f"${ask_depth:,.0f} ({ask_walls} walls)", "inline": True},
+    ]
+    if max_wall_usd >= 10000:
+        fields.append({"name": "Largest Wall", "value": f"${max_wall_usd:,.0f}", "inline": True})
+
+    color = COLOR_GREEN if side == "YES" else COLOR_RED
+    return _send([{
+        "title": f"{emoji} Whale Wall — {market_title[:70]}",
+        "description": f"Significant orderbook imbalance detected" + (f"\n[View Market]({url})" if url else ""),
+        "color": color,
+        "fields": fields,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "Whale Wall Scanner"},
+    }])
+
+
 if __name__ == "__main__":
     # Test all alert types
     print("Testing alerts...")

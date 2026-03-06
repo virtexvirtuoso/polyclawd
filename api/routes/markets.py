@@ -1777,6 +1777,21 @@ async def get_polymarket_microstructure(slug: str):
 
 
 # ============================================================================
+# Whale Wall Scanner
+# ============================================================================
+
+@router.get("/polymarket/whale-wall-scan")
+async def whale_wall_scan(top_n: int = Query(default=15, ge=5, le=30)):
+    """Scan top Polymarket markets for orderbook imbalances (≥3:1 bid/ask ratio)."""
+    try:
+        from signals.whale_wall_scanner import scan_whale_walls
+        return scan_whale_walls(top_n=top_n)
+    except Exception as e:
+        logger.exception("Whale wall scan error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # NEW: Manifold Markets
 # ============================================================================
 
