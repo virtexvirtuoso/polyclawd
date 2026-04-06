@@ -6,8 +6,14 @@ Sources:
   2. Pirate Weather (GEFS/ECMWF/HRRR, free key)
   3. Tomorrow.io (proprietary AI, free key)
   4. WeatherAPI.com (station blend, free key)
-  5. Weather.com / TWC (resolution source, 2x weight) — HIGHEST PRIORITY
+  5. Weather.com / TWC (resolution source, 1.5x weight) — HIGHEST PRIORITY
      This is the exact backend Polymarket resolves against via Weather Underground.
+  6. Bright Sky / DWD MOSMIX (statistical MOS of ICON+ECMWF, no key)
+  7. Met Office DataHub (UKMO Unified Model, free key)
+  8. AccuWeather (SWIFT engine + 100 human meteorologists, trial key)
+  9. Visual Crossing (ECMWF+GFS+GDPS blend + station obs, free key)
+ 10. OpenWeatherMap (multi-model blend, One Call 3.0, free key)
+ 11. Meteosource (ML-blended 6+ NWP models, free key)
 
 Produces probability distributions for temperature markets instead of
 hardcoded fair-value buckets.
@@ -17,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 import urllib.request
 from datetime import datetime, timezone, timedelta
@@ -28,6 +35,11 @@ logger = logging.getLogger(__name__)
 PIRATE_API_KEY = os.environ.get("PIRATE_WEATHER_KEY", "")
 TOMORROW_API_KEY = os.environ.get("TOMORROW_IO_KEY", "")
 WEATHERAPI_KEY = os.environ.get("WEATHERAPI_KEY", "")
+METOFFICE_API_KEY = os.environ.get("METOFFICE_API_KEY", "")
+ACCUWEATHER_API_KEY = os.environ.get("ACCUWEATHER_API_KEY", "")
+VISUALCROSSING_API_KEY = os.environ.get("VISUALCROSSING_API_KEY", "")
+OPENWEATHERMAP_API_KEY = os.environ.get("OPENWEATHERMAP_API_KEY", "")
+METEOSOURCE_API_KEY = os.environ.get("METEOSOURCE_API_KEY", "")
 
 # ── City coordinates ─────────────────────────────────────────────────────
 CITIES: Dict[str, Tuple[float, float, str]] = {
@@ -74,18 +86,62 @@ ENSEMBLE_MODELS = [
     "ecmwf_ifs04",         # ECMWF European
     "gem_global",          # Canada
     "bom_access_global",   # Australia BOM
+    "jma_seamless",        # Japan Meteorological Agency
+    "kma_seamless",        # Korea Meteorological Administration
+    "cma_grapes_global",   # China Meteorological Administration
 ]
 
 # ── Cache ────────────────────────────────────────────────────────────────
 _cache: Dict[str, dict] = {}
 _cache_ts: Dict[str, float] = {}
 CACHE_TTL = 900  # 15 min — faster refresh catches forecast updates sooner (edge decays quickly)
+MAX_CACHE_SIZE = 500  # per cache dict — evict oldest when exceeded
+
+# All cache pairs for centralized eviction
+_ALL_CACHES: List[Tuple] = []  # populated after declarations below
+
+_last_eviction_ts = 0.0
+_EVICTION_INTERVAL = 300  # sweep every 5 min
+
+
+def _evict_expired():
+    """Sweep all caches and remove expired entries. Called periodically."""
+    global _last_eviction_ts
+    now = time.time()
+    if now - _last_eviction_ts < _EVICTION_INTERVAL:
+        return
+    _last_eviction_ts = now
+    total_evicted = 0
+    for data_dict, ts_dict, ttl in _ALL_CACHES:
+        expired = [k for k, ts in ts_dict.items() if now - ts > ttl]
+        for k in expired:
+            data_dict.pop(k, None)
+            ts_dict.pop(k, None)
+        total_evicted += len(expired)
+        # Hard cap: if still too large, evict oldest
+        if len(data_dict) > MAX_CACHE_SIZE:
+            sorted_keys = sorted(ts_dict, key=ts_dict.get)
+            to_remove = sorted_keys[:len(data_dict) - MAX_CACHE_SIZE]
+            for k in to_remove:
+                data_dict.pop(k, None)
+                ts_dict.pop(k, None)
+            total_evicted += len(to_remove)
+    if total_evicted > 0:
+        logger.info("Cache eviction: removed %d expired entries", total_evicted)
+
 
 # Rate limit tracking per source
+# Note: Pirate & WeatherAPI return multi-day forecasts per call, so each call
+# covers all 7 days for one city. With 44 cities we need ~44 calls/scan.
 _rate_limits = {
-    "pirate_weather": {"calls": 0, "reset_ts": 0, "max_per_hour": 15, "max_per_month": 10000},
+    "pirate_weather": {"calls": 0, "reset_ts": 0, "max_per_hour": 50, "max_per_month": 10000},
     "tomorrow_io": {"calls": 0, "reset_ts": 0, "max_per_hour": 20, "max_per_day": 450},
     "weatherapi": {"calls": 0, "reset_ts": 0, "max_per_hour": 50, "max_per_month": 95000},
+    "metoffice": {"calls": 0, "reset_ts": 0, "max_per_hour": 15, "max_per_day": 360},
+    "accuweather": {"calls": 0, "reset_ts": 0, "max_per_hour": 10, "max_per_day": 50},
+    "visualcrossing": {"calls": 0, "reset_ts": 0, "max_per_hour": 50, "max_per_day": 1000},
+    "openweathermap": {"calls": 0, "reset_ts": 0, "max_per_hour": 40, "max_per_day": 1000},
+    "meteosource": {"calls": 0, "reset_ts": 0, "max_per_hour": 10, "max_per_day": 400},
 }
 
 def _rate_check(source: str) -> bool:
@@ -111,6 +167,7 @@ def _cache_key(city: str, date: str) -> str:
 
 
 def _cache_get(city: str, date: str) -> Optional[dict]:
+    _evict_expired()
     key = _cache_key(city, date)
     if key in _cache and (time.time() - _cache_ts.get(key, 0)) < CACHE_TTL:
         return _cache[key]
@@ -144,18 +201,21 @@ def _c_to_f(c: float) -> float:
 
 # ── Source 1: Open-Meteo Ensemble (PRIMARY — no key needed) ─────────────
 
-# Circuit breaker: skip Open-Meteo if rate limited (resets after 1h)
-_open_meteo_blocked = False
-_open_meteo_blocked_ts = 0.0
+# Circuit breaker: time-based backoff on Open-Meteo failures
+_open_meteo_lock = threading.Lock()
+_open_meteo_blocked_until = 0.0  # Unix timestamp — skip all requests until this time
+_open_meteo_consecutive_fails = 0
+_OPEN_METEO_BACKOFF = [60, 300, 900, 1800]  # 1min, 5min, 15min, 30min max
 
 def _fetch_open_meteo_ensemble(lat: float, lon: float, date: str) -> Optional[dict]:
     """
     Fetch ensemble forecasts from multiple independent models.
     Returns dict with high temps from each ensemble member.
     """
-    global _open_meteo_blocked, _open_meteo_blocked_ts
-    if _open_meteo_blocked and (time.time() - _open_meteo_blocked_ts) < 3600:
-        return None
+    global _open_meteo_blocked_until, _open_meteo_consecutive_fails
+    now = time.time()
+    if now < _open_meteo_blocked_until:
+        return None  # Still in backoff window — skip silently
     models_param = ",".join(ENSEMBLE_MODELS)
     url = (
         f"https://ensemble-api.open-meteo.com/v1/ensemble"
@@ -167,11 +227,20 @@ def _fetch_open_meteo_ensemble(lat: float, lon: float, date: str) -> Optional[di
     )
     data = _fetch_json(url, timeout=15)
     if not data:
-
-        _open_meteo_blocked = True
-        _open_meteo_blocked_ts = time.time()
-        logger.info("Open-Meteo circuit breaker tripped (likely 429)")
+        with _open_meteo_lock:
+            _open_meteo_consecutive_fails += 1
+            backoff_idx = min(_open_meteo_consecutive_fails - 1, len(_OPEN_METEO_BACKOFF) - 1)
+            backoff_secs = _OPEN_METEO_BACKOFF[backoff_idx]
+            _open_meteo_blocked_until = time.time() + backoff_secs
+            logger.info("Open-Meteo blocked for %ds (fail #%d)", backoff_secs, _open_meteo_consecutive_fails)
         return None
+
+    # Success — reset circuit breaker
+    with _open_meteo_lock:
+        if _open_meteo_consecutive_fails > 0:
+            logger.info("Open-Meteo recovered after %d failures", _open_meteo_consecutive_fails)
+            _open_meteo_consecutive_fails = 0
+            _open_meteo_blocked_until = 0.0
 
     highs_c = []
     lows_c = []
@@ -460,6 +529,16 @@ _actuals_cache: Dict[str, dict] = {}
 _actuals_cache_ts: Dict[str, float] = {}
 ACTUALS_CACHE_TTL = 3600  # 1h — actuals don't change
 
+# Register all cache pairs for centralized eviction
+_ALL_CACHES.extend([
+    (_cache, _cache_ts, CACHE_TTL),
+    (_pirate_cache, _pirate_cache_ts, CACHE_TTL),
+    (_tomorrow_cache, _tomorrow_cache_ts, CACHE_TTL),
+    (_weatherapi_cache, _weatherapi_cache_ts, CACHE_TTL),
+    (_twc_cache, _twc_cache_ts, CACHE_TTL),
+    (_actuals_cache, _actuals_cache_ts, ACTUALS_CACHE_TTL),
+])
+
 
 def _fetch_twc_actuals(city: str, date: str) -> Optional[dict]:
     """Fetch actual observed high/low from TWC historical observations.
@@ -625,6 +704,348 @@ def _fetch_weather_com(lat: float, lon: float, date: str, city: str = "") -> Opt
     return city_days.get(date)
 
 
+# ── Source 6: Bright Sky (DWD MOSMIX — free, no key) ─────────────────────
+# Statistical MOS correction of ICON+ECMWF, optimized for station accuracy.
+# Returns hourly data — we aggregate to daily max/min.
+
+_brightsky_cache: Dict[str, dict] = {}
+_brightsky_cache_ts: Dict[str, float] = {}
+
+def _fetch_bright_sky(lat: float, lon: float, date: str) -> Optional[dict]:
+    loc_key = f"{lat},{lon}"
+    if loc_key in _brightsky_cache and (time.time() - _brightsky_cache_ts.get(loc_key, 0)) < CACHE_TTL:
+        return _brightsky_cache[loc_key].get(date)
+
+    # Fetch 7 days of hourly data in one call
+    end_date = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=7)).strftime("%Y-%m-%d")
+    url = (
+        f"https://api.brightsky.dev/weather"
+        f"?lat={lat}&lon={lon}&date={date}&last_date={end_date}&units=dwd"
+    )
+    data = _fetch_json(url, timeout=12)
+    if not data or "weather" not in data:
+        return None
+
+    # Aggregate hourly temps into daily max/min
+    from collections import defaultdict
+    daily_temps: Dict[str, list] = defaultdict(list)
+    for record in data["weather"]:
+        ts = record.get("timestamp", "")
+        temp = record.get("temperature")
+        if ts and temp is not None:
+            day_str = ts[:10]
+            daily_temps[day_str].append(temp)
+
+    city_days = {}
+    for day_str, temps in daily_temps.items():
+        if temps:
+            high_c = max(temps)
+            low_c = min(temps)
+            city_days[day_str] = {
+                "source": "bright_sky",
+                "high_f": round(_c_to_f(high_c), 1),
+                "high_std_f": None,
+                "low_f": round(_c_to_f(low_c), 1),
+                "model": "DWD_MOSMIX",
+            }
+
+    _brightsky_cache[loc_key] = city_days
+    _brightsky_cache_ts[loc_key] = time.time()
+    logger.debug("Bright Sky: %d days fetched for %.2f,%.2f", len(city_days), lat, lon)
+    return city_days.get(date)
+
+
+# ── Source 7: Met Office DataHub (UKMO Unified Model — free key) ─────────
+# Completely independent global NWP model — the "big four" model missing
+# from the rest of our stack.
+
+_metoffice_cache: Dict[str, dict] = {}
+_metoffice_cache_ts: Dict[str, float] = {}
+
+def _fetch_met_office(lat: float, lon: float, date: str) -> Optional[dict]:
+    if not METOFFICE_API_KEY:
+        return None
+
+    loc_key = f"{lat},{lon}"
+    if loc_key in _metoffice_cache and (time.time() - _metoffice_cache_ts.get(loc_key, 0)) < CACHE_TTL:
+        return _metoffice_cache[loc_key].get(date)
+
+    if not _rate_check("metoffice"):
+        logger.debug("Met Office rate limited, skipping")
+        return None
+
+    url = (
+        f"https://data.hub.api.metoffice.gov.uk/sitespecific/v0/point/daily"
+        f"?latitude={lat}&longitude={lon}&excludeParameterMetadata=true"
+    )
+    data = _fetch_json(url, timeout=12, headers={"apikey": METOFFICE_API_KEY})
+    if not data:
+        return None
+    _rate_track("metoffice")
+
+    city_days = {}
+    try:
+        features = data.get("features", [])
+        if not features:
+            return None
+        time_series = features[0].get("properties", {}).get("timeSeries", [])
+        for entry in time_series:
+            ts = entry.get("time", "")
+            day_str = ts[:10] if ts else ""
+            high_c = entry.get("dayMaxScreenTemperature")
+            low_c = entry.get("nightMinScreenTemperature")
+            if day_str and high_c is not None:
+                city_days[day_str] = {
+                    "source": "met_office",
+                    "high_f": round(_c_to_f(high_c), 1),
+                    "high_std_f": None,
+                    "low_f": round(_c_to_f(low_c), 1) if low_c is not None else None,
+                    "model": "UKMO_Unified",
+                }
+    except Exception as e:
+        logger.debug("Met Office parse error: %s", e)
+        return None
+
+    _metoffice_cache[loc_key] = city_days
+    _metoffice_cache_ts[loc_key] = time.time()
+    logger.debug("Met Office: %d days fetched for %.2f,%.2f", len(city_days), lat, lon)
+    return city_days.get(date)
+
+
+# ── Source 8: AccuWeather (SWIFT engine + human meteorologists) ──────────
+# Only source with a 100+ meteorologist layer reviewing output.
+# Very tight free tier (50 calls/day) — cache location keys permanently.
+
+_accu_cache: Dict[str, dict] = {}
+_accu_cache_ts: Dict[str, float] = {}
+_accu_location_keys: Dict[str, str] = {}  # "lat,lon" → location key (permanent cache)
+
+def _fetch_accuweather(lat: float, lon: float, date: str) -> Optional[dict]:
+    if not ACCUWEATHER_API_KEY:
+        return None
+
+    loc_key = f"{lat},{lon}"
+    if loc_key in _accu_cache and (time.time() - _accu_cache_ts.get(loc_key, 0)) < CACHE_TTL:
+        return _accu_cache[loc_key].get(date)
+
+    if not _rate_check("accuweather"):
+        logger.debug("AccuWeather rate limited, skipping")
+        return None
+
+    # Step 1: Get location key (cached permanently in memory)
+    if loc_key not in _accu_location_keys:
+        geo_url = (
+            f"https://dataservice.accuweather.com/locations/v1/cities/geoposition/search"
+            f"?apikey={ACCUWEATHER_API_KEY}&q={lat},{lon}"
+        )
+        geo_data = _fetch_json(geo_url, timeout=10)
+        if not geo_data or "Key" not in geo_data:
+            return None
+        _rate_track("accuweather")
+        _accu_location_keys[loc_key] = geo_data["Key"]
+
+    location_key = _accu_location_keys[loc_key]
+
+    # Step 2: Get 5-day forecast (returns Fahrenheit by default)
+    forecast_url = (
+        f"https://dataservice.accuweather.com/forecasts/v1/daily/5day/{location_key}"
+        f"?apikey={ACCUWEATHER_API_KEY}"
+    )
+    data = _fetch_json(forecast_url, timeout=10)
+    if not data:
+        return None
+    _rate_track("accuweather")
+
+    city_days = {}
+    for day in data.get("DailyForecasts", []):
+        day_date = day.get("Date", "")[:10]
+        temp = day.get("Temperature", {})
+        high_f = temp.get("Maximum", {}).get("Value")
+        low_f = temp.get("Minimum", {}).get("Value")
+        if day_date and high_f is not None:
+            city_days[day_date] = {
+                "source": "accuweather",
+                "high_f": round(float(high_f), 1),
+                "high_std_f": None,
+                "low_f": round(float(low_f), 1) if low_f is not None else None,
+                "model": "AccuWeather_SWIFT",
+            }
+
+    _accu_cache[loc_key] = city_days
+    _accu_cache_ts[loc_key] = time.time()
+    logger.debug("AccuWeather: %d days fetched for %.2f,%.2f", len(city_days), lat, lon)
+    return city_days.get(date)
+
+
+# ── Source 9: Visual Crossing (ECMWF+GFS+GDPS blend — free key) ──────────
+# Blends multiple NWP models with station observations and proprietary
+# interpolation. 1,000 calls/day free, 15-day forecast, global coverage.
+
+_vc_cache: Dict[str, dict] = {}
+_vc_cache_ts: Dict[str, float] = {}
+
+def _fetch_visual_crossing(lat: float, lon: float, date: str) -> Optional[dict]:
+    if not VISUALCROSSING_API_KEY:
+        return None
+
+    loc_key = f"{lat},{lon}"
+    if loc_key in _vc_cache and (time.time() - _vc_cache_ts.get(loc_key, 0)) < CACHE_TTL:
+        return _vc_cache[loc_key].get(date)
+
+    if not _rate_check("visualcrossing"):
+        logger.debug("Visual Crossing rate limited, skipping")
+        return None
+
+    # Returns 15 days by default in Fahrenheit
+    url = (
+        f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline"
+        f"/{lat},{lon}?unitGroup=us&include=days"
+        f"&elements=datetime,tempmax,tempmin&contentType=json"
+        f"&key={VISUALCROSSING_API_KEY}"
+    )
+    data = _fetch_json(url, timeout=12)
+    if not data or "days" not in data:
+        return None
+    _rate_track("visualcrossing")
+
+    city_days = {}
+    for day in data["days"]:
+        day_str = day.get("datetime", "")
+        high_f = day.get("tempmax")
+        low_f = day.get("tempmin")
+        if day_str and high_f is not None:
+            city_days[day_str] = {
+                "source": "visual_crossing",
+                "high_f": round(float(high_f), 1),
+                "high_std_f": None,
+                "low_f": round(float(low_f), 1) if low_f is not None else None,
+                "model": "VC_ECMWF_GFS_Blend",
+            }
+
+    _vc_cache[loc_key] = city_days
+    _vc_cache_ts[loc_key] = time.time()
+    logger.debug("Visual Crossing: %d days fetched for %.2f,%.2f", len(city_days), lat, lon)
+    return city_days.get(date)
+
+
+# ── Source 10: OpenWeatherMap (2.5 Forecast — free key, 1000/day) ─────────
+_owm_cache: Dict[str, dict] = {}
+_owm_cache_ts: Dict[str, float] = {}
+
+
+def _fetch_openweathermap(lat: float, lon: float, date: str) -> Optional[dict]:
+    """Fetch forecast from OpenWeatherMap 2.5 API (3-hour intervals, 5 days)."""
+    if not OPENWEATHERMAP_API_KEY:
+        return None
+    if not _rate_check("openweathermap"):
+        return None
+
+    loc_key = f"{lat:.2f},{lon:.2f}"
+    if loc_key in _owm_cache and (time.time() - _owm_cache_ts.get(loc_key, 0)) < CACHE_TTL:
+        return _owm_cache[loc_key].get(date)
+
+    try:
+        url = (
+            f"https://api.openweathermap.org/data/2.5/forecast"
+            f"?lat={lat}&lon={lon}&units=imperial"
+            f"&appid={OPENWEATHERMAP_API_KEY}"
+        )
+        data = _fetch_json(url, timeout=10)
+        if not data or "list" not in data:
+            return None
+
+        # 2.5 returns 3-hour intervals — aggregate to daily max/min
+        daily_temps: Dict[str, List[float]] = {}
+        for entry in data["list"]:
+            dt = entry.get("dt_txt", "")[:10]  # "2026-04-07 12:00:00" → "2026-04-07"
+            if not dt:
+                continue
+            temp = entry.get("main", {}).get("temp")
+            if temp is not None:
+                daily_temps.setdefault(dt, []).append(temp)
+
+        city_days: Dict[str, dict] = {}
+        for dt, temps in daily_temps.items():
+            if len(temps) >= 4:  # Need at least 4 of 8 intervals for reliable daily
+                city_days[dt] = {
+                    "high_f": round(max(temps), 1),
+                    "low_f": round(min(temps), 1),
+                    "model": "OWM_MultiModel",
+                    "n_members": 1,
+                }
+
+        _owm_cache[loc_key] = city_days
+        _owm_cache_ts[loc_key] = time.time()
+        logger.debug("OpenWeatherMap: %d days fetched for %.2f,%.2f", len(city_days), lat, lon)
+        return city_days.get(date)
+    except Exception as exc:
+        logger.debug("OpenWeatherMap error: %s", exc)
+        return None
+
+
+# ── Source 11: Meteosource (ML-blended multi-model — free key, 400/day) ──
+_ms_cache: Dict[str, dict] = {}
+_ms_cache_ts: Dict[str, float] = {}
+
+
+def _fetch_meteosource(lat: float, lon: float, date: str) -> Optional[dict]:
+    """Fetch forecast from Meteosource ML-blended ensemble (6+ NWP models)."""
+    if not METEOSOURCE_API_KEY:
+        return None
+    if not _rate_check("meteosource"):
+        return None
+
+    loc_key = f"{lat:.2f},{lon:.2f}"
+    if loc_key in _ms_cache and (time.time() - _ms_cache_ts.get(loc_key, 0)) < CACHE_TTL:
+        return _ms_cache[loc_key].get(date)
+
+    try:
+        url = (
+            f"https://www.meteosource.com/api/v1/free/point"
+            f"?lat={lat}&lon={lon}&sections=daily&units=us"
+            f"&key={METEOSOURCE_API_KEY}"
+        )
+        data = _fetch_json(url, timeout=12)
+        if not data or "daily" not in data:
+            return None
+
+        daily = data["daily"].get("data", [])
+        city_days: Dict[str, dict] = {}
+        for day in daily:
+            dt = day.get("day")
+            if not dt:
+                continue
+            all_day = day.get("all_day", {})
+            high_f = all_day.get("temperature_max")
+            low_f = all_day.get("temperature_min")
+            if high_f is not None and low_f is not None:
+                city_days[dt] = {
+                    "high_f": round(float(high_f), 1),
+                    "low_f": round(float(low_f), 1),
+                    "model": "Meteosource_ML_Blend",
+                    "n_members": 1,
+                }
+
+        _ms_cache[loc_key] = city_days
+        _ms_cache_ts[loc_key] = time.time()
+        logger.debug("Meteosource: %d days fetched for %.2f,%.2f", len(city_days), lat, lon)
+        return city_days.get(date)
+    except Exception as exc:
+        logger.debug("Meteosource error: %s", exc)
+        return None
+
+
+# Register new source caches for centralized eviction
+_ALL_CACHES.extend([
+    (_brightsky_cache, _brightsky_cache_ts, CACHE_TTL),
+    (_metoffice_cache, _metoffice_cache_ts, CACHE_TTL),
+    (_accu_cache, _accu_cache_ts, CACHE_TTL),
+    (_vc_cache, _vc_cache_ts, CACHE_TTL),
+    (_owm_cache, _owm_cache_ts, CACHE_TTL),
+    (_ms_cache, _ms_cache_ts, CACHE_TTL),
+])
+
+
 # ── Ensemble aggregation ─────────────────────────────────────────────────
 
 def _resolve_city(city: str) -> Optional[Tuple[float, float, str]]:
@@ -731,6 +1152,36 @@ def get_ensemble_forecast(city: str, date: str) -> Optional[dict]:
     twc = _fetch_weather_com(lat, lon, date, city=city)
     if twc:
         sources["weather_com"] = twc
+
+    # Source 6: Bright Sky (DWD MOSMIX — free, no key)
+    bs = _fetch_bright_sky(lat, lon, date)
+    if bs:
+        sources["bright_sky"] = bs
+
+    # Source 7: Met Office (UKMO Unified Model)
+    mo = _fetch_met_office(lat, lon, date)
+    if mo:
+        sources["met_office"] = mo
+
+    # Source 8: AccuWeather (SWIFT + human meteorologists)
+    aw = _fetch_accuweather(lat, lon, date)
+    if aw:
+        sources["accuweather"] = aw
+
+    # Source 9: Visual Crossing (ECMWF+GFS+GDPS blend + station obs)
+    vc = _fetch_visual_crossing(lat, lon, date)
+    if vc:
+        sources["visual_crossing"] = vc
+
+    # Source 10: OpenWeatherMap (multi-model blend, 1000 calls/day free)
+    owm = _fetch_openweathermap(lat, lon, date)
+    if owm:
+        sources["openweathermap"] = owm
+
+    # Source 11: Meteosource (ML-blended 6+ NWP models, 400 calls/day free)
+    ms = _fetch_meteosource(lat, lon, date)
+    if ms:
+        sources["meteosource"] = ms
 
     if not sources:
         logger.warning("No sources returned data for %s/%s", city, date)
@@ -933,6 +1384,22 @@ def source_health() -> dict:
             "key_required": True,
             "key_set": bool(WEATHERAPI_KEY),
         },
+        "bright_sky": {"configured": True, "key_required": False},
+        "met_office": {
+            "configured": bool(METOFFICE_API_KEY),
+            "key_required": True,
+            "key_set": bool(METOFFICE_API_KEY),
+        },
+        "accuweather": {
+            "configured": bool(ACCUWEATHER_API_KEY),
+            "key_required": True,
+            "key_set": bool(ACCUWEATHER_API_KEY),
+        },
+        "visual_crossing": {
+            "configured": bool(VISUALCROSSING_API_KEY),
+            "key_required": True,
+            "key_set": bool(VISUALCROSSING_API_KEY),
+        },
         "cache_entries": len(_cache),
         "rate_limits": {k: {"calls_this_hour": v["calls"], "max_per_hour": v["max_per_hour"]} for k, v in _rate_limits.items()},
     }
@@ -1058,3 +1525,141 @@ if __name__ == "__main__":
             print(f"  P({mean-1:.0f} ≤ high ≤ {mean+1:.0f}) = {r['probability']:.1%}")
     else:
         print("No forecast data available")
+
+
+# ── Ensemble status (for dashboard) ──────────────────────────────────────
+
+_SOURCE_META = [
+    {"key": "open_meteo_ensemble", "display": "Open-Meteo Ensemble", "cache_ts": None, "api_key": None, "rate_key": None},
+    {"key": "pirate_weather", "display": "Pirate Weather", "cache_ts": "_pirate_cache_ts", "api_key": "PIRATE_API_KEY", "rate_key": "pirate_weather"},
+    {"key": "tomorrow_io", "display": "Tomorrow.io", "cache_ts": "_tomorrow_cache_ts", "api_key": "TOMORROW_API_KEY", "rate_key": "tomorrow_io"},
+    {"key": "weatherapi", "display": "WeatherAPI", "cache_ts": "_weatherapi_cache_ts", "api_key": "WEATHERAPI_KEY", "rate_key": "weatherapi"},
+    {"key": "weather_com", "display": "Weather.com / TWC", "cache_ts": "_twc_cache_ts", "api_key": None, "rate_key": None},
+    {"key": "bright_sky", "display": "Bright Sky (MOSMIX)", "cache_ts": "_brightsky_cache_ts", "api_key": None, "rate_key": None},
+    {"key": "met_office", "display": "Met Office (UKMO)", "cache_ts": "_metoffice_cache_ts", "api_key": "METOFFICE_API_KEY", "rate_key": "metoffice"},
+    {"key": "accuweather", "display": "AccuWeather (SWIFT)", "cache_ts": "_accu_cache_ts", "api_key": "ACCUWEATHER_API_KEY", "rate_key": "accuweather"},
+    {"key": "visual_crossing", "display": "Visual Crossing", "cache_ts": "_vc_cache_ts", "api_key": "VISUALCROSSING_API_KEY", "rate_key": "visualcrossing"},
+    {"key": "openweathermap", "display": "OpenWeatherMap", "cache_ts": "_owm_cache_ts", "api_key": "OPENWEATHERMAP_API_KEY", "rate_key": "openweathermap"},
+    {"key": "meteosource", "display": "Meteosource", "cache_ts": "_ms_cache_ts", "api_key": "METEOSOURCE_API_KEY", "rate_key": "meteosource"},
+]
+
+
+def get_ensemble_status() -> dict:
+    """Return ensemble health from in-memory state. No API calls made."""
+    now = time.time()
+    g = globals()
+
+    # ── Per-source status ──
+    source_statuses = []
+    for meta in _SOURCE_META:
+        # Last success timestamp from per-source cache
+        last_ts = None
+        cache_entries = 0
+        if meta["cache_ts"]:
+            ts_dict = g.get(meta["cache_ts"], {})
+            if ts_dict:
+                last_ts = max(ts_dict.values())
+                cache_entries = len(ts_dict)
+        elif meta["key"] == "open_meteo_ensemble":
+            # Open-Meteo uses the main _cache; check which entries have it in sources
+            for k, v in _cache.items():
+                if isinstance(v, dict) and "open_meteo_ensemble" in v.get("sources", {}):
+                    ts = _cache_ts.get(k, 0)
+                    if last_ts is None or ts > last_ts:
+                        last_ts = ts
+                    cache_entries += 1
+
+        # API key check
+        api_key_configured = None
+        if meta["api_key"]:
+            api_key_configured = bool(g.get(meta["api_key"], ""))
+
+        # Rate limit info
+        rate_info = None
+        if meta["rate_key"] and meta["rate_key"] in _rate_limits:
+            rl = _rate_limits[meta["rate_key"]]
+            max_h = rl.get("max_per_hour", 0)
+            rate_info = {
+                "calls": rl["calls"],
+                "max_per_hour": max_h,
+                "pct": round(rl["calls"] / max_h * 100, 1) if max_h > 0 else 0,
+            }
+
+        # Circuit breaker (Open-Meteo only)
+        cb = None
+        if meta["key"] == "open_meteo_ensemble":
+            cb = {
+                "blocked_until": _open_meteo_blocked_until,
+                "consecutive_fails": _open_meteo_consecutive_fails,
+                "blocked": now < _open_meteo_blocked_until,
+            }
+
+        # Derive status
+        ago = (now - last_ts) if last_ts else None
+        if api_key_configured is False:
+            status = "offline"
+        elif last_ts is None or cache_entries == 0:
+            status = "no_data"
+        elif cb and cb["blocked"]:
+            status = "degraded"
+        elif rate_info and rate_info["pct"] > 90:
+            status = "degraded"
+        elif ago and ago > 3600:
+            status = "degraded"
+        else:
+            status = "active"
+
+        source_statuses.append({
+            "key": meta["key"],
+            "name": meta["display"],
+            "status": status,
+            "last_success_ts": round(last_ts, 1) if last_ts else None,
+            "last_success_ago_s": round(ago) if ago else None,
+            "rate_limit": rate_info,
+            "api_key_configured": api_key_configured,
+            "circuit_breaker": cb,
+            "cache_entries": cache_entries,
+        })
+
+    # ── Source distribution from main cache ──
+    dist: Dict[int, int] = {}
+    city_sources: Dict[str, set] = {}
+    for key, val in _cache.items():
+        if not isinstance(val, dict):
+            continue
+        # Skip expired entries
+        if (now - _cache_ts.get(key, 0)) > CACHE_TTL:
+            continue
+        sources = val.get("sources", {})
+        n = len(sources)
+        dist[n] = dist.get(n, 0) + 1
+
+        city = key.split(":")[0] if ":" in key else key
+        if city not in city_sources:
+            city_sources[city] = set()
+        city_sources[city].update(sources.keys())
+
+    # Convert city_sources sets to sorted lists
+    city_coverage = {c: sorted(list(s)) for c, s in sorted(city_sources.items())}
+
+    # ── Summary ──
+    active_count = sum(1 for s in source_statuses if s["status"] == "active")
+    degraded_count = sum(1 for s in source_statuses if s["status"] == "degraded")
+    offline_count = sum(1 for s in source_statuses if s["status"] in ("offline", "no_data"))
+    total_cached = sum(dist.values())
+    avg_sources = sum(k * v for k, v in dist.items()) / total_cached if total_cached > 0 else 0
+
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "sources": source_statuses,
+        "source_distribution": {str(k): v for k, v in sorted(dist.items())},
+        "city_coverage": city_coverage,
+        "summary": {
+            "total_sources": len(_SOURCE_META),
+            "active": active_count,
+            "degraded": degraded_count,
+            "offline": offline_count,
+            "cached_forecasts": total_cached,
+            "avg_sources_per_signal": round(avg_sources, 1),
+        },
+    }

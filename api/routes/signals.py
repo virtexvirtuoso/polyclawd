@@ -1994,6 +1994,30 @@ async def get_source_weights():
 # Weather Scanner
 # ============================================================================
 
+@router.get("/signals/weather/ensemble-status")
+async def weather_ensemble_status():
+    """Ensemble health: per-source status, coverage matrix, distribution."""
+    import asyncio
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from weather_ensemble import get_ensemble_status, get_ensemble_forecast
+        loop = asyncio.get_event_loop()
+
+        # Workers don't share memory — probe 5 diverse cities to warm caches
+        from datetime import datetime, timedelta
+        tomorrow = (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%d")
+        probe_cities = ["miami", "london", "tokyo", "chicago", "sao paulo"]
+        for city in probe_cities:
+            await loop.run_in_executor(None, get_ensemble_forecast, city, tomorrow)
+
+        return await loop.run_in_executor(None, get_ensemble_status)
+    except Exception as e:
+        logger.exception(f"Ensemble status failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/signals/weather")
 async def scan_weather():
     """Scan weather markets on Kalshi + Polymarket against Open-Meteo forecasts."""

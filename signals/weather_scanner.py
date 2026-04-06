@@ -344,6 +344,7 @@ def _f_to_c(fahrenheit: float) -> float:
 # In-memory forecast cache (city → forecast_data) — cleared each scan cycle
 _forecast_cache: Dict[str, dict] = {}
 _forecast_cache_ts: float = 0
+_MAX_FORECAST_CACHE = 200  # hard cap to prevent unbounded growth
 
 # File-based forecast cache for persistence across restarts (2h TTL)
 _FORECAST_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'storage', 'weather_forecast_cache.json')
@@ -495,7 +496,7 @@ def _get_cached_forecast(city: str, days_until: float) -> Optional[dict]:
     global _forecast_cache, _forecast_cache_ts
     now = time.time()
     # Clear cache if older than 2 hours (was 10 min — way too aggressive)
-    if now - _forecast_cache_ts > _FORECAST_CACHE_TTL:
+    if now - _forecast_cache_ts > _FORECAST_CACHE_TTL or len(_forecast_cache) > _MAX_FORECAST_CACHE:
         _forecast_cache = {}
         _forecast_cache_ts = now
 
@@ -579,9 +580,10 @@ def _try_ensemble_evaluate(title: str, market_price: float, city: str, target_da
     ens = forecast_data["ensemble"] if forecast_data else {}
 
     logger.debug(
-        "ENSEMBLE %s: %s fair=%.3f mkt=%.3f edge=%.1f%% side=%s n_models=%d agree=%.2f",
+        "ENSEMBLE %s: %s fair=%.3f mkt=%.3f edge=%.1f%% side=%s n_src=%d n_mdl=%d agree=%.2f",
         city, comparison, result["fair_value"], market_price,
-        abs(edge) * 100, side, result.get("n_sources", 0), result.get("agreement", 0),
+        abs(edge) * 100, side, result.get("n_sources", 0),
+        ens.get("n_models", 0), result.get("agreement", 0),
     )
 
     return {
@@ -880,64 +882,108 @@ def scan_kalshi_weather() -> List[dict]:
 # Buenos Aires data mismatch that cost us $90 (Open-Meteo said 20°C,
 # actual resolution source said 32°C).
 WEATHER_CITIES_SLUG = [
+    # Verified active (API-confirmed April 2026)
     'nyc', 'miami', 'dallas', 'atlanta', 'seattle', 'chicago',
     'london', 'buenos-aires', 'wellington', 'sao-paulo', 'toronto',
     'seoul', 'paris', 'ankara', 'lucknow', 'munich',
-]  # 16 cities with active Polymarket weather markets (verified via tag_id=103040, 2026-03-06)
+    # Extended candidates (probe-validated at runtime)
+    'tokyo', 'sydney', 'los-angeles', 'houston', 'phoenix',
+    'denver', 'boston', 'san-francisco', 'washington-dc',
+    'austin', 'berlin', 'philadelphia', 'san-diego',
+]  # 29 candidates — _discover_weather_cities() validates which are active via slug probe
 
 # Max position size for weather trades (small, uncorrelated bets)
 WEATHER_MAX_BET = 25.0
 WEATHER_MIN_BET = 5.0
 
 
+_active_cities_cache: List[str] = []
+_active_cities_ts: float = 0.0
+_CITY_DISCOVERY_TTL = 3600  # 1 hour
+
+
 def _discover_weather_cities() -> List[str]:
-    """Discover active weather cities from Gamma API using tag_id=103040 (Daily Temperature).
-    
-    Falls back to WEATHER_CITIES_SLUG if API fails.
-    This catches new cities Polymarket adds without code changes.
+    """Discover active weather cities by probing slug pattern for tomorrow.
+
+    The tag_id=103040 and /markets endpoints are broken for temperature markets
+    (hide-from-new tag excludes them). Slug-based /events lookup is the only
+    reliable path. Probes each candidate city for tomorrow's date. Cities that
+    return an event with markets are active. Results cached for 1 hour.
     """
-    import re
+    global _active_cities_cache, _active_cities_ts
+
+    now = time.time()
+    if _active_cities_cache and (now - _active_cities_ts) < _CITY_DISCOVERY_TTL:
+        return _active_cities_cache
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+    month_names = {
+        1: 'january', 2: 'february', 3: 'march', 4: 'april',
+        5: 'may', 6: 'june', 7: 'july', 8: 'august',
+        9: 'september', 10: 'october', 11: 'november', 12: 'december',
+    }
+    month = month_names[tomorrow.month]
+    day = tomorrow.day
+    year = tomorrow.year
+
+    def _probe_city(city_slug: str):
+        slug = f"highest-temperature-in-{city_slug}-on-{month}-{day}-{year}"
+        url = f"{GAMMA_API}/events?slug={slug}"
+        data = _fetch_json(url, timeout=8)
+        if data and isinstance(data, list) and len(data) > 0:
+            markets = data[0].get("markets", [])
+            if markets:
+                return city_slug
+        return None
+
+    active = []
     try:
-        url = f"{GAMMA_API}/events?limit=100&closed=false&tag_id=103040"
-        data = _fetch_json(url)
-        if not data or not isinstance(data, list):
-            return list(WEATHER_CITIES_SLUG)
-
-        cities = set()
-        for event in data:
-            title = event.get("title", "")
-            m = re.search(r"temperature in (.+?)( on |$|\?)", title, re.IGNORECASE)
-            if m:
-                city = m.group(1).strip()
-                # Convert to slug format
-                slug = city.lower().replace(" ", "-")
-                cities.add(slug)
-
-        if cities:
-            # Log if we found new cities not in our list
-            known = set(WEATHER_CITIES_SLUG)
-            new_cities = cities - known
-            if new_cities:
-                logger.warning("New Polymarket weather cities discovered: %s", new_cities)
-                try:
-                    from signals.discord_alerts import _send, COLOR_CYAN
-                    _send([{
-                        "title": "🌍 New Weather Cities Detected",
-                        "description": f"Polymarket added: **{', '.join(sorted(new_cities))}**\n\nAuto-scanning started. Add ICAO codes to `weather_ensemble.py` for TWC forecast/actuals support.",
-                        "color": COLOR_CYAN,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "footer": {"text": "Weather City Discovery"},
-                    }], alert_type="new_weather_city", alert_meta={"cities": sorted(new_cities)})
-                except Exception:
-                    pass
-            missing = known - cities
-            if missing:
-                logger.info("Cities in config but not active on Polymarket: %s", missing)
-            return sorted(cities)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_probe_city, c): c for c in WEATHER_CITIES_SLUG}
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    active.append(result)
     except Exception as e:
-        logger.debug("Weather city discovery failed: %s", e)
+        logger.warning("City probe failed: %s -- using static fallback", e)
+        return list(WEATHER_CITIES_SLUG)
 
-    return list(WEATHER_CITIES_SLUG)
+    if not active:
+        logger.warning("No cities found via probe -- using static fallback")
+        return list(WEATHER_CITIES_SLUG)
+
+    # Log changes vs last known set
+    active_set = set(active)
+    known_set = set(_active_cities_cache) if _active_cities_cache else set(WEATHER_CITIES_SLUG[:16])
+    new_cities = active_set - known_set
+    dropped_cities = known_set - active_set
+
+    if new_cities:
+        logger.warning("New Polymarket weather cities discovered: %s", sorted(new_cities))
+        try:
+            from signals.discord_alerts import _send, COLOR_CYAN
+            _send([{
+                "title": "New Weather Cities Detected",
+                "description": f"Polymarket added: **{', '.join(sorted(new_cities))}**\n\nAuto-scanning started.",
+                "color": COLOR_CYAN,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "footer": {"text": "Weather City Discovery (slug probe)"},
+            }], alert_type="new_weather_city", alert_meta={"cities": sorted(new_cities)})
+        except Exception:
+            pass
+
+    if dropped_cities:
+        logger.info("Cities no longer active on Polymarket: %s", sorted(dropped_cities))
+
+    active_sorted = sorted(active)
+    _active_cities_cache = active_sorted
+    _active_cities_ts = now
+
+    logger.info("Weather city discovery: %d/%d candidates active (probe-based)",
+                len(active), len(WEATHER_CITIES_SLUG))
+    return active_sorted
 
 
 def scan_polymarket_weather() -> List[dict]:
@@ -951,7 +997,7 @@ def scan_polymarket_weather() -> List[dict]:
     active_cities = _discover_weather_cities()
 
     # Pre-load all forecasts in one batch (uses cache, avoids per-market API calls)
-    preload_forecasts(days=3)
+    preload_forecasts(days=7)
 
     # Pre-warm ensemble cache in parallel — skip if file cache is fresh (<2h)
     try:
@@ -982,8 +1028,8 @@ def scan_polymarket_weather() -> List[dict]:
     except Exception as e:
         logger.warning("Ensemble pre-warm failed: %s", e)
 
-    # Check today + next 2 days
-    dates_to_check = [(now + timedelta(days=d)) for d in range(3)]
+    # Check today + next 6 days
+    dates_to_check = [(now + timedelta(days=d)) for d in range(7)]
     month_names = {
         1: 'january', 2: 'february', 3: 'march', 4: 'april',
         5: 'may', 6: 'june', 7: 'july', 8: 'august',
