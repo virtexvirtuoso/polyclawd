@@ -77,7 +77,9 @@ window.lucide = { createIcons: function(opts) {
     margin: 0 auto;
     padding: 32px 28px 48px;
     min-width: 0;
-    overflow-x: hidden;
+    /* overflow-x: clip (not hidden) — clip doesn't create a scroll context,
+       so position: sticky still works for descendants like .section-nav-wrap */
+    overflow-x: clip;
   }
 
   /* ── HEADER BAR ── */
@@ -1338,6 +1340,10 @@ window.lucide = { createIcons: function(opts) {
     .nav-links { display: none; }
   }
 
+  /* Section anchors get scroll-margin so the sticky nav doesn't cover them
+     when navigating via #hash or scrollIntoView */
+  [id$="-section"] { scroll-margin-top: 60px; }
+
   /* Sticky section nav (app-like pill scroller) */
   .section-nav-wrap {
     position: sticky;
@@ -1554,7 +1560,7 @@ window.lucide = { createIcons: function(opts) {
   <!-- SECTION NAV (sticky) -->
   <div class="section-nav-wrap" id="section-nav-wrap" data-scroll-start="true" data-scroll-end="false" style="display:none">
   <nav class="section-nav" id="section-nav">
-    <a class="section-nav-pill" href="#hero-section" data-section="hero-section">Overview</a>
+    <a class="section-nav-pill active" href="#hero-section" data-section="hero-section">Overview</a>
     <a class="section-nav-pill" href="#balance-section" data-section="balance-section">Balance</a>
     <a class="section-nav-pill" href="#tipping-section" data-section="tipping-section">Tipping Point</a>
     <a class="section-nav-pill" href="#midterm-section" data-section="midterm-section">Midterms</a>
@@ -5013,15 +5019,18 @@ function initSectionNav() {
   const sectionIds = [...pills].map(p => p.dataset.section).filter(Boolean);
   const sections = sectionIds.map(id => document.getElementById(id)).filter(Boolean);
 
-  // Smooth scroll on click (with sticky nav offset)
+  // Smooth scroll on click. Uses scrollIntoView which respects
+  // scroll-margin-top, then re-aligns after deferred content renders
+  // (sections below can shift as more cards lazy-render in).
   pills.forEach(pill => {
     pill.addEventListener('click', (e) => {
       e.preventDefault();
       const target = document.getElementById(pill.dataset.section);
       if (!target) return;
-      const navH = wrap.offsetHeight || 48;
-      const y = target.getBoundingClientRect().top + window.pageYOffset - navH - 4;
-      window.scrollTo({ top: y, behavior: 'smooth' });
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      // Re-align after smooth-scroll completes + any layout shifts settle
+      setTimeout(() => target.scrollIntoView({ behavior: 'auto', block: 'start' }), 700);
+      setTimeout(() => target.scrollIntoView({ behavior: 'auto', block: 'start' }), 1500);
     });
   });
 
