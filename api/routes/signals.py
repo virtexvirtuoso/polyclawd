@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -110,6 +110,20 @@ def load_source_outcomes() -> dict:
         "whale_new_position": {"wins": 5, "losses": 5, "total": 10},
         "news_google": {"wins": 3, "losses": 7, "total": 10},
         "news_reddit": {"wins": 3, "losses": 7, "total": 10},
+        "election_cross_platform": {"wins": 5, "losses": 5, "total": 10},
+        "election_fec_money": {"wins": 4, "losses": 6, "total": 10},
+        "election_momentum": {"wins": 3, "losses": 7, "total": 10},
+        "election_ie_spending": {"wins": 4, "losses": 6, "total": 10},
+        "election_primary": {"wins": 4, "losses": 6, "total": 10},
+        "election_narrative": {"wins": 3, "losses": 7, "total": 10},
+        "election_poll_divergence": {"wins": 5, "losses": 5, "total": 10},
+        "election_efiling": {"wins": 5, "losses": 5, "total": 10},
+        "election_wiki_attention": {"wins": 3, "losses": 7, "total": 10},
+        "election_gtrends": {"wins": 3, "losses": 7, "total": 10},
+        "election_smart_money": {"wins": 4, "losses": 6, "total": 10},
+        "election_whale_concentration": {"wins": 3, "losses": 7, "total": 10},
+        "election_cash_momentum": {"wins": 4, "losses": 6, "total": 10},
+        "election_economic_macro": {"wins": 4, "losses": 6, "total": 10},
     }
     _save_json(SOURCE_OUTCOMES_FILE, defaults)
     return defaults
@@ -812,6 +826,14 @@ def aggregate_all_signals() -> dict:
         mcw_data = get_mispriced_category_signals()
         for sig in mcw_data.get("signals", [])[:10]:
             all_signals.append(sig)
+    except Exception:
+        pass
+
+    # 8. Election signals (13 strategies: arb, FEC, momentum, IE, primary, narrative, polls, eFiling, wiki, trends, smart money, whale, cash momentum)
+    try:
+        from signals.election_signal import generate_election_signals
+        election_sigs = generate_election_signals()
+        all_signals.extend(election_sigs[:10])
     except Exception:
         pass
 
@@ -2541,3 +2563,548 @@ async def alert_stats(days: int = Query(30, ge=1, le=365)):
         "delivery_rate": round(sum(1 for a in alerts if a.get("sent")) / len(alerts), 3) if alerts else 1.0,
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }
+
+
+# ── Election Sentiment ───────────────────────────────────────────────────
+
+_election_cache = {"data": None, "ts": 0, "refreshing": False, "artifacts": None}
+_election_core_cache = {"data": None, "ts": 0, "artifacts": None}  # fast core-only cache
+# Skeleton cache — strict subset of full/core for fast first paint (~80KB gzipped
+# vs ~380KB for /core). Keyed by source timestamp so we rebuild only on refresh.
+_election_skeleton_cache = {"source_ts": 0, "artifacts": None}
+
+_ELECTION_FRESH_TTL = 900     # 15 min — serve without refresh
+_ELECTION_STALE_TTL = 7200    # 2 hr  — serve stale, refresh in background (extended from 1hr)
+
+
+def _trim_election_report(report: dict) -> dict:
+    """Shallow-trim large lists in the election report for wire transfer.
+
+    Policy_pulse categories contain thousands of markets but the UI only
+    renders the top 12 per section. Keep top 50 by volume so CLARITY-relevant
+    markets (which rank high by volume) comfortably survive. The Python
+    in-memory cache still holds the full data — this trim only runs once per
+    cache refresh when we build the wire artifacts.
+    """
+    if not isinstance(report, dict):
+        return report
+    trimmed = dict(report)
+    insights = report.get("insights")
+    if isinstance(insights, dict):
+        new_insights = dict(insights)
+        pp = insights.get("policy_pulse")
+        if isinstance(pp, dict):
+            new_pp = dict(pp)
+            for cat in ("scotus", "congress", "trade_tariffs", "foreign_policy",
+                        "domestic_policy", "macro_economic"):
+                lst = pp.get(cat)
+                if isinstance(lst, list) and len(lst) > 50:
+                    new_pp[cat] = sorted(
+                        lst, key=lambda m: (m.get("volume") or 0), reverse=True
+                    )[:50]
+            new_insights["policy_pulse"] = new_pp
+        trimmed["insights"] = new_insights
+    return trimmed
+
+
+def _build_election_skeleton(report: dict) -> dict:
+    """Build a minimal above-the-fold payload from a full election report.
+
+    Target: ~80KB gzipped (vs ~380KB for the full /core payload) so first
+    paint lands in ~1.1s (basically TTFB). Client sees `skeleton: true` +
+    `core_only: true` in the response and fetches /signals/elections in the
+    background to hydrate deferred sections (movers, policy_pulse, crypto
+    money, gdelt, smart money, etc.).
+
+    Strict subset strategy:
+    - Keep all `presidential`, `senate`, `governor` markets (needed for
+      hemicycles + state-by-state above-fold views). These are the races
+      the page is actually *about*.
+    - Keep top-400 by volume from the remaining categories (primary, house,
+      other) so tabs have enough data to render meaningfully.
+    - Drop `deltas`, `top_movers`, and all of `insights` except `midterm`
+      (the only insights field read by above-fold renders).
+    """
+    if not isinstance(report, dict):
+        return report
+    markets = report.get("markets") or []
+    keep_all = [m for m in markets if m.get("race_category") in ("presidential", "senate", "governor")]
+    others = [m for m in markets if m.get("race_category") not in ("presidential", "senate", "governor")]
+    top_others = sorted(others, key=lambda m: (m.get("volume") or 0), reverse=True)[:400]
+    skel_markets = keep_all + top_others
+
+    insights = report.get("insights") or {}
+    skel_insights = {"midterm": insights.get("midterm")}
+
+    return {
+        "timestamp": report.get("timestamp"),
+        "summary": report.get("summary"),
+        "markets": skel_markets,
+        "insights": skel_insights,
+        "skeleton": True,
+        "core_only": True,  # triggers client Phase 2 upgrade fetch
+        "full_market_count": len(markets),
+    }
+
+
+def _build_election_artifacts(report: dict) -> dict:
+    """Serialize + gzip + hash an election report once, so every cache hit
+    just returns pre-built bytes instead of re-encoding a 7MB dict + gzipping
+    on every request. Took cache-hit TTFB from ~1.3s to <50ms in benchmarks.
+    """
+    import gzip as _gzip
+    import hashlib as _hashlib
+    trimmed = _trim_election_report(report)
+    body = json.dumps(trimmed, separators=(",", ":"), default=str).encode("utf-8")
+    body_gz = _gzip.compress(body, compresslevel=6)
+    etag = '"' + _hashlib.md5(body).hexdigest()[:16] + '"'
+    return {"body": body, "body_gz": body_gz, "etag": etag}
+
+
+def _serve_election_cache(cache_dict: dict, request, max_age: int):
+    """Return a FastAPI Response for a cached election report, honoring
+    Accept-Encoding (gzip) and If-None-Match (ETag) for zero-copy 304s.
+    """
+    from fastapi.responses import Response
+    if cache_dict.get("artifacts") is None:
+        cache_dict["artifacts"] = _build_election_artifacts(cache_dict["data"])
+    art = cache_dict["artifacts"]
+    etag = art["etag"]
+    # 304 Not Modified for warm browsers — skips the body entirely
+    inm = request.headers.get("if-none-match") if request else None
+    if inm and inm == etag:
+        return Response(
+            status_code=304,
+            headers={
+                "ETag": etag,
+                "Cache-Control": f"public, max-age={max(0, max_age)}",
+                "Vary": "Accept-Encoding",
+            },
+        )
+    accepts_gzip = "gzip" in (request.headers.get("accept-encoding", "") if request else "")
+    if accepts_gzip:
+        return Response(
+            content=art["body_gz"],
+            media_type="application/json",
+            headers={
+                "Content-Encoding": "gzip",
+                "ETag": etag,
+                "Cache-Control": f"public, max-age={max(0, max_age)}",
+                "Vary": "Accept-Encoding",
+            },
+        )
+    return Response(
+        content=art["body"],
+        media_type="application/json",
+        headers={
+            "ETag": etag,
+            "Cache-Control": f"public, max-age={max(0, max_age)}",
+            "Vary": "Accept-Encoding",
+        },
+    )
+
+
+async def _refresh_election_cache():
+    """Refresh election cache in background thread (non-blocking)."""
+    import asyncio
+    import time
+    if _election_cache["refreshing"]:
+        return  # already refreshing, skip
+    _election_cache["refreshing"] = True
+    try:
+        loop = asyncio.get_event_loop()
+        from signals.election_tracker import generate_report
+        report = await loop.run_in_executor(None, generate_report)
+        _election_cache["data"] = report
+        _election_cache["ts"] = time.time()
+        _election_cache["artifacts"] = None  # invalidate pre-serialized bytes
+        # Core cache is a strict subset — also invalidate its artifacts so a
+        # future core hit rebuilds from the refreshed data (if the core
+        # cache itself is stale, the core handler will pull from the full
+        # cache via its existing fallback branch).
+        _election_core_cache["artifacts"] = None
+        # Skeleton is derived from whichever warm cache exists — force rebuild
+        # on next /core hit so it reflects the refreshed data.
+        _election_skeleton_cache["artifacts"] = None
+        _election_skeleton_cache["source_ts"] = 0
+        logger.info("Election cache refreshed in background")
+    except Exception as e:
+        import traceback
+        logger.error("Background election refresh failed: %s\n%s", e, traceback.format_exc())
+    finally:
+        _election_cache["refreshing"] = False
+
+
+async def prewarm_election_cache():
+    """Pre-warm election cache on startup. Call from lifespan."""
+    logger.info("Pre-warming election cache...")
+    await _refresh_election_cache()
+
+
+@router.get("/signals/elections")
+async def get_election_markets(request: Request):
+    """US election market data from Polymarket + Kalshi with week-over-week deltas."""
+    import asyncio
+    import time
+
+    now = time.time()
+    age = now - _election_cache["ts"] if _election_cache["data"] else float("inf")
+
+    # Fresh cache — return pre-serialized bytes
+    if _election_cache["data"] and age < _ELECTION_FRESH_TTL:
+        max_age = int(_ELECTION_FRESH_TTL - age)
+        return _serve_election_cache(_election_cache, request, max_age)
+
+    # Stale cache — return immediately but kick off background refresh
+    if _election_cache["data"] and age < _ELECTION_STALE_TTL:
+        asyncio.create_task(_refresh_election_cache())
+        return _serve_election_cache(_election_cache, request, 0)
+
+    # No cache or expired beyond stale TTL — must fetch synchronously
+    try:
+        loop = asyncio.get_event_loop()
+        from signals.election_tracker import generate_report
+        report = await loop.run_in_executor(None, generate_report)
+        _election_cache["data"] = report
+        _election_cache["ts"] = now
+        _election_cache["artifacts"] = None  # force rebuild on first serve
+        return _serve_election_cache(_election_cache, request, _ELECTION_FRESH_TTL)
+    except Exception as e:
+        import traceback
+        logger.error("Election data fetch failed: %s\n%s", e, traceback.format_exc())
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+def _serve_election_skeleton(source_cache: dict, request, max_age: int):
+    """Build (or reuse) skeleton artifacts from a source cache and serve them.
+
+    The skeleton is keyed by `source_cache['ts']` so we rebuild only when the
+    underlying report changes. Every request beyond the first is a pre-built
+    ~80KB gzipped byte blob — effectively free on the server side.
+    """
+    from fastapi.responses import Response
+    source_ts = source_cache.get("ts") or 0
+    if (
+        _election_skeleton_cache.get("artifacts") is None
+        or _election_skeleton_cache.get("source_ts") != source_ts
+    ):
+        skel = _build_election_skeleton(source_cache["data"])
+        _election_skeleton_cache["artifacts"] = _build_election_artifacts(skel)
+        _election_skeleton_cache["source_ts"] = source_ts
+
+    art = _election_skeleton_cache["artifacts"]
+    etag = art["etag"]
+    inm = request.headers.get("if-none-match") if request else None
+    if inm and inm == etag:
+        return Response(
+            status_code=304,
+            headers={
+                "ETag": etag,
+                "Cache-Control": f"public, max-age={max(0, max_age)}",
+                "Vary": "Accept-Encoding",
+            },
+        )
+    accepts_gzip = "gzip" in (request.headers.get("accept-encoding", "") if request else "")
+    if accepts_gzip:
+        return Response(
+            content=art["body_gz"],
+            media_type="application/json",
+            headers={
+                "Content-Encoding": "gzip",
+                "ETag": etag,
+                "Cache-Control": f"public, max-age={max(0, max_age)}",
+                "Vary": "Accept-Encoding",
+            },
+        )
+    return Response(
+        content=art["body"],
+        media_type="application/json",
+        headers={
+            "ETag": etag,
+            "Cache-Control": f"public, max-age={max(0, max_age)}",
+            "Vary": "Accept-Encoding",
+        },
+    )
+
+
+@router.get("/signals/elections/core")
+async def get_election_markets_core(request: Request):
+    """Fast skeleton payload for first paint (~80KB gzipped).
+
+    Returns a strict subset of the full election report — only the fields
+    needed for above-the-fold renders (summary, core race markets,
+    insights.midterm). Client sees `skeleton: true` in the response and
+    fetches /signals/elections in the background to hydrate the full list,
+    deltas, movers, policy_pulse, etc.
+    """
+    import asyncio
+    import time
+
+    now = time.time()
+
+    # Prefer the full cache as the skeleton source — it's always a superset
+    # of /core and gives us the freshest data possible for the skeleton.
+    full_age = now - _election_cache["ts"] if _election_cache["data"] else float("inf")
+    if _election_cache["data"] and full_age < _ELECTION_STALE_TTL:
+        # If stale, kick off a background refresh but still serve the skeleton
+        if full_age >= _ELECTION_FRESH_TTL:
+            asyncio.create_task(_refresh_election_cache())
+        return _serve_election_skeleton(_election_cache, request, max(0, int(300 - min(full_age, 300))))
+
+    # Fallback to the core cache as skeleton source
+    core_age = now - _election_core_cache["ts"] if _election_core_cache["data"] else float("inf")
+    if _election_core_cache["data"] and core_age < 300:
+        return _serve_election_skeleton(_election_core_cache, request, max(0, int(300 - core_age)))
+
+    # Cold start — generate a core-only report (fast, no GDELT/FEC/etc. APIs),
+    # cache it, then serve the skeleton derived from it.
+    try:
+        loop = asyncio.get_event_loop()
+        from signals.election_tracker import generate_report
+        report = await loop.run_in_executor(None, lambda: generate_report(core_only=True))
+        _election_core_cache["data"] = report
+        _election_core_cache["ts"] = now
+        _election_core_cache["artifacts"] = None  # force rebuild on first serve
+        # Also kick off full refresh in background
+        asyncio.create_task(_refresh_election_cache())
+        return _serve_election_skeleton(_election_core_cache, request, 300)
+    except Exception as e:
+        logger.error("Election core fetch failed: %s", e)
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+# Keywords that identify a policy market as CLARITY Act / crypto regulation relevant.
+# NOTE: "kalshi" and "polymarket" are intentionally NOT in this list — they appear
+# in resolution boilerplate on virtually every market of that platform, so they
+# match everything and pollute the filter. Use ticker prefixes for platform scoping.
+_CLARITY_MARKET_KEYWORDS = (
+    "clarity act", "cftc", "crypto market structure",
+    "crypto regulat", "crypto legislat", "digital asset", "stablecoin",
+    "h.r. 3633", "hr 3633", "fit21", "market structure bill",
+    "market structure legislation", "cftc oversight", "sec vs cftc",
+    # Broader CLARITY-adjacent terms
+    "crypto bill", "crypto law", "crypto tax", "capital gains on crypto",
+    "cftc vs sec", "cftc authority", "sec authority over crypto",
+    "bitcoin etf", "crypto etf", "defi regulat", "genius act",
+)
+
+# Passage verbs — only count when co-occurring with a crypto anchor.
+# Prevents tariff / AI / immigration bills from matching.
+_CLARITY_PASSAGE_VERBS = (
+    "signed into law", "become law", "becomes law", "pass the senate",
+    "pass the house", "passes the senate", "passes the house",
+)
+_CLARITY_CRYPTO_ANCHORS = (
+    "crypto", "digital asset", "market structure", "stablecoin",
+    "cftc", "clarity act", "h.r. 3633", "hr 3633", "fit21",
+)
+
+# Kalshi ticker prefixes that are direct CLARITY/crypto-structure hits.
+# Check these against market["ticker"] — they carry authority even when the
+# question text is written in a way that doesn't mention "CLARITY".
+_CLARITY_TICKER_PREFIXES = (
+    "KXCRYPTOSTRUCTURE",  # Crypto market structure ladder (FEB1/MAR/.../-27)
+    "KXCLARITYACT",       # Direct CLARITY Act series (currently empty but reserved)
+    "KXCFTC",             # CFTC authority / SEC-vs-CFTC
+    "KXFIT21",            # FIT21 predecessor bill
+    "KXCLARITY",          # Legacy catch-all
+)
+
+# Noise filter: markets that mention "crypto" but aren't about policy/legislation.
+# Also catches sports-event-contract markets that slip in via the "event contract" keyword.
+_CLARITY_NOISE_PATTERNS = (
+    "attend", "conference", "speak at", "will be at",
+    "price of", "reach $", "hit $", "cross $",
+    "sports event contract", "sports-event-contract",
+    "nfl", "nba", "mlb", "nhl", "ncaa",
+)
+
+
+# Passage-market predicate — used to decide which markets get price-history attached.
+def _is_passage_market(q: str) -> bool:
+    q = (q or "").lower()
+    passage_terms = (
+        "signed into law", "become law", "becomes law", "becomes-law",
+        "pass the senate", "pass the house", "passes the senate", "passes the house",
+        "pass senate", "pass house", "passes senate", "passes house",
+    )
+    # Broad "clarity act" clause — paired with an action verb or year
+    if "clarity act" in q and any(w in q for w in ("sign", "law", "pass", "vote", "2026", "2027")):
+        return True
+    return any(t in q for t in passage_terms)
+
+
+def _filter_clarity_markets(policy_pulse: dict) -> list:
+    """Extract CLARITY-relevant markets from policy_pulse, deduped by question.
+
+    Live passage markets (the ones the hero chart cares about) also get a
+    `price_history` field attached via Polymarket's CLOB prices-history API.
+    """
+    if not isinstance(policy_pulse, dict):
+        return []
+    all_markets = []
+    for cat in ("scotus", "congress", "trade_tariffs", "foreign_policy",
+                "domestic_policy", "macro_economic"):
+        for m in (policy_pulse.get(cat) or []):
+            all_markets.append(m)
+
+    relevant = []
+    seen = set()
+    for m in all_markets:
+        q = (m.get("question") or "").lower()
+        ticker = (m.get("ticker") or "").upper()
+        # Match text across question + rules + event title. rules_secondary is
+        # a gold mine on Kalshi — it often names the exact bill (CLARITY, FIT21)
+        # when the question itself is phrased generically ("crypto market
+        # structure bill becomes law").
+        rules1 = (m.get("rules_primary") or "").lower()
+        rules2 = (m.get("rules_secondary") or "").lower()
+        evt_t = (m.get("event_title") or "").lower()
+        haystack = " ".join([q, rules1, rules2, evt_t])
+
+        ticker_match = any(ticker.startswith(p) for p in _CLARITY_TICKER_PREFIXES)
+        keyword_match = any(kw in haystack for kw in _CLARITY_MARKET_KEYWORDS)
+        # Passage verbs only count when a crypto anchor is present in the same
+        # haystack — otherwise "becomes law" matches every tariff/AI/immigration bill.
+        passage_match = (
+            any(v in haystack for v in _CLARITY_PASSAGE_VERBS)
+            and any(a in haystack for a in _CLARITY_CRYPTO_ANCHORS)
+        )
+        if not (ticker_match or keyword_match or passage_match):
+            continue
+        # Drop noise matches unless the ticker is a direct hit
+        if not ticker_match and any(np in q for np in _CLARITY_NOISE_PATTERNS):
+            continue
+        # Drop SCOTUS sports-event-contract markets (they match "event contract" kw)
+        if "scotus" in q and "sports" in q:
+            continue
+        # Dedupe by (platform, per-market-id). On Kalshi, `id` is the
+        # per-market ticker (e.g. KXCRYPTOSTRUCTURE-26JAN-MAY) while
+        # `ticker` may be the event-level ticker (KXCRYPTOSTRUCTURE-26JAN)
+        # which collapses ladder rungs. Prefer `id` for dedupe so ladder
+        # rungs survive. Polymarket rows without id/ticker fall back to
+        # question prefix.
+        plat = (m.get("platform") or "")
+        dedupe_id = (m.get("id") or m.get("ticker") or "").upper() or q[:60]
+        key = (plat, dedupe_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        # Strip heavy fields we don't need for clarity.html.
+        # On Kalshi, prefer the per-market ticker (stored in `id`) so the UI
+        # can distinguish ladder rungs like -FEB1 vs -MAY vs -27. The raw
+        # event-level ticker is preserved in event_ticker for grouping.
+        out_ticker = m.get("ticker")
+        if (m.get("platform") == "kalshi") and m.get("id"):
+            out_ticker = m.get("id")
+        relevant.append({
+            "id": m.get("id"),
+            "question": m.get("question"),
+            "ticker": out_ticker,
+            "event_ticker": m.get("event_ticker") or m.get("ticker"),
+            "slug": m.get("slug"),
+            "platform": m.get("platform"),
+            "volume": m.get("volume"),
+            "outcomes": m.get("outcomes"),
+            "end_date": m.get("end_date"),
+            "event_title": m.get("event_title"),
+            "rules_secondary": (m.get("rules_secondary") or "")[:400],
+        })
+    relevant.sort(key=lambda x: -(x.get("volume") or 0))
+    relevant = relevant[:60]
+
+    # Attach price history to live Polymarket passage markets (usually 1–3).
+    # Kalshi isn't supported yet — needs a different history endpoint.
+    try:
+        from signals.polymarket_price_history import get_price_history
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        for r in relevant:
+            if r.get("platform") != "polymarket":
+                continue
+            if not _is_passage_market(r.get("question") or ""):
+                continue
+            ed = r.get("end_date") or ""
+            try:
+                end_dt = datetime.fromisoformat(ed.replace("Z", "+00:00"))
+                if end_dt <= now:
+                    continue  # expired
+            except Exception:
+                continue
+            slug = r.get("slug")
+            if not slug:
+                continue
+            pts = get_price_history(slug)
+            if pts:
+                r["price_history"] = pts
+    except Exception as e:
+        logger.warning("price history enrichment failed: %s", e)
+
+    return relevant
+
+
+@router.get("/signals/clarity")
+async def get_clarity_widget_data():
+    """Lightweight payload for the CLARITY Act tracker widget.
+
+    Returns only CLARITY-relevant markets + crypto industry money overlay.
+    Reads from on-disk caches to avoid recomputing the full election overlay.
+    Typical payload: &lt;150KB (vs ~3.2MB for /signals/elections).
+    """
+    import json as _json
+    from fastapi.responses import JSONResponse
+
+    out = {
+        "timestamp": None,
+        "clarity_markets": [],
+        "policy_pulse": {"cross_spreads": []},
+        "crypto_money": {"fec_pacs": {"committees": [], "grand_total_spend": 0},
+                         "lda_clarity": {"clients": [], "total_spend": 0},
+                         "fairshake_funders": {"top_funders": [], "top_funders_total": 0},
+                         "vote_alignment": {"matched_recipients": 0, "vote_meta": {}}},
+        "clarity_bills": {"congress": 119, "bills": []},
+        "source": "disk_cache",
+    }
+
+    # Bill status overlay (GovTrack — has its own 6h file cache)
+    try:
+        from signals.congress_bill_tracker import build_clarity_bills_overlay
+        out["clarity_bills"] = build_clarity_bills_overlay()
+    except Exception as e:
+        logger.warning("clarity_bills overlay failed: %s", e)
+
+    # In-memory cache (freshest) → fall back to disk caches
+    policy_pulse = None
+    if _election_cache.get("data"):
+        ins = _election_cache["data"].get("insights") or {}
+        policy_pulse = ins.get("policy_pulse")
+        out["crypto_money"] = ins.get("crypto_money") or out["crypto_money"]
+        out["timestamp"] = _election_cache["data"].get("timestamp")
+        out["source"] = "memory_cache"
+
+    if not policy_pulse:
+        try:
+            pp_path = Path(__file__).parent.parent.parent / "storage" / "policy_pulse_cache.json"
+            if pp_path.exists():
+                cached = _json.loads(pp_path.read_text())
+                policy_pulse = cached.get("policy_pulse") or cached
+        except Exception as e:
+            logger.warning("policy_pulse cache read failed: %s", e)
+
+    if out["crypto_money"]["fec_pacs"].get("grand_total_spend", 0) == 0:
+        try:
+            cm_path = Path(__file__).parent.parent.parent / "storage" / "crypto_money_cache.json"
+            if cm_path.exists():
+                out["crypto_money"] = _json.loads(cm_path.read_text())
+        except Exception as e:
+            logger.warning("crypto_money cache read failed: %s", e)
+
+    if policy_pulse:
+        out["clarity_markets"] = _filter_clarity_markets(policy_pulse)
+        # Pass through cross_spreads (lightweight, used for platform compare)
+        out["policy_pulse"]["cross_spreads"] = (policy_pulse.get("cross_spreads") or [])[:20]
+
+    return JSONResponse(
+        content=out,
+        headers={"Cache-Control": "public, max-age=300, stale-while-revalidate=900"},
+    )
