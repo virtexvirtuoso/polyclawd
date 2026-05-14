@@ -1792,6 +1792,41 @@ async def get_resolve_log(limit: int = Query(default=20)):
 # Equity Curve
 # ============================================================================
 
+@router.get("/portfolio/equity-series")
+async def get_portfolio_equity_series(hours: int = Query(default=0, ge=0, le=8760)):
+    """Time-series equity snapshots (realized + unrealized).
+
+    Each point: {ts, realized_bankroll, unrealized_pnl, total_equity, open_positions, peak_equity, source}
+    On first call, auto-backfills from closed trade history. Pass hours=0 (default)
+    for all snapshots, or hours=N to limit to the last N hours.
+    """
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from paper_portfolio import get_equity_series, backfill_equity_snapshots
+        # Auto-backfill on first call — idempotent
+        backfill_equity_snapshots()
+        return get_equity_series(hours=hours or None)
+    except Exception as e:
+        logger.exception(f"Equity series failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/portfolio/equity-snapshot")
+async def post_portfolio_equity_snapshot():
+    """Force-capture a single equity snapshot now. Used by scheduler/debug."""
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from paper_portfolio import snapshot_equity
+        return snapshot_equity()
+    except Exception as e:
+        logger.exception(f"Equity snapshot failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/portfolio/equity-curve")
 async def get_portfolio_equity_curve():
     """Get equity curve data points from paper_portfolio_state table."""
@@ -2018,26 +2053,29 @@ async def get_source_weights():
 
 @router.get("/signals/weather/ensemble-status")
 async def weather_ensemble_status():
-    """Ensemble health: per-source status, coverage matrix, distribution."""
+    """Ensemble health: per-source status, RMSE, calibration, paper P&L.
+
+    Reads directly from local SQLite tables — no upstream API calls — so it
+    returns in <100ms. (The old implementation probed five cities first to
+    warm caches, which made the endpoint take 90s+ against slow providers.)
+    """
     import asyncio
     try:
         signals_path = _get_signals_path()
         if signals_path not in sys.path:
             sys.path.insert(0, signals_path)
-        from weather_ensemble import get_ensemble_status, get_ensemble_forecast
+        from weather_ensemble import get_ensemble_status
         loop = asyncio.get_event_loop()
-
-        # Workers don't share memory — probe 5 diverse cities to warm caches
-        from datetime import datetime, timedelta
-        tomorrow = (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%d")
-        probe_cities = ["miami", "london", "tokyo", "chicago", "sao paulo"]
-        for city in probe_cities:
-            await loop.run_in_executor(None, get_ensemble_forecast, city, tomorrow)
-
         return await loop.run_in_executor(None, get_ensemble_status)
+    except ImportError as e:
+        logger.warning(f"Ensemble status unavailable: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="weather ensemble status function not available on this server",
+        )
     except Exception as e:
         logger.exception(f"Ensemble status failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="ensemble status failed")
 
 
 @router.get("/signals/weather")
