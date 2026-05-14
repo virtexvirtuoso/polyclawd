@@ -2,10 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Virtuoso Prediction</title>
 <script src="auth.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
 <script src="https://unpkg.com/lucide@latest"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -15,6 +18,9 @@
     --accent:#6c5ce7;--accent2:#a29bfe;--green:#00d68f;--red:#f65164;
     --orange:#f0a050;--cyan:#4ecdc4;--text:#e8e8f0;--text2:#6b6b85;--gold:#ffd700;
     --noise-opacity:0.03;--shadow:rgba(0,0,0,0.3);
+    --card-bg:linear-gradient(135deg, rgba(17,17,24,0.8), rgba(22,22,32,0.6));
+    --card-border:rgba(255,255,255,0.04);--card-inset:rgba(255,255,255,0.03);
+    --chart-bg:rgba(10,10,15,0.5);
   }
   /* Light mode */
   [data-theme="light"] {
@@ -22,6 +28,9 @@
     --accent:#5b4cdb;--accent2:#6c5ce7;--green:#00a843;--red:#e53935;
     --orange:#f57c00;--cyan:#0097a7;--text:#1a1a2e;--text2:#6b6b80;--gold:#c49000;
     --noise-opacity:0;--shadow:rgba(0,0,0,0.08);
+    --card-bg:linear-gradient(135deg, rgba(255,255,255,0.9), rgba(245,245,248,0.7));
+    --card-border:rgba(0,0,0,0.06);--card-inset:rgba(255,255,255,0.5);
+    --chart-bg:rgba(245,245,248,0.6);
   }
   /* Auto — respects OS preference when no manual override */
   @media(prefers-color-scheme:light){
@@ -30,6 +39,9 @@
       --accent:#5b4cdb;--accent2:#6c5ce7;--green:#00a843;--red:#e53935;
       --orange:#f57c00;--cyan:#0097a7;--text:#1a1a2e;--text2:#6b6b80;--gold:#c49000;
       --noise-opacity:0;--shadow:rgba(0,0,0,0.08);
+      --card-bg:linear-gradient(135deg, rgba(255,255,255,0.9), rgba(245,245,248,0.7));
+      --card-border:rgba(0,0,0,0.06);--card-inset:rgba(255,255,255,0.5);
+      --chart-bg:rgba(245,245,248,0.6);
     }
   }
   /* Theme toggle */
@@ -51,9 +63,37 @@
   .timestamp{display:inline-block;margin-top:16px;padding:6px 16px;background:rgba(0,214,143,0.06);border:1px solid rgba(0,214,143,0.15);border-radius:20px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text2)}
   .live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:6px;animation:pulse 2s infinite;box-shadow:0 0 8px rgba(0,214,143,0.6),0 0 20px rgba(0,214,143,0.2)}
   @keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 8px rgba(0,214,143,0.6),0 0 20px rgba(0,214,143,0.2)}50%{opacity:0.4;box-shadow:0 0 4px rgba(0,214,143,0.3),0 0 10px rgba(0,214,143,0.1)}}
+  .timestamp.stale .live-dot{background:var(--orange);box-shadow:0 0 8px rgba(240,160,80,0.6),0 0 20px rgba(240,160,80,0.2);animation:none}
 
   /* Controls */
-  .controls{display:flex;gap:12px;align-items:center;justify-content:center;margin-bottom:40px}
+  .controls{display:flex;gap:12px;align-items:center;justify-content:center;margin-bottom:16px;flex-wrap:wrap}
+
+  /* Liquidity-adaptive sizing toggle bar */
+  .liq-bar{display:flex;gap:14px;align-items:center;justify-content:center;flex-wrap:wrap;
+    margin:0 auto 32px;padding:10px 16px;max-width:760px;
+    background:var(--card-bg);border:1px solid var(--card-border);border-radius:10px;
+    font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text2)}
+  .liq-bar .liq-title{display:flex;align-items:center;gap:6px;color:var(--text);font-weight:600;letter-spacing:0.3px;text-transform:uppercase}
+  .liq-bar .liq-title .dot{width:6px;height:6px;border-radius:50%;background:var(--text2);transition:all .2s}
+  .liq-bar.on .liq-title .dot{background:var(--green);box-shadow:0 0 8px rgba(0,214,143,0.6)}
+  .liq-switch{position:relative;display:inline-block;width:32px;height:18px;flex-shrink:0}
+  .liq-switch input{opacity:0;width:0;height:0}
+  .liq-slider{position:absolute;cursor:pointer;inset:0;background:var(--border);transition:.2s;border-radius:18px}
+  .liq-slider::before{content:"";position:absolute;height:12px;width:12px;left:3px;top:3px;background:#fff;transition:.2s;border-radius:50%}
+  .liq-switch input:checked + .liq-slider{background:var(--green)}
+  .liq-switch input:checked + .liq-slider::before{transform:translateX(14px)}
+  .liq-bar .liq-field{display:flex;align-items:center;gap:6px}
+  .liq-bar .liq-field label{font-size:10px;text-transform:uppercase;letter-spacing:0.3px;color:var(--text2)}
+  .liq-bar input[type="number"]{width:52px;padding:3px 5px;font-family:'JetBrains Mono',monospace;font-size:11px;
+    background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);text-align:right}
+  .liq-bar input[type="number"]:focus{outline:none;border-color:var(--accent)}
+  .liq-save{padding:4px 10px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px;
+    background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);cursor:pointer;font-family:inherit}
+  .liq-save:hover{border-color:var(--accent);color:var(--text)}
+  .liq-save.saved{border-color:var(--green);color:var(--green)}
+  .liq-save.error{border-color:var(--red);color:var(--red)}
+  .liq-hint{font-size:10px;color:var(--text2);opacity:0.7}
+  @media(max-width:600px){.liq-bar{padding:10px 12px;gap:10px}.liq-bar .liq-hint{display:none}}
   .btn{padding:10px 24px;border-radius:10px;border:1px solid var(--border);cursor:pointer;font-family:'Inter',sans-serif;font-weight:600;font-size:13px;transition:all 0.25s;display:inline-flex;align-items:center;gap:8px}
   .btn-primary{background:linear-gradient(135deg,var(--accent),#7c3aed);border-color:var(--accent);color:#fff}
   .btn-primary:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(108,92,231,0.3)}
@@ -64,7 +104,7 @@
 
   /* Stats Row */
   .stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:48px}
-  .stat-card{background:linear-gradient(135deg, rgba(17,17,24,0.8), rgba(22,22,32,0.6));backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.04);box-shadow:0 2px 8px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.03);border-radius:12px;padding:18px 20px;position:relative;overflow:hidden;transition:border-color 0.3s}
+  .stat-card{background:var(--card-bg);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid var(--card-border);box-shadow:0 2px 8px var(--shadow), inset 0 1px 0 var(--card-inset);border-radius:12px;padding:18px 20px;position:relative;overflow:hidden;transition:border-color 0.3s}
   .stat-card:hover{border-color:var(--accent)}
   .stat-card::after{content:'';position:absolute;top:0;left:0;right:0;height:2px}
   .stat-card.bankroll::after{background:linear-gradient(90deg,var(--accent),var(--cyan))}
@@ -88,7 +128,7 @@
   .stats-row.skeleton .stat-sub{color:transparent!important;background:linear-gradient(90deg,var(--surface2) 25%,var(--border) 50%,var(--surface2) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:4px;min-height:1em}
 
   /* Section Cards */
-  .section-card{background:linear-gradient(135deg, rgba(17,17,24,0.8), rgba(22,22,32,0.6));backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.04);box-shadow:0 2px 8px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.03);border-radius:16px;margin-bottom:32px;overflow:hidden;transition:border-color 0.3s}
+  .section-card{background:var(--card-bg);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid var(--card-border);box-shadow:0 2px 8px var(--shadow), inset 0 1px 0 var(--card-inset);border-radius:16px;margin-bottom:32px;overflow:hidden;transition:border-color 0.3s}
   .section-card:hover{border-color:var(--accent)}
   .section-header{display:flex;align-items:center;justify-content:space-between;padding:20px 28px;border-bottom:1px solid var(--border);background:var(--surface2);position:relative}
   .section-title{display:flex;align-items:center;gap:12px}
@@ -128,6 +168,8 @@
   .pos-stat{background:var(--surface);border-radius:8px;padding:8px 10px}
   .pos-stat-label{font-size:9px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text2);margin-bottom:2px}
   .pos-stat-value{font-size:14px;font-weight:600;font-family:'JetBrains Mono',monospace}
+  .pos-stat-secondary{opacity:0.65}
+  .pos-stat-secondary .pos-stat-value{font-size:12px}
   .pos-platform{margin-top:12px;display:flex;justify-content:space-between;align-items:center}
   .platform-tag{font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text2);padding:3px 8px;background:var(--surface);border-radius:4px}
   .pos-days{font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace}
@@ -152,9 +194,14 @@
   .mono{font-family:'JetBrains Mono',monospace}
   .result-won{color:var(--green);font-weight:700;text-shadow:0 0 12px rgba(0,214,143,0.4)}
   .result-lost{color:var(--red);font-weight:700;text-shadow:0 0 12px rgba(246,81,100,0.4)}
+  /* Result & Reason cell alignment */
+  td[data-label="Result"]{white-space:nowrap}
+  td[data-label="Reason"]{max-width:260px;overflow-x:auto;white-space:nowrap;scrollbar-width:thin}
+  td[data-label="Reason"]::-webkit-scrollbar{height:3px}
+  td[data-label="Reason"]::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
 
   /* Chart */
-  .chart-container{height:300px;position:relative;border:1px solid var(--border);border-radius:10px;padding:20px 16px 12px;background:rgba(10,10,15,0.5)}
+  .chart-container{height:300px;position:relative;border:1px solid var(--border);border-radius:10px;padding:20px 16px 12px;background:var(--chart-bg)}
 
   /* Equity summary strip above chart */
   .equity-summary{display:flex;gap:24px;align-items:baseline;margin-bottom:16px;padding:0 4px;flex-wrap:wrap}
@@ -166,6 +213,19 @@
   .equity-range{display:flex;gap:16px;font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace;padding:0 4px}
   .equity-range span{display:flex;align-items:center;gap:4px}
   .equity-range .dot{width:6px;height:6px;border-radius:50%;display:inline-block}
+
+  /* Range presets (zoom buttons) */
+  .range-presets{display:flex;gap:6px;align-items:center;margin-bottom:10px;padding:0 4px;flex-wrap:wrap}
+  .range-btn{background:transparent;border:1px solid var(--border);color:var(--text2);font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;padding:5px 10px;border-radius:6px;cursor:pointer;transition:all 0.15s ease;letter-spacing:0.3px}
+  .range-btn:hover{border-color:var(--accent);color:var(--text)}
+  .range-btn.active{background:rgba(255,215,0,0.12);border-color:var(--gold);color:var(--gold)}
+  .range-btn.reset{margin-left:auto;color:var(--text2);display:flex;align-items:center;gap:4px}
+  .range-btn.reset svg{width:12px;height:12px}
+  .range-hint{font-size:10px;color:var(--text2);opacity:0.6;font-family:'JetBrains Mono',monospace;margin-left:8px}
+  @media (max-width:640px){
+    .range-hint{display:none}
+    .range-btn{padding:4px 8px;font-size:10px}
+  }
 
   /* Empty state */
   .empty{color:var(--text2);text-align:center;padding:40px;font-size:14px}
@@ -181,8 +241,42 @@
   .nav-link:hover{border-color:var(--accent);color:var(--accent2)}
 
   /* Market link */
-  .market-link{color:var(--text);text-decoration:none;transition:color 0.2s}
+  .market-link{color:var(--text);text-decoration:none;transition:color 0.2s;display:inline-block;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
   .market-link:hover{color:var(--accent2);text-decoration:underline}
+
+  /* Resolve Log - Section Header with Chevron */
+  .section-header.resolve-header .section-header-right{display:flex;align-items:center;gap:8px}
+  .section-chevron{width:16px;height:16px;stroke-width:2;transition:transform 0.3s ease;opacity:0.6;flex-shrink:0}
+  .section-card.collapsed .section-chevron{transform:rotate(-180deg)}
+  /* Resolve Log - Mobile optimized row */
+  .resolve-row{display:flex;flex-direction:column;gap:4px;padding:10px 0;border-bottom:1px solid var(--border)}
+  .resolve-row:last-child{border-bottom:none}
+  /* Row 1: full market title on its own line */
+  .resolve-market{font-size:14px;font-weight:500;width:100%;word-break:break-word}
+  /* Row 2: time, outcome, pnl, reason */
+  .resolve-bottom{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .resolve-top{display:flex;align-items:center;gap:8px}
+  .resolve-time{font-size:11px;color:var(--text2);font-family:'JetBrains Mono',monospace;flex-shrink:0;white-space:nowrap}
+  .resolve-outcome{flex-shrink:0}
+  .resolve-pnl{font-family:'JetBrains Mono',monospace;font-size:12px;flex-shrink:0;font-weight:600}
+  .resolve-reason-container{display:flex;align-items:center;gap:6px;flex-shrink:0;max-width:220px;overflow-x:auto;scrollbar-width:thin}
+  .resolve-reason-container::-webkit-scrollbar{height:3px}
+  .resolve-reason-container::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+  .resolve-reason-text{font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;white-space:nowrap}
+  /* Resolve log badges */
+  .resolve-badge{font-size:12px}
+  .badge-clock{background:rgba(255,255,255,0.05);border-radius:4px;padding:2px 6px}
+  .badge-stop{background:rgba(246,81,100,0.15);color:var(--red);border-radius:4px;padding:2px 6px}
+  .badge-warning{background:rgba(240,160,80,0.15);color:var(--orange);border-radius:4px;padding:2px 6px}
+  .badge-manual{background:rgba(136,136,160,0.15);color:var(--text2);border-radius:4px;padding:2px 6px}
+  .badge-void{background:rgba(255,255,255,0.05);border-radius:4px;padding:2px 6px}
+  /* Resolve Log Mobile - single line fallback for very small screens */
+  @media(max-width:400px){
+    .resolve-pnl{font-size:11px}
+    .resolve-reason-text{font-size:9px}
+  }
+  /* Ensure chevron is visible even when collapsed */
+  .section-card.collapsed .section-body{max-height:0;overflow:hidden}
 
   /* Stale position warning */
   .pos-card.stale{border-color:var(--orange)}
@@ -214,11 +308,6 @@
   .capacity-badge.ok{background:rgba(0,230,118,0.1);color:var(--green);border:1px solid rgba(0,230,118,0.2)}
 
   /* Resolve log */
-  .resolve-row{display:flex;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);gap:10px;font-size:12px}
-  .resolve-row:last-child{border:none}
-  .resolve-time{font-family:'JetBrains Mono',monospace;color:var(--text2);white-space:nowrap;font-size:11px}
-  .resolve-market{flex:1;font-weight:500}
-
   /* Hero stats toggle */
   .stats-primary{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:16px}
   .stats-details{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:0;overflow:hidden;transition:max-height 0.3s ease-out,margin-top 0.3s ease-out,opacity 0.3s ease-out}
@@ -271,6 +360,7 @@
     /* Table horizontal scroll fallback */
     .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -16px;padding:0 16px}
     th,td{padding:8px 10px;font-size:12px}
+    .market-link{max-width:220px}
     /* Signal rows */
     .signal-row{flex-wrap:wrap;gap:8px;padding:10px 0}
     .signal-market{flex-basis:100%;font-size:12px}
@@ -289,14 +379,16 @@
     /* Hide desktop controls on mobile — sticky bar replaces them */
     .controls{display:none}
   }
-  /* Phone breakpoint */
+  /* Phone breakpoint (iPhone 15 Pro Max = 430px) */
   @media(max-width:480px){
-    .container{padding:16px 10px}
+    .container{padding:16px 10px;padding-top:calc(16px + env(safe-area-inset-top,0px))}
     h1{font-size:22px}
     .subtitle{font-size:12px}
-    .stats-row{grid-template-columns:1fr;gap:8px}
-    .stat-value{font-size:20px}
-    .stat-label{font-size:9px}
+    .stats-row{grid-template-columns:repeat(2,1fr);gap:8px}
+    .stat-card{padding:10px 12px}
+    .stat-value{font-size:18px}
+    .stat-label{font-size:8px;letter-spacing:2px}
+    .stat-sub{font-size:9px}
     .section-body{padding:12px}
     .section-header{padding:12px 14px}
     .section-title h2{font-size:14px}
@@ -306,9 +398,11 @@
     .equity-hero{font-size:20px}
     .equity-range{flex-wrap:wrap;gap:8px}
     /* Resolve log mobile */
-    .resolve-row{flex-wrap:wrap;gap:4px;padding:10px 0}
-    .resolve-market{flex-basis:100%;font-size:12px}
+    .resolve-row{gap:6px}
+    .resolve-market{font-size:13px;line-height:1.4}
     .resolve-time{font-size:10px}
+    .resolve-pnl{font-size:11px}
+    .resolve-reason-text{font-size:9px}
     /* Tables → card layout */
     .table-wrap{overflow-x:visible;margin:0;padding:0}
     table thead,
@@ -319,13 +413,21 @@
     .arch-table tbody td{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border:none;font-size:13px}
     table tbody td::before,
     .arch-table tbody td::before{content:attr(data-label);color:var(--text2);font-size:10px;text-transform:uppercase;letter-spacing:1px;flex-shrink:0;margin-right:12px}
+    /* Reason text can truncate on small screens */
+    table tbody td[data-label="Reason"] .resolve-reason-text{overflow-x:auto;white-space:nowrap;max-width:200px;display:inline-block;scrollbar-width:thin}
+    .market-link{max-width:100%;white-space:normal}
     /* Hide volume bar column on mobile cards */
     .arch-table tbody td:last-child .arch-bar{display:inline-block;max-width:60px}
     .arch-spark{width:60px;height:20px}
+    /* Timestamp + nav tighter */
+    .timestamp{font-size:11px;padding:4px 12px}
   }
   @media(max-width:380px){
+    .stats-row{grid-template-columns:1fr}
     .pos-grid{grid-template-columns:1fr}
     .stat-value{font-size:18px}
+    .resolve-market{font-size:12px}
+    .resolve-time{font-size:9px}
   }
   /* Touch-specific: replace hover with active */
   @media(hover:none) and (pointer:coarse){
@@ -340,7 +442,7 @@
 <div class="noise"></div>
 <div class="container">
 
-<nav style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px 0;gap:8px"><div style="display:flex;gap:8px;flex-wrap:wrap"><a href="analysis.html" class="nav-link"><i data-lucide="arrow-left" style="width:14px;height:14px;vertical-align:-2px"></i> Analysis</a><a href="how-it-works.html" class="nav-link">How It Works</a></div><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode" aria-label="Toggle theme" id="themeBtn"><i data-lucide="moon" style="width:16px;height:16px"></i></button></nav>
+<nav style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px 0;gap:8px"><div style="display:flex;gap:8px;flex-wrap:wrap"><a href="analysis.html" class="nav-link"><i data-lucide="arrow-left" style="width:14px;height:14px;vertical-align:-2px"></i> Analysis</a><a href="how-it-works.html" class="nav-link">How It Works</a><a href="elections.html" class="nav-link">Elections</a></div><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode" aria-label="Toggle theme" id="themeBtn"><i data-lucide="moon" style="width:16px;height:16px"></i></button></nav>
 <header>
   <div class="logo">Virtuoso</div>
   <h1>Prediction</h1>
@@ -351,6 +453,26 @@
 <div class="controls">
   <button class="btn btn-secondary" onclick="loadAll()"><i data-lucide="refresh-cw" style="width:14px;height:14px"></i> Refresh</button>
   <span class="status-msg" id="statusMsg"></span>
+</div>
+
+<div class="liq-bar" id="liqBar" title="Walks the Polymarket CLOB before entry. Uses the realistic fill price and caps bets at actual book depth. Kalshi signals pass through unchanged.">
+  <span class="liq-title"><span class="dot"></span>Liquidity-Adaptive Sizing</span>
+  <label class="liq-switch">
+    <input type="checkbox" id="liqEnabled" onchange="onLiqToggleChange()">
+    <span class="liq-slider"></span>
+  </label>
+  <div class="liq-field">
+    <label for="liqSlip">Slip</label>
+    <input type="number" id="liqSlip" min="1" max="1000" step="1" value="50">
+    <span style="font-size:10px">bps</span>
+  </div>
+  <div class="liq-field">
+    <label for="liqMin">Min Book</label>
+    <span style="font-size:10px">$</span>
+    <input type="number" id="liqMin" min="1" max="1000" step="1" value="15">
+  </div>
+  <button class="liq-save" id="liqSaveBtn" onclick="saveLiquiditySizing()">Save</button>
+  <span class="liq-hint">Polymarket only</span>
 </div>
 
 <div class="stats-primary skeleton">
@@ -416,28 +538,15 @@
       <span class="section-icon positions"><i data-lucide="briefcase"></i></span>
       <h2>Open Positions</h2>
     </div>
-    <span class="section-count" id="openCount">0 open</span>
   </div>
   <div class="section-body">
     <div class="positions-grid" id="openPositions">
-      <div class="empty"><div class="empty-icon"><i data-lucide="inbox"></i></div>No open positions — process signals to start trading</div>
+      <div class="empty"><div class="empty-icon"><i data-lucide="inbox"></i></div>No open positions — watchdog is scanning for opportunities</div>
     </div>
   </div>
 </div>
 
-<!-- Resolve Log -->
-<div class="section-card" data-collapsible>
-  <div class="section-header" onclick="toggleSection(this)">
-    <div class="section-title">
-      <span class="section-icon resolve"><i data-lucide="rotate-ccw"></i></span>
-      <h2>Resolve Log</h2>
-    </div>
-    <span class="section-count" id="resolveCount">—</span>
-  </div>
-  <div class="section-body" id="resolveLog">
-    <div class="empty"><div class="empty-icon"><i data-lucide="clock"></i></div>No resolutions yet</div>
-  </div>
-</div>
+<!-- Resolve Log merged into Trade History -->
 
 <!-- Equity Curve -->
 <div class="section-card" data-collapsible>
@@ -449,6 +558,15 @@
   </div>
   <div class="section-body">
     <div class="equity-summary" id="equitySummary"></div>
+    <div class="range-presets" id="rangePresets">
+      <button class="range-btn" data-range="1D" onclick="setEquityRange('1D')">1D</button>
+      <button class="range-btn active" data-range="1W" onclick="setEquityRange('1W')">1W</button>
+      <button class="range-btn" data-range="1M" onclick="setEquityRange('1M')">1M</button>
+      <button class="range-btn" data-range="3M" onclick="setEquityRange('3M')">3M</button>
+      <button class="range-btn" data-range="ALL" onclick="setEquityRange('ALL')">ALL</button>
+      <span class="range-hint">scroll to zoom · drag to pan</span>
+      <button class="range-btn reset" onclick="resetEquityZoom()" title="Reset zoom"><i data-lucide="rotate-ccw"></i></button>
+    </div>
     <div class="chart-container"><canvas id="equityChart"></canvas></div>
     <div class="equity-range" id="equityRange"></div>
   </div>
@@ -461,7 +579,6 @@
       <span class="section-icon history"><i data-lucide="scroll-text"></i></span>
       <h2>Trade History</h2>
     </div>
-    <span class="section-count" id="historyCount">0 trades</span>
   </div>
   <div class="section-body" id="tradeHistory">
     <div class="empty"><div class="empty-icon"><i data-lucide="hourglass"></i></div>No closed trades yet — waiting for market resolutions</div>
@@ -475,7 +592,6 @@
       <span class="section-icon signals"><i data-lucide="dna"></i></span>
       <h2>Archetype Breakdown</h2>
     </div>
-    <span class="section-count" id="archCount">—</span>
   </div>
   <div class="section-body" id="archetypeBreakdown">
     <div class="empty"><div class="empty-icon"><i data-lucide="dna"></i></div>No resolved trades yet — breakdown appears after positions close</div>
@@ -489,7 +605,6 @@
       <span class="section-icon guards"><i data-lucide="shield-check"></i></span>
       <h2>Risk Guards</h2>
     </div>
-    <span class="section-count" id="guardStatus">loading…</span>
   </div>
   <div class="section-body">
     <div class="stats-row" id="riskGuards" style="margin-bottom:0">
@@ -527,6 +642,9 @@
 <script>
 const API = '/polyclawd/api';
 let equityChart = null;
+let equityChartMeta = { useTime: false, minX: null, maxX: null, hasTime: false };
+let currentRangePreset = '1W';  // default view on load — zooms to the most recent week
+let manualViewRange = null;  // {min, max} in ms when user has manually zoomed/panned
 let cachedUnrealizedPnl = 0;
 let autoRefreshInterval = null;
 let countdownInterval = null;
@@ -611,13 +729,20 @@ initCollapsible();
 function marketUrl(p) {
   const id = p.market_id || p.id || '';
   const plat = (p.platform || '').toLowerCase();
+  const title = p.market_title || p.market || '';
   if (plat === 'kalshi' || (!plat && !id.startsWith('0x'))) {
-    return id ? `https://kalshi.com/markets/${id}` : '';
+    // Kalshi: ticker-based URL (e.g. KXTEMPD-26APR07-NYC-B60)
+    // Event tickers need /markets/<event_ticker>, contract tickers need the same
+    return id ? `https://kalshi.com/markets/${id.split('-').slice(0, 1).join('-')}` : '';
   }
-  // Use market_slug for working Polymarket links (/market/<slug> -> 307 redirect)
+  // Polymarket: use slug if available, otherwise search by title
   const slug = p.market_slug || '';
-  if (slug) return `https://polymarket.com/market/${slug}`;
-  // No slug available — condition_id URLs don't work on Polymarket
+  if (slug) return `https://polymarket.com/event/${slug}`;
+  // Fallback: Polymarket search — strip "Will " prefix for tighter results
+  if (title) {
+    const q = title.replace(/^Will\s+/i, '').substring(0, 80);
+    return `https://polymarket.com/markets?_q=${encodeURIComponent(q)}`;
+  }
   return '';
 }
 
@@ -656,14 +781,14 @@ async function loadAll() {
     // Auto-resolve stale positions first (fire-and-forget)
     fetch(`${API}/portfolio/resolve`, { method: 'POST' }).catch(() => {});
 
-    const [statusRes, liveRes, histRes, archRes, archPnlRes, resolveLogRes, guardsRes] = await Promise.all([
+    const [statusRes, liveRes, histRes, archRes, archPnlRes, guardsRes, equitySeriesRes] = await Promise.all([
       fetch(`${API}/portfolio/status`).then(r => r.json()).catch(() => ({})),
       fetch(`${API}/portfolio/positions-live`).then(r => r.json()).catch(() => null),
-      fetch(`${API}/portfolio/history?limit=50`).then(r => r.json()).catch(() => []),
+      fetch(`${API}/portfolio/history?limit=1000`).then(r => r.json()).catch(() => []),
       fetch(`${API}/portfolio/archetype-breakdown`).then(r => r.json()).catch(() => null),
       fetch(`${API}/portfolio/archetype-pnl-series`).then(r => r.json()).catch(() => null),
-      fetch(`${API}/portfolio/resolve-log?limit=15`).then(r => r.json()).catch(() => []),
       fetch(`${API}/portfolio/risk-guards`).then(r => r.json()).catch(() => null),
+      fetch(`${API}/portfolio/equity-series`).then(r => r.json()).catch(() => []),
     ]);
 
     renderStatus(statusRes, archRes);
@@ -672,15 +797,16 @@ async function loadAll() {
     const positions = liveRes ? liveRes.positions : (statusRes.positions || []);
     renderPositions(positions);
     if (liveRes) renderUnrealizedPnl(liveRes);
-    renderHistory(histRes, liveRes);
+    renderHistory(histRes, liveRes, statusRes, equitySeriesRes);
     if (archRes) renderArchetypeBreakdown(archRes, archPnlRes);
-    renderResolveLog(resolveLogRes);
     reinitIcons();
     document.querySelector('.stats-primary.skeleton')?.classList.remove('skeleton');
     document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+    document.querySelector('.timestamp')?.classList.remove('stale');
   } catch(e) {
     console.error('Load failed:', e);
     document.getElementById('statusMsg').innerHTML = icon('alert-triangle', 14) + ' API unreachable'; reinitIcons();
+    document.querySelector('.timestamp')?.classList.add('stale');
   }
 }
 
@@ -713,7 +839,6 @@ function renderStatus(s, archRes) {
   const open = s.open_positions || 0;
   const total = s.total_trades || 0;
   document.getElementById('tradeCount').textContent = `${open} / ${total}`;
-  document.getElementById('openCount').textContent = `${open} open`;
 
   // Average hold time from archetype breakdown
   const avgHold = archRes ? archRes.avg_hold_days : 0;
@@ -729,7 +854,7 @@ function renderStatus(s, archRes) {
 function renderRiskGuards(g) {
   const statusEl = document.getElementById('guardStatus');
   if (!g || g.detail) {
-    statusEl.textContent = 'unavailable';
+    if (statusEl) statusEl.textContent = 'unavailable';
     document.getElementById('kellyMode').textContent = '—';
     document.getElementById('corrStatus').textContent = '—';
     return;
@@ -757,6 +882,15 @@ function renderRiskGuards(g) {
     kellySub.textContent = `WR ${(k.rolling_wr * 100).toFixed(0)}% / ${k.rolling_trades} trades — 1/6 Kelly`;
   }
   kellyEl.style.fontSize = '16px';
+  // Conviction scaling indicator
+  const ct = k.confidence_tier;
+  const cm = k.conviction_mult;
+  if (ct && ct !== 'normal') {
+    const tierColors = {high: '#00e676', weak: '#ff9800'};
+    const tierIcons = {high: 'trending-up', weak: 'trending-down'};
+    const tierLabels = {high: `${cm}x conviction`, weak: `${cm}x conviction`};
+    kellySub.innerHTML += ` · <span style="color:${tierColors[ct] || '#888'}">${icon(tierIcons[ct] || 'minus', 11)} ${tierLabels[ct] || ct}</span>`;
+  }
 
   // Correlation
   const corr = g.correlation || {};
@@ -780,7 +914,7 @@ function renderRiskGuards(g) {
   if (k.status === 'paused') alerts.push('PAUSED');
   if (k.status === 'cold') alerts.push('COLD');
   if (groups.some(([_, v]) => v.full)) alerts.push('CAP HIT');
-  statusEl.innerHTML = alerts.length > 0 ? icon('alert-triangle', 12) + ' ' + alerts.join(' · ') : icon('check-circle', 12) + ' all clear'; reinitIcons();
+  if (statusEl) { statusEl.innerHTML = alerts.length > 0 ? icon('alert-triangle', 12) + ' ' + alerts.join(' · ') : icon('check-circle', 12) + ' all clear'; reinitIcons(); }
 }
 
 function renderRiskExposure(s) {
@@ -823,7 +957,7 @@ function renderUnrealizedPnl(liveRes) {
 function renderPositions(positions) {
   const el = document.getElementById('openPositions');
   if (!positions.length) {
-    el.innerHTML = '<div class="empty"><div class="empty-icon">' + icon('inbox', 32) + '</div>No open positions — process signals to start trading</div>'; reinitIcons();
+    el.innerHTML = '<div class="empty"><div class="empty-icon">' + icon('inbox', 32) + '</div>No open positions — watchdog is scanning for opportunities</div>'; reinitIcons();
     return;
   }
   
@@ -877,11 +1011,11 @@ function renderPositions(positions) {
           <div class="pos-stat-label">Unrealized</div>
           <div class="pos-stat-value ${unreal != null ? (unreal >= 0 ? 'green' : 'red') : ''}">${unreal != null ? (unreal >= 0 ? '+' : '') + '$' + unreal.toFixed(2) : '—'}</div>
         </div>
-        <div class="pos-stat" style="opacity:0.5">
+        <div class="pos-stat pos-stat-secondary">
           <div class="pos-stat-label">Confidence</div>
-          <div class="pos-stat-value" style="font-size:12px">${((p.confidence || 0) > 1 ? (p.confidence || 0) : (p.confidence || 0) * 100).toFixed(0)}%</div>
+          <div class="pos-stat-value" style="font-size:12px">${((p.confidence || 0) > 1 ? (p.confidence || 0) : (p.confidence || 0) * 100).toFixed(0)}%${(() => { const c = (p.confidence || 0) > 1 ? (p.confidence || 0) / 100 : (p.confidence || 0); return c >= 0.75 ? ' <span style="color:#00e676;font-size:10px">HIGH</span>' : c < 0.60 ? ' <span style="color:#ff9800;font-size:10px">WEAK</span>' : ''; })()}</div>
         </div>
-        <div class="pos-stat" style="opacity:0.5">
+        <div class="pos-stat pos-stat-secondary">
           <div class="pos-stat-label">Edge</div>
           <div class="pos-stat-value" style="font-size:12px">${((p.edge_pct || 0) > 1 ? (p.edge_pct || 0) : (p.edge_pct || 0) * 100).toFixed(1)}%</div>
         </div>
@@ -896,49 +1030,81 @@ function renderPositions(positions) {
 
 // Manual close removed — auto-resolver runs every 5min via watchdog
 
-function renderHistory(history, liveRes) {
+function renderHistory(history, liveRes, statusRes, equitySeries) {
   const el = document.getElementById('tradeHistory');
   const items = Array.isArray(history) ? history : (history.positions || []);
-  document.getElementById('historyCount').textContent = `${items.length} trade${items.length !== 1 ? 's' : ''}`;
   if (!items.length) {
     el.innerHTML = '<div class="empty"><div class="empty-icon">' + icon('hourglass', 32) + '</div>No closed trades yet — waiting for market resolutions</div>'; reinitIcons();
-    updateEquityChart([], liveRes);
+    updateEquityChart([], liveRes, statusRes, equitySeries);
     return;
   }
   el.innerHTML = `<div class="table-wrap"><table>
-    <thead><tr><th>Market</th><th>Side</th><th>Entry</th><th>Bet</th><th>P&L</th><th>Result</th></tr></thead>
+    <thead><tr><th>Market</th><th>Side</th><th>Entry</th><th>Bet</th><th>P&L</th><th>Result</th><th>Reason</th></tr></thead>
     <tbody>${items.map(t => {
       const pnl = t.pnl || 0;
       const tUrl = marketUrl(t);
-      const tTitle = (t.market_title || '').substring(0, 55);
+      const tTitle = t.market_title || t.market || '';
       const tTitleHtml = tUrl ? `<a href="${tUrl}" target="_blank" rel="noopener" class="market-link">${tTitle} ↗</a>` : tTitle;
+      const resultIcon = t.status === 'won'
+        ? `${icon('circle-check', 14)} Won`
+        : t.status === 'stopped'
+        ? `${icon('shield-off', 14)} Stop`
+        : `${icon('circle-x', 14)} Lost`;
+      const resultClass = t.status === 'won' ? 'result-won' : t.status === 'stopped' ? 'orange' : 'result-lost';
+      const badge = getCloseReasonBadge(t.close_reason || '');
+      const reasonText = (t.close_reason || 'auto').replace(/^auto-resolved:\s*/i, '');
       return `<tr>
         <td data-label="Market">${tTitleHtml}</td>
         <td data-label="Side"><span class="badge badge-${(t.side||'').toLowerCase()}">${t.side}</span></td>
         <td data-label="Entry" class="mono">${((t.side === 'NO' ? 1 - (t.entry_price||0) : (t.entry_price||0))*100).toFixed(0)}¢</td>
         <td data-label="Bet" class="mono">$${(t.bet_size||0).toFixed(2)}</td>
         <td data-label="P&L" class="mono ${pnl >= 0 ? 'result-won' : 'result-lost'}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
-        <td data-label="Result">${t.status === 'won' ? '<i data-lucide="circle-check" style="width:14px;height:14px;color:var(--green);vertical-align:-2px"></i> Won' : '<i data-lucide="circle-x" style="width:14px;height:14px;color:var(--red);vertical-align:-2px"></i> Lost'}</td>
+        <td data-label="Result" class="${resultClass}"><span style="display:inline-flex;align-items:center;gap:4px">${resultIcon}</span></td>
+        <td data-label="Reason"><span style="display:inline-flex;align-items:center;gap:4px">${badge}<span class="resolve-reason-text">${reasonText}</span></span></td>
       </tr>`;
     }).join('')}</tbody>
   </table></div>`;
-  updateEquityChart(items, liveRes);
+  updateEquityChart(items, liveRes, statusRes, equitySeries);
 }
 
-function updateEquityChart(history, liveRes) {
-  const sorted = [...history].reverse();
-  const START = 10000;
-  let bankroll = START;
-  const labels = ['Start'];
-  const data = [START];
+function updateEquityChart(history, liveRes, statusRes, equitySeries) {
+  const START = (statusRes && statusRes.starting_bankroll) || 10000;
 
-  sorted.forEach((t, i) => {
-    bankroll += (t.pnl || 0);
-    const d = t.closed_at ? new Date(t.closed_at) : null;
-    labels.push(d ? `${d.getMonth()+1}/${d.getDate()}` : `#${i + 1}`);
-    data.push(Math.round(bankroll * 100) / 100);
-  });
+  // Prefer the backend time-series (realized + unrealized, sub-trade cadence).
+  // Fall back to client-side reconstruction from closed trades if unavailable.
+  const useSeries = Array.isArray(equitySeries) && equitySeries.length > 0;
 
+  let points;  // [{x: Date, y: number}]
+  let bankroll;  // final realized bankroll
+  let tradesCount;  // labels for the "N trades" line
+
+  if (useSeries) {
+    // Time-series path
+    points = equitySeries.map(s => ({ x: new Date(s.ts), y: s.total_equity }));
+    // Seed with starting bankroll so the curve anchors visually at $START
+    if (points.length && points[0].y !== START) {
+      const firstTs = new Date(points[0].x.getTime() - 60000); // 1min before first snapshot
+      points.unshift({ x: firstTs, y: START });
+    }
+    // Realized bankroll = last realized_bankroll in the series (not including unrealized)
+    const last = equitySeries[equitySeries.length - 1];
+    bankroll = last.realized_bankroll;
+    tradesCount = history.length;
+  } else {
+    // Fallback: reconstruct from trade history
+    const sorted = [...history].reverse();
+    let rolling = START;
+    points = [{ x: null, y: START }];  // null → 'Start' label
+    sorted.forEach((t, i) => {
+      rolling += (t.pnl || 0);
+      const d = t.closed_at ? new Date(t.closed_at) : null;
+      points.push({ x: d, y: Math.round(rolling * 100) / 100 });
+    });
+    bankroll = rolling;
+    tradesCount = history.length;
+  }
+
+  const data = points.map(p => p.y);
   const totalUnreal = liveRes ? (liveRes.total_unrealized_pnl || 0) : 0;
   const projected = Math.round((bankroll + totalUnreal) * 100) / 100;
 
@@ -947,7 +1113,7 @@ function updateEquityChart(history, liveRes) {
   const rangeEl = document.getElementById('equityRange');
   const realPnl = bankroll - START;
   const realPct = ((realPnl / START) * 100).toFixed(1);
-  const high = Math.max(...data);
+  const high = Math.max(Math.max(...data), (statusRes && statusRes.peak_bankroll) || 0);
   const low = Math.min(...data);
   summaryEl.innerHTML = `
     <span class="equity-hero" style="color:${bankroll >= START ? 'var(--green)' : 'var(--red)'}">$${bankroll.toLocaleString('en-US',{minimumFractionDigits:2})}</span>
@@ -957,14 +1123,8 @@ function updateEquityChart(history, liveRes) {
   rangeEl.innerHTML = `
     <span><span class="dot" style="background:var(--green)"></span> High: $${high.toLocaleString('en-US',{minimumFractionDigits:2})}</span>
     <span><span class="dot" style="background:var(--red)"></span> Low: $${low.toLocaleString('en-US',{minimumFractionDigits:2})}</span>
-    <span style="margin-left:auto">${data.length - 1} trade${data.length - 1 !== 1 ? 's' : ''}</span>
+    <span style="margin-left:auto">${tradesCount} trade${tradesCount !== 1 ? 's' : ''}${useSeries ? ` · ${points.length} snapshots` : ''}</span>
   `;
-
-  // Unrealized projection
-  const finalLabels = [...labels];
-  if (totalUnreal !== 0 && data.length > 1) {
-    finalLabels.push('now');
-  }
 
   if (equityChart) equityChart.destroy();
 
@@ -978,26 +1138,36 @@ function updateEquityChart(history, liveRes) {
 
   const lineColor = isUp ? (cssVar('--green') || '#00d68f') : (cssVar('--red') || '#f65164');
 
+  // Use time axis if every point has a real Date; otherwise fall back to category.
+  const allHaveTime = points.every(p => p.x instanceof Date && !isNaN(p.x.getTime()));
+  const chartPoints = allHaveTime
+    ? points.map(p => ({ x: p.x, y: p.y }))
+    : points.map((p, i) => ({ x: p.x ? p.x.toLocaleDateString() : (i === 0 ? 'Start' : `#${i}`), y: p.y }));
+
   const datasets = [{
     label: 'Equity',
-    data,
+    data: chartPoints,
     borderColor: lineColor,
     backgroundColor: gradient,
     fill: true,
-    tension: 0.3,
-    pointRadius: data.length > 20 ? 0 : 3,
-    pointHoverRadius: 6,
+    tension: 0.25,
+    pointRadius: chartPoints.length > 30 ? 0 : 2,
+    pointHoverRadius: 5,
     pointBackgroundColor: lineColor,
     pointBorderColor: cssVar('--bg') || '#0a0a0f',
     pointBorderWidth: 2,
-    borderWidth: 2.5,
+    borderWidth: 2,
   }];
 
-  // Dotted unrealized projection
-  if (totalUnreal !== 0 && data.length > 1) {
-    const unrealLine = new Array(data.length - 1).fill(null);
-    unrealLine.push(data[data.length - 1]);
-    unrealLine.push(projected);
+  // Dotted unrealized projection — only for the fallback path. When useSeries is
+  // true, the last snapshot already includes unrealized PnL.
+  if (!useSeries && totalUnreal !== 0 && chartPoints.length > 1) {
+    const last = chartPoints[chartPoints.length - 1];
+    // Two-point dataset: anchor at last known equity, then project to "now".
+    const unrealLine = [
+      { x: last.x, y: last.y },
+      { x: allHaveTime ? new Date() : 'now', y: projected },
+    ];
     datasets.push({
       label: 'Unrealized',
       data: unrealLine,
@@ -1035,14 +1205,41 @@ function updateEquityChart(history, liveRes) {
       c.fillStyle = 'rgba(136,136,160,0.4)';
       c.font = '10px JetBrains Mono';
       c.textAlign = 'right';
-      c.fillText('$10K start', right - 4, yPixel - 6);
+      c.fillText(`$${(START / 1000).toFixed(START % 1000 === 0 ? 0 : 1)}K start`, right - 4, yPixel - 6);
       c.restore();
     }
   };
 
+  const xScaleConfig = allHaveTime ? {
+    type: 'time',
+    time: {
+      tooltipFormat: 'MMM d, HH:mm',
+      displayFormats: { hour: 'MMM d HH:mm', day: 'MMM d', week: 'MMM d', month: 'MMM yyyy' },
+    },
+    ticks: {
+      color: chartText(),
+      font: { size: 10, family: 'JetBrains Mono' },
+      maxRotation: 0,
+      maxTicksLimit: 8,
+      autoSkip: true,
+    },
+    grid: { display: false },
+    border: { display: false },
+  } : {
+    type: 'category',
+    ticks: {
+      color: chartText(),
+      font: { size: 10, family: 'JetBrains Mono' },
+      maxRotation: 0,
+      maxTicksLimit: 10,
+    },
+    grid: { display: false },
+    border: { display: false },
+  };
+
   equityChart = new Chart(ctx, {
     type: 'line',
-    data: { labels: totalUnreal !== 0 && data.length > 1 ? finalLabels : labels, datasets },
+    data: { datasets },
     plugins: [baselinePlugin],
     options: {
       responsive: true,
@@ -1060,26 +1257,57 @@ function updateEquityChart(history, liveRes) {
           bodyFont: { family: 'JetBrains Mono', size: 13, weight: '700' },
           displayColors: false,
           callbacks: {
-            title: (items) => items[0]?.label || '',
+            title: (items) => {
+              const raw = items[0]?.raw;
+              if (!raw) return '';
+              if (raw.x instanceof Date) {
+                return raw.x.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+              }
+              return String(raw.x);
+            },
             label: (item) => {
               const v = item.parsed.y;
               const diff = v - START;
               return `$${v.toLocaleString('en-US',{minimumFractionDigits:2})}  ${diff >= 0 ? '+' : ''}$${diff.toFixed(2)}`;
             }
           }
-        }
+        },
+        zoom: allHaveTime ? {
+          limits: {
+            x: { min: 'original', max: 'original', minRange: 60 * 60 * 1000 },  // min 1-hour window
+            y: { min: 'original', max: 'original' },
+          },
+          pan: {
+            enabled: true,
+            mode: 'x',
+            modifierKey: null,  // drag to pan, no modifier needed
+            onPanComplete: ({ chart }) => {
+              manualViewRange = { min: chart.scales.x.min, max: chart.scales.x.max };
+              currentRangePreset = null;
+              document.querySelectorAll('.range-btn[data-range]').forEach(b => b.classList.remove('active'));
+            },
+          },
+          zoom: {
+            wheel: { enabled: true, speed: 0.1, modifierKey: null },
+            pinch: { enabled: true },
+            drag: {
+              enabled: true,
+              modifierKey: 'shift',  // shift+drag to box-zoom
+              backgroundColor: 'rgba(255,215,0,0.12)',
+              borderColor: 'rgba(255,215,0,0.5)',
+              borderWidth: 1,
+            },
+            mode: 'x',
+            onZoomComplete: ({ chart }) => {
+              manualViewRange = { min: chart.scales.x.min, max: chart.scales.x.max };
+              currentRangePreset = null;
+              document.querySelectorAll('.range-btn[data-range]').forEach(b => b.classList.remove('active'));
+            },
+          },
+        } : undefined,
       },
       scales: {
-        x: {
-          ticks: {
-            color: chartText(),
-            font: { size: 10, family: 'JetBrains Mono' },
-            maxRotation: 0,
-            maxTicksLimit: 10,
-          },
-          grid: { display: false },
-          border: { display: false },
-        },
+        x: xScaleConfig,
         y: {
           ticks: {
             color: chartText(),
@@ -1093,12 +1321,71 @@ function updateEquityChart(history, liveRes) {
       }
     }
   });
+
+  // Store metadata for range presets + hide/show range UI based on time support
+  equityChartMeta.hasTime = allHaveTime;
+  if (allHaveTime && chartPoints.length > 0) {
+    equityChartMeta.minX = chartPoints[0].x.getTime();
+    equityChartMeta.maxX = chartPoints[chartPoints.length - 1].x.getTime();
+  } else {
+    equityChartMeta.minX = null;
+    equityChartMeta.maxX = null;
+  }
+  const presetsEl = document.getElementById('rangePresets');
+  if (presetsEl) presetsEl.style.display = allHaveTime ? 'flex' : 'none';
+
+  // Re-apply view state after chart rebuild (auto-refresh every 60s)
+  if (allHaveTime) {
+    if (manualViewRange) {
+      // User has panned/zoomed — restore their exact view
+      equityChart.zoomScale('x', manualViewRange, 'default');
+    } else if (currentRangePreset && currentRangePreset !== 'ALL') {
+      applyRangePreset(currentRangePreset);
+    }
+    // else: ALL — chart already shows full range by default
+  }
+}
+
+// ─── Equity chart range controls ────────────────────────────────────────────
+function setEquityRange(preset) {
+  currentRangePreset = preset;
+  manualViewRange = null;  // preset overrides any manual zoom
+  document.querySelectorAll('.range-btn[data-range]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.range === preset);
+  });
+  applyRangePreset(preset);
+}
+
+function applyRangePreset(preset) {
+  if (!equityChart || !equityChartMeta.hasTime) return;
+  const maxMs = equityChartMeta.maxX;
+  if (maxMs == null) return;
+  const DAY = 24 * 60 * 60 * 1000;
+  const spans = { '1D': 1 * DAY, '1W': 7 * DAY, '1M': 30 * DAY, '3M': 90 * DAY };
+
+  if (preset === 'ALL') {
+    equityChart.resetZoom();
+    return;
+  }
+  const span = spans[preset];
+  if (!span) return;
+  const minMs = Math.max(maxMs - span, equityChartMeta.minX);
+  // If we don't have that much history, fall back to ALL
+  if (minMs >= maxMs) {
+    equityChart.resetZoom();
+    return;
+  }
+  equityChart.zoomScale('x', { min: minMs, max: maxMs }, 'default');
+}
+
+function resetEquityZoom() {
+  // Reset button → show ALL
+  setEquityRange('ALL');
 }
 
 function renderArchetypeBreakdown(archRes, archPnlRes) {
   const el = document.getElementById('archetypeBreakdown');
   const items = archRes.breakdown || [];
-  document.getElementById('archCount').textContent = `${items.length} archetype${items.length !== 1 ? 's' : ''}`;
   if (!items.length) {
     el.innerHTML = '<div class="empty"><div class="empty-icon">' + icon('dna', 32) + '</div>No resolved trades yet — breakdown appears after positions close</div>'; reinitIcons();
     return;
@@ -1168,6 +1455,28 @@ function renderArchetypeBreakdown(archRes, archPnlRes) {
   });
 }
 
+function getCloseReasonBadge(reason) {
+  if (!reason || reason === 'auto-resolved') {
+    return '';
+  }
+  if (reason.includes('auto-resolved:')) {
+    return `<span class="resolve-badge badge-clock">${icon('timer', 12)}</span>`;
+  }
+  if (reason.includes('stop-loss:')) {
+    return `<span class="resolve-badge badge-stop">${icon('shield-off', 12)}</span>`;
+  }
+  if (reason.includes('blocked')) {
+    return `<span class="resolve-badge badge-warning">${icon('alert-triangle', 12)}</span>`;
+  }
+  if (reason.includes('Closed:') || reason.includes('Manual')) {
+    return `<span class="resolve-badge badge-manual">${icon('user', 12)}</span>`;
+  }
+  if (reason.includes('void') || reason.includes('Void')) {
+    return `<span class="resolve-badge badge-void">${icon('circle-slash', 12)}</span>`;
+  }
+  return '';
+}
+
 function renderResolveLog(resolveLogRes) {
   const el = document.getElementById('resolveLog');
   const items = Array.isArray(resolveLogRes) ? resolveLogRes : [];
@@ -1181,13 +1490,15 @@ function renderResolveLog(resolveLogRes) {
     const ts = r.closed_at ? new Date(r.closed_at) : null;
     const timeStr = ts ? `${ts.getMonth()+1}/${ts.getDate()} ${ts.getHours()}:${String(ts.getMinutes()).padStart(2,'0')}` : '—';
     const outcome = r.status === 'won' ? icon('circle-check', 14) : icon('circle-x', 14);
-    const reason = r.close_reason || 'auto-resolved';
+    const badge = getCloseReasonBadge(r.close_reason || '');
     return `<div class="resolve-row">
-      <span class="resolve-time">${timeStr}</span>
-      <span>${outcome}</span>
-      <span class="resolve-market">${(r.market_title || '').substring(0, 60)}</span>
-      <span class="mono ${pnl >= 0 ? 'green' : 'red'}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</span>
-      <span style="font-size:10px;color:var(--text2)">${reason}</span>
+      <span class="resolve-market" title="${(r.market_title || '').substring(0, 100)}">${r.market_title || ''}</span>
+      <div class="resolve-bottom">
+        <span class="resolve-time">${timeStr}</span>
+        <span class="resolve-outcome">${outcome}</span>
+        <span class="resolve-pnl ${pnl >= 0 ? 'green' : 'red'}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</span>
+        <div class="resolve-reason-container">${badge} <span class="resolve-reason-text">${(r.close_reason || 'auto')}</span></div>
+      </div>
     </div>`;
   }).join('');
 }
@@ -1243,9 +1554,57 @@ function renderSignals(signals) {
   }).join('');
 }
 
+// ── Liquidity-Adaptive Sizing toggle ──
+async function loadLiquiditySizing() {
+  try {
+    const res = await fetch(`${API}/engine/liquidity-sizing`);
+    if (!res.ok) return;
+    const data = await res.json();
+    document.getElementById('liqEnabled').checked = !!data.enabled;
+    document.getElementById('liqSlip').value = data.max_slip_bps != null ? data.max_slip_bps : 50;
+    document.getElementById('liqMin').value = data.min_book_usd != null ? data.min_book_usd : 15;
+    document.getElementById('liqBar').classList.toggle('on', !!data.enabled);
+  } catch (e) { /* non-fatal */ }
+}
+
+function onLiqToggleChange() {
+  const on = document.getElementById('liqEnabled').checked;
+  document.getElementById('liqBar').classList.toggle('on', on);
+}
+
+async function saveLiquiditySizing() {
+  const btn = document.getElementById('liqSaveBtn');
+  const enabled = document.getElementById('liqEnabled').checked;
+  const maxSlip = parseFloat(document.getElementById('liqSlip').value) || 50;
+  const minBook = parseFloat(document.getElementById('liqMin').value) || 15;
+  const qs = new URLSearchParams({
+    enabled: enabled ? 'true' : 'false',
+    max_slip_bps: String(maxSlip),
+    min_book_usd: String(minBook),
+  });
+  const prev = btn.textContent;
+  btn.textContent = '...';
+  btn.classList.remove('saved', 'error');
+  try {
+    const res = await fetch(`${API}/engine/liquidity-sizing?${qs.toString()}`, { method: 'POST' });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    document.getElementById('liqBar').classList.toggle('on', !!data.enabled);
+    btn.textContent = 'Saved';
+    btn.classList.add('saved');
+    setTimeout(() => { btn.textContent = 'Save'; btn.classList.remove('saved'); }, 1500);
+  } catch (e) {
+    btn.textContent = 'Error';
+    btn.classList.add('error');
+    setTimeout(() => { btn.textContent = 'Save'; btn.classList.remove('error'); }, 2000);
+    console.error('liquidity-sizing save failed', e);
+  }
+}
+
 // Init
 lucide.createIcons();
 loadAll();
+loadLiquiditySizing();
 startAutoRefresh();
 </script>
 </body>
