@@ -2078,6 +2078,240 @@ async def weather_ensemble_status():
         raise HTTPException(status_code=500, detail="ensemble status failed")
 
 
+@router.get("/weather/dashboard")
+async def weather_dashboard():
+    """Dashboard payload for weather.html.
+
+    Aggregates from paper_positions (filtered to archetype='weather') and
+    source_city_rmse to produce the KPIs, equity curve, city/segment/price
+    breakdowns, forecast accuracy, empirical std, open positions, and recent
+    trades that the page consumes. Pure SQLite reads — sub-100ms.
+    """
+    import asyncio
+    import re
+    import sqlite3
+    from datetime import datetime, timezone
+    from collections import defaultdict
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from paper_portfolio import DB_PATH as _DB_PATH  # type: ignore
+
+        def _classify_market(title: str) -> str:
+            t = (title or "").lower()
+            if "between" in t:
+                return "bracket"
+            if "or higher" in t or "or above" in t or "or lower" in t or "or below" in t:
+                return "threshold"
+            return "exact"
+
+        _CITY_RE = re.compile(r"\bin\s+([A-Za-z][A-Za-z\.\s']+?)\s+(?:be\b|on\b)", re.I)
+
+        def _extract_city(title: str) -> str:
+            m = _CITY_RE.search(title or "")
+            return m.group(1).strip().lower() if m else "unknown"
+
+        def _price_bucket(p: float) -> str:
+            if p < 0.05: return "0-5¢"
+            if p < 0.10: return "5-10¢"
+            if p < 0.20: return "10-20¢"
+            if p < 0.40: return "20-40¢"
+            if p < 0.60: return "40-60¢"
+            return "60¢+"
+
+        _BUCKET_ORDER = ["0-5¢", "5-10¢", "10-20¢", "20-40¢", "40-60¢", "60¢+"]
+
+        def _horizon_bucket_hours(hours: float) -> str:
+            if hours < 6: return "0-6h"
+            if hours < 24: return "6-24h"
+            if hours < 48: return "24-48h"
+            return "48h+"
+
+        def _build():
+            conn = sqlite3.connect(_DB_PATH)
+            conn.row_factory = sqlite3.Row
+            try:
+                # ── paper_positions: every weather row, ordered by close ──
+                rows = conn.execute("""
+                    SELECT id, opened_at, closed_at, market_title, side,
+                           entry_price, bet_size, edge_pct, pnl, status
+                    FROM paper_positions WHERE archetype = 'weather'
+                    ORDER BY COALESCE(closed_at, opened_at) ASC
+                """).fetchall()
+
+                resolved_statuses = {"won", "lost", "stopped"}
+                resolved = [r for r in rows if r["status"] in resolved_statuses]
+                open_rows = [r for r in rows if r["status"] == "open"]
+
+                # ── totals (won/lost/stopped → wins/losses, total) ──
+                wins = sum(1 for r in resolved if r["status"] == "won")
+                losses = sum(1 for r in resolved if r["status"] in ("lost", "stopped"))
+                total_pnl = sum((r["pnl"] or 0) for r in resolved)
+                best_trade = max((r["pnl"] or 0) for r in resolved) if resolved else 0
+                totals = {
+                    "total": len(resolved),
+                    "wins": wins,
+                    "losses": losses,
+                    "total_pnl": round(total_pnl, 2),
+                    "best_trade": round(best_trade, 2),
+                }
+
+                # ── equity_curve: cumulative pnl by close_date ──
+                eq = defaultdict(float)
+                for r in resolved:
+                    if r["closed_at"]:
+                        day = r["closed_at"][:10]
+                        eq[day] += (r["pnl"] or 0)
+                cum = 0.0
+                equity_curve = []
+                for day in sorted(eq):
+                    cum += eq[day]
+                    equity_curve.append({"date": day, "pnl": round(cum, 2)})
+
+                # ── city_pnl & segments & price_buckets & open & recent ──
+                city_pnl = defaultdict(float)
+                seg = defaultdict(lambda: {"n": 0, "wins": 0, "pnl": 0.0, "edge_sum": 0.0})
+                buck = defaultdict(lambda: {"n": 0, "wins": 0, "pnl": 0.0})
+                for r in resolved:
+                    city = _extract_city(r["market_title"])
+                    mt = _classify_market(r["market_title"])
+                    won = 1 if r["status"] == "won" else 0
+                    pnl = r["pnl"] or 0
+                    city_pnl[city] += pnl
+                    sk = (mt, r["side"] or "?")
+                    seg[sk]["n"] += 1
+                    seg[sk]["wins"] += won
+                    seg[sk]["pnl"] += pnl
+                    seg[sk]["edge_sum"] += (r["edge_pct"] or 0)
+                    bk = (_price_bucket(r["entry_price"] or 0), r["side"] or "?")
+                    buck[bk]["n"] += 1
+                    buck[bk]["wins"] += won
+                    buck[bk]["pnl"] += pnl
+
+                city_pnl_out = [
+                    {"city": c, "pnl": round(p, 2)}
+                    for c, p in sorted(city_pnl.items(), key=lambda kv: -kv[1])
+                ]
+                segments_out = [
+                    {
+                        "market_type": mt, "side": side,
+                        "n": v["n"], "wins": v["wins"],
+                        "pnl": round(v["pnl"], 2),
+                        "avg_edge": round(v["edge_sum"] / v["n"], 4) if v["n"] else 0,
+                    }
+                    for (mt, side), v in sorted(seg.items(), key=lambda kv: -kv[1]["n"])
+                ]
+                buckets_out = [
+                    {
+                        "bucket": b, "side": side,
+                        "n": v["n"], "wins": v["wins"],
+                        "pnl": round(v["pnl"], 2),
+                    }
+                    for (b, side), v in sorted(
+                        buck.items(),
+                        key=lambda kv: (_BUCKET_ORDER.index(kv[0][0]) if kv[0][0] in _BUCKET_ORDER else 99, kv[0][1])
+                    )
+                ]
+
+                def _row_to_position(r):
+                    return {
+                        "market_title": r["market_title"] or "",
+                        "market_type": _classify_market(r["market_title"]),
+                        "side": r["side"],
+                        "entry_price": r["entry_price"],
+                        "bet_size": r["bet_size"],
+                        "edge_pct": r["edge_pct"],
+                        "opened_at": r["opened_at"],
+                    }
+
+                open_out = [_row_to_position(r) for r in open_rows]
+
+                recent_out = []
+                for r in sorted(resolved, key=lambda x: x["closed_at"] or "", reverse=True)[:50]:
+                    recent_out.append({
+                        "market_title": r["market_title"] or "",
+                        "market_type": _classify_market(r["market_title"]),
+                        "side": r["side"],
+                        "entry_price": r["entry_price"],
+                        "bet_size": r["bet_size"],
+                        "pnl": round(r["pnl"] or 0, 2),
+                        "edge_pct": r["edge_pct"],
+                        "status": r["status"],
+                    })
+
+                # ── forecast_accuracy: per-city MAE & bias across all sources ──
+                acc_out = []
+                for row in conn.execute("""
+                    SELECT city, COUNT(*) AS n,
+                           AVG(ABS(error_f)) AS mae, AVG(error_f) AS bias
+                    FROM source_city_rmse
+                    WHERE error_f IS NOT NULL
+                    GROUP BY city
+                """):
+                    acc_out.append({
+                        "city": row["city"].lower(),
+                        "n": row["n"],
+                        "mae": round(row["mae"], 2),
+                        "bias": round(row["bias"], 2),
+                    })
+
+                # ── empirical_std: per-city × horizon bucket ──
+                # horizon = (end-of-target-day - logged_at) in hours
+                std_out = []
+                stdrows = conn.execute("""
+                    SELECT city, target_date, logged_at, error_f
+                    FROM source_city_rmse WHERE error_f IS NOT NULL
+                """).fetchall()
+                horizon_groups = defaultdict(list)
+                for r in stdrows:
+                    try:
+                        td = datetime.fromisoformat(r["target_date"] + "T23:59:59+00:00")
+                        la = datetime.fromisoformat(r["logged_at"].replace("Z", "+00:00")
+                                                    if r["logged_at"] and "T" in r["logged_at"]
+                                                    else (r["logged_at"] or "").replace(" ", "T") + "+00:00")
+                        hours = (td - la).total_seconds() / 3600.0
+                        if hours < 0:
+                            continue
+                        bucket = _horizon_bucket_hours(hours)
+                        horizon_groups[(r["city"].lower(), bucket)].append(r["error_f"])
+                    except Exception:
+                        continue
+                for (city, bucket), errs in horizon_groups.items():
+                    n = len(errs)
+                    if n < 3:
+                        continue
+                    mean = sum(errs) / n
+                    var = sum((e - mean) ** 2 for e in errs) / n
+                    std_out.append({
+                        "city": city,
+                        "horizon": bucket,
+                        "std_err_f": round(var ** 0.5, 2),
+                        "n_dates": n,
+                    })
+
+                return {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "totals": totals,
+                    "open_positions": open_out,
+                    "equity_curve": equity_curve,
+                    "city_pnl": city_pnl_out,
+                    "segments": segments_out,
+                    "price_buckets": buckets_out,
+                    "forecast_accuracy": acc_out,
+                    "empirical_std": std_out,
+                    "recent_trades": recent_out,
+                }
+            finally:
+                conn.close()
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _build)
+    except Exception as e:
+        logger.exception(f"Weather dashboard failed: {e}")
+        raise HTTPException(status_code=500, detail="weather dashboard failed")
+
+
 @router.get("/signals/weather")
 async def scan_weather():
     """Scan weather markets on Kalshi + Polymarket against Open-Meteo forecasts."""
