@@ -2290,6 +2290,15 @@ async def weather_dashboard():
                         "n_dates": n,
                     })
 
+                # ── calibration: count of resolved backtest brackets ──
+                cal_row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM backtest_brackets WHERE actual_high_f IS NOT NULL"
+                ).fetchone()
+                calibration = {
+                    "method": "Isotonic",
+                    "n_brackets": cal_row["n"] if cal_row else 0,
+                }
+
                 return {
                     "ts": datetime.now(timezone.utc).isoformat(),
                     "totals": totals,
@@ -2301,6 +2310,7 @@ async def weather_dashboard():
                     "forecast_accuracy": acc_out,
                     "empirical_std": std_out,
                     "recent_trades": recent_out,
+                    "calibration": calibration,
                 }
             finally:
                 conn.close()
