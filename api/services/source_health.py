@@ -17,6 +17,7 @@ BASE_DIR = Path(__file__).parent.parent.parent
 DB_PATH = BASE_DIR / "storage" / "shadow_trades.db"
 
 TRACKED_SOURCES = [
+    # Platform / prediction-market sources
     "polymarket_gamma",
     "polymarket_clob",
     "kalshi",
@@ -24,6 +25,19 @@ TRACKED_SOURCES = [
     "action_network",
     "vegas",
     "espn",
+    # Weather forecast APIs (instrumented in signals/weather_ensemble.py
+    # via _record_weather_fetch). Gate 4 in services/health_gates.py reads
+    # these names — keep WEATHER_FORECAST_SOURCES there in sync.
+    "open_meteo",
+    "pirate_weather",
+    "tomorrow_io",
+    "weatherapi",
+    "weather_com",
+    "visual_crossing",
+    "nws",
+    # Weather actuals (resolution source — instrumented but excluded from
+    # Gate 4 since it doesn't affect forward forecasting).
+    "twc_actuals",
 ]
 
 
@@ -48,9 +62,14 @@ def _init_table(conn: sqlite3.Connection):
             total_failures INTEGER DEFAULT 0,
             avg_latency_ms REAL DEFAULT 0,
             last_latency_ms REAL DEFAULT 0,
-            circuit_open_until TEXT
+            circuit_open_until TEXT,
+            last_touched TEXT
         )
     """)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(source_health)").fetchall()}
+    if "last_touched" not in cols:
+        conn.execute("ALTER TABLE source_health ADD COLUMN last_touched TEXT")
+        conn.execute("UPDATE source_health SET last_touched = last_success WHERE last_touched IS NULL AND last_success IS NOT NULL")
     conn.commit()
 
 
@@ -68,33 +87,35 @@ def record_success(source: str, latency_ms: float):
         new_avg = old_avg * 0.8 + latency_ms * 0.2
         conn.execute("""
             UPDATE source_health SET
-                last_success=?, consecutive_failures=0,
+                last_success=?, last_touched=?, consecutive_failures=0,
                 total_successes=?, avg_latency_ms=?, last_latency_ms=?,
                 circuit_open_until=NULL
             WHERE source=?
-        """, (now, total, round(new_avg, 1), round(latency_ms, 1), source))
+        """, (now, now, total, round(new_avg, 1), round(latency_ms, 1), source))
     else:
         conn.execute("""
-            INSERT INTO source_health (source, last_success, consecutive_failures, total_successes, total_failures, avg_latency_ms, last_latency_ms)
-            VALUES (?, ?, 0, 1, 0, ?, ?)
-        """, (source, now, round(latency_ms, 1), round(latency_ms, 1)))
+            INSERT INTO source_health (source, last_success, last_touched, consecutive_failures, total_successes, total_failures, avg_latency_ms, last_latency_ms)
+            VALUES (?, ?, ?, 0, 1, 0, ?, ?)
+        """, (source, now, now, round(latency_ms, 1), round(latency_ms, 1)))
     
     conn.commit()
     conn.close()
 
 
 def touch_source(source: str):
-    """Lightweight: update last_success timestamp without changing latency stats.
-    Call from watchdog/scanners that successfully fetch from a source
-    but don't go through resilient_fetch."""
+    """Heartbeat: update last_touched only — does NOT touch last_success or counters.
+    Use from schedulers/watchdogs that want to mark a source as actively monitored
+    (e.g. to keep dashboard freshness signals green) without claiming a real fetch.
+    Consumers checking 'did we really fetch?' should read last_success; consumers
+    checking 'is this source under active surveillance?' should read last_touched."""
     conn = _get_db()
     now = datetime.now(timezone.utc).isoformat()
     row = conn.execute("SELECT 1 FROM source_health WHERE source=?", (source,)).fetchone()
     if row:
-        conn.execute("UPDATE source_health SET last_success=?, consecutive_failures=0 WHERE source=?", (now, source))
+        conn.execute("UPDATE source_health SET last_touched=? WHERE source=?", (now, source))
     else:
         conn.execute(
-            "INSERT INTO source_health (source, last_success, consecutive_failures, total_successes, total_failures, avg_latency_ms, last_latency_ms) VALUES (?, ?, 0, 0, 0, 0, 0)",
+            "INSERT INTO source_health (source, last_touched, consecutive_failures, total_successes, total_failures, avg_latency_ms, last_latency_ms) VALUES (?, ?, 0, 0, 0, 0, 0)",
             (source, now))
     conn.commit()
     conn.close()
@@ -196,16 +217,39 @@ def get_all_source_health() -> List[Dict]:
 
 
 def get_last_success_timestamp(source: str) -> Optional[float]:
-    """Get Unix timestamp of last successful fetch for staleness checks."""
+    """Get Unix timestamp of last *real* successful fetch (via record_success).
+    Use for hard staleness gates that should block on a truly-dead source."""
     conn = _get_db()
     row = conn.execute("SELECT last_success FROM source_health WHERE source=?", (source,)).fetchone()
     conn.close()
-    
+
     if not row or not row["last_success"]:
         return None
-    
+
     try:
         dt = datetime.fromisoformat(row["last_success"].replace("Z", "+00:00"))
+        return dt.timestamp()
+    except Exception:
+        return None
+
+
+def get_last_touched_timestamp(source: str) -> Optional[float]:
+    """Get Unix timestamp of last activity (real fetch OR scheduler heartbeat).
+    Use for soft freshness signals (e.g. dashboard 'data age' tags) where a
+    scheduler-monitored source counts as fresh even without a recent fetch."""
+    conn = _get_db()
+    row = conn.execute("SELECT last_touched, last_success FROM source_health WHERE source=?", (source,)).fetchone()
+    conn.close()
+
+    if not row:
+        return None
+    # Prefer last_touched; fall back to last_success for rows pre-fix#2
+    ts_str = row["last_touched"] or row["last_success"]
+    if not ts_str:
+        return None
+
+    try:
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
         return dt.timestamp()
     except Exception:
         return None
