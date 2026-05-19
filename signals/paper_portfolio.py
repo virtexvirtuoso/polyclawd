@@ -1431,9 +1431,14 @@ def process_signals(signals: list) -> dict:
         else:
             skipped += 1
             entry["action"] = "skipped"
-        
+
         results.append(entry)
-    
+        logger.info(
+            "process_signals: %s side=%s edge=%.1f%% bet=$%.0f → %s (%s)",
+            market_title[:50], sig.get("side", "?"), (entry["edge"] or 0) * 100,
+            entry["bet_size"] or 0, entry["action"], (entry["reason"] or "")[:80],
+        )
+
     status = get_portfolio_status()
     
     return {

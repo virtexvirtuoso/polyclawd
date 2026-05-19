@@ -113,7 +113,7 @@ def _run_safe(name: str, fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
     except Exception as e:
-        logger.error("Task %s failed: %s", name, e)
+        logger.exception("Task %s failed: %s", name, e)
         return None
 
 
@@ -229,7 +229,7 @@ def task_weather_fast_scan():
             if n > 0:
                 logger.info("Weather fast scan: opened %d positions", n)
     except Exception as e:
-        logger.error("Weather fast scan failed: %s", e)
+        logger.exception("Weather fast scan failed: %s", e)
 
 
 def task_weather_shift_alerts():
@@ -433,7 +433,7 @@ def task_signal_scan():
         if signals:
             process_signals(signals)
     except Exception as e:
-        logger.error("Category scan failed: %s", e)
+        logger.exception("Category scan failed: %s", e)
 
     # Tweet count signals
     try:
@@ -442,7 +442,7 @@ def task_signal_scan():
         if signals:
             process_signals(signals)
     except Exception as e:
-        logger.error("Tweet scan failed: %s", e)
+        logger.exception("Tweet scan failed: %s", e)
 
     # Whale wall signals
     try:
@@ -451,7 +451,7 @@ def task_signal_scan():
         if signals:
             process_signals(signals)
     except Exception as e:
-        logger.error("Whale wall scan failed: %s", e)
+        logger.exception("Whale wall scan failed: %s", e)
 
     logger.info("Signal scan complete (category + tweets + whale walls)")
 
@@ -715,7 +715,7 @@ def task_gdelt_refresh():
         n_states = len(result.get("state_sentiment", []))
         logger.info("GDELT overlay cached: %d candidates, %d states", n_candidates, n_states)
     except Exception as e:
-        logger.error("GDELT refresh failed: %s", e)
+        logger.exception("GDELT refresh failed: %s", e)
 
 
 def task_ie_spending_refresh():
@@ -729,7 +729,7 @@ def task_ie_spending_refresh():
         n_surges = len(result.get("spending_surges", []))
         logger.info("IE spending overlay cached: %d surges", n_surges)
     except Exception as e:
-        logger.error("IE spending refresh failed: %s", e)
+        logger.exception("IE spending refresh failed: %s", e)
 
 
 def task_election_snapshot():
@@ -745,7 +745,7 @@ def task_election_snapshot():
         total = snapshot.get("summary", {}).get("total_markets", 0)
         logger.info("Election snapshot saved: %d markets", total)
     except Exception as e:
-        logger.error("Election snapshot failed: %s", e)
+        logger.exception("Election snapshot failed: %s", e)
         return
 
     _state["election_snapshot_sent"] = today
@@ -788,7 +788,7 @@ def task_election_weekly_report():
             logger.warning("Election Discord alert failed (non-fatal): %s", e)
 
     except Exception as e:
-        logger.error("Election weekly report failed: %s", e)
+        logger.exception("Election weekly report failed: %s", e)
         return
 
     _state["election_report_sent"] = year_week
