@@ -1434,7 +1434,7 @@ def process_signals(signals: list) -> dict:
 
         results.append(entry)
         logger.info(
-            "process_signals: %s side=%s edge=%.1f%% bet=$%.0f → %s (%s)",
+            "process_signals: {} side={} edge={:.1f}% bet=${:.0f} → {} ({})",
             market_title[:50], sig.get("side", "?"), (entry["edge"] or 0) * 100,
             entry["bet_size"] or 0, entry["action"], (entry["reason"] or "")[:80],
         )
