@@ -22,6 +22,12 @@ research/*
 !research/fig
 !research/analysis
 !research/sections
+!research/*.py
+
+# Research data: track the small divergence history CSV + scripts, ignore growing logs
+data-research/*.log
+data-research/launchd-st*.log
+data-research/*.txt
 
 scratchpad
 
@@ -42,3 +48,4 @@ tests/load/
 odds/vegas_cache.json
 mcp/MCP_OPTIMIZATION.md
 mcp/polyrouter/
+reports/
