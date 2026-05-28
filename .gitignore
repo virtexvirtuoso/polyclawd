@@ -24,10 +24,11 @@ research/*
 !research/sections
 !research/*.py
 
-# Research data: track the small divergence history CSV + scripts, ignore growing logs
+# Research data: track the small divergence history CSV + scripts, ignore growing logs + snapshot archive
 data-research/*.log
 data-research/launchd-st*.log
 data-research/*.txt
+data-research/atlfed/
 
 scratchpad
 

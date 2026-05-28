@@ -5,9 +5,11 @@ Idempotent. Writes a sha256-tagged daily CSV. Alerts on schema break or HTTP non
 Schedule via launchd at ~18:00 ET. See vault:
   ~/virtuoso-vault/02-Projects/Polyclawd/Infrastructure/AtlantaFed-Tracker-Ingestion.md
 """
+
 from __future__ import annotations
 
 import hashlib
+import io
 import pathlib
 import sys
 from datetime import date
@@ -17,7 +19,9 @@ import requests
 
 URL = "https://www.atlantafed.org/-/media/Project/Atlanta/FRBA/Documents/cenfis/market-probability-tracker/mpt_histdata.xlsx"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-OUT_DIR = pathlib.Path.home() / "Projects" / "polyclawd" / "data" / "atlfed"
+# NOTE: ~/Projects/polyclawd/data is a symlink to an external G-DRIVE volume that
+# is often unmounted (broken symlink). Write to data-research/ which is local + tracked.
+OUT_DIR = pathlib.Path.home() / "Projects" / "polyclawd" / "data-research" / "atlfed"
 EXPECTED_COLS = {"date", "reference_start", "target_range", "field", "value"}
 
 
@@ -32,7 +36,7 @@ def fetch() -> bytes:
 
 
 def parse(data: bytes) -> pd.DataFrame:
-    df = pd.read_excel(data, sheet_name="DATA")
+    df = pd.read_excel(io.BytesIO(data), sheet_name="DATA")
     missing = EXPECTED_COLS - set(df.columns)
     if missing:
         raise SchemaError(f"missing columns: {missing}")
