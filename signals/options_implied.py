@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS options_implied (
 
 
 def init_db(db_path):
+    pathlib.Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(db_path)
     con.executescript(SCHEMA)
     con.commit()
@@ -247,7 +248,9 @@ def trailing_z(db_path, market_id, strike, before):
 
 
 def _years_to(expiry_date, asof):
-    return max((datetime.fromisoformat(expiry_date) - asof).days, 0) / 365.0
+    exp = datetime.fromisoformat(expiry_date).date()
+    base = asof.date() if isinstance(asof, datetime) else asof
+    return max((exp - base).days, 0) / 365.0
 
 
 def run(db_path=DEFAULT_DB):
