@@ -4,6 +4,11 @@ pydantic==2.5.3
 aiofiles
 slowapi
 httpx
+numpy>=1.24
+loguru>=0.7.2
+requests>=2.31
+aiomcache>=0.8
+websockets>=12.0
 scipy>=1.10.0
 pytest
 pytest-asyncio
