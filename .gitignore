@@ -41,3 +41,13 @@ tests/load/
 odds/vegas_cache.json
 mcp/MCP_OPTIMIZATION.md
 mcp/polyrouter/
+
+# cleanup 2026-05-29 — keep installers / scratch / editor junk out of the repo
+scratch/
+*.pkg
+*.whl
+*.tar.gz
+docs/screenshots/
+.idea/
+*.swp
+*.swo
