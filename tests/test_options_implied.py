@@ -247,3 +247,39 @@ def test_options_inserts_paper_position(tmp_path, monkeypatch):
         "SELECT archetype, side FROM paper_positions WHERE market_id='0xTODAY'").fetchone()
     con.close()
     assert row == ("options", "NO")
+
+
+def test_resolution_logfiles_register_options():
+    from signals.resolution_logger import LOG_FILES, AUTO_LOG_FILES
+    assert "options_implied" in LOG_FILES and "options_implied" in AUTO_LOG_FILES
+
+
+def test_resolution_model_prob_options_schema():
+    import json
+    from signals.resolution_logger import _model_p_yes_from_forecast
+    fc = json.dumps({"type": "options_implied", "implied_prob": 0.30})
+    assert abs(_model_p_yes_from_forecast(fc, 0.7, "YES") - 0.30) < 1e-6
+    assert abs(_model_p_yes_from_forecast(fc, 0.7, "NO") - 0.70) < 1e-6
+
+
+def test_options_open_captures_model_prob(tmp_path, monkeypatch):
+    """open_position stores implied_prob in entry_forecast_json so the calibration
+    tracker has a real model P(YES) for Brier — weather's self-learning hook."""
+    import json
+    import signals.paper_portfolio as pp
+    dbp = tmp_path / "s.db"
+    monkeypatch.setattr(pp, "DB_PATH", dbp)
+    conn = pp._get_db()
+    pp._init_tables(conn)
+    conn.close()
+    monkeypatch.setattr(pp, "evaluate_signal", lambda s: {
+        "eligible": True, "reason": "t", "edge": 5.0, "kelly_pct": 0.05, "bet_size": 25.0})
+    sig = {"market_id": "0xZ", "market": "NVDA above $210", "side": "NO", "entry_price": 0.40,
+           "confidence": 0.7, "edge_pct": 5.0, "strategy": "options_implied", "archetype": "options",
+           "platform": "polymarket", "implied_prob": 0.45, "z_score": 3.1, "trailing_obs": 22}
+    assert pp.open_position(sig).get("opened") is True
+    con = sqlite3.connect(dbp)
+    efj = con.execute("SELECT entry_forecast_json FROM paper_positions WHERE market_id='0xZ'").fetchone()[0]
+    con.close()
+    d = json.loads(efj)
+    assert d["type"] == "options_implied" and d["implied_prob"] == 0.45

@@ -1160,6 +1160,19 @@ def open_position(signal: dict) -> dict:
                 entry_forecast_json = json.dumps(detail)
             except (TypeError, ValueError):
                 pass
+    elif archetype == "options":
+        # options_implied scanner already produced the N(d2) model probability —
+        # capture it so the calibration tracker has a real model P(YES) for Brier.
+        ip = signal.get("implied_prob")
+        if ip is not None:
+            try:
+                entry_forecast_json = json.dumps({
+                    "type": "options_implied", "implied_prob": ip,
+                    "z_score": signal.get("z_score"),
+                    "trailing_obs": signal.get("trailing_obs"),
+                })
+            except (TypeError, ValueError):
+                pass
     conn.execute("""INSERT INTO paper_positions
         (opened_at, market_id, market_title, platform, side, entry_price, bet_size, potential_payout, confidence, edge_pct, status, archetype, strategy, market_slug, kelly_fraction, conviction_mult, entry_forecast_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)""",

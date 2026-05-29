@@ -380,7 +380,7 @@ def task_calibration_check():
     def _status(brier):
         return "GREEN" if brier < 0.15 else "YELLOW" if brier < 0.25 else "RED"
 
-    for strategy in ("tweet_count_mc", "weather_ensemble"):
+    for strategy in ("tweet_count_mc", "weather_ensemble", "options_implied"):
         # Outcome metric (mixed close-types) — current behaviour
         outcome_records = load_resolutions(strategy)
         n_out = len(outcome_records)
@@ -673,7 +673,7 @@ def task_weekly_recap():
         from signals.resolution_logger import load_resolutions, get_scorecard
 
         lines = ["Weekly Calibration Report", ""]
-        for strategy, label in [("tweet_count_mc", "Tweet MC"), ("weather_ensemble", "Weather")]:
+        for strategy, label in [("tweet_count_mc", "Tweet MC"), ("weather_ensemble", "Weather"), ("options_implied", "Options Implied")]:
             records = load_resolutions(strategy)
             n = len(records)
             if n == 0:
