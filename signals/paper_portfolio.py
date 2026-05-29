@@ -403,7 +403,7 @@ ARCHETYPE_MIN_BET = {
 MAX_RESOLUTION_DAYS = 14  # Reject markets resolving >14 days out — capital drag
 
 # Archetype filters — data-driven from resolved trades
-ARCHETYPE_BLOCKLIST = {"sports_winner", "deadline_binary", "election", "social_count"}  # 0% WR. price_above removed — now has crypto_price_signal with VPS data
+ARCHETYPE_BLOCKLIST = {"sports_winner", "election"}  # K8/K9 killed. deadline_binary + social_count removed — K11 price gate handles deadline, social_count has 87.5% shadow WR
 ARCHETYPE_BOOST = {"sports_single_game": 1.3, "social_count": 1.3}  # Proven +180% blended ROI
 MIN_NO_IMPLIED_PROB = 0.35  # Minimum implied NO probability (1 - entry_price for NO bets)
 MIN_EXPIRY_HOURS = 72  # Minimum 3 days to resolution for crypto/price markets
@@ -723,7 +723,7 @@ def evaluate_signal(signal: dict) -> dict:
     # ── META-LABELING GATE ──────────────────────────────────────────────
     meta_score = meta_label_score(side, market_price, confidence, edge, early_archetype or "other")
     # Exempt new strategies from meta gate until they have 20+ trades of their own data
-    META_EXEMPT_STRATEGIES = {"crypto_price", "cross_platform_edge"}
+    META_EXEMPT_STRATEGIES = {"crypto_price", "cross_platform_edge", "weather"}
     if meta_score is not None and meta_score < 0.40 and strategy not in META_EXEMPT_STRATEGIES:
         logger.info("META GATE: Blocking {} — P(profit)={:.0%} (arch={}, side={}, disagree={:.0%})",
                     market_title[:40] if market_title else "?", meta_score, early_archetype or "other", side, disagreement)
@@ -1161,8 +1161,6 @@ def open_position(signal: dict) -> dict:
             except (TypeError, ValueError):
                 pass
     elif archetype == "options":
-        # options_implied scanner already produced the N(d2) model probability —
-        # capture it so the calibration tracker has a real model P(YES) for Brier.
         ip = signal.get("implied_prob")
         if ip is not None:
             try:
