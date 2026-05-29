@@ -5,6 +5,7 @@ Polyclawd Trading API - FastAPI Application Factory
 Paper trading + Simmer SDK live trading integration.
 All endpoints are defined in api/routes/ modules.
 """
+
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -68,6 +69,7 @@ async def lifespan(app: FastAPI):
     # Pre-warm election cache in background (non-blocking startup)
     import asyncio
     from api.routes.signals import prewarm_election_cache
+
     asyncio.create_task(prewarm_election_cache())
 
     yield
@@ -134,16 +136,20 @@ app.include_router(edge_scanner_router, tags=["Edge Scanner"])
 # Visitor Tracking
 # ============================================================================
 
+
 @app.post("/api/visitor-log")
 async def visitor_log(request: Request):
     """Log visitor access for tracking."""
     import sqlite3, json as _json
+
     try:
         body = await request.json()
     except Exception:
         body = {}
 
-    ip = request.headers.get("x-real-ip", request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown"))
+    ip = request.headers.get(
+        "x-real-ip", request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown")
+    )
     entry = {
         "timestamp": body.get("timestamp", ""),
         "ip": ip,
@@ -165,39 +171,53 @@ async def visitor_log(request: Request):
         )""")
         conn.execute(
             "INSERT INTO visitor_log (timestamp, ip, page, user_agent, screen_size, language, referrer) VALUES (?,?,?,?,?,?,?)",
-            (entry["timestamp"], entry["ip"], entry["page"], entry["user_agent"], entry["screen_size"], entry["language"], entry["referrer"])
+            (
+                entry["timestamp"],
+                entry["ip"],
+                entry["page"],
+                entry["user_agent"],
+                entry["screen_size"],
+                entry["language"],
+                entry["referrer"],
+            ),
         )
         conn.commit()
         conn.close()
         logger.info(f"[VISITOR] {entry['ip']} → {entry['page']} ({entry['screen_size']})")
 
-        # Discord alert
+        # Discord alert — webhook loaded from env. The previously-hardcoded
+        # webhook was exposed in git history and MUST be rotated in Discord.
+        import os
         import urllib.request
-        discord_url = "https://discord.com/api/webhooks/1379097202613420163/IJXNvNxw09zXGvQe2oZZ-8TwYc91hZH4PqD6XtVEQa5fH6TpBt9hBLuTZiejUPjW9m8i"
+
+        discord_url = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
         embed = {
-            "embeds": [{
-                "title": "🔐 Polyclawd Login",
-                "color": 0x6c5ce7,
-                "fields": [
-                    {"name": "IP", "value": entry["ip"], "inline": True},
-                    {"name": "Page", "value": entry["page"] or "login", "inline": True},
-                    {"name": "Screen", "value": entry["screen_size"], "inline": True},
-                    {"name": "User Agent", "value": (entry["user_agent"] or "unknown")[:200]},
-                    {"name": "Referrer", "value": entry["referrer"] or "direct", "inline": True},
-                ],
-                "timestamp": entry["timestamp"] or None
-            }]
+            "embeds": [
+                {
+                    "title": "🔐 Polyclawd Login",
+                    "color": 0x6C5CE7,
+                    "fields": [
+                        {"name": "IP", "value": entry["ip"], "inline": True},
+                        {"name": "Page", "value": entry["page"] or "login", "inline": True},
+                        {"name": "Screen", "value": entry["screen_size"], "inline": True},
+                        {"name": "User Agent", "value": (entry["user_agent"] or "unknown")[:200]},
+                        {"name": "Referrer", "value": entry["referrer"] or "direct", "inline": True},
+                    ],
+                    "timestamp": entry["timestamp"] or None,
+                }
+            ]
         }
-        try:
-            req = urllib.request.Request(
-                discord_url,
-                data=_json.dumps(embed).encode(),
-                headers={"Content-Type": "application/json"},
-                method="POST"
-            )
-            urllib.request.urlopen(req, timeout=5)
-        except Exception as de:
-            logger.warning(f"[VISITOR] Discord alert failed: {de}")
+        if discord_url:
+            try:
+                req = urllib.request.Request(
+                    discord_url,
+                    data=_json.dumps(embed).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=5)
+            except Exception as de:
+                logger.warning(f"[VISITOR] Discord alert failed: {de}")
 
     except Exception as e:
         logger.error(f"[VISITOR] Failed to log: {e}")
@@ -209,6 +229,7 @@ async def visitor_log(request: Request):
 async def get_visitor_log(limit: int = 50):
     """Get recent visitor log entries."""
     import sqlite3
+
     db_path = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
     try:
         conn = sqlite3.connect(str(db_path))

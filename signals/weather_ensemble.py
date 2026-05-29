@@ -13,13 +13,12 @@ Produces probability distributions for temperature markets instead of
 hardcoded fair-value buckets.
 """
 
-import asyncio
 import json
 import os
 import time
 import urllib.request
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 from loguru import logger
 
 
@@ -509,7 +508,7 @@ def _fetch_weatherapi(lat: float, lon: float, date: str) -> Optional[dict]:
 # Free public API key, ICAO station codes, 5-day forecast + historical.
 # Double-weighted in ensemble because it IS the judge.
 
-TWC_API_KEY = "e1f10a1e78da46f5b10a1e78da96f525"  # Public key from WU website
+TWC_API_KEY = os.getenv("TWC_API_KEY", "")  # WU/TWC key — set in env (config/polymarket.env)
 
 # ICAO station codes for Polymarket weather cities
 # These match the stations in Polymarket market descriptions
