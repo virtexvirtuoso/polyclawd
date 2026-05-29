@@ -662,6 +662,55 @@ def alert_api_recovered(**kwargs) -> bool:
     }], alert_type="api_recovered", alert_meta={})
 
 
+# ── Election Sentiment Report ────────────────────────────────────────────
+
+def alert_election_report(report: dict) -> bool:
+    """Weekly election sentiment summary embed."""
+    summary = report.get("summary", {})
+    control = summary.get("party_control", {})
+    movers = report.get("top_movers", [])[:5]
+    ts = report.get("timestamp", "")[:10]
+
+    # Party control lines
+    control_lines = []
+    for body in ["presidency", "senate", "house"]:
+        probs = control.get(body, {})
+        r = probs.get("republican", 0)
+        d = probs.get("democrat", 0)
+        leader = "R" if r > d else "D"
+        pct = max(r, d)
+        control_lines.append(f"**{body.title()}**: {leader} {pct:.0%}")
+
+    # Top movers lines
+    mover_lines = []
+    for m in movers:
+        arrow = "+" if m["delta"] > 0 else ""
+        mover_lines.append(
+            f"{m['question'][:45]} — {m['outcome']} {arrow}{m['delta']:.1%}"
+        )
+
+    fields = [
+        {"name": "Party Control", "value": "\n".join(control_lines) or "No data", "inline": False},
+        {"name": "Markets Tracked", "value": f"**{summary.get('total_markets', 0)}** (Poly: {summary.get('polymarket_count', 0)}, Kalshi: {summary.get('kalshi_count', 0)})", "inline": True},
+        {"name": "By Race", "value": "\n".join(f"{k}: {v}" for k, v in sorted(summary.get("by_race", {}).items(), key=lambda x: -x[1])[:5]), "inline": True},
+    ]
+
+    if mover_lines:
+        fields.append({
+            "name": "Top Movers (WoW)",
+            "value": "\n".join(mover_lines) or "No previous snapshot",
+            "inline": False,
+        })
+
+    return _send([{
+        "title": f"Election Sentiment Report — {ts}",
+        "color": COLOR_BLUE,
+        "fields": fields,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": f"Election Tracker | {summary.get('total_markets', 0)} markets"},
+    }], alert_type="election_report", alert_meta={"total": summary.get("total_markets", 0)})
+
+
 # ── Test ─────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

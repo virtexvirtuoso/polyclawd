@@ -16,15 +16,14 @@ v3 improvements:
 """
 
 import json
-import logging
 import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 import re
 from pathlib import Path
+from loguru import logger
 
-logger = logging.getLogger(__name__)
 
 # Sub-daily noise filter: BTC/ETH "Up or Down" with time ranges are coin flips
 _SUBDAILY_PATTERN = re.compile(
@@ -171,7 +170,7 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
         return True, "K5: directional dip/crash (70% NO WR, n=390 — low sample)", archetype
 
     # K2: price_above + cheap entry (hard kill — 20% WR, n=5)
-    # Defense-in-depth: MIN_ENTRY_PRICE=55 already blocks <55c,
+    # Defense-in-depth: MIN_ENTRY_PRICE=50 already blocks <50c,
     # but this catches the specific archetype for future YES-side logic
     if archetype == 'price_above' and price_cents < 45:
         return True, "K2: price_above cheap entry <45c (20% WR)", archetype
@@ -180,9 +179,27 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     if archetype == 'game_total':
         return True, "K7: game_total (52% NO WR population, n=10,999 — no edge after fees)", archetype
 
+    # K8: sports_winner — 0/4 shadow wins at 88.1% avg conf, Brier 0.776 (2026-04-10 baseline)
+    if archetype == 'sports_winner':
+        return True, "K8: sports_winner (0/4 shadow, Brier 0.776)", archetype
+
+    # K9: election — 0/15 shadow wins, 0% WR. All NO bets on markets that resolved YES.
+    if archetype == 'election':
+        return True, "K9: election (0/15 shadow, 0% WR)", archetype
+
+    # K10: ai_model — 0/10 shadow wins, 0% WR. All NO bets on Anthropic #1 markets.
+    if archetype == 'ai_model':
+        return True, "K10: ai_model (0/10 shadow, 0% WR)", archetype
+
+    # K11: MAX_ENTRY_PRICE gate — NO bets on markets priced >70c YES lose 83% of the time.
+    # Affects deadline_binary (3% WR >70c vs 82% WR <=70c) and geopolitical (9% WR >70c vs 42% WR <=70c).
+    if price_cents > 70 and archetype in ('deadline_binary', 'geopolitical'):
+        return True, f"K11: {archetype} entry {price_cents}c > 70c MAX_ENTRY_PRICE (3-9% WR above 70c)", archetype
+
     # K6: Kill sports (efficient) and truly unknown archetypes
-    # Allow: geopolitical, election, deadline_binary, social_count, weather, ai_model
-    ALLOWED_NEW = {'geopolitical', 'election', 'deadline_binary', 'social_count', 'weather', 'entertainment', 'parlay', 'financial_price'}
+    # Allow: geopolitical, deadline_binary, social_count, weather, entertainment, parlay, financial_price
+    # KILLED: election (K9), ai_model (K10)
+    ALLOWED_NEW = {'geopolitical', 'deadline_binary', 'social_count', 'weather', 'entertainment', 'parlay', 'financial_price'}
     # Sports: allow through with warning flag (unverified — no sharp odds cross-ref yet)
     # if archetype in ('sports_winner', 'sports_single_game'):
     #     return True, "K6: sports — efficient market", archetype
@@ -257,10 +274,10 @@ WHALE_VOLUME_KALSHI = 10000     # Contracts
 WHALE_VOLUME_POLYMARKET = 100000 # Dollars
 CONTESTED_LOW = 10              # Cents/pct — lowered from 15 to allow cheap NOs
 CONTESTED_HIGH = 95             # Raised from 92 — allow high-prob NO bets (Becker: 89% NO WR on price_range)
-MAX_DAYS_TO_CLOSE = 365         # Becker: 3-12mo = 82.6% NO WR — don't exclude our best edge
+MAX_DAYS_TO_CLOSE = 30          # Was 365. Capital drag on long-dated markets. Portfolio gate is 14d but filter early.
 MIN_DAYS_TO_CLOSE = 7           # Becker: same-day = 53% NO WR (coin flip) — skip anything < 7d
 MIN_EDGE_PCT = 5
-MIN_ENTRY_PRICE = 45  # Cents — lowered from 55 (Becker: 45-55c range still has 61% NO WR)
+MIN_ENTRY_PRICE = 50  # Cents — lowered from 55 (Becker: 45-55c range still has 61% NO WR)
 
 # Confidence scoring weights
 WEIGHT_CATEGORY_EDGE = 0.35
@@ -466,7 +483,7 @@ def calculate_signal_confidence(
         edge_score * WEIGHT_CATEGORY_EDGE
         + volume_score * WEIGHT_VOLUME_SPIKE
         + whale_score * WEIGHT_WHALE_ACTIVITY
-        + theta_score * WEIGHT_THETA
+        + (100 - theta_score) * WEIGHT_THETA
     )
 
     # Confirmations
@@ -741,7 +758,7 @@ def scan_kalshi_signals() -> List[Dict]:
         # Data shows: NO @ 0.60-0.85 = 79% WR (+8.97 P&L)
         #             YES @ 0.15-0.45 = 29% WR (-3.05 P&L)
         # Skip YES longshots entirely — they bleed edge
-        if price < MIN_ENTRY_PRICE:  # NO-only: reject cheap entries (data: <55c = 37% WR)
+        if price < MIN_ENTRY_PRICE:  # NO-only: reject cheap entries (raised to 50c May 21: 45-49c = +$2.59/trade capital sink)
             continue  # skip cheap markets (would be YES bets) + contested zone
         side = "NO"
         # fair_value is the corrected probability after category edge
@@ -887,7 +904,7 @@ def scan_polymarket_signals() -> List[Dict]:
 
         # Asymmetric fade: ONLY bet NO on overpriced markets
         # YES longshots (price < 50) lose 71% — skip entirely
-        if price_cents < MIN_ENTRY_PRICE:  # NO-only: reject cheap entries (data: <55c = 37% WR)
+        if price_cents < MIN_ENTRY_PRICE:  # NO-only: reject cheap entries (raised to 50c May 21: 45-49c = +$2.59/trade capital sink)
             continue  # skip cheap/contested markets
         side = "NO"
         fair_value = yes_price - edge
@@ -1056,19 +1073,19 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     result = get_mispriced_category_signals()
-    print(f"\n{'='*60}")
-    print(f"Mispriced Category Signals: {result['total']}")
-    print(f"  Kalshi: {result['kalshi_signals']} | Polymarket: {result['polymarket_signals']}")
-    print(f"  Cross-platform matches: {result['cross_platform_matches']}")
-    print(f"  Max days: {result['max_days_to_close']} | Vol floor: Kalshi {result['min_volume_kalshi']} / Poly ${result['min_volume_polymarket']:,}")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Mispriced Category Signals: {result['total']}")
+    logger.info(f"  Kalshi: {result['kalshi_signals']} | Polymarket: {result['polymarket_signals']}")
+    logger.info(f"  Cross-platform matches: {result['cross_platform_matches']}")
+    logger.info(f"  Max days: {result['max_days_to_close']} | Vol floor: Kalshi {result['min_volume_kalshi']} / Poly ${result['min_volume_polymarket']:,}")
+    logger.info(f"{'='*60}")
 
     for sig in result["signals"][:15]:
         platform = sig.get("platform", "?")
-        print(f"\n  [{platform.upper()[:1]}] {sig['market'][:60]}")
+        logger.info(f"\n  [{platform.upper()[:1]}] {sig['market'][:60]}")
         print(f"  Category: {sig.get('category', '?')} ({sig.get('category_tier', '?')})")
-        print(f"  Side: {sig['side']} @ {sig['price']:.2f}")
-        print(f"  Confidence: {sig['confidence']:.1f}% ({sig['confirmations']} confirmations)")
+        logger.info(f"  Side: {sig['side']} @ {sig['price']:.2f}")
+        logger.info(f"  Confidence: {sig['confidence']:.1f}% ({sig['confirmations']} confirmations)")
         vol_fmt = f"${sig['volume']:,}" if platform == "polymarket" else f"{sig['volume']:,} contracts"
-        print(f"  Volume: {vol_fmt}")
-        print(f"  Expires: {sig['days_to_close']:.1f} days")
+        logger.info(f"  Volume: {vol_fmt}")
+        logger.info(f"  Expires: {sig['days_to_close']:.1f} days")

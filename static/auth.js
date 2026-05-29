@@ -1,6 +1,6 @@
 // Polyclawd Access Gate
 (function() {
-  const ACCESS_CODE_HASH = 'e3ec9c275a965620a8b3f36466a9e382a0404c0b314e1c586899cb6024e246d5'; // SHA-256 of access code
+  const ACCESS_CODE_HASH = '9ac3acd6f058770ae5779e25a7ecb05bfb85553545ebdbbb06f4d0352dc6d3bb'; // SHA-256 of access code (rotated 2026-05-15)
   const AUTH_KEY = 'polyclawd_auth';
   const currentPage = window.location.pathname.split('/').pop() || 'index.html';
 
