@@ -17,6 +17,7 @@ This router consolidates all signal-related endpoints:
 """
 import json
 import os
+import pathlib
 import logging
 import sys
 import urllib.request
@@ -3390,3 +3391,41 @@ async def get_clarity_widget_data():
         content=out,
         headers={"Cache-Control": "public, max-age=300, stale-while-revalidate=900"},
     )
+
+
+@router.get("/options/status")
+async def options_status():
+    import asyncio, sqlite3, os
+    def _build():
+        db = os.environ.get("OPTIONS_DB", str(pathlib.Path.home()/"polyclawd-data"/"options_implied.db"))
+        con = sqlite3.connect(db); con.row_factory = sqlite3.Row
+        try:
+            last = con.execute("SELECT MAX(date) d FROM options_implied").fetchone()["d"]
+            n = con.execute("SELECT COUNT(*) c FROM options_implied WHERE date=?", (last,)).fetchone()["c"]
+            names = [r["ticker"] for r in con.execute("SELECT DISTINCT ticker FROM options_implied WHERE date=?", (last,))]
+            return {"last_run": last, "rows_today": n, "tickers": names}
+        finally: con.close()
+    return await asyncio.get_event_loop().run_in_executor(None, _build)
+
+@router.get("/options/dashboard")
+async def options_dashboard():
+    import asyncio, sqlite3, os, statistics
+    def _build():
+        db = os.environ.get("OPTIONS_DB", str(pathlib.Path.home()/"polyclawd-data"/"options_implied.db"))
+        con = sqlite3.connect(db); con.row_factory = sqlite3.Row
+        try:
+            last = con.execute("SELECT MAX(date) d FROM options_implied").fetchone()["d"]
+            rows = [dict(r) for r in con.execute(
+                "SELECT * FROM options_implied WHERE date=? ORDER BY ABS(spread_pp) DESC", (last,))]
+            sp = [r["spread_pp"] for r in rows if r["spread_pp"] is not None]
+            totals = {"date": last, "matched": len(rows),
+                      "mean_spread_pp": round(statistics.mean(sp),2) if sp else 0,
+                      "std_spread_pp": round(statistics.pstdev(sp),2) if len(sp)>1 else 0}
+            bt = {}
+            for r in rows:
+                t = bt.setdefault(r["ticker"], [])
+                if r["spread_pp"] is not None: t.append(r["spread_pp"])
+            by_ticker = {k:{"n":len(v),"mean_spread_pp":round(statistics.mean(v),2) if v else 0} for k,v in bt.items()}
+            return {"totals": totals, "by_ticker": by_ticker, "divergences": rows[:20], "rows": rows}
+        finally: con.close()
+    return await asyncio.get_event_loop().run_in_executor(None, _build)
