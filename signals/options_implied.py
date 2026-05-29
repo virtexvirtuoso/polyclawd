@@ -313,5 +313,92 @@ def run(db_path=DEFAULT_DB):
     return written
 
 
+# ── Trade-signal layer (paper-trades via paper_portfolio, like weather) ──────
+# Trades the z-score-detrended DEVIATION from each contract's own mean, never the
+# raw spread (raw spread is a persistent risk-premium, not edge). A contract only
+# becomes tradeable once it has >= OPTIONS_MIN_OBS trailing observations AND the
+# current spread deviates >= Z_THRESH sigma from that contract's trailing mean.
+OPTIONS_MIN_OBS = int(os.environ.get("OPTIONS_MIN_OBS", str(MIN_OBS)))  # default 30
+
+
+def build_trade_signals(db_path=DEFAULT_DB, z_thresh=Z_THRESH, min_obs=None):
+    """Convert the latest day's rows into paper_portfolio signal dicts.
+
+    Side is set by the z-sign: spread unusually HIGH vs the contract's own mean
+    (z>0, poly richer than normal) -> fade -> NO; z<0 -> YES. Edge = |spread - mu|
+    (expected mean-reversion, in pp). Returns [] when no contract clears the gate.
+    """
+    min_obs = OPTIONS_MIN_OBS if min_obs is None else min_obs
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    last = con.execute("SELECT MAX(date) d FROM options_implied").fetchone()["d"]
+    rows = [dict(r) for r in con.execute(
+        "SELECT * FROM options_implied WHERE date=?", (last,))] if last else []
+    con.close()
+    out = []
+    for r in rows:
+        sp = r.get("spread_pp")
+        if sp is None:
+            continue
+        n, mu, sd = trailing_z(db_path, r["poly_market_id"], r["strike"], before=last)
+        if n < min_obs or not sd:
+            continue
+        z = (sp - mu) / sd
+        if abs(z) < z_thresh:
+            continue
+        side = "NO" if z > 0 else "YES"
+        edge_pp = abs(sp - mu)
+        strike = r.get("strike")
+        title = f"{r.get('ticker')} {r.get('market_type')} ${strike} ({r.get('expiry')})"
+        try:
+            dtc = max(0.1, (date.fromisoformat(r["expiry"]) - date.fromisoformat(last)).days)
+        except Exception:
+            dtc = 1
+        out.append({
+            "market_id": r["poly_market_id"],
+            "market": title,
+            "market_title": title,
+            "side": side,
+            "entry_price": r.get("poly_price"),
+            "market_price": r.get("poly_price"),
+            "confidence": min(0.95, 0.5 + 0.1 * abs(z)),
+            "edge_pct": round(edge_pp, 2),
+            "strategy": "options_implied",
+            "archetype": "options",
+            "platform": "polymarket",
+            "source": "options_implied",
+            "days_to_close": dtc,
+            "z_score": round(z, 2),
+            "implied_prob": r.get("implied_prob"),
+        })
+    return out
+
+
+def get_options_portfolio_signals():
+    """Signals formatted for paper_portfolio.process_signals() (weather pattern)."""
+    return build_trade_signals(DEFAULT_DB)
+
+
+def open_trades():
+    """Open paper positions for z-gated options signals via the shared engine path."""
+    from signals.paper_portfolio import process_signals
+    sigs = get_options_portfolio_signals()
+    if not sigs:
+        print("[options_implied] trade: 0 signals cleared the z-gate (need "
+              f">= {OPTIONS_MIN_OBS} obs and |z| >= {Z_THRESH})")
+        return {"opened": 0, "signals": 0}
+    res = process_signals(sigs)
+    print(f"[options_implied] trade: {len(sigs)} signals -> {res.get('opened', 0)} opened")
+    return res
+
+
 if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Options-implied signal: scan and optionally paper-trade")
+    ap.add_argument("--trade", action="store_true",
+                    help="after scanning, open paper positions for z-gated signals")
+    args = ap.parse_args()
     run()
+    if args.trade:
+        open_trades()

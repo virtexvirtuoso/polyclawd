@@ -68,7 +68,7 @@ def meta_label_score(side, entry_price, confidence, edge_pct, archetype):
     
     ARCHETYPES = ["weather", "entertainment", "geopolitical", "election", "price_above",
                   "sports_winner", "sports_single_game", "social_count", "deadline_binary",
-                  "ai_model", "other"]
+                  "ai_model", "options", "other"]
     
     arch = (archetype or "other").lower()
     arch_idx = next((i for i, a in enumerate(ARCHETYPES) if a in arch), len(ARCHETYPES) - 1)
@@ -120,6 +120,7 @@ CORRELATION_GROUPS = {
     "financial_price": "finance",
     "entertainment": "entertainment", "ai_model": "culture",
     "social_count": "social_count", "weather": "weather",
+    "options": "options",
     "parlay": "other", "other": "other",
 }
 

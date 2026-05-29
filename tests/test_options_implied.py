@@ -113,3 +113,85 @@ def test_zscore_needs_min_obs(tmp_path):
     con.close()
     n, mu, sd = trailing_z(db, "m1", 200.0, before="2026-06-01")
     assert n == MIN_OBS and abs(mu + 8.0) < 1e-9
+
+
+def _seed_history(
+    db,
+    market_id,
+    strike,
+    n,
+    mean=5.0,
+    today_spread=None,
+    today="2026-06-01",
+    ticker="NVDA",
+    market_type="above",
+    expiry="2026-06-05",
+    poly_price=0.60,
+    implied_prob=0.55,
+):
+    """Seed n trailing rows (alternating ±1 around `mean` so sd>0) + one `today` row."""
+    import sqlite3
+
+    con = sqlite3.connect(db)
+    for i in range(n):
+        sp = mean + (1.0 if i % 2 else -1.0)  # mean preserved, sd ~ 1
+        con.execute(
+            "INSERT INTO options_implied (date,poly_market_id,strike,spread_pp,ticker,market_type,expiry,bracket_lo) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (f"2026-04-{i + 1:02d}", market_id, strike, sp, ticker, market_type, expiry, strike),
+        )
+    if today_spread is not None:
+        con.execute(
+            "INSERT INTO options_implied (date,poly_market_id,strike,spread_pp,ticker,market_type,expiry,bracket_lo,poly_price,implied_prob) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (today, market_id, strike, today_spread, ticker, market_type, expiry, strike, poly_price, implied_prob),
+        )
+    con.commit()
+    con.close()
+
+
+def test_trade_signal_high_z_is_NO(tmp_path):
+    """Spread far ABOVE its own mean (z>0, poly unusually rich) -> fade -> NO."""
+    from signals.options_implied import init_db, build_trade_signals, OPTIONS_MIN_OBS
+
+    db = tmp_path / "t.db"
+    init_db(db)
+    _seed_history(db, "m1", 200.0, OPTIONS_MIN_OBS, mean=5.0, today_spread=15.0)
+    sigs = build_trade_signals(db)
+    assert len(sigs) == 1
+    s = sigs[0]
+    assert s["side"] == "NO"
+    assert s["archetype"] == "options" and s["strategy"] == "options_implied"
+    assert s["market_id"] == "m1" and s["platform"] == "polymarket"
+    assert s["edge_pct"] > 0  # |spread - mu| ~ 10pp
+
+
+def test_trade_signal_low_z_is_YES(tmp_path):
+    """Spread far BELOW its own mean (z<0, poly unusually cheap) -> YES."""
+    from signals.options_implied import init_db, build_trade_signals, OPTIONS_MIN_OBS
+
+    db = tmp_path / "t.db"
+    init_db(db)
+    _seed_history(db, "m1", 200.0, OPTIONS_MIN_OBS, mean=5.0, today_spread=-6.0)
+    sigs = build_trade_signals(db)
+    assert len(sigs) == 1 and sigs[0]["side"] == "YES"
+
+
+def test_trade_signal_skips_under_min_obs(tmp_path):
+    """Fewer than OPTIONS_MIN_OBS trailing obs -> no trade emitted."""
+    from signals.options_implied import init_db, build_trade_signals, OPTIONS_MIN_OBS
+
+    db = tmp_path / "t.db"
+    init_db(db)
+    _seed_history(db, "m1", 200.0, OPTIONS_MIN_OBS - 1, mean=5.0, today_spread=15.0)
+    assert build_trade_signals(db) == []
+
+
+def test_trade_signal_skips_small_deviation(tmp_path):
+    """Enough obs but |z| below threshold -> no trade."""
+    from signals.options_implied import init_db, build_trade_signals, OPTIONS_MIN_OBS
+
+    db = tmp_path / "t.db"
+    init_db(db)
+    _seed_history(db, "m1", 200.0, OPTIONS_MIN_OBS, mean=5.0, today_spread=5.5)  # ~0.5 z
+    assert build_trade_signals(db) == []
