@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Election Intelligence Brief · Polyclawd</title>
-<script src="auth.js"></script>
+<script src="/polyclawd/auth.js"></script>
 <script>
 // Inline Lucide icons (only 4 used: arrow-left, book-open, alert-triangle, trending-up, trending-down)
 window.lucide = { createIcons: function(opts) {
@@ -22,7 +22,7 @@ window.lucide = { createIcons: function(opts) {
   });
 }};
 </script>
-<script defer src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<!-- Chart.js lazy-loaded by renderTrends() only when needed -->
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
 
@@ -1520,6 +1520,22 @@ window.lucide = { createIcons: function(opts) {
   .section-collapsible { transition: max-height 0.3s ease, opacity 0.2s ease; overflow: hidden; }
   .section-collapsible.collapsed { max-height: 0 !important; opacity: 0; }
 
+  /* Arrival fade — plays briefly on the section when a pill is tapped.
+     Instant-jump nav can feel abrupt; a subtle fade-in confirms "you arrived
+     here" like an iOS page transition, without delaying arrival. 260ms,
+     ease-out. Applied to both the section label and its collapsible wrapper. */
+  @keyframes section-arrive-fade {
+    0%   { opacity: 0.25; transform: translateY(4px); }
+    100% { opacity: 1;    transform: translateY(0); }
+  }
+  .section-arrived-fade {
+    animation: section-arrive-fade 260ms ease-out;
+    will-change: opacity, transform;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .section-arrived-fade { animation: none; }
+  }
+
   /* Print styles */
   .back-to-top { position: fixed; bottom: 24px; right: 24px; z-index: 100; width: 36px; height: 36px; border-radius: 50%; background: var(--surface); border: 1px solid var(--border); color: var(--text2); cursor: pointer; display: none; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(0,0,0,0.1); transition: opacity 0.2s; font-size: 16px; }
   .back-to-top:hover { background: var(--terracotta); color: #fff; border-color: var(--terracotta); }
@@ -1549,11 +1565,6 @@ window.lucide = { createIcons: function(opts) {
     </div>
     <div class="header-right">
       <span class="header-confidential">Confidential &middot; For authorized distribution only</span>
-      <div class="nav-links">
-        <a href="portfolio.html" class="nav-link"><i data-lucide="arrow-left"></i> Portfolio</a>
-        <a href="election-ensemble.html" class="nav-link"><i data-lucide="trending-up"></i> Ensemble</a>
-        <a href="election-how-it-works.html" class="nav-link"><i data-lucide="book-open"></i> How It Works</a>
-      </div>
     </div>
   </div>
 
@@ -1819,8 +1830,8 @@ window.lucide = { createIcons: function(opts) {
       <div class="intel-card" style="grid-column:1/-1">
         <div class="intel-title">Control Probability Trend</div>
         <div class="intel-subtitle" style="font-size:11px;color:var(--text3);margin-bottom:8px">Daily chamber control probabilities over time. Requires 2+ days of snapshot data.</div>
-        <canvas id="control-trend-chart" height="180" style="width:100%"></canvas>
-        <div id="control-trend-empty" style="display:none;color:var(--text3);font-size:12px;padding:20px 0;text-align:center">Collecting data. Trends populate after 2+ daily snapshots.</div>
+        <canvas id="control-trend-chart" height="180" style="width:100%;display:none"></canvas>
+        <div id="control-trend-empty" style="color:var(--text3);font-size:12px;padding:20px 0;text-align:center">Collecting data. Trends populate after 2+ daily snapshots.</div>
       </div>
     </div>
     <div class="intel-grid">
@@ -2044,6 +2055,19 @@ window.lucide = { createIcons: function(opts) {
       </div>
     </div>
 
+    <!-- CRYPTO INDUSTRY MONEY · CLARITY ACT -->
+    <div class="intel-grid">
+      <div class="intel-card" style="grid-column:1/-1">
+        <div class="intel-title">Crypto Industry Money · CLARITY Act</div>
+        <div class="intel-subtitle" style="font-size:11px;color:var(--text3);margin-bottom:8px">
+          Who's paying for the fight. <strong>Super PAC money</strong> from FEC Schedule E filings (Fairshake network and crypto-industry PACs, 2026 cycle).
+          <strong>Lobbying money</strong> from Senate LDA filings where the client lobbied on H.R. 3633, FIT21, or digital asset market structure (2025).
+          Two separate datasets — super PAC spend targets candidates; LDA spend targets the bill itself.
+        </div>
+        <div id="crypto-money-body" style="font-size:13px;line-height:1.6"></div>
+      </div>
+    </div>
+
     <!-- RACE TABLE -->
     <div class="table-section" id="markets-section">
       <div class="table-header">
@@ -2108,7 +2132,7 @@ let currentPage = 0;
 const PAGE_SIZE = 50;
 
 // -- Base path detection (supports /polyclawd/ subdirectory on VPS) --
-const API_BASE = window.location.pathname.startsWith('/polyclawd') ? '/polyclawd/api' : '/api';
+const API_BASE = (window.location.hostname === 'virtuosocrypto.com' || window.location.pathname.startsWith('/polyclawd') || window.location.pathname.startsWith('/elections') || window.location.pathname.startsWith('/politics')) ? '/polyclawd/api' : '/api';
 
 // -- Helpers --
 function fmtVol(v) {
@@ -2252,6 +2276,7 @@ function render() {
     renderStructural,
     renderPolicyPulse,
     renderClarityAct,
+    renderCryptoMoney,
   ];
   const schedule = window.requestIdleCallback || (cb => setTimeout(cb, 16));
   deferred.forEach((fn, i) => {
@@ -2983,28 +3008,22 @@ function renderInsights() {
 }
 
 let controlChart = null;
+let _chartJsLoading = false;
 
-function renderTrends() {
-  const trends = (rawData.insights || {}).trends || {};
-  const ch = trends.control_history || [];
-  const momentum = trends.momentum || [];
-  const surges = trends.volume_surges || [];
-  const vol = trends.volatility || [];
-  const daysOfData = trends.days_of_data || 0;
+function _loadChartJs() {
+  if (typeof Chart !== 'undefined' || _chartJsLoading) return Promise.resolve();
+  _chartJsLoading = true;
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js';
+    s.onload = resolve;
+    s.onerror = () => { _chartJsLoading = false; reject(new Error('Chart.js CDN failed')); };
+    document.head.appendChild(s);
+  });
+}
 
-  // ── Control probability chart ──
-  const canvas = document.getElementById('control-trend-chart');
-  const emptyMsg = document.getElementById('control-trend-empty');
-
-  if (ch.length < 2) {
-    canvas.style.display = 'none';
-    emptyMsg.style.display = 'block';
-    emptyMsg.textContent = daysOfData <= 1
-      ? 'Collecting data. Trends populate after 2+ daily snapshots.'
-      : 'Insufficient trend data (' + daysOfData + ' snapshots).';
-  } else {
-    canvas.style.display = 'block';
-    emptyMsg.style.display = 'none';
+function _buildControlChart(canvas, emptyMsg, ch) {
+  try {
     if (controlChart) controlChart.destroy();
     const ctx = canvas.getContext('2d');
     controlChart = new Chart(ctx, {
@@ -3031,6 +3050,40 @@ function renderTrends() {
         },
       },
     });
+    canvas.style.display = 'block';
+    emptyMsg.style.display = 'none';
+  } catch (e) {
+    console.warn('Control trend chart failed:', e);
+    canvas.style.display = 'none';
+    emptyMsg.style.display = 'block';
+    emptyMsg.textContent = 'Chart unavailable';
+  }
+}
+
+function renderTrends() {
+  const trends = (rawData.insights || {}).trends || {};
+  const ch = trends.control_history || [];
+  const momentum = trends.momentum || [];
+  const surges = trends.volume_surges || [];
+  const vol = trends.volatility || [];
+  const daysOfData = trends.days_of_data || 0;
+
+  // ── Control probability chart ──
+  const canvas = document.getElementById('control-trend-chart');
+  const emptyMsg = document.getElementById('control-trend-empty');
+
+  if (ch.length < 2) {
+    canvas.style.display = 'none';
+    emptyMsg.style.display = 'block';
+    emptyMsg.textContent = daysOfData <= 1
+      ? 'Collecting data. Trends populate after 2+ daily snapshots.'
+      : 'Insufficient trend data (' + daysOfData + ' snapshots).';
+  } else if (typeof Chart !== 'undefined') {
+    _buildControlChart(canvas, emptyMsg, ch);
+  } else {
+    emptyMsg.textContent = 'Loading chart...';
+    _loadChartJs().then(() => _buildControlChart(canvas, emptyMsg, ch))
+      .catch(() => { emptyMsg.textContent = 'Chart unavailable'; });
   }
 
   // ── Momentum ──
@@ -4503,23 +4556,39 @@ function renderClarityAct() {
     }
 
     const keywords = ['clarity', 'cftc', 'prediction market', 'event contract', 'crypto market structure',
-      'crypto regulat', 'crypto legislat', 'digital asset', 'stablecoin', 'gambling',
-      'polymarket', 'kalshi', 'ai regulat', 'ai legislat', 'deepfake'];
+      'crypto regulat', 'crypto legislat', 'crypto bill', 'crypto tax', 'digital asset', 'stablecoin', 'gambling',
+      'polymarket', 'kalshi', 'ai regulat', 'ai legislat', 'ai safety', 'deepfake'];
     const relevant = allMarkets.filter(m => {
       const q = (m.question || '').toLowerCase();
       return keywords.some(kw => q.includes(kw));
     });
 
-    relevant.sort((a, b) => (b.volume || 0) - (a.volume || 0));
-    const seen = new Set();
-    const deduped = [];
+    // Dedupe ladder markets: Kalshi events like KXCRYPTOSTRUCTURE-26JAN have
+    // ~9 sub-markets sharing the same `ticker` but different deadlines. The
+    // earliest deadline trades near 0% and the year-end deadline trades much
+    // higher — comparing the wrong rung produces a fake "arb" against
+    // Polymarket. Group by ticker (Kalshi) / slug (Polymarket) and keep the
+    // rung with the LATEST end_date — that's the most comparable to a
+    // year-end Polymarket event.
+    const ladderGroups = new Map();
     for (const m of relevant) {
-      const key = (m.question || '').substring(0, 60).toLowerCase();
-      if (!seen.has(key)) {
-        seen.add(key);
-        deduped.push(m);
+      const groupKey = m.platform === 'kalshi'
+        ? ('k:' + (m.ticker || m.id || m.question))
+        : ('p:' + (m.slug || m.id || m.question));
+      const existing = ladderGroups.get(groupKey);
+      if (!existing) {
+        ladderGroups.set(groupKey, m);
+        continue;
+      }
+      const newEnd = Date.parse(m.end_date || '') || 0;
+      const oldEnd = Date.parse(existing.end_date || '') || 0;
+      // Prefer the LATEST deadline (the "by end of year" rung). Tiebreak on volume.
+      if (newEnd > oldEnd || (newEnd === oldEnd && (m.volume || 0) > (existing.volume || 0))) {
+        ladderGroups.set(groupKey, m);
       }
     }
+    const deduped = Array.from(ladderGroups.values());
+    deduped.sort((a, b) => (b.volume || 0) - (a.volume || 0));
     const items = deduped.slice(0, 20);
 
     if (items.length === 0) {
@@ -4558,6 +4627,116 @@ function renderClarityAct() {
       <style>.hide-mobile{} @media(max-width:500px){.hide-mobile{display:none}}</style>`;
     }
   }
+}
+
+function renderCryptoMoney() {
+  const el = document.getElementById('crypto-money-body');
+  if (!el) return;
+  const cm = (rawData.insights || {}).crypto_money || {};
+  const fec = cm.fec_pacs || {};
+  const lda = cm.lda_clarity || {};
+
+  const fecTotal = fec.grand_total_spend || 0;
+  const ldaTotal = lda.total_spend || 0;
+  const ldaDirect = lda.direct_clarity_mentions || 0;
+  const ldaCount = lda.matched_filing_count || 0;
+  const fecCycle = fec.cycle || 2026;
+
+  // Headline summary tiles
+  const summary = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:14px">
+      <div style="background:var(--bg2,#0f1014);border:1px solid var(--border,#222);border-radius:6px;padding:10px 12px">
+        <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Super PAC Spend (${fecCycle})</div>
+        <div style="font-size:18px;font-weight:700;font-family:var(--mono)">$${fmtMoneyShort(fecTotal)}</div>
+        <div style="font-size:10px;color:var(--text3);margin-top:3px">${(fec.committees || []).filter(c => c.total_spend > 0).length} active committees</div>
+      </div>
+      <div style="background:var(--bg2,#0f1014);border:1px solid var(--border,#222);border-radius:6px;padding:10px 12px">
+        <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">CLARITY Lobbying Spend (2025)</div>
+        <div style="font-size:18px;font-weight:700;font-family:var(--mono)">$${fmtMoneyShort(ldaTotal)}</div>
+        <div style="font-size:10px;color:var(--text3);margin-top:3px">${ldaCount} filings · ${ldaDirect} name H.R. 3633 directly</div>
+      </div>
+    </div>`;
+
+  // Super PAC table
+  let fecHtml = '';
+  const committees = (fec.committees || []).filter(c => c.total_spend > 0);
+  if (committees.length > 0) {
+    fecHtml = `
+      <div style="font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--text3);margin:12px 0 6px">Super PAC Independent Expenditures · ${fecCycle} Cycle</div>
+      <div style="font-size:10px;color:var(--text3);margin-bottom:6px">FEC Schedule E filings. Spent supporting/opposing candidates — not earmarked to a bill, but shows which races the crypto industry is putting capital behind.</div>
+      <table class="mini-table" style="width:100%;margin-bottom:8px">
+        <thead><tr>
+          <th style="text-align:left">Committee</th>
+          <th style="text-align:right">Support</th>
+          <th style="text-align:right">Oppose</th>
+          <th style="text-align:right">Total</th>
+          <th style="text-align:right" class="hide-mobile">Cands</th>
+          <th style="text-align:left" class="hide-mobile">Top Target</th>
+        </tr></thead>
+        <tbody>${committees.map(c => {
+          const top = (c.top_recipients || [])[0];
+          const topLbl = top ? `${escHtml(top.candidate)} (${escHtml(top.state || '')}-${escHtml(top.office || '')}) · ${escHtml(top.net_direction || '')}` : '—';
+          const topColor = top && top.net_direction === 'oppose' ? 'var(--neg-red)' : top && top.net_direction === 'support' ? 'var(--pos-green)' : 'var(--text3)';
+          return `<tr>
+            <td style="text-align:left">${escHtml(c.committee_name)}<div style="font-size:9px;color:var(--text3)">${escHtml((c.group || '').replace(/_/g, ' '))}</div></td>
+            <td class="mono" style="text-align:right;color:var(--pos-green)">$${fmtMoneyShort(c.support_spend)}</td>
+            <td class="mono" style="text-align:right;color:var(--neg-red)">$${fmtMoneyShort(c.oppose_spend)}</td>
+            <td class="mono" style="text-align:right;font-weight:700">$${fmtMoneyShort(c.total_spend)}</td>
+            <td class="mono hide-mobile" style="text-align:right">${c.candidates_touched || 0}</td>
+            <td class="hide-mobile" style="text-align:left;font-size:11px;color:${topColor}">${topLbl}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>`;
+  } else {
+    fecHtml = '<div style="color:var(--text3);font-size:12px;margin:10px 0">No FEC Schedule E data loaded for crypto PACs.</div>';
+  }
+
+  // LDA lobbying table
+  let ldaHtml = '';
+  const ldaClients = lda.clients || [];
+  if (ldaClients.length > 0) {
+    ldaHtml = `
+      <div style="font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--text3);margin:14px 0 6px">Senate LDA Lobbying · CLARITY Act Mentions (2025)</div>
+      <div style="font-size:10px;color:var(--text3);margin-bottom:6px">Quarterly lobbying disclosures where the client lobbied on H.R. 3633, FIT21, or digital asset market structure. Spend is the <strong>quarterly total across all issues</strong> — upper bound on CLARITY-specific spend.</div>
+      <table class="mini-table" style="width:100%;margin-bottom:8px">
+        <thead><tr>
+          <th style="text-align:left">Client</th>
+          <th style="text-align:right">2025 Total</th>
+          <th style="text-align:right" class="hide-mobile">Filings</th>
+          <th style="text-align:right" class="hide-mobile">Direct H.R. 3633</th>
+        </tr></thead>
+        <tbody>${ldaClients.map(c => {
+          return `<tr>
+            <td style="text-align:left">${escHtml(c.client)}</td>
+            <td class="mono" style="text-align:right;font-weight:700">$${fmtMoneyShort(c.total_spend)}</td>
+            <td class="mono hide-mobile" style="text-align:right">${c.filing_count}</td>
+            <td class="mono hide-mobile" style="text-align:right;color:${c.direct_clarity_filings > 0 ? 'var(--gold-score, #c9a227)' : 'var(--text3)'}">${c.direct_clarity_filings}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>`;
+  } else {
+    ldaHtml = '<div style="color:var(--text3);font-size:12px;margin:10px 0">No LDA CLARITY filings loaded.</div>';
+  }
+
+  // 501(c)(4) caveat
+  const caveat = `
+    <div style="margin-top:10px;padding:8px 10px;background:var(--bg2,#0f1014);border-left:3px solid var(--gold-score,#c9a227);border-radius:3px;font-size:10px;color:var(--text3);line-height:1.5">
+      <strong style="color:var(--text2,#aaa)">501(c)(4) gap:</strong>
+      Stand With Crypto Alliance is organized as a 501(c)(4) and does not file LDA disclosures directly. Its advocacy footprint — grassroots mobilization, candidate endorsements, voter education — is not federally disclosed.
+      Its affiliated PAC (FEC committee C00876631) is tracked in the Super PAC table above but has minimal cycle-to-date spend.
+      FEC + LDA capture direct lobbying and independent expenditure money only; 501(c)(4) issue advocacy is a known dark-money gap.
+    </div>`;
+
+  el.innerHTML = summary + fecHtml + ldaHtml + caveat;
+}
+
+// Compact money formatter: 1234567 → "1.23M"
+function fmtMoneyShort(n) {
+  n = Number(n) || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return n.toFixed(0);
 }
 
 function renderMultiPlatform() {
@@ -5019,18 +5198,56 @@ function initSectionNav() {
   const sectionIds = [...pills].map(p => p.dataset.section).filter(Boolean);
   const sections = sectionIds.map(id => document.getElementById(id)).filter(Boolean);
 
-  // Smooth scroll on click. Uses scrollIntoView which respects
-  // scroll-margin-top, then re-aligns after deferred content renders
-  // (sections below can shift as more cards lazy-render in).
+  // App-like navigation: instant jump (no smooth scroll) — same pattern as
+  // iOS tab bar, Twitter, Reddit, Notion. Pills are behaving like tabs, not
+  // like a table-of-contents anchor, so smooth-scrolling through intermediate
+  // sections adds latency without useful spatial context. On arrival we
+  // flash the target section label + fire a micro-haptic (mobile) to confirm
+  // "you're here". Scroll-spy is suppressed for one frame so the optimistic
+  // active state isn't clobbered by the jump's scroll event.
+  let programmaticScroll = false;
+  const getTargetY = (target) => {
+    const navH = wrap.offsetHeight || 48;
+    return target.getBoundingClientRect().top + window.pageYOffset - navH - 8;
+  };
+  const jumpToSection = (target) => {
+    programmaticScroll = true;
+    window.scrollTo(0, getTargetY(target));
+    // Arrival fade on the section label + its collapsible wrapper (so the
+    // entire section body fades in together, not just the tiny label).
+    const wrapper = target.nextElementSibling && target.nextElementSibling.classList.contains('section-collapsible')
+      ? target.nextElementSibling
+      : null;
+    const fadeTargets = wrapper ? [target, wrapper] : [target];
+    fadeTargets.forEach(el => {
+      el.classList.remove('section-arrived-fade'); // reset if retriggered
+      void el.offsetWidth;                          // force reflow to restart animation
+      el.classList.add('section-arrived-fade');
+    });
+    setTimeout(() => fadeTargets.forEach(el => el.classList.remove('section-arrived-fade')), 320);
+    // Micro-haptic on mobile (iOS Safari ignores this silently, Android honors it)
+    if (navigator.vibrate) { try { navigator.vibrate(8); } catch {} }
+    // Release the scroll-spy lock after the jump's scroll event has flushed
+    requestAnimationFrame(() => { programmaticScroll = false; });
+    // Corrective pass for lazy-rendered content — sections below can grow
+    // after initial paint, shifting our target's offset. Re-align at 800ms
+    // only if we drifted more than a few pixels.
+    setTimeout(() => {
+      const newY = getTargetY(target);
+      if (Math.abs(newY - window.pageYOffset) > 4) window.scrollTo(0, newY);
+    }, 800);
+  };
   pills.forEach(pill => {
     pill.addEventListener('click', (e) => {
       e.preventDefault();
       const target = document.getElementById(pill.dataset.section);
       if (!target) return;
-      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      // Re-align after smooth-scroll completes + any layout shifts settle
-      setTimeout(() => target.scrollIntoView({ behavior: 'auto', block: 'start' }), 700);
-      setTimeout(() => target.scrollIntoView({ behavior: 'auto', block: 'start' }), 1500);
+      // Optimistic active state — instant tactile feedback
+      pills.forEach(p => p.classList.remove('active'));
+      pill.classList.add('active');
+      lastActive = pill;
+      centerPill(pill);
+      jumpToSection(target);
     });
   });
 
@@ -5072,6 +5289,10 @@ function initSectionNav() {
   // ignore unrendered sections (offsetTop === 0) to avoid mis-selecting last.
   let lastActive = null;
   const updateActive = () => {
+    // Freeze scroll-spy while a pill click is programmatically animating
+    // the viewport — otherwise intermediate sections would briefly mark
+    // their own pills active as we fly past them.
+    if (programmaticScroll) return;
     const navH = wrap.offsetHeight || 48;
     const offset = window.pageYOffset + navH + 20;
     const rendered = sections
@@ -5153,8 +5374,10 @@ fetchData();
 initCollapsible();
 initSectionNav();
 
-// Auto-refresh every 5 minutes
-setInterval(fetchData, 5 * 60 * 1000);
+// Auto-refresh every 5 minutes — skip when tab is hidden
+setInterval(() => {
+  if (!document.hidden) fetchData();
+}, 5 * 60 * 1000);
 </script>
 </body>
 </html>

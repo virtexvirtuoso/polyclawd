@@ -65,6 +65,11 @@ async def lifespan(app: FastAPI):
     http_client = httpx.AsyncClient(timeout=30.0)
     logger.info("HTTP client initialized")
 
+    # Pre-warm election cache in background (non-blocking startup)
+    import asyncio
+    from api.routes.signals import prewarm_election_cache
+    asyncio.create_task(prewarm_election_cache())
+
     yield
 
     # Shutdown

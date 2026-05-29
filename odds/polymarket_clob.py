@@ -104,13 +104,19 @@ def get_orderbook(token_id: str) -> Optional[OrderBook]:
             OrderBookLevel(price=float(a["price"]), size=float(a["size"]))
             for a in data.get("asks", [])
         ]
-        
+
+        # Polymarket's /book returns bids ascending and asks descending
+        # (worst-to-best). Normalize so bids[0] = best bid (highest) and
+        # asks[0] = best ask (lowest) — standard CLOB convention.
+        bids.sort(key=lambda x: x.price, reverse=True)
+        asks.sort(key=lambda x: x.price)
+
         # Calculate spread and mid
         best_bid = bids[0].price if bids else 0
         best_ask = asks[0].price if asks else 1
         spread = best_ask - best_bid
         mid_price = (best_bid + best_ask) / 2 if bids and asks else 0.5
-        
+
         return OrderBook(
             market_id=data.get("market", ""),
             token_id=token_id,
@@ -225,6 +231,163 @@ def analyze_orderbook_depth(orderbook: OrderBook) -> Dict:
     }
 
 
+@dataclass
+class FillEstimate:
+    """Result of walking the order book to size a position.
+
+    Fields:
+        ok            : True iff position is tradeable (actual_usd >= min_usd)
+        actual_usd    : USD that will actually be spent (<= target_usd)
+        shares        : Number of contracts acquired
+        avg_price     : Volume-weighted average fill price (decimal 0..1)
+        best_price    : Top-of-book price (decimal 0..1)
+        slippage_bps  : (avg_price - best_price) / best_price * 10000
+        spread        : best_ask - best_bid at fetch time
+        reason        : "full" | "resized" | "skip:<why>"
+    """
+    ok: bool
+    actual_usd: float
+    shares: float
+    avg_price: float
+    best_price: float
+    slippage_bps: float
+    spread: float
+    reason: str
+
+
+def _walk_asks(
+    asks: List[OrderBookLevel],
+    best_price: float,
+    target_usd: float,
+    max_slip_bps: float,
+) -> tuple[float, float]:
+    """Walk asks accumulating fills. Stops at target_usd OR max_slip_bps.
+    Returns (cum_usd, cum_shares). Partial walk is fine — caller checks against min_usd.
+    """
+    cum_usd = 0.0
+    cum_shares = 0.0
+    for lvl in asks:
+        level_usd = lvl.price * lvl.size
+        if level_usd <= 0:
+            continue
+
+        # Try adding the entire level, see if slippage cap is breached
+        next_usd = cum_usd + level_usd
+        next_shares = cum_shares + lvl.size
+        next_avg = next_usd / next_shares if next_shares > 0 else lvl.price
+        next_slip = ((next_avg - best_price) / best_price) * 10000 if best_price > 0 else 0
+
+        # If this full level is within cap AND we'd still be under target, take it all
+        if next_slip <= max_slip_bps and next_usd <= target_usd:
+            cum_usd = next_usd
+            cum_shares = next_shares
+            continue
+
+        # Otherwise, we need a partial fill on this level — constrained by either
+        # (a) remaining target USD, or (b) slip cap. Take whichever is smaller.
+
+        # (a) Remaining target
+        remaining_usd = max(0.0, target_usd - cum_usd)
+        remaining_shares_by_target = remaining_usd / lvl.price if lvl.price > 0 else 0
+
+        # (b) Slip cap — solve for max shares at this level such that
+        # (cum_usd + p*x) / (cum_shares + x) = best_price * (1 + max_slip_bps/10000)
+        cap_avg = best_price * (1 + max_slip_bps / 10000)
+        # (cum_usd + p*x) = cap_avg * (cum_shares + x)
+        # cum_usd - cap_avg*cum_shares = cap_avg*x - p*x = x*(cap_avg - p)
+        denom = cap_avg - lvl.price
+        if denom >= 0:
+            # Level price is already below the cap — take as much as target allows
+            take_by_slip = remaining_shares_by_target
+        else:
+            # denom negative — solve for x
+            lhs = cum_usd - cap_avg * cum_shares
+            take_by_slip = max(0.0, lhs / denom) if denom != 0 else 0.0
+
+        take = min(remaining_shares_by_target, take_by_slip, lvl.size)
+        if take <= 0:
+            break
+        cum_usd += lvl.price * take
+        cum_shares += take
+        if cum_usd >= target_usd - 1e-9:
+            break
+        # If we hit the slip cap on this level, don't go further
+        if take < lvl.size:
+            break
+    return cum_usd, cum_shares
+
+
+def size_to_book(
+    token_id: Optional[str] = None,
+    market_slug: Optional[str] = None,
+    side: str = "YES",
+    target_usd: float = 100.0,
+    max_slip_bps: float = 50.0,
+    min_usd: float = 15.0,
+    max_spread: float = 0.05,
+) -> FillEstimate:
+    """Walk the Polymarket CLOB order book to size a position adaptively.
+
+    Either `token_id` or `market_slug` (+side) must be provided. If only
+    slug is given, the function resolves the token id via Gamma.
+
+    Policy:
+        1. Fetch book for the side's token.
+        2. If spread > max_spread: skip (wide market).
+        3. Walk asks (for buying) accumulating fills until target_usd or
+           slippage cap.
+        4. If accumulated usd < min_usd: skip (too thin).
+        5. Otherwise return the actual executable size + avg price.
+
+    Returns FillEstimate with ok=False and reason="skip:..." when the
+    market is not tradeable at acceptable quality.
+    """
+    # Resolve token id if only slug given
+    if not token_id and market_slug:
+        outcome = "Yes" if str(side).upper() == "YES" else "No"
+        token_id = get_token_id_for_market(market_slug, outcome)
+    if not token_id:
+        return FillEstimate(False, 0, 0, 0, 0, 0, 0, "skip:no_token_id")
+
+    book = get_orderbook(token_id)
+    if not book:
+        return FillEstimate(False, 0, 0, 0, 0, 0, 0, "skip:no_book")
+
+    # Buying always walks asks on the token you want to acquire. For NO we
+    # already asked get_token_id_for_market for the NO token above.
+    asks = book.asks
+    if not asks:
+        return FillEstimate(False, 0, 0, 0, 0, 0, book.spread, "skip:empty_asks")
+
+    best_price = asks[0].price
+    spread = book.spread
+    if spread > max_spread:
+        return FillEstimate(False, 0, 0, 0, best_price, 0, spread,
+                            f"skip:wide_spread:{spread:.3f}")
+
+    cum_usd, cum_shares = _walk_asks(asks, best_price, target_usd, max_slip_bps)
+
+    if cum_shares <= 0 or cum_usd < min_usd:
+        return FillEstimate(False, round(cum_usd, 2), round(cum_shares, 2),
+                            best_price, best_price, 0, spread,
+                            f"skip:thin_book:${cum_usd:.0f}")
+
+    avg_price = cum_usd / cum_shares
+    slip_bps = ((avg_price - best_price) / best_price) * 10000 if best_price > 0 else 0
+    reason = "full" if cum_usd >= target_usd - 0.01 else "resized"
+
+    return FillEstimate(
+        ok=True,
+        actual_usd=round(cum_usd, 2),
+        shares=round(cum_shares, 2),
+        avg_price=round(avg_price, 4),
+        best_price=round(best_price, 4),
+        slippage_bps=round(slip_bps, 1),
+        spread=round(spread, 4),
+        reason=reason,
+    )
+
+
 def get_market_microstructure(market_slug: str) -> Dict:
     """
     Get complete market microstructure analysis for a market.
@@ -281,11 +444,8 @@ async def get_clob_summary(market_id: str = None) -> Dict:
         # Get specific market
         try:
             url = f"{GAMMA_API}/markets/{market_id}"
-            req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                market = json.loads(resp.read().decode())
-            
-            slug = market.get("slug", "")
+            market = _resilient_urlopen("polymarket_gamma", url, timeout=10)
+            slug = market.get("slug", "") if market else ""
             if slug:
                 result["market"] = get_market_microstructure(slug)
         except:
@@ -294,9 +454,7 @@ async def get_clob_summary(market_id: str = None) -> Dict:
         # Get top liquid markets
         try:
             url = f"{GAMMA_API}/markets?active=true&closed=false&limit=10&_sort=liquidityNum&_order=desc"
-            req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                markets = json.loads(resp.read().decode())
+            markets = _resilient_urlopen("polymarket_gamma", url, timeout=15) or []
             
             result["top_markets"] = []
             for m in markets[:5]:

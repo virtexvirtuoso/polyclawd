@@ -259,25 +259,32 @@ def _extract_date_from_market(title: str) -> Optional[str]:
         "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
     }
     
-    # "on February 14" / "on Feb 14"
-    for month_name, month_num in months.items():
-        pattern = rf"(?:on|for)\s+{month_name}\s+(\d{{1,2}})"
-        m = re.search(pattern, title_lower)
-        if m:
-            day = int(m.group(1))
-            year = datetime.now().year
-            # If month is in the past, assume next year
-            now = datetime.now()
-            if month_num < now.month or (month_num == now.month and day < now.day):
-                year += 1
-            return f"{year}-{month_num:02d}-{day:02d}"
-    
-    # "February 14, 2026"
+    # "February 14, 2026" — explicit year takes priority
     for month_name, month_num in months.items():
         pattern = rf"{month_name}\s+(\d{{1,2}}),?\s+(\d{{4}})"
         m = re.search(pattern, title_lower)
         if m:
             return f"{m.group(2)}-{month_num:02d}-{int(m.group(1)):02d}"
+
+    # "on February 14" / "on Feb 14" — no year, infer from current date
+    for month_name, month_num in months.items():
+        pattern = rf"(?:on|for)\s+{month_name}\s+(\d{{1,2}})"
+        m = re.search(pattern, title_lower)
+        if m:
+            day = int(m.group(1))
+            now = datetime.now()
+            year = now.year
+            # Grace period: only assume next year if date is >7 days in the past.
+            # This prevents yesterday's markets from being treated as next year.
+            GRACE_DAYS = 7
+            try:
+                candidate = datetime(year, month_num, day)
+                delta_days = (now - candidate).days
+                if delta_days > GRACE_DAYS:
+                    year += 1
+            except ValueError:
+                year += 1  # Invalid date in current year (e.g. Feb 29 on non-leap), try next
+            return f"{year}-{month_num:02d}-{day:02d}"
     
     return None
 
@@ -1114,6 +1121,92 @@ def scan_polymarket_weather() -> List[dict]:
     return signals
 
 
+def _is_adverse_drift(mean_shift: float, comparison: str, side: str) -> bool:
+    """Check if the mean shift direction hurts our position.
+
+    For NO bets (our primary side):
+    - "above" market + NO side: mean dropping = good (moves away from threshold), rising = bad
+    - "below" market + NO side: mean rising = good, dropping = bad
+    - "between"/"exact" + NO side: mean moving away from bracket center = good for NO
+    For YES bets (rare, but handle correctly):
+    - Opposite of NO logic
+    """
+    if comparison == "above":
+        # above threshold: higher mean = more likely YES = bad for NO, good for YES
+        adverse_for_no = mean_shift > 0
+    elif comparison == "below":
+        # below threshold: lower mean = more likely YES = bad for NO, good for YES
+        adverse_for_no = mean_shift < 0
+    else:
+        # between/exact: any drift away from center hurts YES, helps NO
+        # For drift check we treat absolute movement as adverse for YES
+        adverse_for_no = False  # between/exact: use absolute drift, handled by caller
+        return side == "YES"  # For between, any big drift hurts YES
+
+    return adverse_for_no if side == "NO" else not adverse_for_no
+
+
+def _compute_forecast_drift(entry_forecast: dict, current_result: dict) -> dict:
+    """Compute forecast drift metrics between entry snapshot and current ensemble.
+
+    Returns:
+        {"mean_drift_sigma": float, "agreement_drop": float, "std_expansion": float,
+         "mean_shift_f": float, "should_close": bool, "reason": str}
+    """
+    entry_mean = entry_forecast.get("forecast_mean") or entry_forecast.get("mean")
+    entry_std = entry_forecast.get("forecast_std") or entry_forecast.get("std")
+    entry_agreement = entry_forecast.get("agreement", entry_forecast.get("source_agreement"))
+
+    current_mean = current_result.get("forecast_mean") or current_result.get("mean")
+    current_std = current_result.get("forecast_std") or current_result.get("std")
+    current_agreement = current_result.get("agreement", current_result.get("source_agreement"))
+
+    drift = {"mean_drift_sigma": 0, "agreement_drop": 0, "std_expansion": 0,
+             "mean_shift_f": 0, "should_close": False, "reason": ""}
+
+    if entry_mean is None or current_mean is None or not entry_std or entry_std <= 0:
+        return drift
+
+    mean_shift = current_mean - entry_mean
+    drift["mean_shift_f"] = round(mean_shift, 2)
+    drift["mean_drift_sigma"] = round(abs(mean_shift) / entry_std, 2)
+
+    if entry_agreement is not None and current_agreement is not None:
+        drift["agreement_drop"] = round(entry_agreement - current_agreement, 3)
+
+    if current_std and entry_std > 0:
+        drift["std_expansion"] = round(current_std / entry_std, 2)
+
+    # Hard thresholds
+    if drift["mean_drift_sigma"] >= 1.5:
+        drift["should_close"] = True
+        drift["reason"] = f"mean drift {drift['mean_drift_sigma']:.1f}σ ({mean_shift:+.1f}°F)"
+    elif drift["agreement_drop"] >= 0.20:
+        drift["should_close"] = True
+        drift["reason"] = f"agreement collapse {drift['agreement_drop']:.0%} drop"
+    elif drift["std_expansion"] >= 2.0:
+        drift["should_close"] = True
+        drift["reason"] = f"std expansion {drift['std_expansion']:.1f}x"
+    else:
+        # Compound trigger: 2 of 3 mild thresholds
+        mild_count = 0
+        reasons = []
+        if drift["mean_drift_sigma"] >= 1.0:
+            mild_count += 1
+            reasons.append(f"mean {drift['mean_drift_sigma']:.1f}σ")
+        if drift["agreement_drop"] >= 0.10:
+            mild_count += 1
+            reasons.append(f"agree -{drift['agreement_drop']:.0%}")
+        if drift["std_expansion"] >= 1.5:
+            mild_count += 1
+            reasons.append(f"std {drift['std_expansion']:.1f}x")
+        if mild_count >= 2:
+            drift["should_close"] = True
+            drift["reason"] = f"compound drift ({' + '.join(reasons)})"
+
+    return drift
+
+
 def reeval_weather_positions() -> dict:
     """
     Re-evaluate open weather positions against fresh ensemble data.
@@ -1144,7 +1237,8 @@ def reeval_weather_positions() -> dict:
     conn.row_factory = sqlite3.Row
     
     positions = conn.execute(
-        "SELECT id, market_title, market_id, side, entry_price, bet_size, opened_at, archetype, edge_pct "
+        "SELECT id, market_title, market_id, side, entry_price, bet_size, opened_at, archetype, edge_pct, platform, entry_forecast_json, "
+        "strategy, confidence "
         "FROM paper_positions WHERE status='open' AND archetype='weather'"
     ).fetchall()
     
@@ -1222,7 +1316,28 @@ def reeval_weather_positions() -> dict:
             entry = 1.0 - entry
         
         current_edge = fair_value - entry
-        
+
+        # ── Forecast drift check ─────────────────────────────────────
+        # Compare entry forecast snapshot against current ensemble.
+        # Catches signal deterioration before the market price gaps.
+        entry_forecast_raw = pos["entry_forecast_json"]
+        forecast_drift = None
+        if entry_forecast_raw:
+            try:
+                entry_forecast = json.loads(entry_forecast_raw)
+                forecast_drift = _compute_forecast_drift(entry_forecast, result)
+                if forecast_drift["should_close"]:
+                    drift_comparison = entry_forecast.get("comparison", comparison)
+                    if _is_adverse_drift(forecast_drift["mean_shift_f"], drift_comparison, side):
+                        # Close via forecast drift — falls through to the close block below
+                        pass
+                    else:
+                        # Drift is in our favor, don't close
+                        logger.debug("WEATHER DRIFT: favorable direction, ignoring drift for pos %d", pos["id"])
+                        forecast_drift["should_close"] = False
+            except (json.JSONDecodeError, TypeError, KeyError) as e:
+                logger.debug("Forecast drift parse failed for pos %d: %s", pos["id"], e)
+
         detail = {
             "id": pos["id"],
             "market": title[:80],
@@ -1232,6 +1347,7 @@ def reeval_weather_positions() -> dict:
             "edge_now": round(current_edge * 100, 1),
             "hours_until": round(hours_until, 1),
             "action": "keep",
+            "forecast_drift": forecast_drift,
         }
         
         # EXIT CRITERIA:
@@ -1265,16 +1381,78 @@ def reeval_weather_positions() -> dict:
             should_close = True
             close_status = "won"
             close_reason = f"weather-reeval: take-profit, edge converged to {current_edge*100:.1f}% (was ~{original_edge*100:.0f}%)"
-        
+
+        # Forecast drift — exit when ensemble data deteriorates adversely
+        if not should_close and forecast_drift and forecast_drift["should_close"]:
+            should_close = True
+            close_reason = f"forecast-drift: {forecast_drift['reason']}"
+            logger.info("FORECAST DRIFT closing pos %d: %s", pos["id"], close_reason)
+
         if should_close:
             try:
-                from signals.paper_portfolio import close_position
-                close_result = close_position(pos["market_id"], close_status, exit_price=None)
+                # Fetch current market price and compute actual PnL
+                # (don't use close_position() — it assumes full win/loss)
+                from services.stop_evaluator import _fetch_price, _compute_unrealized_pnl
+                from signals.paper_portfolio import _get_bankroll, _save_state
+                _, current_yes_price = _fetch_price(dict(pos))
+                if current_yes_price is not None:
+                    unrealized_pnl = _compute_unrealized_pnl(
+                        pos["side"], pos["entry_price"], current_yes_price, pos["bet_size"]
+                    )
+                    pnl = round(unrealized_pnl, 2)
+                    exit_price = round(current_yes_price, 4)
+                else:
+                    # Can't fetch price — fall back to ensemble estimate
+                    # fair_value was already flipped for NO side at line ~1221,
+                    # so flip back to get YES price for _compute_unrealized_pnl
+                    proxy_yes = fair_value if pos["side"] == "YES" else (1 - fair_value)
+                    unrealized_pnl = _compute_unrealized_pnl(
+                        pos["side"], pos["entry_price"], proxy_yes, pos["bet_size"]
+                    )
+                    pnl = round(unrealized_pnl, 2)
+                    exit_price = round(proxy_yes, 4)
+                    logger.warning("WEATHER REEVAL: Could not fetch price for %d, using ensemble fair_value", pos["id"])
+
+                # Close with actual PnL via direct SQL (status='stopped')
+                conn.execute("""
+                    UPDATE paper_positions
+                    SET status = 'stopped',
+                        closed_at = ?,
+                        exit_price = ?,
+                        pnl = ?,
+                        close_reason = ?
+                    WHERE id = ?
+                """, (
+                    now.isoformat(),
+                    exit_price,
+                    pnl,
+                    close_reason,
+                    pos["id"],
+                ))
+                # Update bankroll
+                bankroll = _get_bankroll(conn) + pnl
+                _save_state(conn, bankroll, pnl)
+                conn.commit()
+
+                # Calibration outcome log — same rationale as stop_evaluator:
+                # reeval closes are early exits, not market resolutions. Treat
+                # `won` as the realized P&L sign (positive = take-profit close
+                # was right; negative = adverse-edge close locked in a loss).
+                try:
+                    from signals.resolution_logger import log_position_close
+                    log_position_close(pos, won=(pnl > 0), pnl=pnl,
+                                       close_reason=close_reason,
+                                       closing_line=exit_price)
+                except Exception as e:
+                    logger.warning("Weather reeval resolution log failed: %s", e)
+
                 detail["action"] = "closed"
                 detail["close_reason"] = close_reason
+                detail["pnl"] = pnl
+                detail["exit_price"] = exit_price
                 results["closed"] += 1
-                logger.info("WEATHER REEVAL: Closed position %d (%s) — %s", 
-                           pos["id"], title[:50], close_reason)
+                logger.info("WEATHER REEVAL: Closed position %d (%s) — %s | P&L $%+.2f",
+                           pos["id"], title[:50], close_reason, pnl)
             except Exception as e:
                 logger.error("Failed to close position %d: %s", pos["id"], e)
                 results["errors"] += 1

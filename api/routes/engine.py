@@ -148,6 +148,14 @@ def load_engine_state() -> dict:
     state.setdefault("last_boost_decay", None)
     state.setdefault("daily_pnl", 0)
     state.setdefault("drawdown_halt", False)
+    # Liquidity-adaptive sizing toggle (walks Polymarket order book before entry)
+    state.setdefault("liquidity_adaptive_sizing", False)
+    state.setdefault("max_slip_bps", 50.0)
+    state.setdefault("min_book_usd", 15.0)
+    # Post-lock stop tier (tight stops in the info-lock window before resolution)
+    state.setdefault("post_lock_stops_enabled", False)
+    state.setdefault("post_lock_weather_hours", 3.0)
+    state.setdefault("post_lock_weather_max_loss", 0.12)
     return state
 
 
@@ -221,20 +229,224 @@ def check_drawdown_halt(state: dict, current_balance: float) -> tuple[bool, Opti
 # ============================================================================
 
 def engine_evaluate_and_trade() -> dict:
-    """Evaluate signals and execute trades. Placeholder for full implementation."""
-    state = load_engine_state()
-    logger.info("Engine evaluation triggered")
+    """Evaluate signals and execute paper trades on high-confidence signals.
 
-    # Update scan time
+    Pipeline: aggregate_all_signals() → filter by confidence → Kelly sizing
+    → daily limit check → cooldown check → dedup → paper trade execution.
+    """
+    state = load_engine_state()
     state["last_scan_time"] = datetime.now().isoformat()
+
+    # Check drawdown halt
+    if state.get("drawdown_halt"):
+        save_engine_state(state)
+        return {
+            "action": "halted",
+            "reason": "drawdown_halt",
+            "timestamp": datetime.now().isoformat(),
+            "trades_today": state.get("trades_today", 0),
+        }
+
+    # Load balance for phase detection + sizing
+    _ensure_dirs()
+    balance_data = _load_json(BALANCE_FILE, {"usdc": DEFAULT_BALANCE})
+    balance = balance_data.get("usdc", DEFAULT_BALANCE)
+
+    # Get phase config for min_confidence threshold
+    phase_config = get_phase_config(balance) if PHASE_SCALING_ENABLED else None
+    min_conf = get_effective_min_confidence(state)
+    if phase_config:
+        min_conf = max(min_conf, phase_config.min_confidence)
+
+    # Check daily trade limits
+    if PHASE_SCALING_ENABLED:
+        positions = _load_json(POSITIONS_FILE, [])
+        exposure = sum(p.get("cost_basis", 0) for p in positions)
+        limits = check_daily_limits(
+            balance, state.get("daily_pnl", 0),
+            state.get("trades_today", 0), exposure
+        )
+        if not limits["can_trade"]:
+            save_engine_state(state)
+            return {
+                "action": "limited",
+                "reason": limits["reason"],
+                "timestamp": datetime.now().isoformat(),
+                "trades_today": state.get("trades_today", 0),
+            }
+
+    # Cooldown check — don't trade too fast after a loss
+    last_trade = state.get("last_trade_time")
+    if last_trade and phase_config:
+        try:
+            elapsed = (datetime.now() - datetime.fromisoformat(last_trade)).total_seconds()
+            cooldown = phase_config.cooldown_after_loss if state.get("last_trade_won") is False else 60
+            if elapsed < cooldown:
+                save_engine_state(state)
+                return {
+                    "action": "cooldown",
+                    "seconds_remaining": round(cooldown - elapsed),
+                    "timestamp": datetime.now().isoformat(),
+                }
+        except (ValueError, TypeError):
+            pass
+
+    # Fetch and filter signals
+    try:
+        from api.routes.signals import aggregate_all_signals
+        result = aggregate_all_signals()
+        all_signals = result.get("actionable_signals", [])
+    except Exception as e:
+        logger.exception("Engine: signal aggregation failed: %s", e)
+        save_engine_state(state)
+        return {"action": "error", "reason": str(e)[:200]}
+
+    # Filter to signals above confidence threshold
+    candidates = [
+        s for s in all_signals
+        if s.get("confidence", 0) >= min_conf
+        and s.get("market_id")
+        and s.get("side") in ("YES", "NO")
+        and s.get("price", 0) > 0.01
+    ]
+
+    if not candidates:
+        save_engine_state(state)
+        return {
+            "action": "scanned",
+            "timestamp": datetime.now().isoformat(),
+            "signals_evaluated": len(all_signals),
+            "above_threshold": 0,
+            "trades_executed": 0,
+            "min_confidence": min_conf,
+            "trades_today": state.get("trades_today", 0),
+        }
+
+    # Dedup against open positions — don't double up
+    positions = _load_json(POSITIONS_FILE, [])
+    open_market_ids = {p.get("market_id") for p in positions}
+    candidates = [s for s in candidates if s.get("market_id") not in open_market_ids]
+
+    # Execute top signal only (one trade per cycle for safety)
+    trades_executed = []
+    for candidate in candidates:
+        market_price = candidate.get("price", 0.50)
+        # Skip extreme prices — near-resolved markets have no edge
+        if market_price > 0.95 or market_price < 0.05:
+            continue
+
+        # Quick Kelly check — skip if no mathematical edge at this price
+        p = candidate.get("confidence", 0) / 100
+        mp = max(0.01, min(0.99, market_price))
+        b = (1.0 - mp) / mp
+        kelly_raw = (b * p - (1.0 - p)) / b if b > 0 else 0
+        if kelly_raw <= 0:
+            logger.info("Engine: skipping %s — no Kelly edge at price %.4f",
+                        candidate.get("market_id", "?"), market_price)
+            continue
+
+        # Liquidity-adaptive sizing — walk the Polymarket CLOB to get a realistic
+        # fill price and resize the entry down to whatever the book actually supports.
+        # Opt-in via engine state toggle; Kalshi signals pass through unchanged.
+        if state.get("liquidity_adaptive_sizing") and str(candidate.get("platform", "")).lower() == "polymarket":
+            slug = candidate.get("event_slug") or candidate.get("slug") or ""
+            token_id = candidate.get("clob_token_id") or candidate.get("token_id")
+            if slug or token_id:
+                try:
+                    from odds.polymarket_clob import size_to_book
+                    target_usd = float(state.get("max_per_trade", 100))
+                    max_slip_bps = float(state.get("max_slip_bps", 50.0))
+                    min_book_usd = float(state.get("min_book_usd", 15.0))
+                    fill = size_to_book(
+                        token_id=token_id,
+                        market_slug=slug,
+                        side=candidate.get("side", "YES"),
+                        target_usd=target_usd,
+                        max_slip_bps=max_slip_bps,
+                        min_usd=min_book_usd,
+                    )
+                    if not fill.ok:
+                        logger.info(
+                            "Engine: book-walk skip %s — %s (book=$%.0f, spread=%.3f)",
+                            candidate.get("market_id", "?")[:30],
+                            fill.reason, fill.actual_usd, fill.spread,
+                        )
+                        continue
+                    # Override entry price with realistic fill; Kelly will recalc honest edge.
+                    # Also cap bet size at actual walked depth so we never size past the book.
+                    candidate["entry_price"] = fill.avg_price
+                    candidate["price"] = fill.avg_price
+                    candidate["liquidity_cap_usd"] = fill.actual_usd
+                    candidate["liquidity_walk"] = {
+                        "avg_price": fill.avg_price,
+                        "best_price": fill.best_price,
+                        "slippage_bps": fill.slippage_bps,
+                        "spread": fill.spread,
+                        "actual_usd": fill.actual_usd,
+                        "reason": fill.reason,
+                    }
+                    logger.info(
+                        "Engine: book-walk %s %s — %s @ $%.4f (slip %.0fbps, cap $%.0f)",
+                        candidate.get("market_id", "?")[:30], fill.reason,
+                        candidate.get("side", ""), fill.avg_price,
+                        fill.slippage_bps, fill.actual_usd,
+                    )
+                except Exception as e:
+                    logger.warning("Engine: size_to_book failed, falling through: %s", e)
+
+        # Use paper_portfolio.open_position() — writes to paper_positions table
+        # (same DB that portfolio.html reads), has dedup, correlation caps,
+        # momentum filters, stop-loss re-entry gates, and Discord alerts built in
+        try:
+            from signals.paper_portfolio import open_position
+            result = open_position(candidate)
+        except Exception as e:
+            logger.warning("Engine: open_position failed: %s", e)
+            continue
+
+        if result.get("opened"):
+            trades_executed.append({
+                "market_id": candidate.get("market_id", ""),
+                "market": candidate.get("market", "")[:80],
+                "side": candidate.get("side", ""),
+                "bet_size": result.get("bet_size", 0),
+                "edge": result.get("edge", 0),
+                "confidence": candidate.get("confidence", 0),
+                "source": candidate.get("source", ""),
+                "strategy": candidate.get("strategy", ""),
+                "source_agreement": candidate.get("source_agreement", 1),
+                "archetype": result.get("archetype", ""),
+            })
+            state["trades_today"] = state.get("trades_today", 0) + 1
+            state["total_trades"] = state.get("total_trades", 0) + 1
+            state["last_trade_time"] = datetime.now().isoformat()
+
+            # Also log to shadow tracker for resolution tracking
+            try:
+                from signals.shadow_tracker import log_shadow_trade
+                log_shadow_trade(candidate)
+            except Exception:
+                pass
+
+            # Adaptive boost — raise bar after each trade
+            state = increment_adaptive_boost(state)
+            break  # One trade per cycle
+        else:
+            reason = result.get("reason", "unknown")
+            logger.info("Engine: signal rejected by portfolio: %s — %s",
+                        candidate.get("market_id", "?")[:20], reason)
+
     save_engine_state(state)
 
     return {
-        "action": "scanned",
+        "action": "traded" if trades_executed else "scanned",
         "timestamp": datetime.now().isoformat(),
+        "signals_evaluated": len(all_signals),
+        "above_threshold": len(candidates) + len(trades_executed),
+        "trades_executed": len(trades_executed),
+        "trades": trades_executed,
+        "min_confidence": min_conf,
         "trades_today": state.get("trades_today", 0),
-        "signals_evaluated": 0,  # Placeholder
-        "trades_executed": 0,
     }
 
 
@@ -251,14 +463,19 @@ def engine_loop():
             save_engine_state(state)
 
             if state.get("enabled", False):
-                engine_evaluate_and_trade()
+                result = engine_evaluate_and_trade()
+                action = result.get("action", "")
+                if action == "traded":
+                    logger.info("Engine cycle: executed %d trade(s)", result.get("trades_executed", 0))
+                elif action in ("halted", "limited", "cooldown"):
+                    logger.info("Engine cycle: %s — %s", action, result.get("reason", ""))
 
-            # Sleep between scans (30 seconds)
-            time.sleep(30)
+            # Scan every 5 minutes (election markets move slowly)
+            time.sleep(300)
 
         except Exception as e:
             logger.exception(f"Engine loop error: {e}")
-            time.sleep(60)
+            time.sleep(600)
 
 
 def start_engine() -> dict:
@@ -571,6 +788,16 @@ async def get_engine_status_endpoint():
         "paper_account": {
             "balance": balance_data.get("usdc", DEFAULT_BALANCE),
             "positions": len(positions) if isinstance(positions, list) else 0
+        },
+        "liquidity_sizing": {
+            "enabled": bool(state.get("liquidity_adaptive_sizing", False)),
+            "max_slip_bps": state.get("max_slip_bps", 50.0),
+            "min_book_usd": state.get("min_book_usd", 15.0),
+        },
+        "post_lock_stops": {
+            "enabled": bool(state.get("post_lock_stops_enabled", False)),
+            "weather_hours": state.get("post_lock_weather_hours", 3.0),
+            "weather_max_loss": state.get("post_lock_weather_max_loss", 0.12),
         }
     }
 
@@ -627,6 +854,100 @@ async def update_engine_config(
     save_engine_state(state)
     logger.info(f"Engine config updated: {state}")
     return {"updated": True, "config": state}
+
+
+@router.get("/engine/liquidity-sizing")
+async def get_liquidity_sizing():
+    """Get liquidity-adaptive sizing toggle + parameters.
+
+    When enabled, the engine walks the Polymarket CLOB before opening a
+    Polymarket position, overrides the entry with the realistic fill price,
+    and caps the bet at whatever depth the book actually supports at the
+    configured slippage cap. Kalshi signals pass through unchanged.
+    """
+    state = load_engine_state()
+    return {
+        "enabled": bool(state.get("liquidity_adaptive_sizing", False)),
+        "max_slip_bps": state.get("max_slip_bps", 50.0),
+        "min_book_usd": state.get("min_book_usd", 15.0),
+    }
+
+
+@router.post("/engine/liquidity-sizing")
+async def update_liquidity_sizing(
+    enabled: Optional[bool] = Query(None),
+    max_slip_bps: Optional[float] = Query(None, ge=1, le=1000),
+    min_book_usd: Optional[float] = Query(None, ge=1, le=1000),
+):
+    """Update liquidity-adaptive sizing toggle + parameters."""
+    state = load_engine_state()
+    if enabled is not None:
+        state["liquidity_adaptive_sizing"] = bool(enabled)
+    if max_slip_bps is not None:
+        state["max_slip_bps"] = float(max_slip_bps)
+    if min_book_usd is not None:
+        state["min_book_usd"] = float(min_book_usd)
+    save_engine_state(state)
+    logger.info(
+        "Liquidity sizing updated: enabled=%s slip=%s bps min=$%s",
+        state.get("liquidity_adaptive_sizing"),
+        state.get("max_slip_bps"),
+        state.get("min_book_usd"),
+    )
+    return {
+        "updated": True,
+        "enabled": bool(state.get("liquidity_adaptive_sizing", False)),
+        "max_slip_bps": state.get("max_slip_bps", 50.0),
+        "min_book_usd": state.get("min_book_usd", 15.0),
+    }
+
+
+@router.get("/engine/stop-curve")
+async def get_stop_curve():
+    """Get post-lock stop-tier toggle + parameters.
+
+    When enabled, weather positions use a tighter max-loss threshold during
+    the info-lock window (final N hours before the market close), when
+    underlying weather data has physically finalized and drawdowns are
+    essentially terminal. Backtest (3-week sample) showed +$1,247 net at
+    (3h window, 12% threshold) with 1.6pp safety margin vs winner p95
+    drawdown.
+    """
+    state = load_engine_state()
+    return {
+        "enabled": bool(state.get("post_lock_stops_enabled", False)),
+        "weather_hours": state.get("post_lock_weather_hours", 3.0),
+        "weather_max_loss": state.get("post_lock_weather_max_loss", 0.12),
+    }
+
+
+@router.post("/engine/stop-curve")
+async def update_stop_curve(
+    enabled: Optional[bool] = Query(None),
+    weather_hours: Optional[float] = Query(None, ge=0.25, le=24.0),
+    weather_max_loss: Optional[float] = Query(None, ge=0.02, le=0.50),
+):
+    """Update post-lock stop-tier toggle + parameters."""
+    state = load_engine_state()
+    if enabled is not None:
+        state["post_lock_stops_enabled"] = bool(enabled)
+    if weather_hours is not None:
+        state["post_lock_weather_hours"] = float(weather_hours)
+    if weather_max_loss is not None:
+        state["post_lock_weather_max_loss"] = float(weather_max_loss)
+    save_engine_state(state)
+    logger.info(
+        "Stop curve updated: enabled=%s weather_hours=%s weather_max_loss=%s",
+        state.get("post_lock_stops_enabled"),
+        state.get("post_lock_weather_hours"),
+        state.get("post_lock_weather_max_loss"),
+    )
+    return {
+        "updated": True,
+        "enabled": bool(state.get("post_lock_stops_enabled", False)),
+        "weather_hours": state.get("post_lock_weather_hours", 3.0),
+        "weather_max_loss": state.get("post_lock_weather_max_loss", 0.12),
+    }
 
 
 @router.post("/engine/trigger")
