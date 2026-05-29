@@ -19,9 +19,9 @@ import math
 import re
 import sqlite3
 import urllib.request
-from datetime import datetime, timezone, timedelta, date
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger(__name__)
 

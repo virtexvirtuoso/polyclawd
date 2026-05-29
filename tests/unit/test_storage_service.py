@@ -1,7 +1,6 @@
 """Unit tests for StorageService."""
 import pytest
 import asyncio
-from pathlib import Path
 from api.services.storage import StorageService
 
 

@@ -7,7 +7,6 @@ Features:
 - Expanded topic matching (40+ topics)
 """
 
-import asyncio
 import json
 import os
 import urllib.request

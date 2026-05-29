@@ -21,7 +21,7 @@ import os
 import sqlite3
 import time
 from collections import deque
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Dict, Optional
 from pathlib import Path

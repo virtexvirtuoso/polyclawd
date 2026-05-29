@@ -14,7 +14,7 @@ import json
 import re
 import urllib.request
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 from xml.etree import ElementTree
 from pathlib import Path

@@ -16,7 +16,7 @@ Replaces the simple duration modifier in paper_portfolio.py.
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 

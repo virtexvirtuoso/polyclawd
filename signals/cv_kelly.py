@@ -16,8 +16,7 @@ Also includes Monte Carlo drawdown analysis:
 import math
 import random
 import sqlite3
-import time
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, List, Tuple
 
 
 # Configuration

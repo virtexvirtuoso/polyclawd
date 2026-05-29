@@ -14,15 +14,14 @@ import sys
 import threading
 import time
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from api.models import EngineStatus
 
 router = APIRouter()
 logger = logging.getLogger(__name__)

@@ -389,7 +389,6 @@ def get_market_bets_flow(market_id: str) -> Dict:
 
 
 if __name__ == "__main__":
-    import asyncio
     
     print("Testing Manifold integration...")
     summary = get_manifold_summary()

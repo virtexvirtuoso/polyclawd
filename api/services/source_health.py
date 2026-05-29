@@ -6,7 +6,6 @@ Stores last_success, last_error, consecutive_failures, avg_latency in SQLite.
 
 import logging
 import sqlite3
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional

@@ -12,11 +12,9 @@ Auto-updates as more trades resolve. No manual tuning needed.
 
 import sqlite3
 import time
-import math
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 

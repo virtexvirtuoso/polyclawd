@@ -22,7 +22,6 @@ import sys
 import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -949,8 +948,7 @@ async def get_news_signals():
         if signals_path not in sys.path:
             sys.path.insert(0, signals_path)
         from news_signal import (
-            fetch_google_news, fetch_reddit_posts,
-            get_trending_reddit_signals, analyze_sentiment
+            fetch_google_news, get_trending_reddit_signals, analyze_sentiment
         )
 
         results = {
@@ -2379,7 +2377,7 @@ async def classify_market_archetype(title: str = Query(...)):
         signals_path = _get_signals_path()
         if signals_path not in sys.path:
             sys.path.insert(0, signals_path)
-        from mispriced_category_signal import classify_archetype, _check_kill_rules
+        from mispriced_category_signal import classify_archetype
         archetype = classify_archetype(title)
         return {"title": title, "archetype": archetype}
     except Exception as e:
@@ -2393,7 +2391,7 @@ async def check_kill_rules(title: str = Query(...), price_cents: int = Query(...
         signals_path = _get_signals_path()
         if signals_path not in sys.path:
             sys.path.insert(0, signals_path)
-        from mispriced_category_signal import classify_archetype, _check_kill_rules
+        from mispriced_category_signal import _check_kill_rules
         should_kill, reason, archetype = _check_kill_rules(title, price_cents)
         return {
             "title": title,
@@ -2551,7 +2549,6 @@ async def basket_arb_signals():
 async def basket_arb_compression():
     """Check if arb spreads are compressed (bot competition)."""
     from signals.basket_arb_scanner import check_spread_compression, _fetch_events
-    import json
     events = _fetch_events(limit=50)
     all_markets = []
     for ev in events:

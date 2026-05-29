@@ -1,7 +1,5 @@
 """Tests for weather_ensemble module."""
-import json
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from signals.weather_ensemble import (
     _c_to_f,
     _norm_cdf,

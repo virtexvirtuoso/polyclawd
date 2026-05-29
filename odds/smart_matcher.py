@@ -6,7 +6,6 @@ Entity-based matching for cross-platform market comparison
 import re
 from dataclasses import dataclass, field
 from typing import Optional, List, Set, Tuple
-from datetime import datetime
 
 @dataclass
 class MarketSignature:

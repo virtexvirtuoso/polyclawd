@@ -15,7 +15,6 @@ Called from scheduler tick_5min().
 """
 
 import sqlite3
-import time
 import urllib.request
 import json
 from datetime import datetime, timezone

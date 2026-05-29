@@ -1,5 +1,4 @@
 """Tests for Strategy 1: Score velocity modifier."""
-import sqlite3
 import time
 import pytest
 from signals.alpha_score_tracker import (

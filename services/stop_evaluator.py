@@ -255,7 +255,7 @@ def _close_position_early(conn, pos, current_yes_price, unrealized_pnl, reason):
 def _send_discord_alert(stop_info):
     """Send Discord alert for a stop-loss trigger."""
     try:
-        from signals.discord_alerts import _send, _portfolio_context, COLOR_ORANGE, COLOR_RED
+        from signals.discord_alerts import _send, _portfolio_context, COLOR_RED
 
         entry = stop_info["entry_price"]
         current = stop_info["current_price"]

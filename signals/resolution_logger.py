@@ -12,10 +12,9 @@ Files:
 
 import json
 import logging
-import math
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 logger = logging.getLogger("polyclawd.resolution_logger")
 
