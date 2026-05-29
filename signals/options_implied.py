@@ -314,63 +314,130 @@ def run(db_path=DEFAULT_DB):
 
 
 # ── Trade-signal layer (paper-trades via paper_portfolio, like weather) ──────
-# Trades the z-score-detrended DEVIATION from each contract's own mean, never the
-# raw spread (raw spread is a persistent risk-premium, not edge). A contract only
-# becomes tradeable once it has >= OPTIONS_MIN_OBS trailing observations AND the
-# current spread deviates >= Z_THRESH sigma from that contract's trailing mean.
-OPTIONS_MIN_OBS = int(os.environ.get("OPTIONS_MIN_OBS", str(MIN_OBS)))  # default 30
+# Trades the cross-sectionally-detrended, z-scored DEVIATION of each contract's
+# options-implied spread (two-stage detrend, per quant spec):
+#   1. same-day cross-sectional: residual = spread - mean(spread over that day's
+#      same (ticker, market_type) strikes). Removes the per-name/per-day premium
+#      and IV-regime shift instantly (works day 1, no accumulation wait).
+#   2. trailing scale: z = (residual - mu) / max(sd, SD_FLOOR), where (mu, sd) are
+#      the trailing distribution of residuals keyed on
+#      (ticker, market_type, log-moneyness bucket) -- ROTATION-STABLE, so obs
+#      accumulate across weekly conditionId rotation. (The original (market_id,
+#      strike) key could NEVER reach the obs floor because weekly markets rotate
+#      conditionId and resolve in days -- the QA bug this replaces.)
+# Side: z>0 (richer than peers+norm) -> NO; z<0 -> YES. Gate |z| >= Z_THRESH.
+OPTIONS_MIN_OBS = int(os.environ.get("OPTIONS_MIN_OBS", "20"))  # full-confidence obs floor
+OPTIONS_MIN_OBS_LOWCONF = 10  # 10-19 trailing obs: emit but size down (low confidence)
+OPTIONS_MIN_XS = 3            # min same-day strikes per (ticker,market_type) to detrend
+MONEYNESS_W = 0.025           # log-moneyness bucket width
+SD_FLOOR = 0.5                # pp; stops tiny-sample sd from manufacturing |z|>=2
+
+
+def _moneyness_bucket(strike, underlying, width=MONEYNESS_W):
+    """Integer log-moneyness bin: round(ln(strike/underlying)/width). None if invalid."""
+    if not strike or not underlying or strike <= 0 or underlying <= 0:
+        return None
+    return int(round(math.log(strike / underlying) / width))
+
+
+def _xs_mean(spreads):
+    return (sum(spreads) / len(spreads)) if spreads else None
+
+
+def trailing_residual_stats(db_path, ticker, market_type, bucket, before):
+    """(#distinct dates, mean, sd) of trailing cross-sectional residuals for the
+    rotation-stable (ticker, market_type, log-moneyness bucket) key, dates < before.
+
+    Each historical date's residual = spread - that date's cross-sectional mean over
+    the same (ticker, market_type) strikes (>= OPTIONS_MIN_XS strikes required)."""
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    rows = [dict(r) for r in con.execute(
+        "SELECT date, poly_market_id, strike, underlying, spread_pp FROM options_implied "
+        "WHERE ticker=? AND market_type=? AND date < ? AND spread_pp IS NOT NULL",
+        (ticker, market_type, before))]
+    con.close()
+    by_date = {}
+    for r in rows:
+        by_date.setdefault(r["date"], []).append(r)
+    vals, dates = [], set()
+    for d, drows in by_date.items():
+        sps = [x["spread_pp"] for x in drows]
+        if len(sps) < OPTIONS_MIN_XS:
+            continue
+        m = _xs_mean(sps)
+        for x in drows:
+            if _moneyness_bucket(x["strike"], x["underlying"]) == bucket:
+                vals.append(x["spread_pp"] - m)
+                dates.add(d)
+    n = len(dates)
+    if len(vals) < 2:
+        return n, (vals[0] if vals else None), None
+    return n, statistics.mean(vals), statistics.pstdev(vals)
 
 
 def build_trade_signals(db_path=DEFAULT_DB, z_thresh=Z_THRESH, min_obs=None):
-    """Convert the latest day's rows into paper_portfolio signal dicts.
-
-    Side is set by the z-sign: spread unusually HIGH vs the contract's own mean
-    (z>0, poly richer than normal) -> fade -> NO; z<0 -> YES. Edge = |spread - mu|
-    (expected mean-reversion, in pp). Returns [] when no contract clears the gate.
-    """
+    """Latest day's rows -> paper_portfolio signal dicts via the two-stage detrend.
+    Returns [] when no contract clears the obs floor + |z| gate."""
     min_obs = OPTIONS_MIN_OBS if min_obs is None else min_obs
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
     last = con.execute("SELECT MAX(date) d FROM options_implied").fetchone()["d"]
-    rows = [dict(r) for r in con.execute(
+    today_rows = [dict(r) for r in con.execute(
         "SELECT * FROM options_implied WHERE date=?", (last,))] if last else []
     con.close()
+    groups = {}
+    for r in today_rows:
+        if r.get("spread_pp") is None:
+            continue
+        groups.setdefault((r["ticker"], r["market_type"]), []).append(r)
     out = []
-    for r in rows:
-        sp = r.get("spread_pp")
-        if sp is None:
+    for (tk, mt), grp in groups.items():
+        sps = [r["spread_pp"] for r in grp]
+        if len(sps) < OPTIONS_MIN_XS:  # not enough same-day strikes to detrend
             continue
-        n, mu, sd = trailing_z(db_path, r["poly_market_id"], r["strike"], before=last)
-        if n < min_obs or not sd:
-            continue
-        z = (sp - mu) / sd
-        if abs(z) < z_thresh:
-            continue
-        side = "NO" if z > 0 else "YES"
-        edge_pp = abs(sp - mu)
-        strike = r.get("strike")
-        title = f"{r.get('ticker')} {r.get('market_type')} ${strike} ({r.get('expiry')})"
-        try:
-            dtc = max(0.1, (date.fromisoformat(r["expiry"]) - date.fromisoformat(last)).days)
-        except Exception:
-            dtc = 1
-        out.append({
-            "market_id": r["poly_market_id"],
-            "market": title,
-            "market_title": title,
-            "side": side,
-            "entry_price": r.get("poly_price"),
-            "market_price": r.get("poly_price"),
-            "confidence": min(0.95, 0.5 + 0.1 * abs(z)),
-            "edge_pct": round(edge_pp, 2),
-            "strategy": "options_implied",
-            "archetype": "options",
-            "platform": "polymarket",
-            "source": "options_implied",
-            "days_to_close": dtc,
-            "z_score": round(z, 2),
-            "implied_prob": r.get("implied_prob"),
-        })
+        xs = _xs_mean(sps)
+        for r in grp:
+            bucket = _moneyness_bucket(r.get("strike"), r.get("underlying"))
+            if bucket is None:
+                continue
+            residual = r["spread_pp"] - xs
+            n, mu, sd = trailing_residual_stats(db_path, tk, mt, bucket, before=last)
+            if n < OPTIONS_MIN_OBS_LOWCONF or mu is None or sd is None:
+                continue
+            z = (residual - mu) / max(sd, SD_FLOOR)
+            if abs(z) < z_thresh:
+                continue
+            lowconf = n < min_obs
+            side = "NO" if z > 0 else "YES"
+            strike = r.get("strike")
+            title = f"{tk} {mt} ${strike} ({r.get('expiry')})"
+            try:
+                dtc = max(0.1, (date.fromisoformat(r["expiry"]) - date.fromisoformat(last)).days)
+            except Exception:
+                dtc = 1
+            conf = min(0.9, 0.5 + 0.08 * abs(z))
+            if lowconf:
+                conf *= 0.7
+            out.append({
+                "market_id": r["poly_market_id"],
+                "market": title,
+                "market_title": title,
+                "side": side,
+                "entry_price": r.get("poly_price"),
+                "market_price": r.get("poly_price"),
+                "confidence": round(conf, 3),
+                "edge_pct": round(abs(residual - mu), 2),
+                "strategy": "options_implied",
+                "archetype": "options",
+                "platform": "polymarket",
+                "source": "options_implied",
+                "days_to_close": dtc,
+                "z_score": round(z, 2),
+                "trailing_obs": n,
+                "low_confidence": lowconf,
+                "implied_prob": r.get("implied_prob"),
+            })
     return out
 
 
@@ -385,7 +452,8 @@ def open_trades():
     sigs = get_options_portfolio_signals()
     if not sigs:
         print("[options_implied] trade: 0 signals cleared the z-gate (need "
-              f">= {OPTIONS_MIN_OBS} obs and |z| >= {Z_THRESH})")
+              f">= {OPTIONS_MIN_OBS_LOWCONF} trailing obs in the moneyness bucket and "
+              f"|z| >= {Z_THRESH})")
         return {"opened": 0, "signals": 0}
     res = process_signals(sigs)
     print(f"[options_implied] trade: {len(sigs)} signals -> {res.get('opened', 0)} opened")

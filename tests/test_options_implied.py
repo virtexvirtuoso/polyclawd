@@ -115,83 +115,135 @@ def test_zscore_needs_min_obs(tmp_path):
     assert n == MIN_OBS and abs(mu + 8.0) < 1e-9
 
 
-def _seed_history(
-    db,
-    market_id,
-    strike,
-    n,
-    mean=5.0,
-    today_spread=None,
-    today="2026-06-01",
-    ticker="NVDA",
-    market_type="above",
-    expiry="2026-06-05",
-    poly_price=0.60,
-    implied_prob=0.55,
-):
-    """Seed n trailing rows (alternating ±1 around `mean` so sd>0) + one `today` row."""
-    import sqlite3
+import sqlite3
+from datetime import date, timedelta
 
+# 5 strikes at underlying=200 -> distinct log-moneyness buckets. Target = 210.
+_STRIKES = [190.0, 200.0, 210.0, 220.0, 230.0]
+_BASE = {190.0: 1.0, 200.0: 2.0, 210.0: 3.0, 220.0: 4.0, 230.0: 5.0}  # per-strike premium
+_COMMON = [-4.0, -2.0, 0.0, 2.0, 4.0, 1.0, -1.0, 3.0, -3.0]            # daily market factor
+
+
+def _noise(strike_idx, i):
+    # deterministic, decorrelated-ish across strikes, range [-2,2] -> residual sd > SD_FLOOR
+    return ((i * 7 + strike_idx * 13) % 5) - 2
+
+
+def _day_spread(strike, i):
+    return _COMMON[i % len(_COMMON)] + _BASE[strike] + _noise(_STRIKES.index(strike), i)
+
+
+def _seed_rotation(db, n_weeks, today=None, today_delta=0.0,
+                   ticker="NVDA", market_type="above"):
+    """n_weeks DISTINCT conditionIds (weekly rotation) across 5 strikes (constant
+    moneyness buckets via underlying=200). Each day's spreads share a common market
+    factor + per-strike premium + decorrelated noise, so residuals have realistic
+    variance (sd > floor). Proves obs accumulate ACROSS rotating conditionIds for the
+    target's (ticker, market_type, moneyness-bucket) key -- the QA bug the old
+    (poly_market_id, strike) key could never satisfy. `today_delta` shocks ONLY the
+    210 target on the final day."""
     con = sqlite3.connect(db)
-    for i in range(n):
-        sp = mean + (1.0 if i % 2 else -1.0)  # mean preserved, sd ~ 1
-        con.execute(
-            "INSERT INTO options_implied (date,poly_market_id,strike,spread_pp,ticker,market_type,expiry,bracket_lo) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (f"2026-04-{i + 1:02d}", market_id, strike, sp, ticker, market_type, expiry, strike),
-        )
-    if today_spread is not None:
-        con.execute(
-            "INSERT INTO options_implied (date,poly_market_id,strike,spread_pp,ticker,market_type,expiry,bracket_lo,poly_price,implied_prob) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (today, market_id, strike, today_spread, ticker, market_type, expiry, strike, poly_price, implied_prob),
-        )
+
+    def ins(d, cid, strike, sp, **extra):
+        cols = ["date", "poly_market_id", "strike", "underlying", "spread_pp",
+                "ticker", "market_type", "expiry", "bracket_lo"]
+        vals = [d, cid, strike, 200.0, sp, ticker, market_type, d, strike]
+        for k, v in extra.items():
+            cols.append(k)
+            vals.append(v)
+        con.execute(f"INSERT INTO options_implied ({','.join(cols)}) "
+                    f"VALUES ({','.join('?' * len(vals))})", vals)
+
+    base = date(2026, 1, 5)
+    for i in range(n_weeks):
+        d = (base + timedelta(weeks=i)).isoformat()
+        for s in _STRIKES:
+            ins(d, f"0x{int(s)}_{i:03d}", s, _day_spread(s, i))
+    if today is not None:
+        i = n_weeks
+        for s in _STRIKES:
+            sp = _day_spread(s, i) + (today_delta if s == 210.0 else 0.0)
+            extra = {"poly_price": 0.60, "implied_prob": 0.45} if s == 210.0 else {}
+            cid = "0xTODAY" if s == 210.0 else f"0x{int(s)}_today"
+            ins(today, cid, s, sp, **extra)
     con.commit()
     con.close()
 
 
-def test_trade_signal_high_z_is_NO(tmp_path):
-    """Spread far ABOVE its own mean (z>0, poly unusually rich) -> fade -> NO."""
+def test_trade_fires_across_rotation(tmp_path):
+    """OPTIONS_MIN_OBS distinct weekly conditionIds at one moneyness bucket -> obs
+    accumulate despite weekly rotation (the QA bug); outlier-high target fires NO."""
     from signals.options_implied import init_db, build_trade_signals, OPTIONS_MIN_OBS
 
     db = tmp_path / "t.db"
     init_db(db)
-    _seed_history(db, "m1", 200.0, OPTIONS_MIN_OBS, mean=5.0, today_spread=15.0)
+    _seed_rotation(db, OPTIONS_MIN_OBS, today="2026-06-01", today_delta=8.0)
     sigs = build_trade_signals(db)
-    assert len(sigs) == 1
-    s = sigs[0]
-    assert s["side"] == "NO"
-    assert s["archetype"] == "options" and s["strategy"] == "options_implied"
-    assert s["market_id"] == "m1" and s["platform"] == "polymarket"
-    assert s["edge_pct"] > 0  # |spread - mu| ~ 10pp
+    tgt = [s for s in sigs if s["market_id"] == "0xTODAY"]
+    assert len(tgt) == 1, [s["market_id"] for s in sigs]
+    s = tgt[0]
+    assert s["side"] == "NO" and s["archetype"] == "options"
+    assert s["trailing_obs"] >= OPTIONS_MIN_OBS and s["low_confidence"] is False
+    assert s["edge_pct"] > 0
 
 
-def test_trade_signal_low_z_is_YES(tmp_path):
-    """Spread far BELOW its own mean (z<0, poly unusually cheap) -> YES."""
+def test_trade_low_z_is_YES(tmp_path):
+    """Outlier-low target (residual below trailing) -> YES."""
     from signals.options_implied import init_db, build_trade_signals, OPTIONS_MIN_OBS
 
     db = tmp_path / "t.db"
     init_db(db)
-    _seed_history(db, "m1", 200.0, OPTIONS_MIN_OBS, mean=5.0, today_spread=-6.0)
+    _seed_rotation(db, OPTIONS_MIN_OBS, today="2026-06-01", today_delta=-8.0)
     sigs = build_trade_signals(db)
-    assert len(sigs) == 1 and sigs[0]["side"] == "YES"
+    tgt = [s for s in sigs if s["market_id"] == "0xTODAY"]
+    assert len(tgt) == 1 and tgt[0]["side"] == "YES"
 
 
-def test_trade_signal_skips_under_min_obs(tmp_path):
-    """Fewer than OPTIONS_MIN_OBS trailing obs -> no trade emitted."""
+def test_trade_skips_under_min_obs(tmp_path):
+    """Fewer than the low-confidence floor of distinct dates -> no trade for target."""
+    from signals.options_implied import init_db, build_trade_signals, OPTIONS_MIN_OBS_LOWCONF
+
+    db = tmp_path / "t.db"
+    init_db(db)
+    _seed_rotation(db, OPTIONS_MIN_OBS_LOWCONF - 1, today="2026-06-01", today_delta=8.0)
+    sigs = build_trade_signals(db)
+    assert [s for s in sigs if s["market_id"] == "0xTODAY"] == []
+
+
+def test_trade_skips_small_deviation(tmp_path):
+    """Enough obs but target on-trend (no shock) -> |z| below threshold -> no trade."""
     from signals.options_implied import init_db, build_trade_signals, OPTIONS_MIN_OBS
 
     db = tmp_path / "t.db"
     init_db(db)
-    _seed_history(db, "m1", 200.0, OPTIONS_MIN_OBS - 1, mean=5.0, today_spread=15.0)
-    assert build_trade_signals(db) == []
+    _seed_rotation(db, OPTIONS_MIN_OBS, today="2026-06-01", today_delta=0.0)
+    sigs = build_trade_signals(db)
+    assert [s for s in sigs if s["market_id"] == "0xTODAY"] == []
 
 
-def test_trade_signal_skips_small_deviation(tmp_path):
-    """Enough obs but |z| below threshold -> no trade."""
-    from signals.options_implied import init_db, build_trade_signals, OPTIONS_MIN_OBS
+def test_options_inserts_paper_position(tmp_path, monkeypatch):
+    """End-to-end open path: an eligible options signal inserts a paper_positions row
+    with archetype='options' (DB_PATH + evaluate_signal monkeypatched so the test is
+    independent of live source-health gates)."""
+    import signals.paper_portfolio as pp
 
-    db = tmp_path / "t.db"
-    init_db(db)
-    _seed_history(db, "m1", 200.0, OPTIONS_MIN_OBS, mean=5.0, today_spread=5.5)  # ~0.5 z
-    assert build_trade_signals(db) == []
+    dbp = tmp_path / "shadow.db"
+    monkeypatch.setattr(pp, "DB_PATH", dbp)
+    conn = pp._get_db()
+    pp._init_tables(conn)
+    conn.close()
+    monkeypatch.setattr(pp, "evaluate_signal", lambda sig: {
+        "eligible": True, "reason": "test", "edge": 5.0, "kelly_pct": 0.05, "bet_size": 25.0})
+    sig = {
+        "market_id": "0xTODAY", "market": "NVDA above $210 (2026-06-06)", "side": "NO",
+        "entry_price": 0.40, "market_price": 0.40, "confidence": 0.7, "edge_pct": 5.0,
+        "strategy": "options_implied", "archetype": "options", "platform": "polymarket",
+        "source": "options_implied", "days_to_close": 5,
+    }
+    res = pp.open_position(sig)
+    assert res.get("opened") is True, res
+    con = sqlite3.connect(dbp)
+    row = con.execute(
+        "SELECT archetype, side FROM paper_positions WHERE market_id='0xTODAY'").fetchone()
+    con.close()
+    assert row == ("options", "NO")
