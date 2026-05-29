@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>How Election Trading Works · Polyclawd</title>
+<script src="auth.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+
+  :root {
+    --bg: #FAF8F5;
+    --surface: #FFFFFF;
+    --surface2: #F5F2EE;
+    --border: #E2DDD6;
+    --border-light: #EDE9E3;
+    --text: #2D2D2D;
+    --text2: #7A7568;
+    --text3: #8A8275;
+    --terracotta: #C75B39;
+    --gold: #D4A843;
+    --olive: #6B8E6B;
+    --blue: #4A7FB5;
+    --rep-red: #B83A2E;
+    --dem-blue: #2B6CB0;
+    --shadow: rgba(45, 45, 45, 0.06);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, sans-serif;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.7;
+  }
+
+  .container {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 32px 28px 48px;
+  }
+
+  /* ── HEADER BAR ── */
+  .header-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 32px;
+  }
+  .header-left {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+  }
+  .header-brand {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    color: var(--terracotta);
+  }
+  .header-title {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text2);
+    letter-spacing: 0.5px;
+  }
+  .nav-links {
+    display: flex;
+    gap: 6px;
+  }
+  .nav-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text2);
+    text-decoration: none;
+    padding: 5px 12px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    transition: all 0.2s;
+    font-weight: 500;
+  }
+  .nav-link:hover { border-color: var(--terracotta); color: var(--terracotta); }
+
+  /* ── PAGE HEADER ── */
+  .page-header {
+    text-align: center;
+    margin-bottom: 40px;
+  }
+  .page-header h1 {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    color: var(--text);
+    margin-bottom: 8px;
+  }
+  .page-header .subtitle {
+    font-size: 14px;
+    color: var(--text2);
+    font-weight: 400;
+  }
+
+  /* ── CALLOUT ── */
+  .callout {
+    background: linear-gradient(135deg, rgba(199,91,57,0.06), rgba(74,127,181,0.06));
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px 28px;
+    text-align: center;
+    margin-bottom: 36px;
+  }
+  .callout p {
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.5;
+    color: var(--text);
+  }
+  .callout .hl { color: var(--terracotta); }
+
+  /* ── SECTION CARDS ── */
+  .section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 20px;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+  .section:hover { border-color: var(--terracotta); }
+  .section-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border-light);
+    background: var(--surface2);
+  }
+  .section-head .icon {
+    width: 28px; height: 28px;
+    border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px;
+  }
+  .section-head h2 {
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .section-body {
+    padding: 20px 24px;
+  }
+  .section-body p {
+    margin-bottom: 14px;
+    font-size: 13.5px;
+    color: var(--text);
+  }
+  .section-body p:last-child { margin-bottom: 0; }
+
+  /* ── TABLES ── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+  }
+  th {
+    text-align: left;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text2);
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    font-weight: 500;
+  }
+  td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-light);
+    font-size: 12.5px;
+  }
+  tr:last-child td { border-bottom: none; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+  .green { color: var(--olive); }
+  .red { color: var(--rep-red); }
+  .blue { color: var(--dem-blue); }
+  .gold { color: var(--gold); }
+  .terra { color: var(--terracotta); }
+
+  /* ── PIPELINE ── */
+  .pipeline {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 14px 0;
+  }
+  .pipe-step {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    background: var(--surface2);
+    border-radius: 6px;
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+  .pipe-num {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: var(--terracotta);
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; flex-shrink: 0;
+  }
+  .pipe-arrow { color: var(--text3); text-align: center; font-size: 11px; }
+
+  /* ── STRATEGY GRID ── */
+  .strat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+    margin: 14px 0;
+  }
+  .strat-card {
+    background: var(--surface2);
+    border: 1px solid var(--border-light);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .strat-card .strat-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--terracotta);
+    margin-bottom: 2px;
+  }
+  .strat-card .strat-name {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .strat-card .strat-desc {
+    font-size: 11.5px;
+    color: var(--text2);
+    line-height: 1.5;
+  }
+  .strat-card .strat-meta {
+    margin-top: 8px;
+    font-size: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text3);
+  }
+
+  /* ── SETTINGS GRID ── */
+  .settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+    margin: 14px 0;
+  }
+  .setting-card {
+    background: var(--surface2);
+    border: 1px solid var(--border-light);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .setting-label {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--text3);
+    margin-bottom: 4px;
+  }
+  .setting-value {
+    font-size: 18px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--terracotta);
+  }
+  .setting-why {
+    font-size: 10.5px;
+    color: var(--text2);
+    margin-top: 3px;
+  }
+
+  /* ── FORMULA BOX ── */
+  .formula-box {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 14px 0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    line-height: 1.8;
+    color: var(--text);
+    overflow-x: auto;
+  }
+  .formula-box .comment { color: var(--text3); }
+
+  /* ── LATENCY STACK ── */
+  .latency-stack {
+    margin: 14px 0;
+  }
+  .latency-tier {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border-light);
+  }
+  .latency-tier:last-child { border-bottom: none; }
+  .latency-label {
+    width: 70px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  .latency-items {
+    font-size: 12px;
+    color: var(--text2);
+  }
+
+  /* ── FOOTER ── */
+  footer {
+    text-align: center;
+    padding: 32px 0 16px;
+    border-top: 1px solid var(--border);
+    margin-top: 16px;
+  }
+  footer p {
+    font-size: 11px;
+    color: var(--text3);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  footer .brand { color: var(--terracotta); }
+
+  /* ── MOBILE ── */
+  @media (max-width: 768px) {
+    .container { padding: 16px 14px 32px; }
+    .header-bar { flex-direction: column; gap: 10px; align-items: flex-start; }
+    .page-header h1 { font-size: 22px; }
+    .strat-grid { grid-template-columns: 1fr; }
+    .settings-grid { grid-template-columns: 1fr 1fr; }
+    table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .section-head { padding: 12px 16px; }
+    .section-body { padding: 16px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- HEADER BAR -->
+  <div class="header-bar">
+    <div class="header-left">
+      <span class="header-brand">Polyclawd</span>
+      <span class="header-title">Election Trading Methodology</span>
+    </div>
+    <div class="nav-links">
+      <a href="elections.html" class="nav-link">&larr; Elections</a>
+      <a href="election-ensemble.html" class="nav-link">Ensemble</a>
+      <a href="portfolio.html" class="nav-link">Portfolio</a>
+    </div>
+  </div>
+
+  <!-- PAGE HEADER -->
+  <div class="page-header">
+    <h1>How Election Trading Works</h1>
+    <p class="subtitle">13 data-driven strategies that find edges in US election prediction markets</p>
+  </div>
+
+  <!-- CALLOUT -->
+  <div class="callout">
+    <p>Pull data from <span class="hl">10 sources</span>. Run <span class="hl">14 strategies</span>. Stack confirming signals. Size with Kelly. Trade the edge.</p>
+  </div>
+
+  <!-- THE PIPELINE -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(199,91,57,0.12)">&#9889;</div>
+      <h2>The Pipeline</h2>
+    </div>
+    <div class="section-body">
+      <p>Every 5 minutes, the engine runs this loop:</p>
+      <div class="pipeline">
+        <div class="pipe-step"><div class="pipe-num">1</div><span><strong>Collect</strong> &mdash; Pull election data from Polymarket, Kalshi, PredictIt, FEC, GDELT, Wikipedia, Google Trends</span></div>
+        <div class="pipe-arrow">&darr;</div>
+        <div class="pipe-step"><div class="pipe-num">2</div><span><strong>Analyze</strong> &mdash; Run 13 strategies to find mispricings, divergences, and momentum</span></div>
+        <div class="pipe-arrow">&darr;</div>
+        <div class="pipe-step"><div class="pipe-num">3</div><span><strong>Confluence</strong> &mdash; Stack signals that agree on the same market+side for boosted confidence</span></div>
+        <div class="pipe-arrow">&darr;</div>
+        <div class="pipe-step"><div class="pipe-num">4</div><span><strong>Filter</strong> &mdash; Bayesian confidence adjustment based on source win rates</span></div>
+        <div class="pipe-arrow">&darr;</div>
+        <div class="pipe-step"><div class="pipe-num">5</div><span><strong>Size</strong> &mdash; Kelly Criterion determines bet amount based on edge and odds</span></div>
+        <div class="pipe-arrow">&darr;</div>
+        <div class="pipe-step"><div class="pipe-num">6</div><span><strong>Execute</strong> &mdash; Trade via Simmer SDK with safety rails ($100/trade, $500/day)</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- DATA SOURCES -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(74,127,181,0.12)">&#128225;</div>
+      <h2>10 Data Sources</h2>
+    </div>
+    <div class="section-body">
+      <table>
+        <tr><th>Source</th><th>What We Get</th><th>Freshness</th></tr>
+        <tr><td><strong>Polymarket</strong></td><td>Market prices, volume, holder data</td><td class="mono">Real-time</td></tr>
+        <tr><td><strong>Kalshi</strong></td><td>Competing prices for arb detection</td><td class="mono">Real-time</td></tr>
+        <tr><td><strong>PredictIt</strong></td><td>Third platform for 3-way arb</td><td class="mono">Real-time</td></tr>
+        <tr><td><strong>FEC</strong></td><td>Campaign fundraising, Super PAC filings</td><td class="mono">Minutes&ndash;Quarterly</td></tr>
+        <tr><td><strong>GDELT</strong></td><td>News sentiment, narrative tone shifts</td><td class="mono">Hours</td></tr>
+        <tr><td><strong>Wikipedia</strong></td><td>Pageview attention spikes</td><td class="mono">Hours</td></tr>
+        <tr><td><strong>Google Trends</strong></td><td>Search interest surges</td><td class="mono">Hours</td></tr>
+        <tr><td><strong>Ballotpedia</strong></td><td>Race ratings, filing deadlines, candidate status</td><td class="mono">12h cache</td></tr>
+        <tr><td><strong>FRED</strong></td><td>Economic indicators (CPI, unemployment, GDP, gas)</td><td class="mono">6h cache</td></tr>
+        <tr><td><strong>Policy Pulse</strong></td><td>SCOTUS, Congress, Trade/Tariffs, Foreign Policy, Domestic Policy, Macro/Economic + cross-platform arb</td><td class="mono">Report cycle</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- 13 STRATEGIES -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(212,168,67,0.12)">&#127919;</div>
+      <h2>14 Strategies</h2>
+    </div>
+    <div class="section-body">
+      <p>Each strategy looks for a specific type of edge. Confidence ranges are capped conservatively &mdash; high conviction comes from multiple strategies agreeing, not any single one.</p>
+
+      <div class="strat-grid">
+        <div class="strat-card">
+          <div class="strat-num">#1</div>
+          <div class="strat-name">Cross-Platform Arb</div>
+          <div class="strat-desc">When Polymarket, Kalshi, and PredictIt disagree by &gt;5pp on the same race, buy the cheaper side.</div>
+          <div class="strat-meta">Conf: 30&ndash;80 &middot; Low risk</div>
+        </div>
+        <div class="strat-card">
+          <div class="strat-num">#2</div>
+          <div class="strat-name">FEC Money vs Odds</div>
+          <div class="strat-desc">Campaign cash share diverges from market odds by &gt;12pp. Bet with the money.</div>
+          <div class="strat-meta">Conf: 20&ndash;65 &middot; Medium risk</div>
+        </div>
+        <div class="strat-card">
+          <div class="strat-num">#3</div>
+          <div class="strat-name">Momentum</div>
+          <div class="strat-desc">Daily price moves &gt;3pp with volume confirmation. Trend-follow the direction.</div>
+          <div class="strat-meta">Conf: 20&ndash;60 &middot; Higher risk</div>
+        </div>
+        <div class="strat-card">
+          <div class="strat-num">#4</div>
+          <div class="strat-name">IE Spending Surge</div>
+          <div class="strat-desc">Super PAC spends &gt;$200K opposing or supporting a candidate. Follow the smart money.</div>
+          <div class="strat-meta">Conf: 20&ndash;55 &middot; Medium risk</div>
+        </div>
+        <div class="strat-card">
+          <div class="strat-num">#5</div>
+          <div class="strat-name">Primary Value</div>
+          <div class="strat-desc">Competitive multi-candidate fields where the frontrunner is underpriced (markets overprice longshots).</div>
+          <div class="strat-meta">Conf: 25&ndash;50 &middot; Medium risk</div>
+        </div>
+        <div class="strat-card">
+          <div class="strat-num">#6</div>
+          <div class="strat-name">Narrative Shift</div>
+          <div class="strat-desc">GDELT news sentiment shifts &gt;1.0 magnitude over 7 days. Tone drives direction.</div>
+          <div class="strat-meta">Conf: 20&ndash;55 &middot; Medium risk</div>
+        </div>
+        <div class="strat-card">
+          <div class="strat-num">#7</div>
+          <div class="strat-name">Poll Divergence</div>
+          <div class="strat-desc">Polling averages imply different odds than market price by &gt;5pp. Bet with the polls.</div>
+          <div class="strat-meta">Conf: 15&ndash;65 &middot; Medium risk</div>
+        </div>
+        <div class="strat-card">
+          <div class="strat-num">#8</div>
+          <div class="strat-name">eFiling Real-Time</div>
+          <div class="strat-desc">Super PAC Form F24 filings detected within minutes. &gt;$100K triggers signal.</div>
+          <div class="strat-meta">Conf: 25&ndash;70 &middot; Low-medium risk</div>
+        </div>
+        <div class="strat-card">
+          <div class="strat-num">#9</div>
+          <div class="strat-name">Wiki Attention</div>
+          <div class="strat-desc">Wikipedia pageview spike &gt;2&sigma; above rolling average, combined with GDELT tone for direction.</div>
+          <div class="strat-meta">Conf: 15&ndash;50 &middot; Higher risk</div>
+        </div>
+        <div class="strat-card">
+          <div class="strat-num">#10</div>
+          <div class="strat-name">Google Trends</div>
+          <div class="strat-desc">Candidate appears in top trending US topics. Cross-confirmed with Wiki + GDELT tone.</div>
+          <div class="strat-meta">Conf: 30&ndash;65 &middot; Medium risk</div>
+        </div>
+        <div class="strat-card">
+          <div class="strat-num">#11</div>
+          <div class="strat-name">Smart Money Diverge</div>
+          <div class="strat-desc">Top 20 YES holders on Polymarket disagree with FEC campaign cash direction. Follow the cash.</div>
+          <div class="strat-meta">Conf: 20&ndash;65 &middot; Medium risk</div>
+        </div>
+        <div class="strat-card">
+          <div class="strat-num">#12</div>
+          <div class="strat-name">Whale Concentration</div>
+          <div class="strat-desc">Single holder owns &gt;35% of YES. Thin market &mdash; if whale exits, price crashes. Contrarian fade.</div>
+          <div class="strat-meta">Conf: 25&ndash;45 &middot; Higher risk</div>
+        </div>
+        <div class="strat-card">
+          <div class="strat-num">#13</div>
+          <div class="strat-name">Cash Momentum</div>
+          <div class="strat-desc">Fresh eFiling cash-on-hand disagrees with quarterly FEC data. Follow the fresher money signal.</div>
+          <div class="strat-meta">Conf: 25&ndash;50 &middot; Medium risk</div>
+        </div>
+        <div class="strat-card">
+          <div class="strat-num">#14</div>
+          <div class="strat-name">Policy Arb</div>
+          <div class="strat-desc">6-category policy markets (SCOTUS, Congress, Trade, Foreign, Domestic, Macro) matched cross-platform via TF-IDF similarity. Buy the cheaper side when spread &gt;3pp.</div>
+          <div class="strat-meta">Conf: 30&ndash;70 &middot; Low risk</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CONFLUENCE SCORING -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(107,142,107,0.12)">&#128200;</div>
+      <h2>Confluence Scoring</h2>
+    </div>
+    <div class="section-body">
+      <p>A single strategy firing is interesting. Multiple strategies pointing the same direction on the same market is <strong>actionable</strong>. The system stacks confirming signals automatically:</p>
+
+      <div class="formula-box">
+<span class="comment">// Group signals by (market_id, side)</span>
+<br>lead_signal = highest_confidence in group
+<br>boost = min(24, confirming_sources &times; 8)
+<br>final_confidence = min(85, lead + boost)
+<br>
+<br><span class="comment">// Kelly gets a multiplier too:</span>
+<br>agreement_mult = 1.0 + (0.10 &times; extra_sources)
+<br><span class="comment">// 2 sources = 1.1x, 3 = 1.2x, 4 = 1.3x Kelly</span>
+      </div>
+
+      <p><strong>Example:</strong> TX Senate with 3 confirming strategies:</p>
+      <table>
+        <tr><th>Strategy</th><th>Confidence</th><th>Role</th></tr>
+        <tr><td>Cross-platform arb</td><td class="mono terra">60</td><td>Lead signal</td></tr>
+        <tr><td>Smart money divergence</td><td class="mono">45</td><td>+8 boost</td></tr>
+        <tr><td>Cash momentum</td><td class="mono">35</td><td>+8 boost</td></tr>
+        <tr><td style="font-weight:600">Final</td><td class="mono terra" style="font-weight:700">76</td><td>1.2&times; Kelly</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- CONFIDENCE & KELLY -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(199,91,57,0.12)">&#128202;</div>
+      <h2>Confidence &amp; Kelly Sizing</h2>
+    </div>
+    <div class="section-body">
+      <p>Each signal's raw confidence passes through <strong>Bayesian adjustment</strong> &mdash; the system tracks how often each strategy's trades actually win. Sources that perform well get boosted; poor performers get dampened.</p>
+
+      <p>The <strong>Kelly Criterion</strong> then converts confidence into bet size:</p>
+
+      <div class="formula-box">
+<span class="comment">// Kelly formula with variable odds</span>
+<br>b = (1 - market_price) / market_price
+<br>p = adjusted_confidence / 100
+<br>kelly_raw = (b &times; p - (1 - p)) / b
+<br>
+<br><span class="comment">// If kelly_raw &le; 0, there is no mathematical edge</span>
+<br><span class="comment">// Only trade when kelly_raw > 0</span>
+<br>
+<br>bet_size = bankroll &times; kelly_raw &times; (1/6) &times; agreement_mult
+      </div>
+
+      <p><strong>Key insight:</strong> A signal with 60% confidence on a market priced at 55% has a <em>tiny</em> edge. The same 60% confidence on a market priced at 30% has a <em>large</em> edge. Kelly naturally sizes bigger when the odds are in our favor.</p>
+
+      <p>Additionally, a <strong>Market Gate</strong> blocks trades where signal confidence diverges more than 20% from the market price &mdash; preventing us from stubbornly betting against strong market consensus.</p>
+    </div>
+  </div>
+
+  <!-- WHAT ACTUALLY TRADES -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(74,127,181,0.12)">&#9989;</div>
+      <h2>What Actually Trades</h2>
+    </div>
+    <div class="section-body">
+      <p>With the current minimum confidence threshold of <strong class="mono terra">45</strong> (Seed phase), here's what can realistically trigger a trade:</p>
+
+      <table>
+        <tr><th>Likely to Trade Alone</th><th>Needs Confluence</th><th>Rarely Trades Alone</th></tr>
+        <tr>
+          <td>Cross-platform arb (&gt;10pp)<br>eFiling &gt;$500K<br>Poll divergence &gt;10pp<br>Google Trends + Wiki + tone</td>
+          <td>Smart money + IE confirms<br>FEC money (&gt;17pp)<br>Cash momentum<br>IE spending &gt;$600K</td>
+          <td>Wiki attention (max 50)<br>Whale concentration (max 45)<br>Narrative shift<br>Primary value</td>
+        </tr>
+      </table>
+
+      <p>The system is deliberately conservative. Low-confidence strategies exist as <strong>confluence boosters</strong> &mdash; they add weight when stronger signals fire, but rarely trade alone.</p>
+    </div>
+  </div>
+
+  <!-- DATA LATENCY -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(212,168,67,0.12)">&#9200;</div>
+      <h2>Data Latency Stack</h2>
+    </div>
+    <div class="section-body">
+      <p>Different data sources arrive at different speeds. Faster data means earlier signals:</p>
+
+      <div class="latency-stack">
+        <div class="latency-tier">
+          <span class="latency-label terra">Minutes</span>
+          <span class="latency-items">FEC eFiling (Super PAC F24), Polymarket holder shifts</span>
+        </div>
+        <div class="latency-tier">
+          <span class="latency-label gold">Hours</span>
+          <span class="latency-items">GDELT narrative tone, Wikipedia pageviews, Google Trends</span>
+        </div>
+        <div class="latency-tier">
+          <span class="latency-label blue">Days</span>
+          <span class="latency-items">RCP polling averages, FEC eFiling cash-on-hand</span>
+        </div>
+        <div class="latency-tier">
+          <span class="latency-label" style="color:var(--text2)">Weeks</span>
+          <span class="latency-items">FEC quarterly fundraising, IE spending batch data</span>
+        </div>
+        <div class="latency-tier">
+          <span class="latency-label" style="color:var(--text3)">Always-on</span>
+          <span class="latency-items">Cross-platform arb, whale concentration, primary value</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SAFETY RAILS -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(184,58,46,0.12)">&#128737;</div>
+      <h2>Safety Rails</h2>
+    </div>
+    <div class="section-body">
+      <div class="settings-grid">
+        <div class="setting-card">
+          <div class="setting-label">Per Trade</div>
+          <div class="setting-value">$100</div>
+          <div class="setting-why">Max position per signal</div>
+        </div>
+        <div class="setting-card">
+          <div class="setting-label">Daily Limit</div>
+          <div class="setting-value">$500</div>
+          <div class="setting-why">Caps daily exposure</div>
+        </div>
+        <div class="setting-card">
+          <div class="setting-label">Drawdown Halt</div>
+          <div class="setting-value">-5%</div>
+          <div class="setting-why">Auto-halt on daily loss</div>
+        </div>
+        <div class="setting-card">
+          <div class="setting-label">Min Confidence</div>
+          <div class="setting-value">45</div>
+          <div class="setting-why">Seed phase threshold</div>
+        </div>
+        <div class="setting-card">
+          <div class="setting-label">Market Gate</div>
+          <div class="setting-value">&plusmn;20%</div>
+          <div class="setting-why">Signal vs market must agree</div>
+        </div>
+        <div class="setting-card">
+          <div class="setting-label">Kelly Fraction</div>
+          <div class="setting-value">1/6</div>
+          <div class="setting-why">Conservative sizing</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- BAYESIAN PRIORS -->
+  <div class="section">
+    <div class="section-head">
+      <div class="icon" style="background:rgba(107,142,107,0.12)">&#129504;</div>
+      <h2>Bayesian Source Priors</h2>
+    </div>
+    <div class="section-body">
+      <p>Each strategy starts with conservative prior win rates. As trades resolve, win rates auto-update and the Bayesian multiplier adjusts confidence up or down:</p>
+
+      <table>
+        <tr><th>Strategy</th><th>Starting Win Rate</th><th>Prior</th></tr>
+        <tr><td>Cross-platform arb</td><td class="mono">50%</td><td class="mono" style="color:var(--text3)">5W / 5L</td></tr>
+        <tr><td>Poll divergence</td><td class="mono">50%</td><td class="mono" style="color:var(--text3)">5W / 5L</td></tr>
+        <tr><td>eFiling real-time</td><td class="mono">50%</td><td class="mono" style="color:var(--text3)">5W / 5L</td></tr>
+        <tr><td>FEC money, IE spend, smart money, cash momentum</td><td class="mono">40%</td><td class="mono" style="color:var(--text3)">4W / 6L</td></tr>
+        <tr><td>Primary value</td><td class="mono">40%</td><td class="mono" style="color:var(--text3)">4W / 6L</td></tr>
+        <tr><td>Momentum, narrative, wiki, trends, whale</td><td class="mono">30%</td><td class="mono" style="color:var(--text3)">3W / 7L</td></tr>
+      </table>
+
+      <p>Strategies that prove themselves earn higher Bayesian multipliers over time. Strategies that underperform get naturally dampened without manual intervention.</p>
+    </div>
+  </div>
+
+  <!-- STATUS -->
+  <div style="text-align:center;margin:28px 0">
+    <div style="display:inline-flex;align-items:center;gap:8px;padding:10px 20px;background:rgba(212,168,67,0.08);border:1px solid rgba(212,168,67,0.25);border-radius:8px;font-size:13px;font-weight:600;color:var(--gold)">&#x1F7E1; Paper Trading &mdash; calibrating Bayesian priors</div>
+    <p style="margin-top:12px;color:var(--text2);font-size:12px">The system is live and scanning. Once enough resolved trades confirm strategy win rates, Bayesian priors will auto-adjust and position sizing will scale accordingly.</p>
+  </div>
+
+  <footer>
+    <p><span class="brand">polyclawd</span> &middot; election intelligence engine</p>
+  </footer>
+</div>
+</body>
+</html>

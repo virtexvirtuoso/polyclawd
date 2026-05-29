@@ -1,0 +1,1281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Election Intelligence Ensemble · Polyclawd</title>
+<script src="auth.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap');
+
+  :root {
+    --bg: #FAF8F5;
+    --surface: #FFFFFF;
+    --surface2: #F5F2EE;
+    --border: #E2DDD6;
+    --border-light: #EDE9E3;
+    --text: #2D2D2D;
+    --text2: #7A7568;
+    --text3: #8A8275;
+    --terracotta: #C75B39;
+    --gold: #D4A843;
+    --olive: #6B8E6B;
+    --blue: #4A7FB5;
+    --rep-red: #B83A2E;
+    --rep-red-light: #E8564A;
+    --rep-bg: rgba(184, 58, 46, 0.08);
+    --dem-blue: #2B6CB0;
+    --dem-blue-light: #4A90D9;
+    --dem-bg: rgba(43, 108, 176, 0.08);
+    --tossup: #9B9B9B;
+    --green-score: #4A8B5C;
+    --gold-score: #B8923E;
+    --red-score: #B84A3E;
+    --shadow: rgba(45, 45, 45, 0.06);
+    --bg2: #F5F2EE;
+    --text1: #2D2D2D;
+    --accent: #C75B39;
+    --amber: #D4A843;
+    --pos-green: #5B9A6B;
+    --neg-red: #C25B4A;
+    --info-blue: #4A7FB5;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, sans-serif;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  .container {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 32px 28px 48px;
+    min-width: 0;
+    overflow-x: hidden;
+  }
+
+  /* -- HEADER BAR -- */
+  .header-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 32px;
+  }
+  .header-left {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+  }
+  .header-brand {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    color: var(--terracotta);
+  }
+  .header-title {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text2);
+    letter-spacing: 0.5px;
+  }
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .header-confidential {
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text3);
+  }
+  .nav-links {
+    display: flex;
+    gap: 6px;
+  }
+  .nav-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text2);
+    text-decoration: none;
+    padding: 5px 12px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    transition: all 0.2s;
+    cursor: pointer;
+    font-weight: 500;
+  }
+  .nav-link:hover { border-color: var(--terracotta); color: var(--terracotta); }
+  .nav-link svg { width: 12px; height: 12px; stroke-width: 2; }
+
+  /* -- SECTION LABELS -- */
+  .section-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--text3);
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-light);
+  }
+
+  /* -- LAST UPDATED BAR -- */
+  .last-updated {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 24px;
+  }
+  .last-updated-text {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text3);
+    letter-spacing: 0.5px;
+  }
+  .refresh-btn {
+    padding: 4px 12px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text2);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .refresh-btn:hover { border-color: var(--terracotta); color: var(--terracotta); }
+
+  /* -- SOURCE HEALTH GRID -- */
+  .source-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
+    gap: 10px;
+    margin-bottom: 32px;
+  }
+  .source-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 14px 16px;
+    box-shadow: 0 1px 3px var(--shadow);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .source-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .status-dot.green { background: var(--green-score); }
+  .status-dot.amber { background: var(--gold-score); }
+  .status-dot.red { background: var(--red-score); }
+  .source-name {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+  .source-metric {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1;
+  }
+  .source-status {
+    font-size: 11px;
+    color: var(--text3);
+    line-height: 1.3;
+  }
+
+  /* -- PARTY CONTROL BARS -- */
+  .control-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: 0 1px 3px var(--shadow);
+    margin-bottom: 32px;
+    padding: 24px 28px;
+  }
+  .control-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--text3);
+    margin-bottom: 20px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-light);
+  }
+  .gauge-row {
+    margin-bottom: 18px;
+  }
+  .gauge-row:last-child { margin-bottom: 0; }
+  .gauge-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 6px;
+  }
+  .gauge-branch {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text2);
+  }
+  .gauge-pcts {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    display: flex;
+    gap: 12px;
+  }
+  .gauge-pcts .dem { color: var(--dem-blue); }
+  .gauge-pcts .rep { color: var(--rep-red); }
+  .gauge-bar-wrap {
+    display: flex;
+    height: 14px;
+    border-radius: 7px;
+    overflow: hidden;
+    background: var(--surface2);
+  }
+  .gauge-bar-d {
+    background: var(--dem-blue);
+    transition: width 0.5s ease;
+    border-radius: 7px 0 0 7px;
+  }
+  .gauge-bar-r {
+    background: var(--rep-red);
+    transition: width 0.5s ease;
+    border-radius: 0 7px 7px 0;
+    margin-left: auto;
+  }
+
+  /* -- SIGNAL PIPELINE -- */
+  .pipeline-grid {
+    display: grid;
+    grid-template-columns: 1fr 300px;
+    gap: 16px;
+    margin-bottom: 32px;
+  }
+  .pipeline-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 20px 24px;
+    box-shadow: 0 1px 3px var(--shadow);
+  }
+  .pipeline-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--text3);
+    margin-bottom: 14px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-light);
+  }
+  .strategy-row {
+    display: flex;
+    align-items: center;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--border-light);
+    gap: 10px;
+  }
+  .strategy-row:last-child { border-bottom: none; }
+  .strategy-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text);
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .strategy-count {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text);
+    width: 32px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+  .strategy-status {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* Engine status card */
+  .engine-stat {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border-light);
+  }
+  .engine-stat:last-child { border-bottom: none; }
+  .engine-stat-label {
+    font-size: 11px;
+    color: var(--text3);
+    flex: 1;
+  }
+  .engine-stat-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .engine-running { color: var(--green-score); }
+  .engine-stopped { color: var(--red-score); }
+
+  /* -- DATA TABLE SECTIONS -- */
+  .table-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    margin-bottom: 32px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px var(--shadow);
+  }
+  .table-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  .table-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--text3);
+  }
+  .table-count {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text3);
+    padding: 3px 10px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+  }
+  .table-body-wrap { padding: 16px 24px 24px; }
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  table { width: 100%; border-collapse: collapse; min-width: 600px; }
+  th {
+    text-align: left;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text3);
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  td {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border-light);
+    font-size: 13px;
+    color: var(--text);
+  }
+  tr:hover td { background: rgba(199, 91, 57, 0.03); }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+
+  /* Badges */
+  .badge {
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    white-space: nowrap;
+  }
+  .badge-poly {
+    background: var(--dem-bg);
+    color: var(--dem-blue);
+    border: 1px solid rgba(43, 108, 176, 0.2);
+  }
+  .badge-kalshi {
+    background: rgba(199, 91, 57, 0.08);
+    color: var(--terracotta);
+    border: 1px solid rgba(199, 91, 57, 0.2);
+  }
+  .badge-aligned {
+    background: rgba(91, 154, 107, 0.1);
+    color: var(--pos-green);
+    border: 1px solid rgba(91, 154, 107, 0.2);
+  }
+  .badge-diverge {
+    background: rgba(184, 58, 46, 0.08);
+    color: var(--rep-red);
+    border: 1px solid rgba(184, 58, 46, 0.2);
+  }
+  .badge-mixed {
+    background: rgba(212, 168, 67, 0.1);
+    color: var(--gold-score);
+    border: 1px solid rgba(212, 168, 67, 0.2);
+  }
+  .badge-up {
+    background: rgba(91, 154, 107, 0.1);
+    color: var(--pos-green);
+  }
+  .badge-down {
+    background: rgba(184, 58, 46, 0.08);
+    color: var(--rep-red);
+  }
+
+  .prob { font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 13px; }
+  .prob-high { color: var(--green-score); }
+  .prob-mid { color: var(--gold-score); }
+  .prob-low { color: var(--red-score); }
+
+  /* -- TWO COLUMN INTEL -- */
+  .intel-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 32px;
+    max-width: 100%;
+    overflow: hidden;
+  }
+  .intel-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px 26px;
+    box-shadow: 0 1px 3px var(--shadow);
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .intel-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--text3);
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-light);
+  }
+
+  /* -- LOADING & ERROR -- */
+  .loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 80px 20px;
+    gap: 16px;
+  }
+  .spinner {
+    width: 28px;
+    height: 28px;
+    border: 2px solid var(--border);
+    border-top-color: var(--terracotta);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-text { font-size: 12px; color: var(--text3); }
+
+  .error-state { text-align: center; padding: 60px; color: var(--text2); }
+  .error-msg { font-size: 13px; margin-bottom: 16px; }
+  .retry-btn {
+    padding: 9px 22px;
+    border-radius: 4px;
+    border: 1px solid var(--terracotta);
+    background: var(--terracotta);
+    color: #fff;
+    font-family: 'Inter', sans-serif;
+    font-weight: 600;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .retry-btn:hover { background: #b5502f; }
+
+  /* -- EMPTY STATE -- */
+  .empty-state {
+    text-align: center;
+    padding: 32px;
+    color: var(--text3);
+    font-size: 12px;
+    font-style: italic;
+  }
+
+  /* -- METHODOLOGY FOOTER -- */
+  .methodology-bar {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 16px 24px;
+    margin-bottom: 24px;
+  }
+  .methodology-text {
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--text3);
+  }
+
+  footer {
+    text-align: center;
+    padding: 16px 0 8px;
+    border-top: 1px solid var(--border-light);
+  }
+  footer p {
+    font-size: 10px;
+    color: var(--text3);
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.5px;
+  }
+  footer .brand { color: var(--terracotta); }
+
+  /* -- RESPONSIVE -- */
+  @media (max-width: 1024px) {
+    .pipeline-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 768px) {
+    .container { padding: 16px 12px 32px; }
+    .header-bar { flex-direction: column; gap: 10px; align-items: flex-start; }
+    .header-left { flex-wrap: wrap; gap: 6px; }
+    .header-right { width: 100%; justify-content: space-between; }
+    .header-confidential { display: none; }
+    .intel-grid { grid-template-columns: 1fr; }
+    .source-grid { grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr)); }
+    table { min-width: 500px; }
+    th, td { padding: 8px 8px; font-size: 12px; }
+    .table-wrap { margin: 0 -12px; padding: 0 12px; }
+  }
+  @media (max-width: 480px) {
+    .container { padding: 10px 8px 24px; }
+    .source-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+    .source-metric { font-size: 16px; }
+    .nav-links { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .nav-link { white-space: nowrap; font-size: 10px; padding: 6px 10px; }
+    table { min-width: 420px; font-size: 11px; }
+    th, td { padding: 6px 6px; }
+    .badge { font-size: 9px; padding: 1px 6px; }
+  }
+  @media (max-width: 360px) {
+    .source-grid { grid-template-columns: 1fr; }
+    table { min-width: 360px; }
+    .nav-links { display: none; }
+  }
+
+  @media print {
+    body { background: #fff; }
+    .nav-links, .refresh-btn, .retry-btn { display: none; }
+    .loading, .error-state { display: none !important; }
+    .table-section { break-inside: avoid; }
+    .intel-card, .pipeline-card, .control-section { break-inside: avoid; page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- HEADER BAR -->
+  <div class="header-bar">
+    <div class="header-left">
+      <span class="header-brand">Polyclawd</span>
+      <span class="header-title">Election Intelligence Ensemble</span>
+    </div>
+    <div class="header-right">
+      <span class="header-confidential">Confidential &middot; For authorized distribution only</span>
+      <div class="nav-links">
+        <a href="portfolio.html" class="nav-link">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
+          Portfolio
+        </a>
+        <a href="elections.html" class="nav-link">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          Elections
+        </a>
+        <a href="engine-status.html" class="nav-link">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          Engine
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- LAST UPDATED -->
+  <div class="last-updated">
+    <span class="last-updated-text" id="last-updated">Last updated: --</span>
+    <button class="refresh-btn" onclick="fetchAllData()">Refresh</button>
+  </div>
+
+  <!-- LOADING STATE -->
+  <div class="loading" id="loading-state">
+    <div class="spinner"></div>
+    <div class="loading-text">Loading election ensemble data...</div>
+  </div>
+
+  <!-- ERROR STATE -->
+  <div class="error-state" id="error-state" style="display:none">
+    <div class="error-msg" id="error-msg">Failed to load data.</div>
+    <button class="retry-btn" onclick="fetchAllData()">Retry</button>
+  </div>
+
+  <!-- MAIN CONTENT -->
+  <div id="main-content" style="display:none">
+
+    <!-- ROW 1: SOURCE HEALTH -->
+    <div class="section-label">Ensemble Source Health</div>
+    <div class="source-grid" id="source-grid"></div>
+
+    <!-- ROW 2: PARTY CONTROL GAUGES -->
+    <div class="control-section" id="control-section">
+      <div class="control-title">Party Control Probabilities</div>
+      <div id="control-gauges"></div>
+    </div>
+
+    <!-- ROW 3: SIGNAL PIPELINE -->
+    <div class="section-label">Signal Pipeline</div>
+    <div class="pipeline-grid">
+      <div class="pipeline-card">
+        <div class="pipeline-title">Trading Strategies</div>
+        <div id="strategy-list"></div>
+      </div>
+      <div class="pipeline-card">
+        <div class="pipeline-title">Engine Status</div>
+        <div id="engine-status"></div>
+      </div>
+    </div>
+
+    <!-- ROW 4: CROSS-PLATFORM SPREADS -->
+    <div class="table-section" id="spreads-section">
+      <div class="table-header">
+        <div class="table-title">Cross-Platform Spreads (Arb Opportunities)</div>
+        <div class="table-count" id="spreads-count">--</div>
+      </div>
+      <div class="table-body-wrap">
+        <div class="table-wrap" id="spreads-table"></div>
+      </div>
+    </div>
+
+    <!-- ROW 5: FEC MONEY VS ODDS -->
+    <div class="table-section" id="mvo-section">
+      <div class="table-header">
+        <div class="table-title">FEC Money vs Market Odds</div>
+        <div class="table-count" id="mvo-count">--</div>
+      </div>
+      <div class="table-body-wrap">
+        <div class="table-wrap" id="mvo-table"></div>
+      </div>
+    </div>
+
+    <!-- ROW 6: SMART MONEY -->
+    <div class="intel-grid">
+      <!-- FEC Cross Signals -->
+      <div class="intel-card">
+        <div class="intel-title">FEC Cross Signals</div>
+        <div class="table-wrap" id="fec-cross-table"></div>
+      </div>
+      <!-- Smart Money Tracker -->
+      <div class="intel-card">
+        <div class="intel-title">Smart Money Tracker</div>
+        <div class="table-wrap" id="smart-money-table"></div>
+      </div>
+    </div>
+
+    <!-- ROW 7: ATTENTION SIGNALS -->
+    <div class="intel-grid">
+      <div class="intel-card">
+        <div class="intel-title">Wikipedia Spikes</div>
+        <div class="table-wrap" id="wiki-table"></div>
+      </div>
+      <div class="intel-card">
+        <div class="intel-title">Google Trends</div>
+        <div class="table-wrap" id="gtrends-table"></div>
+      </div>
+    </div>
+
+    <!-- ROW 8: TOP MOVERS -->
+    <div class="table-section" id="movers-section">
+      <div class="table-header">
+        <div class="table-title">Top Movers</div>
+        <div class="table-count" id="movers-count">--</div>
+      </div>
+      <div class="table-body-wrap">
+        <div class="table-wrap" id="movers-table"></div>
+      </div>
+    </div>
+
+    <!-- ROW 9: NARRATIVE SHIFTS -->
+    <div class="table-section" id="narrative-section">
+      <div class="table-header">
+        <div class="table-title">Narrative Shifts (GDELT)</div>
+        <div class="table-count" id="narrative-count">--</div>
+      </div>
+      <div class="table-body-wrap">
+        <div class="table-wrap" id="narrative-table"></div>
+      </div>
+    </div>
+
+    <!-- METHODOLOGY -->
+    <div class="methodology-bar">
+      <div class="methodology-text">
+        This ensemble aggregates 13 independent data sources: Polymarket, Kalshi, PredictIt, FEC Quarterly, FEC eFiling, FEC IE Spending, GDELT Sentiment, RCP Polls, Wikipedia Pageviews, Google Trends, Smart Money Concentration, Manifold Markets, and Betfair/Odds.
+        Cross-platform spreads highlight arbitrage when the same race shows a price divergence above 5% across platforms. Signal confidence is computed via Bayesian aggregation of all active sources. Auto-refreshes every 5 minutes.
+      </div>
+    </div>
+
+  </div><!-- /main-content -->
+
+  <footer>
+    <p><span class="brand">Polyclawd</span> &middot; Election Intelligence Ensemble</p>
+  </footer>
+
+</div><!-- /container -->
+
+<script>
+const API = window.location.origin + '/polyclawd';
+
+// ── Helpers ──
+function pct(v) { return v != null ? (v * 100).toFixed(1) + '%' : '--'; }
+function fmt(n) { return n != null ? Number(n).toLocaleString() : '--'; }
+function probClass(v) { return v >= 0.65 ? 'prob-high' : v >= 0.40 ? 'prob-mid' : 'prob-low'; }
+function escHtml(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+
+function timeAgo(ts) {
+  if (!ts) return '--';
+  const d = new Date(ts);
+  const diff = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
+}
+
+// ── State ──
+let electionData = null;
+let signalsData = null;
+let engineData = null;
+
+// ── Fetch All Data ──
+async function fetchAllData() {
+  document.getElementById('loading-state').style.display = 'flex';
+  document.getElementById('error-state').style.display = 'none';
+  document.getElementById('main-content').style.display = 'none';
+
+  try {
+    const [elRes, sigRes, engRes] = await Promise.all([
+      fetch(API + '/api/signals/elections', { headers: authHeaders() }).then(r => r.ok ? r.json() : Promise.reject(r.statusText)).catch(() => null),
+      fetch(API + '/api/signals', { headers: authHeaders() }).then(r => r.ok ? r.json() : Promise.reject(r.statusText)).catch(() => null),
+      fetch(API + '/api/engine/status', { headers: authHeaders() }).then(r => r.ok ? r.json() : Promise.reject(r.statusText)).catch(() => null),
+    ]);
+
+    if (!elRes) throw new Error('Election data unavailable');
+
+    electionData = elRes;
+    signalsData = sigRes;
+    engineData = engRes;
+
+    renderAll();
+
+    document.getElementById('loading-state').style.display = 'none';
+    document.getElementById('main-content').style.display = 'block';
+    document.getElementById('last-updated').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+  } catch (err) {
+    document.getElementById('loading-state').style.display = 'none';
+    document.getElementById('error-state').style.display = 'block';
+    document.getElementById('error-msg').textContent = 'Failed to load data: ' + err.message;
+  }
+}
+
+function authHeaders() {
+  if (typeof getAuthHeaders === 'function') return getAuthHeaders();
+  return {};
+}
+
+// ── Render All Sections ──
+function renderAll() {
+  renderSourceHealth();
+  renderControlGauges();
+  renderSignalPipeline();
+  renderEngineStatus();
+  renderSpreads();
+  renderMoneyVsOdds();
+  renderFecCross();
+  renderSmartMoney();
+  renderWikiSpikes();
+  renderGtrends();
+  renderTopMovers();
+  renderNarrativeShifts();
+}
+
+// ── Row 1: Source Health Cards ──
+function renderSourceHealth() {
+  const s = electionData.summary || {};
+  const ins = electionData.insights || {};
+  const grid = document.getElementById('source-grid');
+
+  const sources = [
+    {
+      name: 'Polymarket',
+      metric: fmt(s.polymarket_count),
+      status: s.polymarket_count > 0 ? 'green' : 'red',
+      text: s.polymarket_count > 0 ? 'Active' : 'No markets'
+    },
+    {
+      name: 'Kalshi',
+      metric: fmt(s.kalshi_count),
+      status: s.kalshi_count > 0 ? 'green' : 'red',
+      text: s.kalshi_count > 0 ? 'Active' : 'No markets'
+    },
+    {
+      name: 'PredictIt',
+      metric: fmt((ins.predictit_spreads || []).length),
+      status: (ins.predictit_spreads || []).length > 0 ? 'green' : 'red',
+      text: (ins.predictit_spreads || []).length > 0 ? 'Spreads found' : 'Blocked / 403'
+    },
+    {
+      name: 'FEC Quarterly',
+      metric: Object.keys(ins.fundraising || {}).length,
+      status: Object.keys(ins.fundraising || {}).length > 0 ? 'green' : 'amber',
+      text: Object.keys(ins.fundraising || {}).length > 0 ? 'States tracked' : 'No data'
+    },
+    {
+      name: 'FEC eFiling',
+      metric: fmt((ins.efiling_alerts || []).length),
+      status: (ins.efiling_alerts || []).length > 0 ? 'green' : 'amber',
+      text: (ins.efiling_alerts || []).length > 0 ? 'Recent filings' : 'No recent filings'
+    },
+    {
+      name: 'FEC IE Spending',
+      metric: fmt((ins.ie_spending || []).length),
+      status: (ins.ie_spending || []).length > 0 ? 'green' : 'amber',
+      text: (ins.ie_spending || []).length > 0 ? 'Races tracked' : 'No data'
+    },
+    {
+      name: 'GDELT',
+      metric: fmt((ins.narrative_shifts || []).length),
+      status: (ins.narrative_shifts || []).length > 0 ? 'green' : 'amber',
+      text: (ins.candidate_sentiment || []).length + ' candidates tracked'
+    },
+    {
+      name: 'RCP Polls',
+      metric: fmt((ins.poll_data || []).length),
+      status: (ins.poll_market_divergences || []).length > 0 ? 'green' : 'amber',
+      text: (ins.poll_market_divergences || []).length + ' divergences'
+    },
+    {
+      name: 'Wikipedia',
+      metric: fmt((ins.wiki_pageviews || []).length),
+      status: (ins.wiki_spikes || []).length > 0 ? 'green' : 'amber',
+      text: (ins.wiki_spikes || []).length + ' spikes'
+    },
+    {
+      name: 'Google Trends',
+      metric: fmt((ins.gtrends_election_topics || []).length),
+      status: (ins.gtrends_spikes || []).length > 0 ? 'green' : 'amber',
+      text: (ins.gtrends_spikes || []).length + ' trending'
+    },
+    {
+      name: 'Smart Money',
+      metric: fmt((ins.smart_money || []).length),
+      status: (ins.fec_cross_signals || []).length > 0 ? 'green' : 'amber',
+      text: (ins.fec_cross_signals || []).length + ' cross-signals'
+    },
+    {
+      name: 'Manifold',
+      metric: fmt((ins.manifold_spreads || []).length),
+      status: (ins.manifold_spreads || []).length > 0 ? 'green' : 'red',
+      text: (ins.manifold_spreads || []).length > 0 ? 'Spreads found' : 'No spreads'
+    },
+    {
+      name: 'Betfair/Odds',
+      metric: '--',
+      status: 'amber',
+      text: 'Polling endpoint'
+    },
+  ];
+
+  grid.innerHTML = sources.map(src => `
+    <div class="source-card">
+      <div class="source-header">
+        <div class="status-dot ${src.status}"></div>
+        <div class="source-name">${escHtml(src.name)}</div>
+      </div>
+      <div class="source-metric">${src.metric}</div>
+      <div class="source-status">${escHtml(src.text)}</div>
+    </div>
+  `).join('');
+}
+
+// ── Row 2: Party Control Gauges ──
+function renderControlGauges() {
+  const pc = (electionData.summary || {}).party_control || {};
+  const container = document.getElementById('control-gauges');
+
+  const branches = [
+    { name: 'Presidency', data: pc.presidency },
+    { name: 'Senate', data: pc.senate },
+    { name: 'House', data: pc.house },
+  ];
+
+  container.innerHTML = branches.map(b => {
+    const d = (b.data || {}).democrat || 0;
+    const r = (b.data || {}).republican || 0;
+    const total = d + r || 1;
+    const dPct = (d / total * 100).toFixed(1);
+    const rPct = (r / total * 100).toFixed(1);
+    return `
+      <div class="gauge-row">
+        <div class="gauge-header">
+          <span class="gauge-branch">${b.name}</span>
+          <span class="gauge-pcts">
+            <span class="dem">D ${dPct}%</span>
+            <span class="rep">R ${rPct}%</span>
+          </span>
+        </div>
+        <div class="gauge-bar-wrap">
+          <div class="gauge-bar-d" style="width:${dPct}%"></div>
+          <div class="gauge-bar-r" style="width:${rPct}%"></div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+// ── Row 3: Signal Pipeline ──
+function renderSignalPipeline() {
+  const container = document.getElementById('strategy-list');
+  if (!signalsData || !signalsData.sources) {
+    container.innerHTML = '<div class="empty-state">No signal data available</div>';
+    return;
+  }
+
+  const sources = signalsData.sources;
+  const entries = Object.entries(sources).sort((a, b) => b[1] - a[1]);
+
+  container.innerHTML = entries.map(([name, count]) => {
+    const color = count > 0 ? 'background:var(--green-score)' : 'background:var(--tossup)';
+    const displayName = name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    return `
+      <div class="strategy-row">
+        <div class="strategy-status" style="${color}"></div>
+        <div class="strategy-name">${escHtml(displayName)}</div>
+        <div class="strategy-count">${count}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderEngineStatus() {
+  const container = document.getElementById('engine-status');
+  if (!engineData) {
+    container.innerHTML = '<div class="empty-state">Engine status unavailable</div>';
+    return;
+  }
+
+  const running = engineData.running || engineData.enabled;
+  const cfg = engineData.config || {};
+
+  container.innerHTML = `
+    <div class="engine-stat">
+      <span class="engine-stat-label">Status</span>
+      <span class="engine-stat-value ${running ? 'engine-running' : 'engine-stopped'}">${running ? 'RUNNING' : 'STOPPED'}</span>
+    </div>
+    <div class="engine-stat">
+      <span class="engine-stat-label">Trades Today</span>
+      <span class="engine-stat-value">${engineData.trades_today != null ? engineData.trades_today : '--'}</span>
+    </div>
+    <div class="engine-stat">
+      <span class="engine-stat-label">Min Confidence</span>
+      <span class="engine-stat-value">${cfg.min_confidence != null ? cfg.min_confidence : '--'}</span>
+    </div>
+    <div class="engine-stat">
+      <span class="engine-stat-label">Max Per Trade</span>
+      <span class="engine-stat-value">${cfg.max_per_trade != null ? '$' + cfg.max_per_trade : '--'}</span>
+    </div>
+    <div class="engine-stat">
+      <span class="engine-stat-label">Adaptive Boost</span>
+      <span class="engine-stat-value">${engineData.adaptive_boost != null ? engineData.adaptive_boost : '--'}</span>
+    </div>
+    <div class="engine-stat">
+      <span class="engine-stat-label">Total Signals</span>
+      <span class="engine-stat-value">${signalsData ? signalsData.total_signals || 0 : '--'}</span>
+    </div>
+  `;
+}
+
+// ── Row 4: Cross-Platform Spreads ──
+function renderSpreads() {
+  const spreads = (electionData.insights || {}).cross_platform_spreads || [];
+  document.getElementById('spreads-count').textContent = spreads.length + ' opportunities';
+  const container = document.getElementById('spreads-table');
+
+  if (!spreads.length) {
+    container.innerHTML = '<div class="empty-state">No cross-platform spreads detected</div>';
+    return;
+  }
+
+  const rows = spreads.slice(0, 30).map(s => {
+    const spread = s.spread != null ? (s.spread * 100).toFixed(1) + '%' : s.spread_pct != null ? s.spread_pct.toFixed(1) + '%' : '--';
+    return `<tr>
+      <td>${escHtml(s.state || s.race || '--')}</td>
+      <td>${escHtml(s.race_type || s.type || '--')}</td>
+      <td class="mono prob ${probClass(s.poly_dem || s.polymarket)}">${pct(s.poly_dem || s.polymarket)}</td>
+      <td class="mono prob ${probClass(s.kalshi_dem || s.kalshi)}">${pct(s.kalshi_dem || s.kalshi)}</td>
+      <td class="mono prob">${pct(s.pi_dem || s.predictit)}</td>
+      <td class="mono" style="font-weight:700;color:var(--terracotta)">${spread}</td>
+      <td>${escHtml(s.platforms || '--')}</td>
+    </tr>`;
+  }).join('');
+
+  container.innerHTML = `<table>
+    <thead><tr><th>State</th><th>Race</th><th>Poly D%</th><th>Kalshi D%</th><th>PI D%</th><th>Spread</th><th>Platforms</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+// ── Row 5: Money vs Odds ──
+function renderMoneyVsOdds() {
+  const items = (electionData.insights || {}).money_vs_odds || [];
+  document.getElementById('mvo-count').textContent = items.length + ' divergences';
+  const container = document.getElementById('mvo-table');
+
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state">No money-vs-odds divergences found</div>';
+    return;
+  }
+
+  const rows = items.slice(0, 30).map(m => {
+    const div = m.divergence != null ? (m.divergence * 100).toFixed(1) + '%' : m.divergence_pct != null ? m.divergence_pct.toFixed(1) + '%' : '--';
+    return `<tr>
+      <td style="font-weight:600">${escHtml(m.state || '--')}</td>
+      <td class="mono prob ${probClass(m.dem_market_odds || m.market_odds)}">${pct(m.dem_market_odds || m.market_odds)}</td>
+      <td class="mono prob">${pct(m.dem_cash_share || m.cash_share)}</td>
+      <td class="mono" style="font-weight:700;color:var(--terracotta)">${div}</td>
+      <td>${escHtml(m.signal || m.direction || '--')}</td>
+    </tr>`;
+  }).join('');
+
+  container.innerHTML = `<table>
+    <thead><tr><th>State</th><th>D Market Odds</th><th>D Cash Share</th><th>Divergence</th><th>Signal</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+// ── Row 6a: FEC Cross Signals ──
+function renderFecCross() {
+  const items = (electionData.insights || {}).fec_cross_signals || [];
+  const container = document.getElementById('fec-cross-table');
+
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state">No FEC cross signals</div>';
+    return;
+  }
+
+  const rows = items.slice(0, 20).map(f => {
+    const signalClass = (f.signal || '').toLowerCase().includes('aligned') ? 'badge-aligned' :
+                        (f.signal || '').toLowerCase().includes('diverge') ? 'badge-diverge' : 'badge-mixed';
+    return `<tr>
+      <td style="font-weight:600">${escHtml(f.state || '--')}</td>
+      <td>${escHtml(f.yes_party || f.party || '--')}</td>
+      <td class="mono">${f.fec_cash != null ? '$' + fmt(f.fec_cash) : '--'}</td>
+      <td class="mono">${f.ie_spend != null ? '$' + fmt(f.ie_spend) : '--'}</td>
+      <td><span class="badge ${signalClass}">${escHtml(f.signal || '--')}</span></td>
+    </tr>`;
+  }).join('');
+
+  container.innerHTML = `<table style="min-width:400px">
+    <thead><tr><th>State</th><th>Party</th><th>FEC Cash</th><th>IE Spend</th><th>Signal</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+// ── Row 6b: Smart Money ──
+function renderSmartMoney() {
+  const items = (electionData.insights || {}).smart_money || [];
+  const container = document.getElementById('smart-money-table');
+
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state">No smart money data</div>';
+    return;
+  }
+
+  const rows = items.slice(0, 20).map(m => {
+    const whaleP = m.whale_pct != null ? (m.whale_pct * 100).toFixed(0) + '%' : m.whale_percentage != null ? m.whale_percentage.toFixed(0) + '%' : '--';
+    const top5 = m.top5_concentration != null ? (m.top5_concentration * 100).toFixed(0) + '%' : m.top5_conc != null ? (m.top5_conc * 100).toFixed(0) + '%' : '--';
+    return `<tr>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(m.market || m.question || '--')}</td>
+      <td class="mono prob ${probClass(m.yes_price)}">${pct(m.yes_price)}</td>
+      <td class="mono">${m.yes_shares != null ? fmt(m.yes_shares) : '--'}</td>
+      <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(m.top_holder || '--')}</td>
+      <td class="mono">${top5}</td>
+      <td class="mono" style="font-weight:700;color:var(--terracotta)">${whaleP}</td>
+    </tr>`;
+  }).join('');
+
+  container.innerHTML = `<table style="min-width:500px">
+    <thead><tr><th>Market</th><th>YES Price</th><th>YES Shares</th><th>Top Holder</th><th>Top5 Conc</th><th>Whale%</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+// ── Row 7a: Wiki Spikes ──
+function renderWikiSpikes() {
+  const items = (electionData.insights || {}).wiki_spikes || [];
+  const container = document.getElementById('wiki-table');
+
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state">No Wikipedia spikes detected</div>';
+    return;
+  }
+
+  const rows = items.slice(0, 20).map(w => {
+    const z = w.z_score != null ? w.z_score.toFixed(1) : '--';
+    const above = w.pct_above_avg != null ? (w.pct_above_avg * 100).toFixed(0) + '%' : w.percent_above_avg != null ? w.percent_above_avg.toFixed(0) + '%' : '--';
+    return `<tr>
+      <td style="font-weight:600">${escHtml(w.candidate || w.name || '--')}</td>
+      <td>${escHtml(w.state || '--')}</td>
+      <td class="mono" style="font-weight:700;color:${parseFloat(z) >= 2 ? 'var(--terracotta)' : 'var(--text)'}">${z}</td>
+      <td class="mono">${above}</td>
+    </tr>`;
+  }).join('');
+
+  container.innerHTML = `<table style="min-width:380px">
+    <thead><tr><th>Candidate</th><th>State</th><th>Z-Score</th><th>% Above Avg</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+// ── Row 7b: Google Trends ──
+function renderGtrends() {
+  const items = (electionData.insights || {}).gtrends_spikes || [];
+  const container = document.getElementById('gtrends-table');
+
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state">No Google Trends spikes detected</div>';
+    return;
+  }
+
+  const rows = items.slice(0, 20).map(g => {
+    return `<tr>
+      <td style="font-weight:600">${escHtml(g.topic || g.query || '--')}</td>
+      <td class="mono">${g.traffic != null ? fmt(g.traffic) : g.value != null ? fmt(g.value) : '--'}</td>
+      <td>${escHtml(g.candidate_match || g.match || '--')}</td>
+    </tr>`;
+  }).join('');
+
+  container.innerHTML = `<table style="min-width:380px">
+    <thead><tr><th>Topic</th><th>Traffic</th><th>Candidate Match</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+// ── Row 8: Top Movers ──
+function renderTopMovers() {
+  const items = electionData.top_movers || [];
+  document.getElementById('movers-count').textContent = items.length + ' movers';
+  const container = document.getElementById('movers-table');
+
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state">No top movers</div>';
+    return;
+  }
+
+  const rows = items.slice(0, 30).map(m => {
+    const delta = m.delta || m.change || 0;
+    const deltaStr = (delta >= 0 ? '+' : '') + (delta * 100).toFixed(1) + '%';
+    const deltaClass = delta >= 0 ? 'badge-up' : 'badge-down';
+    const prev = m.previous != null ? pct(m.previous) : m.prev_price != null ? pct(m.prev_price) : '--';
+    const curr = m.current != null ? pct(m.current) : m.price != null ? pct(m.price) : '--';
+    const platform = (m.platform || m.source || '').toLowerCase();
+    const platBadge = platform.includes('kalshi') ? 'badge-kalshi' : 'badge-poly';
+    return `<tr>
+      <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500">${escHtml(m.market || m.question || '--')}</td>
+      <td>${escHtml(m.outcome || m.token || '--')}</td>
+      <td class="mono">${prev}</td>
+      <td class="mono">${curr}</td>
+      <td><span class="badge ${deltaClass}">${deltaStr}</span></td>
+      <td><span class="badge ${platBadge}">${escHtml(m.platform || m.source || '--')}</span></td>
+    </tr>`;
+  }).join('');
+
+  container.innerHTML = `<table>
+    <thead><tr><th>Market</th><th>Outcome</th><th>Previous</th><th>Current</th><th>Delta</th><th>Platform</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+// ── Row 9: Narrative Shifts ──
+function renderNarrativeShifts() {
+  const items = (electionData.insights || {}).narrative_shifts || [];
+  document.getElementById('narrative-count').textContent = items.length + ' shifts';
+  const container = document.getElementById('narrative-table');
+
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state">No narrative shifts detected</div>';
+    return;
+  }
+
+  const rows = items.slice(0, 30).map(n => {
+    const mag = n.magnitude != null ? n.magnitude.toFixed(2) : '--';
+    const dir = (n.direction || '').toLowerCase();
+    const dirBadge = dir.includes('up') || dir.includes('positive') ? 'badge-up' : dir.includes('down') || dir.includes('negative') ? 'badge-down' : 'badge-mixed';
+    return `<tr>
+      <td style="font-weight:600">${escHtml(n.type || n.topic || '--')}</td>
+      <td><span class="badge ${dirBadge}">${escHtml(n.direction || '--')}</span></td>
+      <td class="mono" style="font-weight:700">${mag}</td>
+      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(n.detail || n.description || '--')}</td>
+    </tr>`;
+  }).join('');
+
+  container.innerHTML = `<table>
+    <thead><tr><th>Type</th><th>Direction</th><th>Magnitude</th><th>Detail</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+// ── Init ──
+fetchAllData();
+setInterval(fetchAllData, 5 * 60 * 1000);
+</script>
+</body>
+</html>
