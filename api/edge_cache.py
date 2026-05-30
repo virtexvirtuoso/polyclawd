@@ -107,8 +107,8 @@ def fetch_soccer_edges() -> List[Dict]:
                     "side": side,
                     "confidence": min(60, abs(edge_pct) * 2),
                     "value": abs(edge_pct),
-                    "reasoning": f"Vegas {edge.get('vegas_prob', 0):.0f}% vs Poly {edge.get('poly_prob', 0):.0f}% ({edge_pct:+.1f}% edge)",
-                    "price": edge.get("poly_prob", 50) / 100,
+                    "reasoning": f"Vegas {edge.get('vegas_prob', 0):.0f}% vs Poly {edge.get('polymarket_price', 0):.0f}% ({edge_pct:+.1f}% edge)",
+                    "price": edge.get("polymarket_price", 50) / 100,
                     "url": edge.get("poly_url")
                 })
     except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
@@ -139,8 +139,8 @@ def fetch_betfair_edges() -> List[Dict]:
                     "side": side,
                     "confidence": min(65, abs(edge_pct) * 2.5),
                     "value": abs(edge_pct),
-                    "reasoning": f"Betfair {edge.get('betfair_prob', 0):.0f}% vs Poly {edge.get('poly_prob', 0):.0f}% ({edge_pct:+.1f}% edge)",
-                    "price": edge.get("poly_prob", 50) / 100,
+                    "reasoning": f"Betfair {edge.get('betfair_prob', 0):.0f}% vs Poly {edge.get('polymarket_price', 0):.0f}% ({edge_pct:+.1f}% edge)",
+                    "price": edge.get("polymarket_price", 50) / 100,
                     "url": edge.get("poly_url")
                 })
     except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
