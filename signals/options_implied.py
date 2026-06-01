@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS options_implied (
   bracket_lo REAL, bracket_hi REAL, market_type TEXT,
   poly_price REAL, implied_prob REAL, spread_pp REAL,
   underlying REAL, iv REAL, poly_liquidity REAL, poly_vol_24h REAL,
+  iv_rv_ratio REAL,
   PRIMARY KEY (date, poly_market_id, strike)
 );
 """
@@ -68,6 +69,7 @@ _FIELDS = [
     "iv",
     "poly_liquidity",
     "poly_vol_24h",
+    "iv_rv_ratio",
 ]
 
 
@@ -362,6 +364,11 @@ def run(db_path=DEFAULT_DB):
                         continue
                     K = m["bracket_lo"]
                     iv = pick_iv(snaps, exp, K, right="C")
+                    if iv is not None:
+                        from signals.vol_spread import get_iv_rv_ratio
+                        iv_rv_ratio_val = get_iv_rv_ratio(tk, iv)
+                    else:
+                        iv_rv_ratio_val = None
                     if iv is None or m["poly_price"] is None:
                         continue
                     if m["market_type"] == "bracket":
@@ -392,6 +399,7 @@ def run(db_path=DEFAULT_DB):
                             "iv": iv,
                             "poly_liquidity": m["poly_liquidity"],
                             "poly_vol_24h": m["poly_vol_24h"],
+                            "iv_rv_ratio": iv_rv_ratio_val,
                         }
                     )
         except Exception as e:
