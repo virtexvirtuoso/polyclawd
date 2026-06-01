@@ -157,6 +157,15 @@
   <div class="card"><div class="stat-value" id="kpi-date">—</div><div class="stat-label">Last Run</div></div>
 </div>
 
+<!-- IV/RV Volatility Spread Card -->
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">📊 Volatility Spread — IV vs RV</div>
+  <div class="subtitle" style="margin-bottom:12px">Implied Vol (Alpaca OPRA) vs Realized Vol (yfinance 30d). Ratio &gt;1.5 = expensive options (reduces BUY confidence).</div>
+  <div id="iv-rv-table">
+    <div class="empty-state">Loading volatility data…</div>
+  </div>
+</div>
+
 <!-- Chart + Top Divergences -->
 <div class="grid grid-2">
   <div class="card">
@@ -230,6 +239,12 @@ async function load() {
     renderRows(d.rows);
     if (d.shadow) renderShadowTrades(d.shadow);
     if (d.accuracy) renderAccuracy(d.accuracy);
+    
+    // Fetch IV/RV data
+    fetch('/polyclawd/api/options/iv-rv')
+      .then(r => r.json())
+      .then(ivData => renderIVRV(ivData))
+      .catch(() => {});
     
     // Update ticker tag with discovered count
     const tkTag = document.getElementById('ticker-tag');
@@ -435,6 +450,40 @@ function renderAccuracy(accuracy) {
   }
   
   container.innerHTML = html;
+}
+
+function renderIVRV(data) {
+  const el = document.getElementById('iv-rv-table');
+  if (!data || !Object.keys(data).length) {
+    el.innerHTML = '<div class="empty-state">Volatility data unavailable</div>';
+    return;
+  }
+  let html = '<div class="table-wrap"><table><thead><tr><th>Ticker</th><th>IV</th><th>RV (30d)</th><th>IV/RV</th><th>Assessment</th></tr></thead><tbody>';
+  for (const [tk, stats] of Object.entries(data)) {
+    const ratio = stats.iv_rv_ratio;
+    let assessment, ratioColor;
+    if (ratio === null || ratio === undefined) {
+      assessment = '—';
+      ratioColor = 'var(--dim)';
+    } else if (ratio > 1.5) {
+      assessment = '💎 Expensive';
+      ratioColor = 'var(--green)';
+    } else if (ratio < 0.8) {
+      assessment = '🟡 Cheap';
+      ratioColor = 'var(--red)';
+    } else {
+      assessment = '⚪ Fair';
+      ratioColor = 'var(--dim)';
+    }
+    html += `<tr>
+      <td style="font-weight:600">${tk}</td>
+      <td>${stats.iv != null ? (stats.iv * 100).toFixed(1) + '%' : '—'}</td>
+      <td>${stats.rv != null ? (stats.rv * 100).toFixed(1) + '%' : '—'}</td>
+      <td style="color:${ratioColor};font-weight:600">${ratio != null ? ratio.toFixed(2) : '—'}</td>
+      <td>${assessment}</td>
+    </tr>`;
+  }
+  el.innerHTML = html + '</tbody></table></div>';
 }
 
 function switchTab(name) {

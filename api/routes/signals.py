@@ -3386,8 +3386,19 @@ async def get_clarity_widget_data():
 
     return JSONResponse(
         content=out,
-        headers={"Cache-Control": "public, max-age=300, stale-while-revalidate=900"},
     )
+
+@router.get("/options/iv-rv")
+async def get_options_iv_rv():
+    """Get IV/RV ratios for all tracked options tickers."""
+    try:
+        from signals.vol_spread import get_iv_rv_status
+        return get_iv_rv_status()
+    except Exception as e:
+        logger.exception("Options IV/RV error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 
 @router.get("/options/status")
