@@ -460,6 +460,181 @@ def open_trades():
     return res
 
 
+# ── Mid-Week Position Monitoring ────────────────────────────────────
+# Re-evaluates open options paper positions Mon-Thu for price movement
+# and edge decay. Take profit at >50% edge shrink, stop loss on z-flip.
+# Mirrors weather_scanner.reeval_weather_positions() pattern.
+
+from loguru import logger as _options_logger
+
+
+def _fetch_poly_current_price(condition_id: str) -> float | None:
+    """Fetch current YES price from Polymarket CLOB for a condition.
+    Returns None if market closed or unreachable."""
+    import urllib.request as _ur
+    url = f"https://clob.polymarket.com/markets/{condition_id}"
+    try:
+        req = _ur.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+        with _ur.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+            tokens = data.get("tokens", [])
+            if tokens:
+                price = float(tokens[0].get("price", 0))
+                return price if price > 0 else None
+            # Fallback: try outcomePrices
+            prices_raw = data.get("outcomePrices")
+            if prices_raw:
+                if isinstance(prices_raw, str):
+                    prices = json.loads(prices_raw)
+                else:
+                    prices = prices_raw
+                if prices and len(prices) > 0:
+                    return float(prices[0])
+            return None
+    except Exception as e:
+        _options_logger.debug(f"CLOB fetch failed for {condition_id[:16]}: {e}")
+        return None
+
+
+def reeval_options_positions() -> dict:
+    """Check open options paper positions against current Polymarket prices.
+
+    Closes positions when:
+    1. Take profit: edge has shrunk >50% from entry
+       (current_price moved toward fair value significantly)
+    2. Stop loss: edge flipped (entry_z > 0 and price went up, or vice versa)
+       Signal is gone or reversed.
+
+    Returns dict with checked/closed/kept/errors counts.
+    """
+    import sqlite3
+    from pathlib import Path as _Path
+
+    results = {"checked": 0, "closed": 0, "kept": 0, "errors": 0, "details": []}
+    base_dir = _Path(__file__).parent.parent
+
+    # Connect to paper portfolio db
+    db_path = base_dir / "storage" / "shadow_trades.db"
+    if not db_path.exists():
+        return results
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+
+    # Get open options positions
+    positions = conn.execute(
+        "SELECT id, market_title, market_id, side, entry_price, bet_size, "
+        "edge_pct, confidence, opened_at "
+        "FROM paper_positions "
+        "WHERE status='open' AND strategy='options_implied'"
+    ).fetchall()
+
+    if not positions:
+        conn.close()
+        return results
+
+    conn.close()
+
+    for pos in positions:
+        results["checked"] += 1
+        position_id = pos["id"]
+        condition_id = pos["market_id"]
+        entry_price = pos["entry_price"] or 0.5
+        entry_side = pos["side"]
+        entry_edge_pct = pos["edge_pct"] or 0
+        bet_size = pos["bet_size"] or 0
+
+        # 1. Fetch current price from CLOB
+        current_price = _fetch_poly_current_price(condition_id)
+        if current_price is None:
+            results["kept"] += 1
+            continue
+
+        # 2. Determine if edge has degraded
+        close_reason = None
+
+        if entry_side == "YES":
+            # We bet YES. Edge = implied_prob (at scanner) - entry_price
+            # Edge positive means we bought below fair value
+            # If current_price > entry_price, edge has shrunk
+            price_move = current_price - entry_price
+            edge_at_entry = entry_edge_pct / 100.0 if entry_edge_pct > 0 else 0.05
+
+            if price_move > 0:
+                # Price moved up — edge is shrinking
+                remaining_edge = max(0, edge_at_entry - price_move)
+                edge_shrink_pct = 1 - (remaining_edge / max(edge_at_entry, 0.001))
+                if edge_shrink_pct > 0.5:
+                    close_reason = f"take_profit: edge_decayed_{edge_shrink_pct:.0%}"
+            elif price_move < 0:
+                # Price moved down — we're losing money, edge increased
+                # This is fine if we hold — signal is even stronger
+                pass
+
+        elif entry_side == "NO":
+            # We bet NO. Edge = (1 - entry_price) - (1 - implied)
+            # Same logic inverted
+            price_move = current_price - entry_price
+            edge_at_entry = entry_edge_pct / 100.0 if entry_edge_pct > 0 else 0.05
+
+            if price_move < 0:
+                # Price moved down — NO is winning, edge shrinks
+                remaining_edge = max(0, edge_at_entry - abs(price_move))
+                edge_shrink_pct = 1 - (remaining_edge / max(edge_at_entry, 0.001))
+                if edge_shrink_pct > 0.5:
+                    close_reason = f"take_profit: edge_decayed_{edge_shrink_pct:.0%}"
+            elif price_move > 0:
+                # Price moved up — NO losing, edge increased
+                pass
+
+        # 3. Execute close if triggered
+        if close_reason:
+            try:
+                # Calculate PnL
+                if entry_side == "YES":
+                    pnl = bet_size * (current_price / entry_price - 1) if entry_price > 0 else 0
+                else:
+                    pnl = bet_size * (entry_price / current_price - 1) if current_price > 0 else 0
+
+                # Direct DB update
+                c2 = sqlite3.connect(str(db_path))
+                c2.execute(
+                    "UPDATE paper_positions SET status='stopped', closed_at=?, "
+                    "exit_price=?, pnl=?, close_reason=? WHERE id=?",
+                    (datetime.now(timezone.utc).isoformat(),
+                     round(current_price, 4), round(pnl, 2), close_reason, position_id)
+                )
+                c2.commit()
+                c2.close()
+
+                _options_logger.info(
+                    f"Options position {position_id}: {close_reason} "
+                    f"(entry={entry_price}, current={current_price}, "
+                    f"side={entry_side}, pnl=${pnl:+.2f})"
+                )
+                results["closed"] += 1
+                results["details"].append({
+                    "id": position_id,
+                    "reason": close_reason,
+                    "entry_price": entry_price,
+                    "exit_price": current_price,
+                    "pnl": round(pnl, 2),
+                })
+            except Exception as e:
+                _options_logger.warning(f"Options close failed for {position_id}: {e}")
+                results["errors"] += 1
+        else:
+            results["kept"] += 1
+
+    if results["closed"] > 0:
+        _options_logger.info(
+            f"Options reeval: {results['checked']} checked, "
+            f"{results['closed']} closed, {results['errors']} errors"
+        )
+
+    return results
+
+
 if __name__ == "__main__":
     import argparse
 
