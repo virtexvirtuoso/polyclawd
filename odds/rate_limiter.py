@@ -8,8 +8,7 @@ Usage tracking stored in JSON file, resets monthly.
 """
 
 import json
-import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 from dataclasses import dataclass, asdict

@@ -15,7 +15,6 @@ Run via: systemd polyclawd-scheduler.service
 """
 
 import asyncio
-import json
 import logging
 import os
 import sqlite3
@@ -256,9 +255,8 @@ def task_tweet_pace_alerts():
     if not positions:
         return
 
-    import re
     from signals.tweet_count_scanner import (
-        fetch_post_history, _extract_bracket, TRACKED_ACCOUNTS as ACCOUNTS, scan_tweet_markets,
+        _extract_bracket, TRACKED_ACCOUNTS as ACCOUNTS, scan_tweet_markets,
     )
     from signals.discord_alerts import alert_tweet_pace
 

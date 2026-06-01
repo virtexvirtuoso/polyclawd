@@ -15,16 +15,14 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional, List, Dict
-from datetime import datetime, timezone
-import re
+from datetime import datetime
 import os
-import base64
 import time
 
 try:
     from .smart_matcher import create_signature, signatures_match, match_markets
 except ImportError:
-    from odds.smart_matcher import create_signature, signatures_match, match_markets
+    from odds.smart_matcher import match_markets
 
 # Kalshi API endpoints
 KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"

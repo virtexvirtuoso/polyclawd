@@ -11,7 +11,7 @@ import json
 import subprocess
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from dataclasses import dataclass, asdict
 
 logger = logging.getLogger(__name__)

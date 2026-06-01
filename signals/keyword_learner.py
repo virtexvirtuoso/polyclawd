@@ -12,9 +12,8 @@ No external API needed - learns from your own trading data.
 import json
 import re
 from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, List, Set, Tuple, Optional
-from collections import Counter
+from datetime import datetime
+from typing import Dict, List, Tuple, Optional
 
 # ============================================================================
 # Storage

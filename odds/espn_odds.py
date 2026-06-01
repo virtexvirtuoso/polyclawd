@@ -256,7 +256,7 @@ def find_polymarket_edges(poly_events: List[Dict], min_edge: float = 5.0) -> Lis
     try:
         from smart_matcher import match_markets
     except ImportError:
-        from odds.smart_matcher import match_markets
+        pass
     
     all_odds = fetch_all_odds()
     edges = []

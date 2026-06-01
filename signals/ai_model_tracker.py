@@ -18,12 +18,11 @@ Feeds into mispriced_category as a sub-signal for tech/AI markets.
 import json
 import logging
 import re
-import time
 import urllib.request
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger(__name__)
 

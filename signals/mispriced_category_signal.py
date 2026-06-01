@@ -18,8 +18,8 @@ v3 improvements:
 import json
 import time
 import urllib.request
-from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any, Optional
+from datetime import datetime, timezone
+from typing import List, Dict, Any
 import re
 from pathlib import Path
 from loguru import logger
@@ -1068,7 +1068,6 @@ def get_mispriced_category_signals() -> Dict[str, Any]:
 # ============================================================================
 
 if __name__ == "__main__":
-    import sys
 
     logging.basicConfig(level=logging.INFO)
 

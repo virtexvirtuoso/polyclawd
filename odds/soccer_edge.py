@@ -14,7 +14,7 @@ try:
     from .vegas_scraper import get_vegas_odds_with_fallback, VegasOdds
     from .client import devig_multiway
 except ImportError:
-    from vegas_scraper import get_vegas_odds_with_fallback, VegasOdds
+    from vegas_scraper import get_vegas_odds_with_fallback
     from client import devig_multiway
 
 @dataclass

@@ -16,8 +16,7 @@ Falls back gracefully when browser-use is unavailable.
 import json
 import logging
 import urllib.request
-from datetime import datetime, timezone
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 

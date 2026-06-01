@@ -4,7 +4,6 @@ Direct access to orderbook depth and price history
 """
 
 import json
-import urllib.request
 from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass

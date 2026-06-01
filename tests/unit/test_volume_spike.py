@@ -10,8 +10,6 @@ from volume_spike_detector import (
     get_volume_baseline,
     SPIKE_RATIO,
     MEGA_SPIKE_RATIO,
-    MIN_HISTORY_POINTS,
-    MIN_VOLUME,
 )
 
 

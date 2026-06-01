@@ -11,7 +11,7 @@ Based on: [[Polymarket 134 to 200K Story]] and [[HF_MODULE_PLAN]]
 
 import json
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 
@@ -443,7 +443,6 @@ def full_hf_scan(neg_vig_threshold: float = 0.99) -> Dict:
 # ============================================================================
 
 if __name__ == "__main__":
-    import pprint
     
     print("=" * 60)
     print("Polyclawd HF Scanner — Phase 1")

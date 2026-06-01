@@ -5,7 +5,6 @@ Analyzes: whale profitability, timing edges, price impact, late-stage drift."""
 import duckdb
 import glob
 import json
-from datetime import datetime
 
 BASE = '/Volumes/G-DRIVE/Trading/polyclawd-data/data/polymarket'
 OUT = '/tmp/becker_trade_results.json'

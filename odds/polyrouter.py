@@ -11,7 +11,6 @@ Docs: https://docs.polyrouter.io
 import os
 import httpx
 from typing import Optional
-from functools import lru_cache
 
 POLYROUTER_API_KEY = os.environ.get("POLYROUTER_API_KEY", "")
 BASE_URL = "https://api-v2.polyrouter.io"

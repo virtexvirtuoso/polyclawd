@@ -6,7 +6,7 @@ Free public API, politics focused
 import json
 import urllib.request
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 PREDICTIT_API = "https://www.predictit.org/api/marketdata/all/"
 

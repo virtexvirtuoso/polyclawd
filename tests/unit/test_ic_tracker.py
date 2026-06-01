@@ -1,5 +1,4 @@
 """Tests for IC (Information Coefficient) tracker."""
-import time
 import pytest
 from signals.ic_tracker import (
     init_ic_tables,

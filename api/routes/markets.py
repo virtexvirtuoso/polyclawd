@@ -679,7 +679,10 @@ async def get_soccer_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
         odds_path = _get_odds_modules_path()
         if odds_path not in sys.path:
             sys.path.insert(0, odds_path)
-        from soccer_edge import get_soccer_edge_summary
+        try:
+            from the_odds_api import get_soccer_edge_summary
+        except ImportError:
+            from soccer_edge import get_soccer_edge_summary
         return await get_soccer_edge_summary()
 
     return await handle_edge_request("soccer", _get_soccer())
@@ -695,7 +698,10 @@ async def _get_league_edges(league: str, min_edge: float = 0.01):
     odds_path = _get_odds_modules_path()
     if odds_path not in sys.path:
         sys.path.insert(0, odds_path)
-    from soccer_edge import find_soccer_edges
+    try:
+        from the_odds_api import find_soccer_edges
+    except ImportError:
+        from soccer_edge import find_soccer_edges
 
     all_edges = await find_soccer_edges(min_edge)
     # Filter to specific league
@@ -763,6 +769,35 @@ async def get_worldcup_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
     Compares Vegas odds with Polymarket for World Cup Winner market.
     """
     return await handle_edge_request("worldcup", _get_league_edges("world_cup", min_edge))
+
+
+# ----------------------------------------------------------------------------
+# MLB Baseball Edge
+# ----------------------------------------------------------------------------
+
+@router.get("/baseball/edge")
+async def get_baseball_edge(min_edge: float = Query(default=0.05, ge=0, le=1)):
+    """MLB moneyline edges: devigged The Odds API vs Polymarket game markets.
+
+    Data sources:
+      - The Odds API baseball_mlb h2h (requires ODDS_API_KEY env var)
+      - Polymarket Gamma API tag_slug=baseball game events
+
+    Edge = devigged bookmaker probability - Polymarket price (YES).
+    Only returns |edge| >= min_edge (default 5%).
+
+    Returns:
+      {source, timestamp, total_edges, edges: [...], top_opportunities: [...]}
+    """
+    async def _get_baseball():
+        import sys
+        odds_path = _get_odds_modules_path()
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from baseball_edge import get_baseball_edge_summary
+        return await get_baseball_edge_summary()
+
+    return await handle_edge_request("baseball", _get_baseball())
 
 
 # ----------------------------------------------------------------------------
@@ -1108,10 +1143,18 @@ async def hf_full_scan(
     
     Based on the $134→$200K Polymarket bot strategy.
     """
+    import asyncio as _aio
+
     async def _scan():
-        from odds.hf_scanner import full_hf_scan
-        return full_hf_scan(neg_vig_threshold=threshold)
-    
+        loop = _aio.get_event_loop()
+        try:
+            return await _aio.wait_for(
+                loop.run_in_executor(None, lambda: __import__('odds.hf_scanner', fromlist=['full_hf_scan']).full_hf_scan(neg_vig_threshold=threshold)),
+                timeout=30.0
+            )
+        except _aio.TimeoutError:
+            return {"error": "HF scan timed out after 30s", "markets": [], "neg_vig": []}
+
     return await handle_edge_request("hf-scanner", _scan())
 
 
@@ -1121,16 +1164,27 @@ async def hf_discover_markets():
     
     Searches for 5-min, 15-min BTC/ETH/SOL up/down markets on Polymarket.
     """
+    import asyncio as _aio2
+
     async def _discover():
-        from odds.hf_scanner import discover_hf_markets
-        from dataclasses import asdict
-        markets = discover_hf_markets()
-        return {
-            "markets": [asdict(m) for m in markets],
-            "count": len(markets),
-            "timestamp": datetime.now().isoformat(),
-        }
-    
+        loop = _aio2.get_event_loop()
+        try:
+            def _sync():
+                from odds.hf_scanner import discover_hf_markets
+                from dataclasses import asdict
+                markets = discover_hf_markets()
+                return {
+                    "markets": [asdict(m) for m in markets],
+                    "count": len(markets),
+                    "timestamp": datetime.now().isoformat(),
+                }
+            return await _aio2.wait_for(
+                loop.run_in_executor(None, _sync),
+                timeout=30.0
+            )
+        except _aio2.TimeoutError:
+            return {"markets": [], "count": 0, "error": "Discovery timed out after 30s"}
+
     return await handle_edge_request("hf-discovery", _discover())
 
 
@@ -1142,20 +1196,41 @@ async def hf_neg_vig_scan(
     
     Checks CLOB orderbooks where Yes_ask + No_ask < threshold.
     Buying both sides = guaranteed profit on resolution.
+    Timeout: 30s (Gamma API can be slow).
     """
+    import asyncio
+
     async def _negvig():
-        from odds.hf_scanner import discover_hf_markets, scan_neg_vig
-        from dataclasses import asdict
-        markets = discover_hf_markets()
-        opps = scan_neg_vig(markets, threshold=threshold)
-        return {
-            "opportunities": [asdict(o) for o in opps],
-            "count": len(opps),
-            "markets_scanned": len(markets),
-            "threshold": threshold,
-            "timestamp": datetime.now().isoformat(),
-        }
-    
+        loop = asyncio.get_event_loop()
+
+        def _sync_scan():
+            from odds.hf_scanner import discover_hf_markets, scan_neg_vig
+            from dataclasses import asdict
+            markets = discover_hf_markets()
+            opps = scan_neg_vig(markets, threshold=threshold)
+            return {
+                "opportunities": [asdict(o) for o in opps],
+                "count": len(opps),
+                "markets_scanned": len(markets),
+                "threshold": threshold,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, _sync_scan),
+                timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            return {
+                "opportunities": [],
+                "count": 0,
+                "markets_scanned": 0,
+                "threshold": threshold,
+                "timestamp": datetime.now().isoformat(),
+                "error": "Scan timed out after 30s (Gamma API slow)",
+            }
+
     return await handle_edge_request("hf-negvig", _negvig())
 
 

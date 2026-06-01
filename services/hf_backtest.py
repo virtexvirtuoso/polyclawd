@@ -9,17 +9,15 @@ Simulates HF strategy performance using collected data:
 Outputs: expected edge per cycle, Kelly sizing, drawdown profiles, win rate.
 """
 
-import json
 import logging
 import math
 import os
 import random
 import sqlite3
-from collections import Counter
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 logger = logging.getLogger("hf_backtest")
 
@@ -423,7 +421,6 @@ def full_backtest_report(
 
 
 if __name__ == "__main__":
-    import pprint
     logging.basicConfig(level=logging.INFO)
     
     print("=" * 60)

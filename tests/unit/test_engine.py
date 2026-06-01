@@ -1,8 +1,7 @@
 """Unit tests for engine router - engine control, alerts, LLM, Kelly, and phase endpoints."""
 import json
 from datetime import datetime, timedelta
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -15,19 +14,15 @@ from api.routes.engine import (
     increment_adaptive_boost,
     check_drawdown_halt,
     start_engine,
-    stop_engine,
     engine_evaluate_and_trade,
     load_price_alerts,
     save_price_alerts,
-    check_price_alerts,
     load_recent_performance,
     calculate_dynamic_kelly,
     llm_validate_signal,
-    _engine_running,
     ADAPTIVE_CONF_INCREMENT,
     ADAPTIVE_CONF_MAX,
     ADAPTIVE_CONF_DECAY_MINUTES,
-    DRAWDOWN_HALT_PCT,
 )
 
 

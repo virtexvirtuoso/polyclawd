@@ -32,7 +32,6 @@ try:
 except ImportError:
     HAS_MOMENTUM = False
 from loguru import logger
-import logging
 
 # ── META-LABELING (López de Prado inspired, Mar 13 2026) ────────────
 # Predicts P(profit | signal features) using trained logistic regression.
@@ -100,7 +99,7 @@ import math
 import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 
 
 BASE_DIR = Path(__file__).parent.parent
@@ -556,7 +555,7 @@ def evaluate_signal(signal: dict) -> dict:
     # Circuit breaker: stop all new bets if daily P&L is too negative
     try:
         conn_check = _get_db()
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timezone
         today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0).isoformat()
         daily_closed = conn_check.execute(
             "SELECT COALESCE(SUM(pnl), 0) as daily_pnl FROM paper_positions WHERE closed_at >= ? AND status IN ('won','lost','stopped')",
@@ -751,7 +750,7 @@ def evaluate_signal(signal: dict) -> dict:
 
     # ─── Resolution Horizon Gate ──────────────────────────────
     # Reject markets that resolve too far in the future (capital drag)
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timezone
     end_date_str = signal.get("end_date") or signal.get("resolves_at") or signal.get("resolution_date") or ""
     days_out = None
     if end_date_str:

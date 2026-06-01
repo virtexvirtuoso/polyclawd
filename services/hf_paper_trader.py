@@ -17,12 +17,10 @@ import logging
 import os
 import sqlite3
 import sys
-import time
 import urllib.request
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
-from dataclasses import dataclass, asdict
 
 logger = logging.getLogger("hf_paper_trader")
 

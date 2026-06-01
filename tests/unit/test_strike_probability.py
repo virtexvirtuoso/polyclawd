@@ -7,7 +7,6 @@ import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timezone, timedelta
-from unittest.mock import patch
 
 import pytest
 

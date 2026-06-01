@@ -7,10 +7,9 @@ positions for overlap with our signals (confirmation layer).
 Uses Polymarket data-api.polymarket.com endpoints.
 """
 
-import json
 import logging
 import time
-from collections import Counter, defaultdict
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 

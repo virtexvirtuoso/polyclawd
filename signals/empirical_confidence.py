@@ -9,7 +9,7 @@ Data-driven. Self-improving. Honest.
 import sqlite3
 import re
 import logging
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
