@@ -45,6 +45,9 @@
   .badge-sharp { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
   .badge-live { background: rgba(6, 182, 212, 0.15); color: var(--cyan); }
   .badge-stale { background: rgba(148, 163, 184, 0.15); color: var(--dim); }
+  .badge-ml { background: rgba(59, 130, 246, 0.15); color: var(--accent); }
+  .badge-spread { background: rgba(139, 92, 246, 0.15); color: var(--purple); }
+  .badge-total { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
   .chart-wrap { position: relative; height: 250px; }
   .chart-wrap-tall { position: relative; height: 300px; }
   .refresh-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }
@@ -132,6 +135,7 @@
 <div class="nav-links">
   <a href="/polyclawd/portfolio.html">← Portfolio</a>
   <a href="/polyclawd/weather.html">🌡️ Weather</a>
+  <a href="/polyclawd/options.html">📈 Options</a>
   <a href="/polyclawd/analysis.html">Analysis</a>
 </div>
 
@@ -442,9 +446,14 @@ function renderGames(data) {
     for (const e of game.edges) {
       const dir = e.direction === 'BUY' ? 'buy' : 'sell';
       const cls = e.direction === 'BUY' ? 'badge-buy' : 'badge-sell';
+      const mt = e.market_type || 'moneyline';
+      const mtBadge = mt === 'moneyline' ? 'badge-ml' : (mt === 'spread' ? 'badge-spread' : 'badge-total');
+      const mtLabel = mt === 'moneyline' ? 'ML' : (mt === 'spread' ? 'SP' : 'O/U');
+      const pointStr = e.point_value != null ? ' (' + (mt === 'spread' ? (e.point_value > 0 ? '+' : '') + e.point_value : 'O/U ' + Math.abs(e.point_value)) + ')' : '';
       html += `<div class="odds-line">`;
+      html += `<span class="badge ${mtBadge}">${mtLabel}</span>`;
       html += `<span class="badge ${cls}">${dir.toUpperCase()}</span>`;
-      html += `<span class="odds-value">${e.team}</span>`;
+      html += `<span class="odds-value">${e.team}${pointStr}</span>`;
       if (e.american_odds) html += `<span class="odds-book">${fmtOdds(e.american_odds)}</span>`;
       html += `<span style="color:var(--dim)">Poly ${e.polymarket_price}¢</span>`;
       if (e.edge_pct !== undefined) {
@@ -476,13 +485,18 @@ function renderEdgesTable(data) {
   if (!notable.length) {
     container.innerHTML = '<div class="empty-state">No edges ≥5% detected. Polymarket MLB is well-calibrated right now.</div>';
   } else {
-    let html = '<div class="table-wrap"><table><thead><tr><th>Game</th><th>Team</th><th>Book</th><th>Book Prob</th><th>Poly Price</th><th>Edge</th><th>Action</th></tr></thead><tbody>';
+    let html = '<div class="table-wrap"><table><thead><tr><th>Game</th><th>Team</th><th>Type</th><th>Book</th><th>Book Prob</th><th>Poly Price</th><th>Edge</th><th>Action</th></tr></thead><tbody>';
     for (const e of notable) {
       const dir = e.direction === 'BUY' ? 'badge-buy' : 'badge-sell';
       const sign = e.edge_pct > 0 ? '+' : '';
+      const mt = e.market_type || 'moneyline';
+      const mtBadge = mt === 'moneyline' ? 'badge-ml' : (mt === 'spread' ? 'badge-spread' : 'badge-total');
+      const mtLabel = mt === 'moneyline' ? 'ML' : (mt === 'spread' ? 'SP' : 'O/U');
+      const pt = e.point_value != null ? ' (' + Math.abs(e.point_value) + ')' : '';
       html += `<tr>
         <td>${e.game || '—'}</td>
-        <td><strong>${e.team || '—'}</strong></td>
+        <td><strong>${e.team || '—'}${pt}</strong></td>
+        <td><span class="badge ${mtBadge}">${mtLabel}</span></td>
         <td>${e.american_odds ? fmtOdds(e.american_odds) : '—'}</td>
         <td>${e.odds_api_prob || '—'}%</td>
         <td>${e.polymarket_price || '—'}¢</td>
@@ -497,11 +511,16 @@ function renderEdgesTable(data) {
   // Also render debug table (all edges)
   const debugContainer = document.getElementById('debug-edges');
   if (edges.length) {
-    let html = '<div class="table-wrap"><table><thead><tr><th>Game</th><th>Team</th><th>Book Odds</th><th>Book Prob</th><th>Poly Price</th><th>Edge %</th><th>Dir</th><th>Time</th></tr></thead><tbody>';
+    let html = '<div class="table-wrap"><table><thead><tr><th>Game</th><th>Team</th><th>Type</th><th>Book Odds</th><th>Book Prob</th><th>Poly Price</th><th>Edge %</th><th>Dir</th><th>Time</th></tr></thead><tbody>';
     for (const e of edges) {
+      const mt = e.market_type || 'moneyline';
+      const mtBadge = mt === 'moneyline' ? 'badge-ml' : (mt === 'spread' ? 'badge-spread' : 'badge-total');
+      const mtLabel = mt === 'moneyline' ? 'ML' : (mt === 'spread' ? 'SP' : 'O/U');
+      const pt = e.point_value != null ? ' (' + Math.abs(e.point_value) + ')' : '';
       html += `<tr>
         <td>${truncate(e.game, 35) || '—'}</td>
-        <td>${e.team || '—'}</td>
+        <td>${e.team || '—'}${pt}</td>
+        <td><span class="badge ${mtBadge}">${mtLabel}</span></td>
         <td>${e.american_odds ? fmtOdds(e.american_odds) : '—'}</td>
         <td>${e.odds_api_prob || '—'}%</td>
         <td>${e.polymarket_price || '—'}¢</td>

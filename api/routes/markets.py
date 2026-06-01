@@ -2172,10 +2172,11 @@ async def get_kalshi_entertainment():
 
 @router.get("/odds-api/credits")
 async def get_odds_api_credits():
-    """Get The Odds API credit budget status (20K/mo, usage tracking)."""
+    """Get The Odds API credit budget status (20K/mo, usage tracking).
+    Makes a free API call to /v4/sports to read the real headers."""
     try:
-        from odds.the_odds_api import get_credit_status
-        return get_credit_status()
+        from odds.the_odds_api import refresh_credit_balance
+        return refresh_credit_balance()
     except Exception as e:
         logger.exception("Odds API credit status error")
         raise HTTPException(status_code=500, detail=str(e))

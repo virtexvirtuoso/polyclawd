@@ -216,6 +216,7 @@ async function load() {
     renderDivergences(d.divergences);
     renderRows(d.rows);
     if (d.shadow) renderShadowTrades(d.shadow);
+    if (d.accuracy) renderAccuracy(d.accuracy);
   } catch (e) {
     console.error('Dashboard load failed:', e);
     document.getElementById('api-status').innerHTML =
@@ -350,6 +351,65 @@ function renderShadowTrades(shadow) {
       const sideBadge = t.side === 'YES' ? 'badge-yes' : 'badge-no';
       const market = (t.market || '—').length > 35 ? (t.market || '—').slice(0, 35) + '…' : (t.market || '—');
       html += `<tr><td>${market}</td><td><span class="badge ${sideBadge}">${t.side}</span></td><td>${t.entry_price || '—'}</td><td><span class="badge ${outcomeClass}">${outcomeBadge}</span></td><td style="color:${pnlColor}">${t.pnl > 0 ? '+' : ''}${t.pnl || '0.00'}</td></tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+  
+  container.innerHTML = html;
+}
+
+function renderAccuracy(accuracy) {
+  if (!accuracy || !accuracy.total) return;
+  const container = document.getElementById('shadow-status');
+  
+  // Build on top of existing shadow trade content
+  let html = container.innerHTML;
+  
+  // Collection progress
+  const coll = accuracy.collection || {resolved: 0, target: 30, pct: 0};
+  const pct = coll.pct || 0;
+  const barColor = pct >= 100 ? 'var(--green)' : (pct >= 50 ? 'var(--amber)' : 'var(--accent)');
+  html += '<div class="section-title" style="font-size:0.85rem;margin-top:12px">📊 Forecast Accuracy</div>';
+  html += '<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px">';
+  html += '<div><span style="color:var(--dim)">Resolved:</span> <strong>' + accuracy.total + '</strong></div>';
+  html += '<div><span style="color:var(--dim)">Accuracy:</span> <strong>' + (accuracy.accuracy || '—') + '%</strong></div>';
+  html += '</div>';
+  html += '<div style="font-size:0.75rem;margin-bottom:4px;color:var(--dim)">Collection: ' + coll.resolved + '/' + coll.target + '</div>';
+  html += '<div class="meter-track"><div class="meter-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>';
+  
+  // By ticker
+  const tickers = accuracy.by_ticker || {};
+  if (Object.keys(tickers).length) {
+    html += '<div class="section-title" style="font-size:0.85rem;margin-top:12px">🏷️ By Ticker</div>';
+    html += '<div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Resolved</th><th>Correct</th><th>Accuracy</th></tr></thead><tbody>';
+    for (const [tk, stats] of Object.entries(tickers)) {
+      const accColor = stats.accuracy > 60 ? 'var(--green)' : (stats.accuracy > 40 ? 'var(--amber)' : 'var(--red)');
+      html += '<tr><td style="font-weight:600">' + tk + '</td><td>' + stats.total + '</td><td>' + stats.correct + '</td><td style="color:' + accColor + '">' + stats.accuracy + '%</td></tr>';
+    }
+    html += '</tbody></table></div>';
+  }
+  
+  // By market type
+  const types = accuracy.by_market_type || {};
+  if (Object.keys(types).length) {
+    html += '<div class="section-title" style="font-size:0.85rem;margin-top:12px">📦 By Market Type</div>';
+    html += '<div class="table-wrap"><table><thead><tr><th>Type</th><th>Resolved</th><th>Correct</th><th>Accuracy</th></tr></thead><tbody>';
+    for (const [mt, stats] of Object.entries(types)) {
+      html += '<tr><td>' + mt + '</td><td>' + stats.total + '</td><td>' + stats.correct + '</td><td>' + stats.accuracy + '%</td></tr>';
+    }
+    html += '</tbody></table></div>';
+  }
+  
+  // Recent resolved
+  const recent = accuracy.recent || [];
+  if (recent.length) {
+    html += '<div class="section-title" style="font-size:0.85rem;margin-top:12px">🕐 Recent Resolutions</div>';
+    html += '<div class="table-wrap"><table><thead><tr><th>Market</th><th>Prob</th><th>Poly</th><th>Predicted</th><th>Actual</th><th>✅</th></tr></thead><tbody>';
+    for (const r of recent) {
+      const correctBadge = r.correct ? 'badge-won' : 'badge-lost';
+      const correctLabel = r.correct ? '✅' : '❌';
+      const title = (r.ticker || '') + ' ' + (r.market_type || '') + ' $' + (r.strike || '') + ' (' + (r.expiry || '') + ')';
+      html += '<tr><td>' + title + '</td><td>' + (r.implied_prob || '—') + '%</td><td>' + (r.poly_price || '—') + '¢</td><td>' + (r.predicted_side || '—') + '</td><td>' + (r.actual_outcome || '—') + '</td><td><span class="badge ' + correctBadge + '">' + correctLabel + '</span></td></tr>';
     }
     html += '</tbody></table></div>';
   }

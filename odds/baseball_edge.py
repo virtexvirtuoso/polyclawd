@@ -333,7 +333,7 @@ def _extract_moneyline_prices(
 
 
 def _extract_spread_prices(
-    event: Dict, home_team: str, away_team: str, target_point: float
+    event: Dict, target_team: str, target_point: float
 ) -> Optional[Tuple[float, float, str]]:
     """
     Extract (favored_price, underdog_price, market_id) for a specific spread point.
@@ -359,13 +359,8 @@ def _extract_spread_prices(
         if str(abs_point) not in spread_parts[1]:
             continue
         
-        # Check this spread market is for the right team
-        bet_team = None
-        if _team_in_title(home_team, spread_team_raw):
-            bet_team = home_team
-        elif _team_in_title(away_team, spread_team_raw):
-            bet_team = away_team
-        if bet_team is None:
+        # Only match if this spread market is for our target team
+        if not _team_in_title(target_team, spread_team_raw):
             continue
         
         prices_raw = market.get("outcomePrices", "[]")
@@ -648,8 +643,8 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
                     
                     # Get the named team's spread price from Polymarket
                     # We need the market for the favored team first
-                    prices_a = _extract_spread_prices(event, home_team, away_team, point_a)
-                    prices_b = _extract_spread_prices(event, home_team, away_team, point_b)
+                    prices_a = _extract_spread_prices(event, team_a, point_a)
+                    prices_b = _extract_spread_prices(event, team_b, point_b)
                     
                     for team, true_prob, american_odds, point, prices in [
                         (team_a, true_prob_a, odds_a, point_a, prices_a),

@@ -14,10 +14,6 @@ Vendor evaluation: see ENSEMBLE_AUDIT_2026-05-15_05_Odds-API-Replacement.md
 Health tracking: routed through _resilient_urlopen("the_odds_api", url) so
 source_health.record_success/failure get called automatically.
 
-# Odds API credit budget tracking (20K credits/month)
-_CREDIT_BUDGET = {"remaining": None, "used": None, "last_check": 0, "alerted_low": False}
-CREDIT_LOW_WATERMARK = 5000  # Alert when remaining credits drop below this
-
 To activate:
     1. Sign up at https://the-odds-api.com/, copy key
     2. ssh vps 'sudo systemctl set-environment ODDS_API_KEY=<key>'
@@ -108,6 +104,41 @@ def _track_credits_from_response(resp) -> None:
         pass
 
 
+
+
+
+
+def refresh_credit_balance() -> dict:
+    """Call Odds API /v4/sports (free endpoint) to read real credit headers."""
+    global _CREDIT_BUDGET
+    api_key = _get_api_key()
+    if not api_key:
+        logger.warning("refresh_credit_balance: ODDS_API_KEY not set")
+        return get_credit_status()
+    import urllib.request
+    url = f"{ODDS_API_BASE}/sports?apiKey={api_key}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            remaining = resp.headers.get("x-requests-remaining")
+            used = resp.headers.get("x-requests-used")
+            if remaining is not None:
+                _CREDIT_BUDGET["remaining"] = int(remaining)
+            if used is not None:
+                _CREDIT_BUDGET["used"] = int(used)
+            _CREDIT_BUDGET["last_check"] = time.time()
+            r_int = int(remaining) if remaining is not None else None
+            if r_int is not None and r_int < CREDIT_LOW_WATERMARK:
+                if not _CREDIT_BUDGET["alerted_low"]:
+                    logger.warning(f"Credits low: {r_int} remaining")
+                    _CREDIT_BUDGET["alerted_low"] = True
+            if r_int is not None and r_int > CREDIT_LOW_WATERMARK:
+                _CREDIT_BUDGET["alerted_low"] = False
+            logger.info(f"Credits: {used}/{r_int or '?'} used")
+            return get_credit_status()
+    except Exception as e:
+        logger.warning(f"refresh_credit_balance failed: {e}")
+        return get_credit_status()
 
 
 # Simple per-day call counter (estimate, since resilient_fetch returns parsed data not headers)
