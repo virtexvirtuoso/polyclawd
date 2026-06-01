@@ -772,6 +772,35 @@ async def get_worldcup_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
 
 
 # ----------------------------------------------------------------------------
+# MLB Baseball Edge
+# ----------------------------------------------------------------------------
+
+@router.get("/baseball/edge")
+async def get_baseball_edge(min_edge: float = Query(default=0.05, ge=0, le=1)):
+    """MLB moneyline edges: devigged The Odds API vs Polymarket game markets.
+
+    Data sources:
+      - The Odds API baseball_mlb h2h (requires ODDS_API_KEY env var)
+      - Polymarket Gamma API tag_slug=baseball game events
+
+    Edge = devigged bookmaker probability - Polymarket price (YES).
+    Only returns |edge| >= min_edge (default 5%).
+
+    Returns:
+      {source, timestamp, total_edges, edges: [...], top_opportunities: [...]}
+    """
+    async def _get_baseball():
+        import sys
+        odds_path = _get_odds_modules_path()
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from baseball_edge import get_baseball_edge_summary
+        return await get_baseball_edge_summary()
+
+    return await handle_edge_request("baseball", _get_baseball())
+
+
+# ----------------------------------------------------------------------------
 # NFL Futures Endpoints
 # ----------------------------------------------------------------------------
 

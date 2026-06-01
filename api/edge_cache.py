@@ -180,6 +180,45 @@ def fetch_kalshi_overlaps() -> List[Dict]:
         logger.exception(f"Unexpected error fetching Kalshi overlaps: {e}")
     return signals
 
+def fetch_baseball_edges() -> List[Dict]:
+    """Fetch MLB baseball edge signals from /api/baseball/edge."""
+    signals = []
+    try:
+        resp = urllib.request.urlopen(
+            urllib.request.Request(
+                "http://localhost:8420/api/baseball/edge?min_edge=0.05",
+                headers={"User-Agent": "EdgeCache/1.0"},
+            ),
+            timeout=25,
+        )
+        data = json.loads(resp.read().decode())
+        for edge in data.get("edges", [])[:5]:
+            edge_pct = edge.get("edge_pct", 0)
+            if abs(edge_pct) >= 5:
+                side = "YES" if edge_pct > 0 else "NO"
+                signals.append({
+                    "source": "baseball_edge",
+                    "platform": "polymarket",
+                    "market": f"{edge.get('team', '')} - {edge.get('game', '')}",
+                    "market_id": edge.get("market_id"),
+                    "side": side,
+                    "confidence": min(65, abs(edge_pct) * 2.5),
+                    "value": abs(edge_pct),
+                    "reasoning": (
+                        f"Odds API {edge.get('odds_api_prob', 0):.0f}% "
+                        f"({edge.get('american_odds', '')}) "
+                        f"vs Poly {edge.get('polymarket_price', 0):.0f}¢ "
+                        f"({edge_pct:+.1f}% edge)"
+                    ),
+                    "price": edge.get("polymarket_price", 50) / 100,
+                })
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
+        logger.debug(f"Baseball edge fetch failed (expected if service down): {e}")
+    except Exception as e:
+        logger.exception(f"Unexpected error fetching baseball edges: {e}")
+    return signals
+
+
 def fetch_manifold_edges() -> List[Dict]:
     """Fetch Manifold edge signals"""
     signals = []
@@ -248,6 +287,7 @@ def refresh_edge_cache() -> List[Dict]:
     all_signals.extend(fetch_vegas_edges())
     all_signals.extend(fetch_betfair_edges())
     all_signals.extend(fetch_soccer_edges())
+    all_signals.extend(fetch_baseball_edges())
     all_signals.extend(fetch_manifold_edges())
     all_signals.extend(fetch_predictit_edges())
     all_signals.extend(fetch_kalshi_overlaps())

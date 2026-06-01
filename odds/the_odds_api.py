@@ -67,6 +67,11 @@ SOCCER_SPORT_KEYS: Dict[str, str] = {
     "worldcup": "soccer_fifa_world_cup",
 }
 
+# The Odds API sport key for MLB regular season game odds
+BASEBALL_SPORT_KEYS: Dict[str, str] = {
+    "mlb": "baseball_mlb",
+}
+
 
 # ---------------------------------------------------------------------------
 # Lightweight VegasOdds-shaped object (avoid importing vegas_scraper)
@@ -303,6 +308,31 @@ async def get_soccer_edge_summary() -> Dict:
 # ---------------------------------------------------------------------------
 # Health probe (optional — can be wired into polyclawd-scheduler)
 # ---------------------------------------------------------------------------
+
+async def get_baseball_games_with_odds() -> List[Dict]:
+    """
+    Fetch today's MLB game odds from The Odds API.
+    Returns the raw Odds API event list (one dict per game):
+      [{"id": ..., "home_team": "...", "away_team": "...",
+        "commence_time": "2026-06-01T18:10:00Z",
+        "bookmakers": [{"key": "draftkings", "markets": [{"key": "h2h",
+          "outcomes": [{"name": "Cubs", "price": -130}, ...]}]}]}, ...]
+
+    Returns [] if ODDS_API_KEY is not set or no games today.
+    """
+    api_key = _get_api_key()
+    if not api_key:
+        logger.warning("the_odds_api: ODDS_API_KEY not set — returning empty baseball data")
+        return []
+
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor() as pool:
+        raw = await loop.run_in_executor(
+            pool, _fetch_league_sync, api_key, BASEBALL_SPORT_KEYS["mlb"]
+        )
+
+    return raw if isinstance(raw, list) else []
+
 
 def health_probe(timeout: int = 5) -> Tuple[bool, str]:
     """
