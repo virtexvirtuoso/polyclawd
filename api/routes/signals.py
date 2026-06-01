@@ -3423,6 +3423,74 @@ async def options_dashboard():
                 t = bt.setdefault(r["ticker"], [])
                 if r["spread_pp"] is not None: t.append(r["spread_pp"])
             by_ticker = {k:{"n":len(v),"mean_spread_pp":round(statistics.mean(v),2) if v else 0} for k,v in bt.items()}
-            return {"totals": totals, "by_ticker": by_ticker, "divergences": rows[:20], "rows": rows}
+
+            # Shadow trade stats (open + resolved options trades)
+            shadow_db = str(pathlib.Path(__file__).parent.parent.parent / "storage" / "shadow_trades.db")
+            shadow = {"open_trades": [], "open_count": 0, "resolved": {"total": 0, "wins": 0, "losses": 0, "win_rate": 0, "total_pnl": 0}, "collection": {"resolved": 0, "target": 30, "pct": 0}}
+            try:
+                scon = sqlite3.connect(shadow_db, timeout=5)
+                scon.row_factory = sqlite3.Row
+
+                # Open trades
+                open_rows = scon.execute("""
+                    SELECT id, market, side, entry_price, confidence, days_to_close, timestamp, reasoning
+                    FROM shadow_trades
+                    WHERE resolved = 0 AND strategy = 'options_implied'
+                    ORDER BY timestamp DESC LIMIT 25
+                """).fetchall()
+                shadow["open_trades"] = [{
+                    "id": r["id"],
+                    "market": r["market"],
+                    "side": r["side"],
+                    "entry_price": round(r["entry_price"], 3) if r["entry_price"] else None,
+                    "confidence": round(r["confidence"], 1) if r["confidence"] else None,
+                    "timestamp": r["timestamp"],
+                } for r in open_rows]
+                shadow["open_count"] = len(shadow["open_trades"])
+
+                # Resolved trades
+                res = scon.execute("""
+                    SELECT COUNT(*) as total,
+                           SUM(CASE WHEN outcome = side THEN 1 ELSE 0 END) as wins,
+                           SUM(CASE WHEN outcome != side THEN 1 ELSE 0 END) as losses,
+                           SUM(COALESCE(pnl, 0)) as total_pnl,
+                           AVG(confidence) as avg_confidence
+                    FROM shadow_trades
+                    WHERE resolved = 1 AND strategy = 'options_implied'
+                      AND outcome IN ('YES','NO') AND side IN ('YES','NO')
+                """).fetchone()
+                if res and res["total"]:
+                    total = res["total"]
+                    wins = res["wins"] or 0
+                    losses = res["losses"] or 0
+                    shadow["resolved"] = {
+                        "total": total, "wins": wins, "losses": losses,
+                        "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
+                        "total_pnl": round(res["total_pnl"] or 0, 4),
+                        "avg_confidence": round(res["avg_confidence"] or 0, 1),
+                    }
+                    shadow["collection"] = {"resolved": total, "target": 30, "pct": min(100, round(total / 30 * 100, 1))}
+
+                # Recent resolved
+                recent = scon.execute("""
+                    SELECT id, market, side, entry_price, confidence, outcome, pnl, resolved_at
+                    FROM shadow_trades
+                    WHERE resolved = 1 AND strategy = 'options_implied'
+                      AND outcome IN ('YES','NO')
+                    ORDER BY resolved_at DESC LIMIT 10
+                """).fetchall()
+                shadow["recent_trades"] = [{
+                    "id": r["id"], "market": r["market"], "side": r["side"],
+                    "entry_price": round(r["entry_price"], 3) if r["entry_price"] else None,
+                    "confidence": round(r["confidence"], 1) if r["confidence"] else None,
+                    "outcome": r["outcome"],
+                    "pnl": round(r["pnl"], 4) if r["pnl"] else None,
+                    "resolved_at": r["resolved_at"],
+                } for r in recent]
+                scon.close()
+            except Exception:
+                pass
+
+            return {"totals": totals, "by_ticker": by_ticker, "divergences": rows[:20], "rows": rows, "shadow": shadow}
         finally: con.close()
     return await asyncio.get_event_loop().run_in_executor(None, _build)

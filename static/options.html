@@ -67,6 +67,14 @@
   .nav-links a:hover { text-decoration: underline; }
   .last-updated { font-size: 0.7rem; color: var(--dim); margin-top: 8px; }
   .banner { background: rgba(139,92,246,0.1); border: 1px solid rgba(139,92,246,0.3); color: var(--purple); border-radius: 10px; padding: 10px 14px; font-size: 0.8rem; margin-bottom: 16px; }
+  .tab-bar { display: flex; gap: 4px; margin-bottom: 16px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; } .tab-bar::-webkit-scrollbar { display: none; }
+  .tab { padding: 6px 14px; border-radius: 8px; font-size: 0.8rem; cursor: pointer; background: transparent; color: var(--dim); border: 1px solid var(--border); transition: all 0.2s; white-space: nowrap; }
+  .tab.active { background: var(--accent); color: white; border-color: var(--accent); }
+  .tab:hover:not(.active) { background: rgba(59,130,246,0.1); color: var(--text); }
+  .section { display: none; }
+  .section.active { display: block; }
+  .meter-track { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+  .meter-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
   @media (max-width: 768px) {
     .grid-2, .grid-3 { grid-template-columns: 1fr; }
     .grid-4 { grid-template-columns: repeat(2, 1fr); }
@@ -113,11 +121,21 @@
 
 <div class="nav-links">
   <a href="/polyclawd/portfolio.html">← Portfolio</a>
-  <a href="/polyclawd/weather.html">Weather</a>
+  <a href="/polyclawd/weather.html">🌡️ Weather</a>
+  <a href="/polyclawd/baseball.html">⚾ Baseball</a>
   <a href="/polyclawd/analysis.html">Analysis</a>
 </div>
 
 <div class="banner">⚠️ Display-only research signal — spread is risk-premium-detrended; raw level is not edge.</div>
+
+<!-- Tab Navigation -->
+<div class="tab-bar">
+  <div class="tab active" onclick="switchTab('divergences')">📊 Divergences</div>
+  <div class="tab" onclick="switchTab('trading')">💰 Trading</div>
+</div>
+
+<!-- ===================== DIVERGENCES TAB ===================== -->
+<div class="section active" id="tab-divergences">
 
 <!-- KPI Cards -->
 <div class="grid grid-4" id="kpi-stats">
@@ -143,6 +161,23 @@
 <div class="card" style="margin-bottom:16px">
   <div class="section-title">🗂️ All Matched Rows <span id="rows-count" style="font-size:0.75rem;color:var(--dim)"></span></div>
   <div id="rows-table" class="table-wrap"><div class="empty-state">Loading…</div></div>
+</div>
+
+</div>
+
+<!-- ===================== TRADING TAB ===================== -->
+<div class="section" id="tab-trading">
+
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">💾 Options-Implied Shadow Trades</div>
+  <div class="subtitle" style="margin-bottom:12px">Paper trades logged via paper_portfolio with strategy=options_implied, archetype=options.</div>
+  <div id="shadow-status">
+    <div class="empty-state" style="padding:20px">
+      No options shadow trades yet — data appears when the options scanner runs and feeds paper_portfolio.
+    </div>
+  </div>
+</div>
+
 </div>
 
 <script>
@@ -180,6 +215,7 @@ async function load() {
     renderTickerChart(d.by_ticker);
     renderDivergences(d.divergences);
     renderRows(d.rows);
+    if (d.shadow) renderShadowTrades(d.shadow);
   } catch (e) {
     console.error('Dashboard load failed:', e);
     document.getElementById('api-status').innerHTML =
@@ -276,6 +312,57 @@ function renderRows(rows) {
     </tr>`;
   }
   el.innerHTML = html + '</table>';
+}
+
+function renderShadowTrades(shadow) {
+  if (!shadow) return;
+  const container = document.getElementById('shadow-status');
+  const openCount = shadow.open_count || 0;
+  const resolved = shadow.resolved || {};
+  const collection = shadow.collection || {resolved: 0, target: 30, pct: 0};
+  const recent = shadow.recent_trades || [];
+  
+  let html = `<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px">`;
+  html += `<div><span style="color:var(--dim)">Open:</span> <strong>${openCount}</strong></div>`;
+  html += `<div><span style="color:var(--dim)">Resolved:</span> <strong>${resolved.total || 0}</strong></div>`;
+  html += `<div><span style="color:var(--dim)">Win Rate:</span> <strong style="color:${resolved.win_rate > 50 ? 'var(--green)' : (resolved.win_rate > 0 && resolved.win_rate < 50 ? 'var(--red)' : 'var(--dim)')}">${resolved.win_rate || '—'}%</strong></div>`;
+  html += `<div><span style="color:var(--dim)">P&amp;L:</span> <strong style="color:${resolved.total_pnl > 0 ? 'var(--green)' : (resolved.total_pnl < 0 ? 'var(--red)' : 'var(--dim)')}">$${resolved.total_pnl || '0.00'}</strong></div>`;
+  html += `<div><span style="color:var(--dim)">Avg Conf:</span> <strong>${resolved.avg_confidence || '—'}%</strong></div>`;
+  html += `</div>`;
+  
+  const pct = collection.pct || 0;
+  const barColor = pct >= 100 ? 'var(--green)' : (pct >= 50 ? 'var(--amber)' : 'var(--accent)');
+  html += `<div style="margin-bottom:12px">`;
+  html += `<div style="display:flex;justify-content:space-between;font-size:0.75rem;margin-bottom:4px">
+    <span style="color:var(--dim)">Collection: ${collection.resolved || 0} / ${collection.target} resolved</span>
+    <span style="color:${barColor}">${pct}%</span>
+  </div>`;
+  html += `<div class="meter-track"><div class="meter-fill" style="width:${pct}%;background:${barColor}"></div></div>`;
+  html += `</div>`;
+  
+  if (recent.length) {
+    html += '<div class="section-title" style="font-size:0.85rem;margin-top:12px">🕐 Recent Resolved</div>';
+    html += '<div class="table-wrap"><table><thead><tr><th>Market</th><th>Side</th><th>Price</th><th>Outcome</th><th>P&amp;L</th></tr></thead><tbody>';
+    for (const t of recent) {
+      const outcomeClass = t.side === t.outcome ? 'badge-won' : 'badge-lost';
+      const outcomeBadge = t.side === t.outcome ? 'WON' : 'LOST';
+      const pnlColor = t.pnl > 0 ? 'var(--green)' : (t.pnl < 0 ? 'var(--red)' : 'var(--dim)');
+      const sideBadge = t.side === 'YES' ? 'badge-yes' : 'badge-no';
+      const market = (t.market || '—').length > 35 ? (t.market || '—').slice(0, 35) + '…' : (t.market || '—');
+      html += `<tr><td>${market}</td><td><span class="badge ${sideBadge}">${t.side}</span></td><td>${t.entry_price || '—'}</td><td><span class="badge ${outcomeClass}">${outcomeBadge}</span></td><td style="color:${pnlColor}">${t.pnl > 0 ? '+' : ''}${t.pnl || '0.00'}</td></tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+  
+  container.innerHTML = html;
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  const tabEls = document.querySelectorAll(`[onclick*="'${name}'"]`);
+  tabEls.forEach(t => t.classList.add('active'));
+  document.getElementById('tab-' + name).classList.add('active');
 }
 
 async function loadStatus() {
