@@ -9,6 +9,7 @@ import math, sqlite3, pathlib, json, re, os, statistics
 from datetime import date, datetime, timezone
 
 import requests
+from loguru import logger
 
 RISK_FREE = 0.045  # short T-bill proxy
 
@@ -89,6 +90,88 @@ def upsert_rows(db_path, rows):
 GAMMA = "https://gamma-api.polymarket.com"
 UA = {"User-Agent": "Mozilla/5.0 polyclawd-options"}
 NAMES = ["NVDA", "META", "MSFT", "AAPL", "AMZN"]
+
+# ── Auto-Discovery Cache ────────────────────────────────────────────
+# Discovered tickers cache (refreshed once per day, not every scan)
+_DISCOVERED_TICKERS = {"date": "", "tickers": []}
+_HP = {"APCA-API-KEY-ID": "", "APCA-API-SECRET-KEY": ""}  # populated lazily
+
+
+def discover_active_tickers(force_refresh: bool = False) -> List[str]:
+    """Auto-discover stock tickers that have both active Polymarket close
+    markets AND Alpaca options chains.
+
+    Queries Polymarket public-search once per day for events matching
+    "close above", extracts unique tickers, then tests each against
+    Alpaca's options API. Caches results for the day.
+
+    Returns list of ticker strings, e.g. ["NVDA", "TSLA", ...].
+    """
+    global _DISCOVERED_TICKERS
+    today = date.today().isoformat()
+
+    # Use cache if already fetched today and not forced
+    if _DISCOVERED_TICKERS["date"] == today and not force_refresh:
+        return _DISCOVERED_TICKERS["tickers"]
+
+    # 1. Search Polymarket for close-above events
+    found = set()
+    try:
+        # Search for common stock ticker patterns
+        search_url = f"{GAMMA}/public-search"
+        params = {"q": "close above", "limit_per_type": 50, "events_status": "active"}
+        r = requests.get(search_url, params=params, headers=UA, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        events = data.get("events", []) if isinstance(data, dict) else data
+
+        for ev in events:
+            title = ev.get("title", "")
+            slug = ev.get("slug", "")
+            # Extract ticker from "(TICKER)" pattern
+            m = re.search(r'\(([A-Z]{2,5})\)', title)
+            if m:
+                tk = m.group(1)
+                # Skip non-stock tickers (commodities, indices with different option chains)
+                if tk in ("WTI", "BTC", "ETH", "SOL"):
+                    continue
+                # Check it's actually a close market (not futures, not exotic)
+                if "close" in slug.lower() or "close" in title.lower():
+                    found.add(tk)
+    except Exception as e:
+        logger.warning(f"Ticker discovery failed: {e}")
+        # Fall back to hardcoded NAMES
+        _DISCOVERED_TICKERS = {"date": today, "tickers": list(NAMES)}
+        return list(NAMES)
+
+    if not found:
+        _DISCOVERED_TICKERS = {"date": today, "tickers": list(NAMES)}
+        return list(NAMES)
+
+    # 2. Validate against Alpaca options chain (does this ticker have options?)
+    validated = []
+    hp = _alpaca_headers()
+    for tk in sorted(found):
+        try:
+            url = f"https://data.alpaca.markets/v1beta1/options/snapshots/{tk}"
+            params = {"expiration_date": "2026-06-12", "limit": 1}
+            r2 = requests.get(url, params=params, headers=hp, timeout=8)
+            if r2.status_code == 200:
+                d2 = r2.json()
+                snaps = d2.get("snapshots", {})
+                if isinstance(snaps, dict) and len(snaps) > 0:
+                    validated.append(tk)
+        except Exception:
+            continue
+
+    if not validated:
+        validated = list(NAMES)
+
+    logger.info(f"Auto-discovered {len(validated)} tickers: {validated}")
+    _DISCOVERED_TICKERS = {"date": today, "tickers": validated}
+    return validated
+
+
 _RANGE_RE = re.compile(r"\$?(\d[\d,]*)(?:\s*(?:and|-|to)\s*\$?(\d[\d,]*))?", re.I)
 
 
@@ -259,7 +342,12 @@ def run(db_path=DEFAULT_DB):
     today = date.today().isoformat()
     now = datetime.now(timezone.utc)
     rows = []
-    for tk in NAMES:
+
+    # Auto-discover tickers with active Polymarket + Alpaca coverage
+    active_tickers = discover_active_tickers()
+    logger.info(f"Options scan: {len(active_tickers)} active tickers: {active_tickers}")
+
+    for tk in active_tickers:
         try:
             S = underlying_price(tk)
             for ev in fetch_poly_close_events(tk):

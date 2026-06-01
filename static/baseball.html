@@ -96,21 +96,39 @@
   .movement-flat { color: var(--dim); font-size: 0.75rem; }
   @media (max-width: 768px) {
     .grid-2, .grid-3 { grid-template-columns: 1fr; }
-    .grid-4 { grid-template-columns: repeat(2, 1fr); }
+    .grid-4 { grid-template-columns: repeat(2, 1fr); gap: 10px; }
     .chart-wrap-tall { height: 250px; }
     .chart-wrap { height: 200px; }
     h1 { font-size: 1.2rem; }
-    .subtitle { font-size: 0.75rem; }
+    .subtitle { font-size: 0.75rem; margin-bottom: 12px; }
     .header-row { gap: 4px; }
     .stat-value { font-size: 1.4rem; }
     .tab-bar { overflow-x: auto; }
     .tab { font-size: 0.75rem; padding: 6px 10px; }
+    .refresh-bar { flex-direction: column; gap: 6px; align-items: flex-start; }
+    .card { padding: 12px; }
+    table { font-size: 0.72rem; }
+    td { padding: 5px 4px; }
+    .game-card { padding: 10px; }
+    .game-card-odds { gap: 8px; }
+    .odds-line { flex-wrap: wrap; gap: 4px; }
+    .tag { font-size: 0.6rem; padding: 1px 5px; }
   }
   @media (max-width: 480px) {
     body { padding: 10px; }
     .grid-4 { grid-template-columns: 1fr 1fr; gap: 8px; }
     .stat-value { font-size: 1.2rem; }
-    .game-card-odds { gap: 10px; }
+    .game-card-odds { gap: 6px; flex-direction: column; }
+    .odds-line { font-size: 0.75rem; }
+    .game-card-teams { font-size: 0.82rem; }
+    .odds-value { font-size: 0.78rem; }
+    .nav-links { font-size: 0.72rem; gap: 6px; }
+    .badge { font-size: 0.6rem; padding: 1px 5px; }
+    .section-title { font-size: 0.82rem; }
+    .tag { font-size: 0.55rem; padding: 1px 4px; }
+    table { font-size: 0.65rem; }
+    th { font-size: 0.55rem; padding: 4px 3px; }
+    td { padding: 4px 3px; }
   }
 </style>
 </head>

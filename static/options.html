@@ -77,27 +77,39 @@
   .meter-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
   @media (max-width: 768px) {
     .grid-2, .grid-3 { grid-template-columns: 1fr; }
-    .grid-4 { grid-template-columns: repeat(2, 1fr); }
+    .grid-4 { grid-template-columns: repeat(2, 1fr); gap: 10px; }
     .chart-wrap-tall { height: 250px; }
     .chart-wrap { height: 200px; }
     h1 { font-size: 1.2rem; }
-    .subtitle { font-size: 0.75rem; }
+    .subtitle { font-size: 0.75rem; margin-bottom: 12px; }
     .header-row { gap: 4px; }
     .tag { font-size: 0.6rem; padding: 2px 6px; }
     .stat-value { font-size: 1.4rem; }
-    .refresh-bar { flex-direction: column; gap: 8px; align-items: flex-start; }
+    .refresh-bar { flex-direction: column; gap: 6px; align-items: flex-start; }
     .section-title { font-size: 0.85rem; }
-    table { font-size: 0.75rem; }
+    table { font-size: 0.72rem; }
     th { font-size: 0.6rem; }
     td { padding: 5px 4px; }
     .card { padding: 12px; }
+    .nav-links { gap: 8px; }
+    .nav-links a { font-size: 0.72rem; }
+    .banner { font-size: 0.72rem; }
+    .tab { font-size: 0.72rem; padding: 5px 8px; }
   }
   @media (max-width: 480px) {
     body { padding: 10px; }
     .grid-4 { grid-template-columns: 1fr 1fr; gap: 8px; }
     .stat-value { font-size: 1.2rem; }
-    table { font-size: 0.7rem; }
+    table { font-size: 0.65rem; }
+    td { padding: 4px 3px; }
+    th { font-size: 0.55rem; padding: 4px 3px; }
     .badge { font-size: 0.6rem; padding: 1px 5px; }
+    .tag { font-size: 0.5rem; padding: 1px 4px; }
+    .nav-links { gap: 6px; flex-wrap: wrap; }
+    .nav-links a { font-size: 0.68rem; }
+    .section-title { font-size: 0.78rem; }
+    .banner { font-size: 0.68rem; padding: 8px 10px; }
+    h1 { font-size: 1rem; }
   }
 </style>
 </head>
