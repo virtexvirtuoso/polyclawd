@@ -108,6 +108,20 @@ def _track_credits_from_response(resp) -> None:
         pass
 
 
+
+
+# Simple per-day call counter (estimate, since resilient_fetch returns parsed data not headers)
+_CALL_COUNTER = {"date": "", "count": 0}
+
+def _count_call():
+    """Increment call counter, reset at UTC day boundary."""
+    import datetime
+    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    if _CALL_COUNTER["date"] != today:
+        _CALL_COUNTER["date"] = today
+        _CALL_COUNTER["count"] = 0
+    _CALL_COUNTER["count"] += 1
+
 def get_credit_status() -> dict:
     """Return current Odds API credit usage for dashboards."""
     global _CREDIT_BUDGET
@@ -116,6 +130,7 @@ def get_credit_status() -> dict:
         "used": _CREDIT_BUDGET.get("used"),
         "budget": 20000,
         "last_check": _CREDIT_BUDGET.get("last_check"),
+        "estimated_today": _CALL_COUNTER.get("count", 0),  # approx calls today
         "alerted": _CREDIT_BUDGET.get("alerted_low", False),
     }
 
@@ -170,6 +185,7 @@ def _fetch_league_sync(api_key: str, sport_key: str, timeout: int = 10) -> List[
     if HAS_RESILIENT and _resilient_urlopen is not None:
         # Routes through retries + circuit breaker + source_health tracking
         data = _resilient_urlopen(SOURCE_NAME, url, timeout=timeout)
+        _count_call()
         return data if isinstance(data, list) else []
 
     # Fallback path (resilient_fetch unavailable — should not normally happen)

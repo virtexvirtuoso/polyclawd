@@ -388,8 +388,8 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
         f"{len(game_events)} Polymarket game events"
     )
 
-    game_id_field = game.get("id", "")
     for game in odds_games:
+        game_id_field = game.get("id", "")
         home_team = game.get("home_team", "")
         away_team = game.get("away_team", "")
         commence_time = game.get("commence_time", "")

@@ -442,12 +442,12 @@
 <div class="noise"></div>
 <div class="container">
 
-<nav style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px 0;gap:8px"><div style="display:flex;gap:8px;flex-wrap:wrap"><a href="analysis.html" class="nav-link"><i data-lucide="arrow-left" style="width:14px;height:14px;vertical-align:-2px"></i> Analysis</a><a href="how-it-works.html" class="nav-link">How It Works</a><a href="elections.html" class="nav-link">Elections</a></div><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode" aria-label="Toggle theme" id="themeBtn"><i data-lucide="moon" style="width:16px;height:16px"></i></button></nav>
+<nav style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px 0;gap:8px"><div style="display:flex;gap:8px;flex-wrap:wrap"><a href="analysis.html" class="nav-link"><i data-lucide="arrow-left" style="width:14px;height:14px;vertical-align:-2px"></i> Analysis</a><a href="how-it-works.html" class="nav-link">How It Works</a><a href="weather.html" class="nav-link">🌡️ Weather</a><a href="baseball.html" class="nav-link">⚾ Baseball</a><a href="elections.html" class="nav-link">Elections</a></div><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode" aria-label="Toggle theme" id="themeBtn"><i data-lucide="moon" style="width:16px;height:16px"></i></button></nav>
 <header>
   <div class="logo">Virtuoso</div>
   <h1>Prediction</h1>
   <p class="subtitle">Dynamic Kelly · edge trading · auto-managed</p>
-  <div class="timestamp"><span class="live-dot"></span>live · <span id="lastUpdate">—</span></div>
+  <div class="timestamp"><span class="live-dot"></span><span class="conn-label">live</span> · <span id="lastUpdate">—</span></div>
 </header>
 
 <div class="controls">
@@ -748,6 +748,7 @@ function marketUrl(p) {
 
 // Auto-refresh countdown
 function updateCountdown() {
+  if (window.__connOnline === false) return;  // don't fake "refreshing" while offline
   const timestampEl = document.getElementById('lastUpdate');
   const lastUpdate = timestampEl.textContent;
   if (secondsUntilRefresh > 0) {
@@ -773,26 +774,73 @@ function startAutoRefresh() {
   countdownInterval = setInterval(updateCountdown, 1000);
 }
 
+// Honest connection state: driven by whether the status fetch actually succeeds.
+window.__connOnline = true;
+window.__lastGoodTime = null;
+function setConnState(online) {
+  const ts = document.querySelector('.timestamp');
+  const label = document.querySelector('.conn-label');
+  const last = document.getElementById('lastUpdate');
+  const msg = document.getElementById('statusMsg');
+  window.__connOnline = online;
+  if (online) {
+    ts && ts.classList.remove('stale');
+    if (label) label.textContent = 'live';
+    window.__lastGoodTime = new Date().toLocaleTimeString();
+    if (last) last.textContent = window.__lastGoodTime;
+    if (msg) msg.textContent = '';
+  } else {
+    ts && ts.classList.add('stale');
+    if (label) label.textContent = 'offline';
+    if (last) last.textContent = window.__lastGoodTime ? `stale · last good ${window.__lastGoodTime}` : 'no data';
+    if (msg) { msg.innerHTML = icon('alert-triangle', 14) + ' API unreachable'; reinitIcons(); }
+  }
+}
+
 async function loadAll() {
+  secondsUntilRefresh = 60;
+
+  // Auto-resolve stale positions first (fire-and-forget, bounded so it can't pile up)
+  fetch(`${API}/portfolio/resolve`, { method: 'POST', signal: AbortSignal.timeout(15000) }).catch(() => {});
+
+  // CRITICAL path: portfolio status. Its failure is NOT swallowed — it is the
+  // single source of truth for whether the backend is actually reachable.
+  let statusRes;
   try {
-    // Reset countdown on manual refresh
-    secondsUntilRefresh = 60;
-    
-    // Auto-resolve stale positions first (fire-and-forget)
-    fetch(`${API}/portfolio/resolve`, { method: 'POST' }).catch(() => {});
+    const r = await fetch(`${API}/portfolio/status`, { signal: AbortSignal.timeout(12000) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    statusRes = await r.json();
+  } catch (e) {
+    console.error('status fetch failed:', e);
+    setConnState(false);   // honest offline: keep last-known cards, never fabricate
+    return;
+  }
 
-    const [statusRes, liveRes, histRes, archRes, archPnlRes, guardsRes, equitySeriesRes] = await Promise.all([
-      fetch(`${API}/portfolio/status`).then(r => r.json()).catch(() => ({})),
-      fetch(`${API}/portfolio/positions-live`).then(r => r.json()).catch(() => null),
-      fetch(`${API}/portfolio/history?limit=1000`).then(r => r.json()).catch(() => []),
-      fetch(`${API}/portfolio/archetype-breakdown`).then(r => r.json()).catch(() => null),
-      fetch(`${API}/portfolio/archetype-pnl-series`).then(r => r.json()).catch(() => null),
-      fetch(`${API}/portfolio/risk-guards`).then(r => r.json()).catch(() => null),
-      fetch(`${API}/portfolio/equity-series`).then(r => r.json()).catch(() => []),
-    ]);
-
-    renderStatus(statusRes, archRes);
+  // Primary stat cards depend only on status — paint them immediately rather
+  // than blocking on the slower enrichment calls below.
+  try {
+    renderStatus(statusRes, null);
     renderRiskExposure(statusRes);
+    document.querySelector('.stats-primary.skeleton')?.classList.remove('skeleton');
+    setConnState(true);
+  } catch (e) { console.error('primary render failed:', e); }
+
+  // Enrichment calls: each optional, individually timed-out and swallowed so one
+  // slow/failed endpoint can never wedge the whole page.
+  const opt = (p, fb, ms = 18000) =>
+    fetch(`${API}${p}`, { signal: AbortSignal.timeout(ms) })
+      .then(r => r.ok ? r.json() : fb).catch(() => fb);
+  const [liveRes, histRes, archRes, archPnlRes, guardsRes, equitySeriesRes] = await Promise.all([
+    opt('/portfolio/positions-live', null),
+    opt('/portfolio/history?limit=1000', []),
+    opt('/portfolio/archetype-breakdown', null),
+    opt('/portfolio/archetype-pnl-series', null),
+    opt('/portfolio/risk-guards', null),
+    opt('/portfolio/equity-series', []),
+  ]);
+
+  try {
+    renderStatus(statusRes, archRes);
     renderRiskGuards(guardsRes);
     const positions = liveRes ? liveRes.positions : (statusRes.positions || []);
     renderPositions(positions);
@@ -800,17 +848,16 @@ async function loadAll() {
     renderHistory(histRes, liveRes, statusRes, equitySeriesRes);
     if (archRes) renderArchetypeBreakdown(archRes, archPnlRes);
     reinitIcons();
-    document.querySelector('.stats-primary.skeleton')?.classList.remove('skeleton');
-    document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
-    document.querySelector('.timestamp')?.classList.remove('stale');
-  } catch(e) {
-    console.error('Load failed:', e);
-    document.getElementById('statusMsg').innerHTML = icon('alert-triangle', 14) + ' API unreachable'; reinitIcons();
-    document.querySelector('.timestamp')?.classList.add('stale');
-  }
+  } catch (e) { console.error('enrichment render failed:', e); }
 }
 
 function renderStatus(s, archRes) {
+  if (!s || s.starting_bankroll == null) {  // no real data — show dashes, never fabricate $10k
+    ['bankroll','totalPnl','capitalRisk','tradeCount'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.textContent = '—';
+    });
+    return;
+  }
   const startingBankroll = s.starting_bankroll || 10000;
   const bankroll = s.bankroll || startingBankroll;
   document.getElementById('bankroll').textContent = `$${bankroll.toLocaleString('en-US', {minimumFractionDigits: 2})}`;

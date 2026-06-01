@@ -801,6 +801,157 @@ async def get_baseball_edge(min_edge: float = Query(default=0.05, ge=0, le=1)):
     return await handle_edge_request("baseball", _get_baseball())
 
 
+@router.get("/baseball/dashboard")
+async def get_baseball_dashboard():
+    """Baseball shadow trade dashboard — open trades, resolved stats, collection progress.
+
+    Queries shadow_trades.db for strategy='baseball_moneyline' trades.
+    Returns empty-state data (no errors) if no trades exist or forecast_log table missing.
+
+    Returns:
+      {open_trades: [...], resolved: {total, wins, losses, win_rate, pnl, ...},
+       forecast_log: [...], collection: {resolved_count, target, pct}}
+    """
+    import sqlite3
+    from pathlib import Path
+
+    db_path = Path(__file__).parent.parent.parent / "storage" / "shadow_trades.db"
+    result = {
+        "open_trades": [],
+        "open_count": 0,
+        "resolved": {"total": 0, "wins": 0, "losses": 0, "win_rate": 0, "total_pnl": 0},
+        "forecast_log": [],
+        "forecast_count": 0,
+        "collection": {"resolved": 0, "target": 30, "pct": 0},
+    }
+
+    if not db_path.exists():
+        return result
+
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.row_factory = sqlite3.Row
+
+        # Open baseball trades
+        open_rows = conn.execute("""
+            SELECT id, market, side, entry_price, confidence, days_to_close,
+                   timestamp, reasoning, category
+            FROM shadow_trades
+            WHERE resolved = 0
+              AND strategy = 'baseball_moneyline'
+            ORDER BY timestamp DESC
+            LIMIT 25
+        """).fetchall()
+
+        result["open_trades"] = [
+            {
+                "id": r["id"],
+                "market": r["market"],
+                "side": r["side"],
+                "entry_price": round(r["entry_price"], 3) if r["entry_price"] else None,
+                "confidence": round(r["confidence"], 1) if r["confidence"] else None,
+                "days_to_close": round(r["days_to_close"], 1) if r["days_to_close"] else None,
+                "timestamp": r["timestamp"],
+                "reasoning": r["reasoning"],
+            }
+            for r in open_rows
+        ]
+        result["open_count"] = len(result["open_trades"])
+
+        # Resolved baseball trades
+        resolved_row = conn.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN outcome = side AND pnl > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN outcome != side THEN 1 ELSE 0 END) as losses,
+                SUM(COALESCE(pnl, 0)) as total_pnl,
+                AVG(confidence) as avg_confidence
+            FROM shadow_trades
+            WHERE resolved = 1
+              AND strategy = 'baseball_moneyline'
+              AND outcome IN ('YES','NO')
+              AND side IN ('YES','NO')
+        """).fetchone()
+
+        if resolved_row and resolved_row["total"]:
+            total = resolved_row["total"]
+            wins = resolved_row["wins"] or 0
+            losses = resolved_row["losses"] or 0
+            result["resolved"] = {
+                "total": total,
+                "wins": wins,
+                "losses": losses,
+                "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
+                "total_pnl": round(resolved_row["total_pnl"] or 0, 4),
+                "avg_confidence": round(resolved_row["avg_confidence"] or 0, 1),
+            }
+            result["collection"] = {
+                "resolved": total,
+                "target": 30,
+                "pct": min(100, round(total / 30 * 100, 1)),
+            }
+
+        # Recent resolved trades (last 10)
+        recent_rows = conn.execute("""
+            SELECT id, market, side, entry_price, confidence,
+                   outcome, pnl, resolved_at
+            FROM shadow_trades
+            WHERE resolved = 1
+              AND strategy = 'baseball_moneyline'
+              AND outcome IN ('YES','NO')
+            ORDER BY resolved_at DESC
+            LIMIT 10
+        """).fetchall()
+
+        result["recent_trades"] = [
+            {
+                "id": r["id"],
+                "market": r["market"],
+                "side": r["side"],
+                "entry_price": round(r["entry_price"], 3) if r["entry_price"] else None,
+                "confidence": round(r["confidence"], 1) if r["confidence"] else None,
+                "outcome": r["outcome"],
+                "pnl": round(r["pnl"], 4) if r["pnl"] else None,
+                "resolved_at": r["resolved_at"],
+            }
+            for r in recent_rows
+        ]
+
+        # Forecast log (Phase 1 — gracefully handle missing table)
+        try:
+            forecast_rows = conn.execute("""
+                SELECT team, opponent, game_date, edge_pct, direction,
+                       actual_outcome, predicted_correct
+                FROM baseball_forecast_log
+                ORDER BY game_date DESC
+                LIMIT 20
+            """).fetchall()
+
+            result["forecast_log"] = [
+                {
+                    "team": r["team"],
+                    "opponent": r["opponent"],
+                    "game_date": r["game_date"],
+                    "edge_pct": round(r["edge_pct"] * 100, 1) if r["edge_pct"] else 0,
+                    "direction": r["direction"],
+                    "actual_outcome": r["actual_outcome"],
+                    "correct": bool(r["predicted_correct"]),
+                }
+                for r in forecast_rows
+            ]
+            result["forecast_count"] = len(result["forecast_log"])
+        except sqlite3.OperationalError:
+            # Table doesn't exist yet (Phase 1 not deployed)
+            result["forecast_log"] = []
+            result["forecast_count"] = 0
+
+        conn.close()
+    except Exception as e:
+        logger.exception(f"baseball dashboard query failed: {e}")
+
+    return result
+
+
 # ----------------------------------------------------------------------------
 # NFL Futures Endpoints
 # ----------------------------------------------------------------------------
