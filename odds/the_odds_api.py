@@ -14,6 +14,10 @@ Vendor evaluation: see ENSEMBLE_AUDIT_2026-05-15_05_Odds-API-Replacement.md
 Health tracking: routed through _resilient_urlopen("the_odds_api", url) so
 source_health.record_success/failure get called automatically.
 
+# Odds API credit budget tracking (20K credits/month)
+_CREDIT_BUDGET = {"remaining": None, "used": None, "last_check": 0, "alerted_low": False}
+CREDIT_LOW_WATERMARK = 5000  # Alert when remaining credits drop below this
+
 To activate:
     1. Sign up at https://the-odds-api.com/, copy key
     2. ssh vps 'sudo systemctl set-environment ODDS_API_KEY=<key>'
@@ -25,6 +29,7 @@ To activate:
 
 import os
 import json
+import time
 import asyncio
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -71,6 +76,48 @@ SOCCER_SPORT_KEYS: Dict[str, str] = {
 BASEBALL_SPORT_KEYS: Dict[str, str] = {
     "mlb": "baseball_mlb",
 }
+
+
+# ---------------------------------------------------------------------------
+# Credit budget tracking
+# ---------------------------------------------------------------------------
+
+import time as _time_mod
+
+_CREDIT_BUDGET = {"remaining": None, "used": None, "last_check": 0, "alerted_low": False}
+CREDIT_LOW_WATERMARK = 5000  # Alert when remaining credits drop below this
+
+def _track_credits_from_response(resp) -> None:
+    """Extract credit usage from response headers if present."""
+    global _CREDIT_BUDGET
+    try:
+        remaining = resp.headers.get("x-requests-remaining")
+        used = resp.headers.get("x-requests-used")
+        if remaining is not None:
+            _CREDIT_BUDGET["remaining"] = int(remaining)
+        if used is not None:
+            _CREDIT_BUDGET["used"] = int(used)
+        _CREDIT_BUDGET["last_check"] = time.time()
+        if _CREDIT_BUDGET["remaining"] is not None and _CREDIT_BUDGET["remaining"] < CREDIT_LOW_WATERMARK:
+            if not _CREDIT_BUDGET["alerted_low"]:
+                logger.warning(
+                    f"Odds API credit budget low: {_CREDIT_BUDGET['remaining']} remaining (watermark: {CREDIT_LOW_WATERMARK})"
+                )
+                _CREDIT_BUDGET["alerted_low"] = True
+    except (ValueError, TypeError, AttributeError):
+        pass
+
+
+def get_credit_status() -> dict:
+    """Return current Odds API credit usage for dashboards."""
+    global _CREDIT_BUDGET
+    return {
+        "remaining": _CREDIT_BUDGET.get("remaining"),
+        "used": _CREDIT_BUDGET.get("used"),
+        "budget": 20000,
+        "last_check": _CREDIT_BUDGET.get("last_check"),
+        "alerted": _CREDIT_BUDGET.get("alerted_low", False),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +176,8 @@ def _fetch_league_sync(api_key: str, sport_key: str, timeout: int = 10) -> List[
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
+            # Track credit usage from response headers
+            _track_credits_from_response(resp)
             return json.loads(resp.read().decode())
     except Exception as e:
         logger.warning(f"the_odds_api fetch failed for {sport_key}: {e}")

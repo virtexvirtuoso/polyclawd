@@ -2013,3 +2013,17 @@ async def get_kalshi_entertainment():
     except Exception as e:
         logger.exception("Kalshi entertainment error")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# NEW: The Odds API credit status
+# ============================================================================
+
+@router.get("/odds-api/credits")
+async def get_odds_api_credits():
+    """Get The Odds API credit budget status (20K/mo, usage tracking)."""
+    try:
+        from odds.the_odds_api import get_credit_status
+        return get_credit_status()
+    except Exception as e:
+        logger.exception("Odds API credit status error")
+        raise HTTPException(status_code=500, detail=str(e))

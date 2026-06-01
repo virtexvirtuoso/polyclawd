@@ -80,6 +80,18 @@ signals = result_data.get('signals', [])
 result = process_signals(signals)
 " > /dev/null 2>&1 || true
 
+    # === EVERY 30 MIN: Baseball edge signals ===
+    $VENV -c "
+from odds.baseball_edge import get_baseball_edge_summary
+import asyncio
+summary = asyncio.run(get_baseball_edge_summary())
+total = summary.get('total_edges', 0)
+moved = summary.get('games_with_movement', 0)
+if total > 0 or moved > 0:
+    import logging
+    logging.info(f'Baseball edge scan: {total} edges, {moved} with line movement')
+" > /dev/null 2>&1 || true
+
     # Weather signals
     $VENV -c "
 from signals.paper_portfolio import process_signals

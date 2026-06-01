@@ -20,9 +20,11 @@ Usage:
 
 import asyncio
 import json
+import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -34,6 +36,141 @@ try:
 except ImportError:
     from the_odds_api import get_baseball_games_with_odds, _american_to_implied_prob
     from client import devig_multiway
+
+# Shadow tracker (soft import — degrade gracefully)
+try:
+    from signals.shadow_tracker import log_shadow_trade
+    HAS_SHADOW = True
+except ImportError:
+    try:
+        import sys
+        sys.path.insert(0, str(__import__('pathlib').Path(__file__).parent.parent / 'signals'))
+        from shadow_tracker import log_shadow_trade
+        HAS_SHADOW = True
+    except ImportError:
+        HAS_SHADOW = False
+        log_shadow_trade = None
+
+# Empirical confidence (soft import — degrade gracefully)
+try:
+    from signals.empirical_confidence import calculate_empirical_confidence
+    HAS_EMPIRICAL = True
+except ImportError:
+    try:
+        import sys
+        sys.path.insert(0, str(__import__('pathlib').Path(__file__).parent.parent / 'signals'))
+        from empirical_confidence import calculate_empirical_confidence
+        HAS_EMPIRICAL = True
+    except ImportError:
+        HAS_EMPIRICAL = False
+        calculate_empirical_confidence = None
+
+# ─── Line movement store ─────────────────────────────────────────────
+# In-memory dict tracking last seen best odds per (game_id, team)
+# Key: "{game_id}|{team}" → {"odds": int, "timestamp": float, "delta_3h": int}
+# Cross-request state (uvicorn process lives long enough)
+_LINE_MOVEMENT: Dict[str, Dict] = {}
+_LINE_MOVEMENT_WINDOW = 10800  # 3 hours for movement tracking
+
+
+def _is_stale_game(commence_time: str) -> bool:
+    """Check if a game starts in <30min or has already started.
+    Returns True if too stale to trade."""
+    if not commence_time:
+        return True
+    try:
+        game_time = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        mins_to_start = (game_time - now).total_seconds() / 60
+        return mins_to_start < 30
+    except (ValueError, TypeError):
+        return True
+
+
+def _update_line_movement(game_id: str, team: str, best_odds: int) -> Dict:
+    """Record a line movement observation and return delta info.
+    
+    Returns {"delta_3h": int or None, "delta_ticks": int, "direction": str}
+    delta_3h = cumulative change over 3h window (None if first observation)
+    """
+    key = f"{game_id}|{team}"
+    now = time.time()
+    entry = _LINE_MOVEMENT.get(key)
+    
+    # Clean stale entries (>3h old)
+    if entry and (now - entry["timestamp"]) > _LINE_MOVEMENT_WINDOW:
+        entry["delta_3h"] = 0
+        entry["first_odds"] = best_odds
+        entry["timestamp"] = now
+        entry["odds"] = best_odds
+        _LINE_MOVEMENT[key] = entry
+        return {"delta_3h": 0, "delta_ticks": 0, "direction": "flat"}
+    
+    if entry:
+        delta = best_odds - entry["odds"]
+        delta_3h = best_odds - entry.get("first_odds", best_odds)
+        dir_str = "sharp_buy" if delta_3h > 3 else ("sharp_sell" if delta_3h < -3 else "flat")
+        entry["odds"] = best_odds
+        entry["timestamp"] = now
+        if entry.get("first_odds") is None:
+            entry["first_odds"] = best_odds
+        res = {"delta_3h": delta_3h, "delta_ticks": delta, "direction": dir_str}
+        return res
+    else:
+        # First observation
+        _LINE_MOVEMENT[key] = {
+            "odds": best_odds,
+            "first_odds": best_odds,
+            "timestamp": now,
+            "delta_3h": 0,
+        }
+        return {"delta_3h": None, "delta_ticks": 0, "direction": "first_observation"}
+
+
+async def _log_baseball_shadow(edge: "MLBEdge", edge_pct: float, game_id: str):
+    """Log a baseball edge to the shadow tracker for empirical validation."""
+    if not HAS_SHADOW or not log_shadow_trade:
+        return
+    try:
+        # Build confidence from empirical confidence system if available
+        conf = min(75, abs(edge_pct) * 15)
+        if HAS_EMPIRICAL and calculate_empirical_confidence:
+            try:
+                ec = calculate_empirical_confidence(
+                    edge.game_title,
+                    "YES" if edge.direction == "BUY" else "NO",
+                    edge.polymarket_price,
+                    days_to_close=7.0,
+                )
+                if not ec.get("killed"):
+                    conf = min(85, ec["confidence"] * 100)
+            except Exception:
+                pass
+
+        platform = "polymarket" if edge.poly_market_id and edge.poly_market_id.startswith("0x") else "polymarket"
+        signal = {
+            "market_id": edge.poly_market_id or f"mlb_{game_id}_{edge.bet_team.replace(' ', '')}",
+            "market": f"{edge.game_title[:180]} — {edge.bet_team} Moneyline",
+            "platform": platform,
+            "side": "YES" if edge.direction == "BUY" else "NO",
+            "price": edge.polymarket_price,
+            "confidence": conf,
+            "days_to_close": 7.0,
+            "volume": 0,
+            "confirmations": 1,
+            "reasoning": (
+                f"MLB baseball edge: Odds API {edge.odds_api_prob*100:.0f}% "
+                f"vs Poly {edge.polymarket_price*100:.1f}¢ "
+                f"({edge.edge_pct*100:+.1f}% edge)"
+            ),
+            "archetype": "sports_single_game",
+            "strategy": "baseball_moneyline",
+            "category": "baseball",
+            "category_tier": "sports",
+        }
+        log_shadow_trade(signal)
+    except Exception as e:
+        logger.debug(f"baseball shadow log failed: {e}")
 
 POLYMARKET_GAMMA = "https://gamma-api.polymarket.com"
 DEFAULT_MIN_EDGE = 0.05  # 5%
@@ -251,12 +388,18 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
         f"{len(game_events)} Polymarket game events"
     )
 
+    game_id_field = game.get("id", "")
     for game in odds_games:
         home_team = game.get("home_team", "")
         away_team = game.get("away_team", "")
         commence_time = game.get("commence_time", "")
 
         if not home_team or not away_team:
+            continue
+
+        # ⏰ Stale game guard: skip games starting in <30min or already started
+        if _is_stale_game(commence_time):
+            logger.debug(f"baseball_edge: stale game {away_team} @ {home_team} — {commence_time}")
             continue
 
         event = _find_matching_event(home_team, away_team, game_events)
@@ -286,6 +429,14 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
             (away_team, away_true_prob, away_poly_price, away_odds),
         ]:
             edge = true_prob - poly_price
+
+            # 📊 Line movement tracking
+            game_id = game.get("id", game_id_field)
+            mov = _update_line_movement(game_id, team, american_odds)
+            sharp_flag = ""
+            if mov["delta_3h"] is not None and abs(mov["delta_3h"]) >= 3:
+                sharp_flag = f" (line moved {mov['delta_3h']:+d} ticks = sharp {mov['direction']})"
+
             if abs(edge) >= min_edge:
                 edges.append(MLBEdge(
                     game_title=event.get("title", f"{away_team} vs. {home_team}"),
@@ -303,6 +454,31 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
                     poly_event_id=event.get("id"),
                 ))
 
+            # 💾 Log all edges >= 3% to shadow tracker (collection phase)
+            if abs(edge) >= 0.03:
+                try:
+                    await _log_baseball_shadow(
+                        MLBEdge(
+                            game_title=event.get("title", f"{away_team} vs. {home_team}"),
+                            home_team=home_team,
+                            away_team=away_team,
+                            bet_team=team,
+                            market_type="moneyline",
+                            odds_api_prob=true_prob,
+                            american_odds=american_odds,
+                            polymarket_price=poly_price,
+                            edge_pct=edge,
+                            direction="BUY" if edge > 0 else "SELL",
+                            commence_time=commence_time,
+                            poly_market_id=market_id,
+                            poly_event_id=event.get("id"),
+                        ),
+                        edge,
+                        game_id,
+                    )
+                except Exception:
+                    pass
+
     edges.sort(key=lambda e: abs(e.edge_pct), reverse=True)
     return edges
 
@@ -314,10 +490,28 @@ async def get_baseball_edge_summary() -> Dict:
     """
     edges = await find_baseball_edges()
 
+    # Build line movement report for games that have it
+    games_moved = 0
+    line_moves = []
+    for k, v in _LINE_MOVEMENT.items():
+        delta = v.get("delta_3h")
+        if delta is not None and abs(delta) >= 2:
+            games_moved += 1
+            game_or_team = k.split("|")
+            line_moves.append({
+                "key": k,
+                "delta_3h": delta,
+                "direction": "sharp_buy" if delta > 3 else ("sharp_sell" if delta < -3 else "minor"),
+                "current_odds": v["odds"],
+            })
+
     return {
         "source": "the_odds_api_baseball",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "total_edges": len(edges),
+        "games_tracked": len(_LINE_MOVEMENT),
+        "games_with_movement": games_moved,
+        "line_movements": line_moves,
         "edges": [
             {
                 "game": e.game_title,
