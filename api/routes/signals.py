@@ -3491,6 +3491,14 @@ async def options_dashboard():
             except Exception:
                 pass
 
-            return {"totals": totals, "by_ticker": by_ticker, "divergences": rows[:20], "rows": rows, "shadow": shadow}
+            # Accuracy from options_forecast_log
+            try:
+                from signals.options_resolver import get_options_accuracy_summary
+            except ImportError:
+                accuracy = {"total": 0, "by_ticker": {}, "by_market_type": {}, "recent": [], "collection": {"resolved": 0, "target": 30, "pct": 0}}
+            else:
+                accuracy = get_options_accuracy_summary()
+
+            return {"totals": totals, "by_ticker": by_ticker, "divergences": rows[:20], "rows": rows, "shadow": shadow, "accuracy": accuracy}
         finally: con.close()
     return await asyncio.get_event_loop().run_in_executor(None, _build)
