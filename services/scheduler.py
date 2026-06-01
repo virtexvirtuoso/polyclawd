@@ -536,6 +536,17 @@ def task_options_resolution():
         logger.exception("Options resolution failed: %s", e)
 
 
+def task_options_monitor():
+    """Check open options positions for edge decay (every 30 min)."""
+    try:
+        from signals.options_implied import reeval_options_positions
+        result = reeval_options_positions()
+        if result.get("closed", 0) > 0:
+            logger.info("Options monitor: %d closed (take-profit/stop-loss)", result["closed"])
+    except Exception as e:
+        logger.exception("Options monitor failed: %s", e)
+
+
 def task_credit_refresh():
     """Refresh Odds API credit balance from /v4/sports endpoint (free call)."""
     try:
@@ -891,6 +902,7 @@ async def tick_30min():
         await run_in_thread(_run_safe, "signal_scan", task_signal_scan)
         await run_in_thread(_run_safe, "options_scan", task_options_scan)
         await run_in_thread(_run_safe, "options_resolution", task_options_resolution)
+        await run_in_thread(_run_safe, "options_monitor", task_options_monitor)
         await run_in_thread(_run_safe, "whale_wall_alerts", task_whale_wall_alerts)
         await run_in_thread(_run_safe, "credit_refresh", task_credit_refresh)
         await run_in_thread(_run_safe, "source_health_touch", task_source_health_touch)
