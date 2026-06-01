@@ -638,6 +638,25 @@ def reeval_options_positions() -> dict:
             results["kept"] += 1
             continue
 
+        # 2.5 IV/RV overlay: if options expensive, reduce edge threshold (take profit sooner)
+        iv_rv_factor = 1.0
+        try:
+            c3 = sqlite3.connect(str(DEFAULT_DB))
+            ticker_row = c3.execute(
+                "SELECT ticker, iv FROM options_implied WHERE poly_market_id=? ORDER BY date DESC LIMIT 1",
+                (condition_id,),
+            ).fetchone()
+            c3.close()
+            if ticker_row and ticker_row[1]:
+                tk = ticker_row[0]
+                iv = ticker_row[1]
+                from signals.vol_spread import get_iv_rv_ratio
+                ratio = get_iv_rv_ratio(tk, iv)
+                if ratio and ratio > 1.5:
+                    iv_rv_factor = 0.7  # 30% more eager to take profit
+        except Exception:
+            pass
+
         # 2. Determine if edge has degraded
         close_reason = None
 
@@ -652,7 +671,7 @@ def reeval_options_positions() -> dict:
                 # Price moved up — edge is shrinking
                 remaining_edge = max(0, edge_at_entry - price_move)
                 edge_shrink_pct = 1 - (remaining_edge / max(edge_at_entry, 0.001))
-                if edge_shrink_pct > 0.5:
+                if edge_shrink_pct > 0.5 * iv_rv_factor:
                     close_reason = f"take_profit: edge_decayed_{edge_shrink_pct:.0%}"
             elif price_move < 0:
                 # Price moved down — we're losing money, edge increased
@@ -669,7 +688,7 @@ def reeval_options_positions() -> dict:
                 # Price moved down — NO is winning, edge shrinks
                 remaining_edge = max(0, edge_at_entry - abs(price_move))
                 edge_shrink_pct = 1 - (remaining_edge / max(edge_at_entry, 0.001))
-                if edge_shrink_pct > 0.5:
+                if edge_shrink_pct > 0.5 * iv_rv_factor:
                     close_reason = f"take_profit: edge_decayed_{edge_shrink_pct:.0%}"
             elif price_move > 0:
                 # Price moved up — NO losing, edge increased
