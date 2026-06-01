@@ -46,6 +46,15 @@ if [ "$HEALTHY" -eq 0 ]; then
     exit 0
 fi
 
+# === EVERY 5 MIN: Baseball resolution watcher ===
+$VENV -c "
+from signals.baseball_resolver import scan_resolved_baseball_games
+r = scan_resolved_baseball_games()
+if r.get('resolved', 0) > 0:
+    import logging
+    logging.info(f'Baseball: {r[\"resolved\"]} resolved')
+" > /dev/null 2>&1 || true
+
 # === EVERY 5 MIN: Shadow trade resolution ===
 cd "$WORKDIR"
 $VENV signals/shadow_tracker.py resolve > /dev/null 2>&1 || true

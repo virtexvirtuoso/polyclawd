@@ -454,6 +454,29 @@ def task_signal_scan():
     logger.info("Signal scan complete (category + tweets + whale walls)")
 
 
+def task_options_scan():
+    """30-min options-implied scanner: fetch Alpaca + Polymarket, compute spreads, paper-trade z-gated signals."""
+    from signals.options_implied import run, open_trades
+    
+    # Step 1: Run the scanner (fetch + compute + write to options_implied.db)
+    written = run()
+    if written is None:
+        logger.warning("Options scan: run() returned None (likely missing ALPACA_API_KEY)")
+        return
+    
+    logger.info("Options scan: %d rows written to DB", written)
+    
+    # Step 2: Open paper trades for z-gated signals
+    try:
+        result = open_trades()
+        if result and result.get("opened", 0) > 0:
+            logger.info("Options scan: opened %d new positions", result["opened"])
+        elif result:
+            logger.debug("Options scan: no signals cleared z-gate")
+    except Exception as e:
+        logger.exception("Options paper trade failed: %s", e)
+
+
 def task_whale_wall_alerts():
     """Alert on new whale wall detections (dedup by market_id, 4h cooldown)."""
     from signals.whale_wall_scanner import scan_whale_walls
@@ -837,9 +860,10 @@ async def tick_5min():
 
 
 async def tick_30min():
-    """Every 30 minutes: signal scans, edge alerts, source health."""
+    """Every 30 minutes: signal scans, options scan, edge alerts, source health."""
     while True:
         await run_in_thread(_run_safe, "signal_scan", task_signal_scan)
+        await run_in_thread(_run_safe, "options_scan", task_options_scan)
         await run_in_thread(_run_safe, "whale_wall_alerts", task_whale_wall_alerts)
         await run_in_thread(_run_safe, "source_health_touch", task_source_health_touch)
         await run_in_thread(_run_safe, "edge_alerts", task_edge_alerts)
