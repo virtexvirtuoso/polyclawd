@@ -3,7 +3,8 @@ Polyclawd Scheduler Service — replaces cron watchdog
 
 Persistent asyncio service that orchestrates all periodic tasks:
 - 30s:   HF signal processing + resolution
-- 5min:  health check, paper resolution, shadow resolution, weather reeval, alerts, calibration
+- 60s:   urgent stop-loss for positions resolving within 6h (15% weather threshold)
+- 5min:  health check, stop-loss eval, price logging, paper resolution, shadow resolution, weather reeval, alerts, calibration
 - 5min:  weather signal scan (fast loop — edge decays quickly)
 - 30min: signal scans (category, tweets), edge alerts, source_health touch
 - 6h:    arena snapshots
@@ -53,6 +54,8 @@ _state = {
     "weekly_sent": None,           # year+week string
     "scorecard_sent": None,        # year+week string
     "milestone_sent": {},          # strategy → bool
+    "election_report_sent": None,  # year+week string
+    "election_snapshot_sent": None, # date string
 }
 
 
@@ -109,7 +112,7 @@ def _run_safe(name: str, fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
     except Exception as e:
-        logger.error("Task %s failed: %s", name, e)
+        logger.exception("Task %s failed: %s", name, e)
         return None
 
 
@@ -148,6 +151,16 @@ def task_paper_resolution():
     resolve_open_positions()
 
 
+def task_equity_snapshot():
+    """Capture a periodic equity snapshot (realized + unrealized) for the time-series chart."""
+    from signals.paper_portfolio import snapshot_equity, backfill_equity_snapshots
+    # Idempotent — runs once on first call, no-op after
+    backfill_equity_snapshots()
+    snap = snapshot_equity()
+    logger.debug("Equity snapshot: $%.2f (realized $%.2f, unrealized $%.2f)",
+                 snap.get("equity", 0), snap.get("realized", 0), snap.get("unrealized", 0))
+
+
 def task_hf_signals():
     """Process HF signals → paper positions + resolve HF trades."""
     from services.hf_paper_trader import process_hf_signals, resolve_hf_positions
@@ -172,6 +185,32 @@ def task_weather_reeval():
     reeval_weather_positions()
 
 
+def task_stop_evaluator():
+    """Check all open positions against stop-loss thresholds."""
+    from services.stop_evaluator import evaluate_stops
+    evaluate_stops()
+
+
+def task_stop_evaluator_urgent():
+    """Fast stop check for positions resolving within 6 hours."""
+    from services.stop_evaluator import evaluate_stops_urgent
+    evaluate_stops_urgent()
+
+
+def task_price_logger():
+    """Log current prices for all open positions."""
+    from services.price_logger import log_position_prices
+    log_position_prices()
+
+
+def task_book_logger():
+    """Log adverse-side orderbook microstructure for all open Polymarket
+    positions. Pure observability — no trading impact. Builds dataset for
+    future orderbook-aware stop logic. See services/book_logger.py."""
+    from services.book_logger import log_position_books
+    log_position_books()
+
+
 def task_weather_fast_scan():
     """Fast weather scan every 5min — edge decays fast, scan often.
 
@@ -189,7 +228,7 @@ def task_weather_fast_scan():
             if n > 0:
                 logger.info("Weather fast scan: opened %d positions", n)
     except Exception as e:
-        logger.error("Weather fast scan failed: %s", e)
+        logger.exception("Weather fast scan failed: %s", e)
 
 
 def task_weather_shift_alerts():
@@ -319,22 +358,55 @@ def task_tweet_pace_alerts():
 
 
 def task_calibration_check():
-    """Check calibration health, log Brier scores."""
-    from signals.resolution_logger import load_resolutions, get_scorecard
+    """Check calibration health, log Brier scores.
 
-    for strategy in ("tweet_count_mc", "weather_ensemble"):
-        records = load_resolutions(strategy)
-        n = len(records)
-        if n < 20:
-            logger.info("CALIBRATION %s: %d/20 resolutions (collecting)", strategy, n)
-            continue
+    Two metrics (Option-B split, 2026-04-28):
+      • model_calibration  — auto-resolved closes only. Tests "did the
+        model's P(NO) match actual market resolutions?" This is the metric
+        that determines whether the model itself needs recalibration.
+      • stop_policy_outcome — every close (auto, stop, manual, partial).
+        Tests "did our trading outcomes match the model's prior belief?"
+        High Brier here with low Brier above means stops or sizing are the
+        problem, not the model.
 
-        card = get_scorecard(strategy)
-        if card:
-            brier = card["brier"]
-            wr = card["win_rate"]
-            status = "GREEN" if brier < 0.15 else "YELLOW" if brier < 0.25 else "RED"
-            logger.info("CALIBRATION %s: Brier=%.3f (%s) WR=%.0f%% n=%d", strategy, brier, status, wr * 100, n)
+    Threshold (each metric independently): GREEN <0.15, YELLOW <0.25, RED >=0.25.
+    """
+    from signals.resolution_logger import (
+        load_resolutions, get_scorecard, get_auto_scorecard,
+    )
+
+    def _status(brier):
+        return "GREEN" if brier < 0.15 else "YELLOW" if brier < 0.25 else "RED"
+
+    for strategy in ("tweet_count_mc", "weather_ensemble", "options_implied"):
+        # Outcome metric (mixed close-types) — current behaviour
+        outcome_records = load_resolutions(strategy)
+        n_out = len(outcome_records)
+        if n_out >= 20:
+            card = get_scorecard(strategy)
+            if card:
+                logger.info(
+                    "CALIBRATION %s outcome: Brier=%.3f (%s) WR=%.0f%% n=%d",
+                    strategy, card["brier"], _status(card["brier"]),
+                    card["win_rate"] * 100, n_out,
+                )
+        else:
+            logger.info("CALIBRATION %s outcome: %d/20 (collecting)", strategy, n_out)
+
+        # Model-calibration metric (auto-resolved only) — true model accuracy
+        auto_card = get_auto_scorecard(strategy)
+        if auto_card:
+            logger.info(
+                "CALIBRATION %s model: Brier=%.3f (%s) WR=%.0f%% n=%d",
+                strategy, auto_card["brier"], _status(auto_card["brier"]),
+                auto_card["win_rate"] * 100, auto_card["n"],
+            )
+        else:
+            # Look up raw count even when below threshold so we can see growth
+            from signals.resolution_logger import load_auto_resolutions
+            n_auto = len(load_auto_resolutions(strategy))
+            logger.info("CALIBRATION %s model: %d/20 (collecting auto-resolved)",
+                        strategy, n_auto)
 
             # Milestone alert (first time hitting 20)
             if not _state["milestone_sent"].get(strategy):
@@ -359,7 +431,7 @@ def task_signal_scan():
         if signals:
             process_signals(signals)
     except Exception as e:
-        logger.error("Category scan failed: %s", e)
+        logger.exception("Category scan failed: %s", e)
 
     # Tweet count signals
     try:
@@ -368,7 +440,7 @@ def task_signal_scan():
         if signals:
             process_signals(signals)
     except Exception as e:
-        logger.error("Tweet scan failed: %s", e)
+        logger.exception("Tweet scan failed: %s", e)
 
     # Whale wall signals
     try:
@@ -377,7 +449,7 @@ def task_signal_scan():
         if signals:
             process_signals(signals)
     except Exception as e:
-        logger.error("Whale wall scan failed: %s", e)
+        logger.exception("Whale wall scan failed: %s", e)
 
     logger.info("Signal scan complete (category + tweets + whale walls)")
 
@@ -599,7 +671,7 @@ def task_weekly_recap():
         from signals.resolution_logger import load_resolutions, get_scorecard
 
         lines = ["Weekly Calibration Report", ""]
-        for strategy, label in [("tweet_count_mc", "Tweet MC"), ("weather_ensemble", "Weather")]:
+        for strategy, label in [("tweet_count_mc", "Tweet MC"), ("weather_ensemble", "Weather"), ("options_implied", "Options Implied")]:
             records = load_resolutions(strategy)
             n = len(records)
             if n == 0:
@@ -625,6 +697,101 @@ def task_weekly_recap():
     logger.info("Weekly Discord recap sent")
 
 
+def task_gdelt_refresh():
+    """Pre-compute GDELT sentiment overlay every 6 hours.
+
+    Writes results to storage/gdelt_cache.json so the election API
+    can serve cached GDELT data without blocking on rate-limited queries.
+    """
+    import json as _json
+    try:
+        from signals.gdelt_client import build_gdelt_overlay
+        result = build_gdelt_overlay()
+        cache_path = PROJECT_ROOT / "storage" / "gdelt_cache.json"
+        cache_path.write_text(_json.dumps(result))
+        n_candidates = len(result.get("candidate_sentiment", []))
+        n_states = len(result.get("state_sentiment", []))
+        logger.info("GDELT overlay cached: %d candidates, %d states", n_candidates, n_states)
+    except Exception as e:
+        logger.exception("GDELT refresh failed: %s", e)
+
+
+def task_ie_spending_refresh():
+    """Pre-compute FEC IE spending overlay every 6 hours."""
+    import json as _json
+    try:
+        from signals.election_tracker import _fetch_ie_spending_overlay
+        result = _fetch_ie_spending_overlay()
+        cache_path = PROJECT_ROOT / "storage" / "ie_spending_cache.json"
+        cache_path.write_text(_json.dumps(result))
+        n_surges = len(result.get("spending_surges", []))
+        logger.info("IE spending overlay cached: %d surges", n_surges)
+    except Exception as e:
+        logger.exception("IE spending refresh failed: %s", e)
+
+
+def task_election_snapshot():
+    """Daily election market snapshot at 6am UTC — feeds trend DB."""
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    if _state["election_snapshot_sent"] == today:
+        return
+
+    try:
+        from signals.election_tracker import snapshot_elections, save_snapshot
+        snapshot = snapshot_elections()
+        save_snapshot(snapshot)
+        total = snapshot.get("summary", {}).get("total_markets", 0)
+        logger.info("Election snapshot saved: %d markets", total)
+    except Exception as e:
+        logger.exception("Election snapshot failed: %s", e)
+        return
+
+    _state["election_snapshot_sent"] = today
+
+
+def task_election_weekly_report():
+    """Weekly election PDF report — Monday 6am UTC."""
+    year_week = datetime.now(timezone.utc).strftime("%Y%W")
+    if _state["election_report_sent"] == year_week:
+        return
+
+    try:
+        from signals.election_tracker import generate_report, save_snapshot
+        from signals.election_pdf import generate_election_pdf
+
+        report = generate_report()
+        save_snapshot(report)
+        pdf_path = generate_election_pdf(report)
+
+        summary = report.get("summary", {})
+        pc = summary.get("party_control", {})
+        midterm = report.get("insights", {}).get("midterm", {})
+        fl = midterm.get("flipping", {}).get("senate", {})
+
+        logger.info(
+            "Election weekly report generated: %s | %d markets | Senate D%.0f/R%.0f | %s",
+            pdf_path,
+            summary.get("total_markets", 0),
+            pc.get("senate", {}).get("democrat", 0) * 100,
+            pc.get("senate", {}).get("republican", 0) * 100,
+            fl.get("net_shift_label", "?"),
+        )
+
+        # Send Discord alert if available
+        try:
+            from signals.discord_alerts import alert_election_report
+            alert_election_report(report)
+            logger.info("Election Discord alert sent")
+        except Exception as e:
+            logger.warning("Election Discord alert failed (non-fatal): %s", e)
+
+    except Exception as e:
+        logger.exception("Election weekly report failed: %s", e)
+        return
+
+    _state["election_report_sent"] = year_week
+
+
 # ============================================================================
 # Scheduler loop
 # ============================================================================
@@ -642,12 +809,23 @@ async def tick_30s():
         await asyncio.sleep(30)
 
 
+async def tick_1min():
+    """Every 60 seconds: urgent stop-loss for positions resolving within 6 hours."""
+    while True:
+        await run_in_thread(_run_safe, "stop_evaluator_urgent", task_stop_evaluator_urgent)
+        await asyncio.sleep(60)
+
+
 async def tick_5min():
-    """Every 5 minutes: health, resolution, reeval, weather scan, alerts, calibration."""
+    """Every 5 minutes: health, stops, resolution, reeval, weather scan, alerts, calibration."""
     while True:
         await run_in_thread(_run_safe, "health_check", task_health_check)
+        await run_in_thread(_run_safe, "stop_evaluator", task_stop_evaluator)
+        await run_in_thread(_run_safe, "price_logger", task_price_logger)
+        await run_in_thread(_run_safe, "book_logger", task_book_logger)
         await run_in_thread(_run_safe, "shadow_resolution", task_shadow_resolution)
         await run_in_thread(_run_safe, "paper_resolution", task_paper_resolution)
+        await run_in_thread(_run_safe, "equity_snapshot", task_equity_snapshot)
         await run_in_thread(_run_safe, "resolution_scanner", task_resolution_scanner)
         await run_in_thread(_run_safe, "weather_reeval", task_weather_reeval)
         await run_in_thread(_run_safe, "weather_fast_scan", task_weather_fast_scan)
@@ -669,10 +847,65 @@ async def tick_30min():
         await asyncio.sleep(1800)
 
 
+def task_state_cleanup():
+    """Prune stale entries from scheduler state dicts to prevent memory growth."""
+    pruned = 0
+    # edge_alert_state: keep only last 100 entries
+    for key in ("edge_alert_state", "pace_alert_sent", "milestone_sent"):
+        d = _state.get(key, {})
+        if len(d) > 100:
+            # Keep most recent 50 (by key insertion order)
+            keys_to_remove = list(d.keys())[:-50]
+            for k in keys_to_remove:
+                del d[k]
+            pruned += len(keys_to_remove)
+    # weather_shift_cache: bounded by open positions, but cap at 200
+    wsc = _state.get("weather_shift_cache", {})
+    if len(wsc) > 200:
+        keys_to_remove = list(wsc.keys())[:-100]
+        for k in keys_to_remove:
+            del wsc[k]
+        pruned += len(keys_to_remove)
+    if pruned:
+        logger.info("State cleanup: pruned %d stale entries", pruned)
+
+
+def task_db_maintenance():
+    """Archive old forecast_log rows and run VACUUM to reclaim space."""
+    conn = _db()
+    try:
+        # Delete forecast_log rows older than 7 days
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        cursor = conn.execute(
+            "DELETE FROM forecast_log WHERE timestamp < ?", (cutoff,)
+        )
+        deleted = cursor.rowcount
+        if deleted > 0:
+            logger.info("DB maintenance: deleted %d old forecast_log rows", deleted)
+        conn.commit()
+    except Exception as e:
+        logger.debug("forecast_log cleanup skipped: %s", e)
+    finally:
+        conn.close()
+
+    # VACUUM in separate connection (can't run inside transaction)
+    try:
+        conn2 = sqlite3.connect(str(DB_PATH))
+        conn2.execute("VACUUM")
+        conn2.close()
+        logger.info("DB maintenance: VACUUM complete")
+    except Exception as e:
+        logger.warning("VACUUM failed: %s", e)
+
+
 async def tick_6h():
-    """Every 6 hours: arena snapshot."""
+    """Every 6 hours: arena snapshot, state cleanup, DB maintenance, GDELT/IE refresh."""
     while True:
         await run_in_thread(_run_safe, "arena_snapshot", task_arena_snapshot)
+        await run_in_thread(_run_safe, "state_cleanup", task_state_cleanup)
+        await run_in_thread(_run_safe, "db_maintenance", task_db_maintenance)
+        await run_in_thread(_run_safe, "gdelt_refresh", task_gdelt_refresh)
+        await run_in_thread(_run_safe, "ie_spending_refresh", task_ie_spending_refresh)
         await asyncio.sleep(21600)
 
 
@@ -684,6 +917,14 @@ async def tick_scheduled():
         # Daily summary at 22:xx UTC
         if now.hour == 22:
             await run_in_thread(_run_safe, "daily_summary", task_daily_discord_summary)
+
+        # Daily election snapshot at 6:xx UTC
+        if now.hour == 6:
+            await run_in_thread(_run_safe, "election_snapshot", task_election_snapshot)
+
+        # Weekly election PDF report: Monday 6:xx UTC
+        if now.weekday() == 0 and now.hour == 6:
+            await run_in_thread(_run_safe, "election_report", task_election_weekly_report)
 
         # Weekly recap: Sunday 23:xx UTC
         if now.weekday() == 6 and now.hour == 23:
@@ -702,6 +943,7 @@ async def main():
     # Stagger starts to avoid thundering herd
     tasks = [
         asyncio.create_task(tick_30s()),
+        asyncio.create_task(_delayed_start(3, tick_1min)),
         asyncio.create_task(_delayed_start(5, tick_5min)),
         asyncio.create_task(_delayed_start(15, tick_30min)),
         asyncio.create_task(_delayed_start(60, tick_6h)),
@@ -719,3 +961,28 @@ async def _delayed_start(delay_s: int, coro_fn):
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+def task_daily_portfolio_telegram():
+    """Send daily paper portfolio report to Telegram (tree format)."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if _state.get("portfolio_report_sent") == today:
+        return
+    
+    try:
+        from scripts.daily_portfolio_report import get_portfolio_summary, format_report, send_telegram
+        
+        data = get_portfolio_summary()
+        if data["cum_resolved"] == 0:
+            return
+        
+        report = format_report(data)
+        success = send_telegram(report)
+        
+        if success:
+            _state["portfolio_report_sent"] = today
+            logger.info("Daily portfolio report sent to Telegram")
+        else:
+            logger.warning("Portfolio report send failed - saved to pending/")
+    except Exception as e:
+        logger.exception(f"Portfolio report failed: {e}")

@@ -67,7 +67,7 @@ def meta_label_score(side, entry_price, confidence, edge_pct, archetype):
     
     ARCHETYPES = ["weather", "entertainment", "geopolitical", "election", "price_above",
                   "sports_winner", "sports_single_game", "social_count", "deadline_binary",
-                  "ai_model", "other"]
+                  "ai_model", "options", "other"]
     
     arch = (archetype or "other").lower()
     arch_idx = next((i for i, a in enumerate(ARCHETYPES) if a in arch), len(ARCHETYPES) - 1)
@@ -119,6 +119,7 @@ CORRELATION_GROUPS = {
     "financial_price": "finance",
     "entertainment": "entertainment", "ai_model": "culture",
     "social_count": "social_count", "weather": "weather",
+    "options": "options",
     "parlay": "other", "other": "other",
 }
 
@@ -401,7 +402,7 @@ ARCHETYPE_MIN_BET = {
 MAX_RESOLUTION_DAYS = 14  # Reject markets resolving >14 days out — capital drag
 
 # Archetype filters — data-driven from resolved trades
-ARCHETYPE_BLOCKLIST = {"sports_winner", "deadline_binary", "election", "social_count"}  # 0% WR. price_above removed — now has crypto_price_signal with VPS data
+ARCHETYPE_BLOCKLIST = {"sports_winner", "election"}  # K8/K9 killed. deadline_binary + social_count removed — K11 price gate handles deadline, social_count has 87.5% shadow WR
 ARCHETYPE_BOOST = {"sports_single_game": 1.3, "social_count": 1.3}  # Proven +180% blended ROI
 MIN_NO_IMPLIED_PROB = 0.35  # Minimum implied NO probability (1 - entry_price for NO bets)
 MIN_EXPIRY_HOURS = 72  # Minimum 3 days to resolution for crypto/price markets
@@ -721,7 +722,7 @@ def evaluate_signal(signal: dict) -> dict:
     # ── META-LABELING GATE ──────────────────────────────────────────────
     meta_score = meta_label_score(side, market_price, confidence, edge, early_archetype or "other")
     # Exempt new strategies from meta gate until they have 20+ trades of their own data
-    META_EXEMPT_STRATEGIES = {"crypto_price", "cross_platform_edge"}
+    META_EXEMPT_STRATEGIES = {"crypto_price", "cross_platform_edge", "weather"}
     if meta_score is not None and meta_score < 0.40 and strategy not in META_EXEMPT_STRATEGIES:
         logger.info("META GATE: Blocking {} — P(profit)={:.0%} (arch={}, side={}, disagree={:.0%})",
                     market_title[:40] if market_title else "?", meta_score, early_archetype or "other", side, disagreement)
@@ -1158,6 +1159,17 @@ def open_position(signal: dict) -> dict:
                 entry_forecast_json = json.dumps(detail)
             except (TypeError, ValueError):
                 pass
+    elif archetype == "options":
+        ip = signal.get("implied_prob")
+        if ip is not None:
+            try:
+                entry_forecast_json = json.dumps({
+                    "type": "options_implied", "implied_prob": ip,
+                    "z_score": signal.get("z_score"),
+                    "trailing_obs": signal.get("trailing_obs"),
+                })
+            except (TypeError, ValueError):
+                pass
     conn.execute("""INSERT INTO paper_positions
         (opened_at, market_id, market_title, platform, side, entry_price, bet_size, potential_payout, confidence, edge_pct, status, archetype, strategy, market_slug, kelly_fraction, conviction_mult, entry_forecast_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)""",
@@ -1430,9 +1442,14 @@ def process_signals(signals: list) -> dict:
         else:
             skipped += 1
             entry["action"] = "skipped"
-        
+
         results.append(entry)
-    
+        logger.info(
+            "process_signals: {} side={} edge={:.1f}% bet=${:.0f} → {} ({})",
+            market_title[:50], sig.get("side", "?"), (entry["edge"] or 0) * 100,
+            entry["bet_size"] or 0, entry["action"], (entry["reason"] or "")[:80],
+        )
+
     status = get_portfolio_status()
     
     return {
