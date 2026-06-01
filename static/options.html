@@ -120,7 +120,7 @@
     <div class="header-row">
       <h1>📈 Options-Implied Signal</h1>
       <span class="tag">N(d2) vs Polymarket</span>
-      <span class="tag" style="background:rgba(16,185,129,0.15);color:var(--green)">NVDA · META · MSFT · AAPL · AMZN</span>
+      <span class="tag" id="ticker-tag" style="background:rgba(16,185,129,0.15);color:var(--green)">Auto-discovered</span>
       <span class="tag" style="background:rgba(139,92,246,0.15);color:var(--purple)">Display-Only</span>
     </div>
     <div class="subtitle">Alpaca OPRA options-implied probabilities vs Polymarket close-ladder prices — auto-refreshes every 60s</div>
@@ -230,6 +230,13 @@ async function load() {
     renderRows(d.rows);
     if (d.shadow) renderShadowTrades(d.shadow);
     if (d.accuracy) renderAccuracy(d.accuracy);
+    
+    // Update ticker tag with discovered count
+    const tkTag = document.getElementById('ticker-tag');
+    if (tkTag && d.by_ticker) {
+      const tks = Object.keys(d.by_ticker).join(' · ');
+      tkTag.textContent = tks || 'Auto-discovered';
+    }
   } catch (e) {
     console.error('Dashboard load failed:', e);
     document.getElementById('api-status').innerHTML =
