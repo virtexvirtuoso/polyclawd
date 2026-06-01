@@ -23,6 +23,7 @@ import logging
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1247,7 +1248,7 @@ async def hf_directional_signal(asset: str):
     async def _signal():
         from services.virtuoso_bridge import get_directional_signal
         from dataclasses import asdict
-        sig = get_directional_signal(asset)
+        sig = await run_in_threadpool(get_directional_signal, asset)
         return asdict(sig)
     
     return await handle_edge_request("hf-signal", _signal())
@@ -1258,7 +1259,7 @@ async def hf_all_signals():
     """Get directional signals for all supported assets (BTC, ETH)."""
     async def _signals():
         from services.virtuoso_bridge import scan_all_assets
-        return scan_all_assets()
+        return await run_in_threadpool(scan_all_assets)
     
     return await handle_edge_request("hf-signals", _signals())
 
@@ -1272,7 +1273,7 @@ async def hf_opportunities():
     """
     async def _opps():
         from services.virtuoso_bridge import match_signals_to_markets
-        return match_signals_to_markets()
+        return await run_in_threadpool(match_signals_to_markets)
     
     return await handle_edge_request("hf-opportunities", _opps())
 
