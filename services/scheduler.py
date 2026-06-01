@@ -522,6 +522,32 @@ def task_source_health_touch():
         touch_source(src)
 
 
+def task_options_resolution():
+    """Resolve expired options-implied markets against Polymarket (every 30min)."""
+    try:
+        from signals.options_resolver import scan_resolved_options_markets
+        result = scan_resolved_options_markets()
+        if result.get("resolved", 0) > 0 or result.get("forecast_logged", 0) > 0:
+            logger.info(
+                "Options resolution: %d resolved, %d logged",
+                result["resolved"], result["forecast_logged"],
+            )
+    except Exception as e:
+        logger.exception("Options resolution failed: %s", e)
+
+
+def task_credit_refresh():
+    """Refresh Odds API credit balance from /v4/sports endpoint (free call)."""
+    try:
+        from odds.the_odds_api import refresh_credit_balance
+        status = refresh_credit_balance()
+        remaining = status.get("remaining")
+        if remaining is not None:
+            logger.info("Odds API credits: %s remaining", remaining)
+    except Exception as e:
+        logger.debug("Credit refresh skipped: %s", e)
+
+
 def task_edge_alerts():
     """Smart edge alerts to Discord — dedup, cooldown, liquidity filter."""
     from signals.discord_alerts import alert_edge_batch
@@ -864,7 +890,9 @@ async def tick_30min():
     while True:
         await run_in_thread(_run_safe, "signal_scan", task_signal_scan)
         await run_in_thread(_run_safe, "options_scan", task_options_scan)
+        await run_in_thread(_run_safe, "options_resolution", task_options_resolution)
         await run_in_thread(_run_safe, "whale_wall_alerts", task_whale_wall_alerts)
+        await run_in_thread(_run_safe, "credit_refresh", task_credit_refresh)
         await run_in_thread(_run_safe, "source_health_touch", task_source_health_touch)
         await run_in_thread(_run_safe, "edge_alerts", task_edge_alerts)
         logger.info("30-min tick complete")
