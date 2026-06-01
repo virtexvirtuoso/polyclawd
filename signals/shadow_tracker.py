@@ -131,6 +131,13 @@ def _init_tables(conn: sqlite3.Connection):
     except sqlite3.OperationalError:
         pass  # Column already exists
 
+    # Migration: add strategy column for source-specific queries
+    try:
+        conn.execute("ALTER TABLE shadow_trades ADD COLUMN strategy TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
 
 def _migrate_legacy_json(conn: sqlite3.Connection):
     """Import trades from legacy JSON file into SQLite."""
@@ -335,8 +342,8 @@ def log_shadow_trade(signal: Dict) -> bool:
             INSERT INTO shadow_trades
             (timestamp, market_id, market, category, category_tier, platform,
              side, entry_price, confidence, confirmations, days_to_close,
-             volume, reasoning, snapshot_date, archetype)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             volume, reasoning, snapshot_date, archetype, strategy)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             datetime.now(timezone.utc).isoformat(),
             market_id,
@@ -353,6 +360,7 @@ def log_shadow_trade(signal: Dict) -> bool:
             signal.get("reasoning", "")[:500],
             today,
             signal.get("archetype"),
+            signal.get("strategy", None),
         ))
         conn.commit()
         conn.close()

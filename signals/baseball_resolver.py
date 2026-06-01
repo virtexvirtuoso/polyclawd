@@ -72,6 +72,13 @@ def _init_tables(conn: sqlite3.Connection):
     """)
     conn.commit()
 
+    # Migration: ensure strategy column exists on shadow_trades
+    try:
+        conn.execute("ALTER TABLE shadow_trades ADD COLUMN strategy TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
 
 # ─── Polymarket API Calls ────────────────────────────────────────────
 
@@ -177,15 +184,19 @@ def _check_clob_resolution(condition_id: str) -> Optional[str]:
 
 def _get_unresolved_baseball_trades(conn: sqlite3.Connection) -> List[Dict]:
     """Get all unresolved shadow trades with strategy=baseball_moneyline."""
-    rows = conn.execute("""
-        SELECT id, market_id, side, entry_price, market, category, reasoning
-        FROM shadow_trades
-        WHERE resolved = 0
-          AND (strategy = 'baseball_moneyline'
-               OR (category = 'baseball' AND side IN ('YES','NO')))
-        ORDER BY timestamp ASC
-    """).fetchall()
-    return [dict(r) for r in rows]
+    try:
+        rows = conn.execute("""
+            SELECT id, market_id, side, entry_price, market, category, reasoning
+            FROM shadow_trades
+            WHERE resolved = 0
+              AND (strategy = 'baseball_moneyline'
+                   OR (category = 'baseball' AND side IN ('YES','NO')))
+            ORDER BY timestamp ASC
+        """).fetchall()
+        return [dict(r) for r in rows]
+    except sqlite3.OperationalError:
+        # shadow_trades table may not exist yet (first run, fresh DB)
+        return []
 
 
 # ─── Resolution Logic ────────────────────────────────────────────────

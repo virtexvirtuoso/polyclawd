@@ -376,13 +376,7 @@ async def get_soccer_edge_summary() -> Dict:
 
 async def get_baseball_games_with_odds() -> List[Dict]:
     """
-    Fetch today's MLB game odds from The Odds API.
-    Returns the raw Odds API event list (one dict per game):
-      [{"id": ..., "home_team": "...", "away_team": "...",
-        "commence_time": "2026-06-01T18:10:00Z",
-        "bookmakers": [{"key": "draftkings", "markets": [{"key": "h2h",
-          "outcomes": [{"name": "Cubs", "price": -130}, ...]}]}]}, ...]
-
+    Fetch today's MLB game odds (h2h only) from The Odds API.
     Returns [] if ODDS_API_KEY is not set or no games today.
     """
     api_key = _get_api_key()
@@ -397,6 +391,42 @@ async def get_baseball_games_with_odds() -> List[Dict]:
         )
 
     return raw if isinstance(raw, list) else []
+
+
+async def get_baseball_games_with_all_markets() -> List[Dict]:
+    """
+    Fetch today's MLB game odds including h2h, spreads, and totals.
+    Same API call but with all three market types.
+    Returns [] if ODDS_API_KEY is not set or no games today.
+    """
+    import urllib.request  # must precede urllib.parse.urlencode call
+    api_key = _get_api_key()
+    if not api_key:
+        logger.warning("the_odds_api: ODDS_API_KEY not set — returning empty baseball data")
+        return []
+
+    sport_key = BASEBALL_SPORT_KEYS["mlb"]
+    params = {
+        "apiKey": api_key,
+        "regions": "us,uk,eu",
+        "markets": "h2h,spreads,totals",
+        "oddsFormat": "american",
+    }
+    url = f"{ODDS_API_BASE}/sports/{sport_key}/odds?{urllib.parse.urlencode(params)}"
+
+    if HAS_RESILIENT and _resilient_urlopen is not None:
+        data = _resilient_urlopen(SOURCE_NAME, url, timeout=10)
+        _count_call()
+        return data if isinstance(data, list) else []
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            _track_credits_from_response(resp)
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        logger.warning(f"the_odds_api baseball all-markets fetch failed: {e}")
+        return []
 
 
 def health_probe(timeout: int = 5) -> Tuple[bool, str]:

@@ -31,10 +31,18 @@ import requests
 from loguru import logger
 
 try:
-    from .the_odds_api import get_baseball_games_with_odds, _american_to_implied_prob
+    from .the_odds_api import (
+        get_baseball_games_with_odds,
+        get_baseball_games_with_all_markets,
+        _american_to_implied_prob,
+    )
     from .client import devig_multiway
 except ImportError:
-    from the_odds_api import get_baseball_games_with_odds, _american_to_implied_prob
+    from the_odds_api import (
+        get_baseball_games_with_odds,
+        get_baseball_games_with_all_markets,
+        _american_to_implied_prob,
+    )
     from client import devig_multiway
 
 # Shadow tracker (soft import — degrade gracefully)
@@ -216,13 +224,14 @@ class MLBEdge:
     home_team: str
     away_team: str
     bet_team: str         # team this edge is for
-    market_type: str      # "moneyline"
+    market_type: str      # "moneyline", "spread", or "total"
     odds_api_prob: float  # devigged bookmaker probability (0-1)
     american_odds: int
     polymarket_price: float  # Polymarket YES price (0-1)
     edge_pct: float       # odds_api_prob - polymarket_price (signed)
     direction: str        # "BUY" or "SELL"
     commence_time: str
+    point_value: Optional[float] = None  # spread or total point, e.g. -1.5 or 8.5
     poly_market_id: Optional[str] = None
     poly_event_id: Optional[str] = None
 
@@ -323,6 +332,93 @@ def _extract_moneyline_prices(
     return None
 
 
+def _extract_spread_prices(
+    event: Dict, home_team: str, away_team: str, target_point: float
+) -> Optional[Tuple[float, float, str]]:
+    """
+    Extract (favored_price, underdog_price, market_id) for a specific spread point.
+    Matches Polymarket markets like "Spread: Team (-1.5)" or "Spread: Team (+1.5)".
+    target_point from Odds API (positive = underdog, negative = favorite).
+    Returns None if no matching spread market found.
+    """
+    abs_point = abs(target_point)
+    for market in event.get("markets", []):
+        q = market.get("question", "")
+        if "Spread:" not in q:
+            continue
+        # Match point value in question
+        if str(int(abs_point)) not in q:
+            continue
+        # Check if team name appears
+        if _team_in_title(home_team, q) or _team_in_title(away_team, q):
+            prices_raw = market.get("outcomePrices", "[]")
+            if isinstance(prices_raw, str):
+                try:
+                    prices = json.loads(prices_raw)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            else:
+                prices = prices_raw
+            if len(prices) < 2:
+                continue
+            try:
+                price0 = float(prices[0])
+                price1 = float(prices[1])
+            except (ValueError, TypeError):
+                continue
+            if price0 <= 0 or price1 <= 0:
+                continue
+            # outcomePrices[0] = "YES" = the named team covers the spread
+            first_team_in_question = q.replace("Spread:", "").split("(")[0].strip()
+            # If target_point is negative, the Odds API team is favored
+            if target_point < 0:
+                # Favored team is the one with negative point
+                favored_price = price0 if _team_in_title(away_team, first_team_in_question) else price1
+                underdog_price = price1 if favored_price == price0 else price0
+            else:
+                underdog_price = price0 if _team_in_title(away_team, first_team_in_question) else price1
+                favored_price = price1 if underdog_price == price0 else price0
+            return favored_price, underdog_price, market.get("id", "")
+    return None
+
+
+def _extract_total_prices(
+    event: Dict, target_point: float
+) -> Optional[Tuple[float, float, str]]:
+    """
+    Extract (over_price, under_price, market_id) for a specific total point.
+    Matches Polymarket markets like "Team A vs. Team B: O/U 8.5".
+    """
+    abs_point = abs(target_point)
+    point_str = str(int(abs_point)) if abs_point == int(abs_point) else str(abs_point)
+    for market in event.get("markets", []):
+        q = market.get("question", "")
+        if "/U " not in q or "O/" not in q:
+            continue
+        if point_str not in q:
+            continue
+        prices_raw = market.get("outcomePrices", "[]")
+        if isinstance(prices_raw, str):
+            try:
+                prices = json.loads(prices_raw)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        else:
+            prices = prices_raw
+        if len(prices) < 2:
+            continue
+        try:
+            price0 = float(prices[0])
+            price1 = float(prices[1])
+        except (ValueError, TypeError):
+            continue
+        if price0 <= 0 or price1 <= 0:
+            continue
+        # outcomePrices[0] = "YES" = Over for total markets
+        return price0, price1, market.get("id", "")
+    return None
+
+
 def _devig_two_way(odds_a: int, odds_b: int) -> Tuple[float, float]:
     """
     Remove bookmaker vig from a two-outcome market.
@@ -356,25 +452,82 @@ def _best_odds_per_team(game: Dict) -> Dict[str, int]:
     return best
 
 
+def _best_spreads(game: Dict) -> Dict[str, Tuple[int, float]]:
+    """
+    Find best available spread odds across bookmakers.
+    Returns {team: (american_odds, point)}.
+    Spread markets have outcomes like:
+      {"name": "Team A", "price": -110, "point": 1.5}
+      {"name": "Team B", "price": -110, "point": -1.5}
+    """
+    best: Dict[str, Tuple[int, float]] = {}
+    for bookmaker in game.get("bookmakers", []):
+        for market in bookmaker.get("markets", []):
+            if market.get("key") != "spreads":
+                continue
+            for outcome in market.get("outcomes", []):
+                name = outcome.get("name")
+                price = outcome.get("price")
+                point = outcome.get("point")
+                if name is None or price is None or point is None:
+                    continue
+                price = int(price)
+                point = float(point)
+                existing = best.get(name)
+                if existing is None or _american_to_implied_prob(price) < _american_to_implied_prob(existing[0]):
+                    best[name] = (price, point)
+    return best
+
+
+def _best_totals(game: Dict) -> Dict[float, Tuple[int, int]]:
+    """
+    Find best available total (over/under) odds across bookmakers.
+    Returns {point: (over_odds, under_odds)} using lowest implied prob per side.
+    Total markets have outcomes like:
+      {"name": "Over", "price": -105, "point": 8.0}
+      {"name": "Under", "price": -115, "point": 8.0}
+    """
+    best: Dict[float, Dict[str, int]] = {}
+    for bookmaker in game.get("bookmakers", []):
+        for market in bookmaker.get("markets", []):
+            if market.get("key") != "totals":
+                continue
+            over_odds, under_odds, seen_point = None, None, None
+            for outcome in market.get("outcomes", []):
+                name = outcome.get("name", "")
+                price = outcome.get("price")
+                point = outcome.get("point")
+                if price is None or point is None:
+                    continue
+                price = int(price)
+                point = float(point)
+                seen_point = point
+                if name.lower() == "over":
+                    if over_odds is None or _american_to_implied_prob(price) < _american_to_implied_prob(over_odds):
+                        over_odds = price
+                elif name.lower() == "under":
+                    if under_odds is None or _american_to_implied_prob(price) < _american_to_implied_prob(under_odds):
+                        under_odds = price
+            if seen_point is not None and over_odds is not None and under_odds is not None:
+                existing = best.get(seen_point)
+                if existing is None:
+                    best[seen_point] = (over_odds, under_odds)
+    return best
+
+
 async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdge]:
     """
-    Compute edges between devigged bookmaker moneylines and Polymarket game prices.
+    Compute edges between devigged bookmaker odds and Polymarket game prices
+    for moneylines, spreads, and totals.
 
-    Flow:
-      1. Fetch Odds API MLB game list (home_team, away_team, bookmakers)
-      2. Fetch Polymarket baseball events (tag_slug=baseball)
-      3. Match each game to its Polymarket event by team name
-      4. Extract moneyline prices from both sources
-      5. Devig bookmaker odds, compare to Polymarket price
-      6. Return signals where |edge| >= min_edge, sorted by |edge| desc
-
+    Returns signals where |edge| >= min_edge, sorted by |edge| desc.
     Returns [] if ODDS_API_KEY not set or no games today.
     """
     edges: List[MLBEdge] = []
 
-    # Parallel fetch
+    # Parallel fetch — use all-markets endpoint for spreads + totals
     odds_games, poly_events = await asyncio.gather(
-        get_baseball_games_with_odds(),
+        get_baseball_games_with_all_markets(),
         get_polymarket_baseball_events(),
     )
 
@@ -389,7 +542,7 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
     )
 
     for game in odds_games:
-        game_id_field = game.get("id", "")
+        game_id = game.get("id", "")
         home_team = game.get("home_team", "")
         away_team = game.get("away_team", "")
         commence_time = game.get("commence_time", "")
@@ -397,87 +550,143 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
         if not home_team or not away_team:
             continue
 
-        # ⏰ Stale game guard: skip games starting in <30min or already started
         if _is_stale_game(commence_time):
-            logger.debug(f"baseball_edge: stale game {away_team} @ {home_team} — {commence_time}")
             continue
 
         event = _find_matching_event(home_team, away_team, game_events)
         if not event:
-            logger.debug(f"baseball_edge: no Polymarket match for {away_team} @ {home_team}")
             continue
 
+        # ── MONEYLINES ──────────────────────────────────────────────
         team_odds = _best_odds_per_team(game)
         home_odds = team_odds.get(home_team)
         away_odds = team_odds.get(away_team)
-        if not home_odds or not away_odds:
-            continue
-
-        home_true_prob, away_true_prob = _devig_two_way(home_odds, away_odds)
-
-        prices = _extract_moneyline_prices(event, home_team, away_team)
-        if not prices:
-            logger.debug(
-                f"baseball_edge: no moneyline market for '{event.get('title')}'"
-            )
-            continue
-
-        home_poly_price, away_poly_price, market_id = prices
-
-        for team, true_prob, poly_price, american_odds in [
-            (home_team, home_true_prob, home_poly_price, home_odds),
-            (away_team, away_true_prob, away_poly_price, away_odds),
-        ]:
-            edge = true_prob - poly_price
-
-            # 📊 Line movement tracking
-            game_id = game.get("id", game_id_field)
-            mov = _update_line_movement(game_id, team, american_odds)
-            sharp_flag = ""
-            if mov["delta_3h"] is not None and abs(mov["delta_3h"]) >= 3:
-                sharp_flag = f" (line moved {mov['delta_3h']:+d} ticks = sharp {mov['direction']})"
-
-            if abs(edge) >= min_edge:
-                edges.append(MLBEdge(
-                    game_title=event.get("title", f"{away_team} vs. {home_team}"),
-                    home_team=home_team,
-                    away_team=away_team,
-                    bet_team=team,
-                    market_type="moneyline",
-                    odds_api_prob=true_prob,
-                    american_odds=american_odds,
-                    polymarket_price=poly_price,
-                    edge_pct=edge,
-                    direction="BUY" if edge > 0 else "SELL",
-                    commence_time=commence_time,
-                    poly_market_id=market_id,
-                    poly_event_id=event.get("id"),
-                ))
-
-            # 💾 Log all edges >= 3% to shadow tracker (collection phase)
-            if abs(edge) >= 0.03:
-                try:
-                    await _log_baseball_shadow(
-                        MLBEdge(
-                            game_title=event.get("title", f"{away_team} vs. {home_team}"),
-                            home_team=home_team,
-                            away_team=away_team,
-                            bet_team=team,
-                            market_type="moneyline",
-                            odds_api_prob=true_prob,
-                            american_odds=american_odds,
-                            polymarket_price=poly_price,
-                            edge_pct=edge,
+        if home_odds and away_odds:
+            home_true_prob, away_true_prob = _devig_two_way(home_odds, away_odds)
+            prices = _extract_moneyline_prices(event, home_team, away_team)
+            if prices:
+                home_poly_price, away_poly_price, ml_market_id = prices
+                for team, true_prob, poly_price, american_odds in [
+                    (home_team, home_true_prob, home_poly_price, home_odds),
+                    (away_team, away_true_prob, away_poly_price, away_odds),
+                ]:
+                    edge = true_prob - poly_price
+                    if abs(edge) >= min_edge:
+                        edges.append(MLBEdge(
+                            game_title=event.get("title", ""),
+                            home_team=home_team, away_team=away_team,
+                            bet_team=team, market_type="moneyline",
+                            odds_api_prob=true_prob, american_odds=american_odds,
+                            polymarket_price=poly_price, edge_pct=edge,
                             direction="BUY" if edge > 0 else "SELL",
                             commence_time=commence_time,
-                            poly_market_id=market_id,
-                            poly_event_id=event.get("id"),
-                        ),
-                        edge,
-                        game_id,
-                    )
-                except Exception:
-                    pass
+                            poly_market_id=ml_market_id, poly_event_id=event.get("id"),
+                        ))
+                    if abs(edge) >= 0.03:
+                        await _log_baseball_shadow(MLBEdge(
+                            game_title=event.get("title", ""),
+                            home_team=home_team, away_team=away_team,
+                            bet_team=team, market_type="moneyline",
+                            odds_api_prob=true_prob, american_odds=american_odds,
+                            polymarket_price=poly_price, edge_pct=edge,
+                            direction="BUY" if edge > 0 else "SELL",
+                            commence_time=commence_time,
+                            poly_market_id=ml_market_id, poly_event_id=event.get("id"),
+                        ), edge, game_id)
+
+        # ── SPREADS ────────────────────────────────────────────────
+        spreads = _best_spreads(game)
+        if spreads:
+            # Find the most liquid spread (smallest absolute point)
+            # Odds API returns multiple spreads per game
+            spread_teams = list(spreads.keys())
+            if len(spread_teams) >= 2:
+                # Typically team A has +1.5 (underdog) and team B has -1.5 (favored)
+                for team_a in spread_teams:
+                    for team_b in spread_teams:
+                        if team_a == team_b:
+                            continue
+                        odds_a, point_a = spreads[team_a]
+                        odds_b, point_b = spreads[team_b]
+                        if abs(point_a) != abs(point_b):
+                            continue
+                        true_prob_a, true_prob_b = _devig_two_way(odds_a, odds_b)
+                        spread_point = point_a
+                        prices = _extract_spread_prices(event, home_team, away_team, spread_point)
+                        if not prices:
+                            continue
+                        favored_price, underdog_price, sp_market_id = prices
+
+                        # Compare each side
+                        for team, true_prob, poly_price, american_odds in [
+                            (team_a, true_prob_a, favored_price if spread_point < 0 else underdog_price, odds_a),
+                            (team_b, true_prob_b, underdog_price if spread_point < 0 else favored_price, odds_b),
+                        ]:
+                            edge = true_prob - poly_price
+                            if abs(edge) >= min_edge:
+                                edges.append(MLBEdge(
+                                    game_title=event.get("title", ""),
+                                    home_team=home_team, away_team=away_team,
+                                    bet_team=team, market_type="spread",
+                                    odds_api_prob=true_prob, american_odds=american_odds,
+                                    polymarket_price=poly_price, edge_pct=edge,
+                                    direction="BUY" if edge > 0 else "SELL",
+                                    commence_time=commence_time,
+                                    point_value=spread_point,
+                                    poly_market_id=sp_market_id, poly_event_id=event.get("id"),
+                                ))
+                            if abs(edge) >= 0.03:
+                                await _log_baseball_shadow(MLBEdge(
+                                    game_title=event.get("title", ""),
+                                    home_team=home_team, away_team=away_team,
+                                    bet_team=team, market_type="spread",
+                                    odds_api_prob=true_prob, american_odds=american_odds,
+                                    polymarket_price=poly_price, edge_pct=edge,
+                                    direction="BUY" if edge > 0 else "SELL",
+                                    commence_time=commence_time,
+                                    point_value=spread_point,
+                                    poly_market_id=sp_market_id, poly_event_id=event.get("id"),
+                                ), edge, game_id)
+
+        # ── TOTALS ─────────────────────────────────────────────────
+        totals = _best_totals(game)
+        if totals:
+            for total_point, (over_odds, under_odds) in totals.items():
+                true_prob_over, true_prob_under = _devig_two_way(over_odds, under_odds)
+                prices = _extract_total_prices(event, total_point)
+                if not prices:
+                    continue
+                over_poly_price, under_poly_price, tot_market_id = prices
+
+                for label, true_prob, poly_price, american_odds in [
+                    ("Over", true_prob_over, over_poly_price, over_odds),
+                    ("Under", true_prob_under, under_poly_price, under_odds),
+                ]:
+                    edge = true_prob - poly_price
+                    if abs(edge) >= min_edge:
+                        edges.append(MLBEdge(
+                            game_title=event.get("title", ""),
+                            home_team=home_team, away_team=away_team,
+                            bet_team=label, market_type="total",
+                            odds_api_prob=true_prob, american_odds=american_odds,
+                            polymarket_price=poly_price, edge_pct=edge,
+                            direction="BUY" if edge > 0 else "SELL",
+                            commence_time=commence_time,
+                            point_value=total_point,
+                            poly_market_id=tot_market_id, poly_event_id=event.get("id"),
+                        ))
+                    if abs(edge) >= 0.03:
+                        await _log_baseball_shadow(MLBEdge(
+                            game_title=event.get("title", ""),
+                            home_team=home_team, away_team=away_team,
+                            bet_team=label, market_type="total",
+                            odds_api_prob=true_prob, american_odds=american_odds,
+                            polymarket_price=poly_price, edge_pct=edge,
+                            direction="BUY" if edge > 0 else "SELL",
+                            commence_time=commence_time,
+                            point_value=total_point,
+                            poly_market_id=tot_market_id, poly_event_id=event.get("id"),
+                        ), edge, game_id)
 
     edges.sort(key=lambda e: abs(e.edge_pct), reverse=True)
     return edges
@@ -517,6 +726,7 @@ async def get_baseball_edge_summary() -> Dict:
                 "game": e.game_title,
                 "team": e.bet_team,
                 "market_type": e.market_type,
+                "point_value": e.point_value,
                 "odds_api_prob": round(e.odds_api_prob * 100, 1),
                 "american_odds": f"{e.american_odds:+d}",
                 "polymarket_price": round(e.polymarket_price * 100, 1),
@@ -528,6 +738,11 @@ async def get_baseball_edge_summary() -> Dict:
             }
             for e in edges
         ],
+        "market_type_breakdown": {
+            "moneyline": sum(1 for e in edges if e.market_type == "moneyline"),
+            "spread": sum(1 for e in edges if e.market_type == "spread"),
+            "total": sum(1 for e in edges if e.market_type == "total"),
+        },
         "top_opportunities": [
             {
                 "game": e.game_title,
