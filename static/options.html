@@ -331,7 +331,7 @@ function renderRows(rows) {
   if (!rows || !rows.length) { el.innerHTML = '<div class="empty-state">No matched rows yet</div>'; if (cntEl) cntEl.textContent = ''; return; }
   const shown = rows.slice(0, 100);
   if (cntEl) cntEl.textContent = `(showing ${shown.length} of ${rows.length})`;
-  let html = '<table><tr><th>Ticker</th><th>Expiry</th><th>Strike</th><th>Type</th><th>Poly</th><th>Implied</th><th>Spread</th><th>Underlying</th><th>IV</th><th>Liq</th><th>Vol 24h</th></tr>';
+  let html = '<table><tr><th>Ticker</th><th>Expiry</th><th>Strike</th><th>Type</th><th>Poly</th><th>Implied</th><th>Spread</th><th>Underlying</th><th>IV</th><th>Liq</th><th>Vol 24h</th><th>Book Spr</th><th>Tradeable</th></tr>';
   for (const r of shown) {
     html += `<tr>
       <td style="font-weight:600">${r.ticker || '—'}</td>
@@ -345,6 +345,8 @@ function renderRows(rows) {
       <td>${r.iv != null ? (Number(r.iv) * 100).toFixed(1) + '%' : '—'}</td>
       <td style="color:var(--dim)">${r.poly_liquidity != null ? '$' + Number(r.poly_liquidity).toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'}</td>
       <td style="color:var(--dim)">${r.poly_vol_24h != null ? '$' + Number(r.poly_vol_24h).toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'}</td>
+      <td>${r.book_spread_pp != null ? r.book_spread_pp + '¢' : '—'}</td>
+      <td>${(r.tradeable === 1 || r.tradeable === true) ? '<span style="color:var(--green)">✓</span>' : ((r.tradeable === 0 || r.tradeable === false) ? '<span style="color:var(--dim)">✗</span>' : '<span style="color:var(--dim)">—</span>')}</td>
     </tr>`;
   }
   el.innerHTML = html + '</table>';

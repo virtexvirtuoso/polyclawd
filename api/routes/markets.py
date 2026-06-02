@@ -796,7 +796,7 @@ async def get_baseball_edge(min_edge: float = Query(default=0.05, ge=0, le=1)):
         if odds_path not in sys.path:
             sys.path.insert(0, odds_path)
         from baseball_edge import get_baseball_edge_summary
-        return await get_baseball_edge_summary()
+        return await get_baseball_edge_summary(min_edge)
 
     return await handle_edge_request("baseball", _get_baseball())
 

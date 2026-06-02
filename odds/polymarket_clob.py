@@ -172,16 +172,22 @@ def get_price_history(
         if not data or "history" not in data:
             return []
         
-        return [
-            {
-                "timestamp": h.get("t"),
-                "open": float(h.get("o", 0)),
-                "high": float(h.get("h", 0)),
-                "low": float(h.get("l", 0)),
-                "close": float(h.get("c", 0)),
-            }
-            for h in data["history"]
-        ]
+        # Polymarket /prices-history returns {t, p} price points (NOT OHLC).
+        # Map price -> close (and o/h/l) so callers get a usable series;
+        # fall back to OHLC keys if a variant ever returns them.
+        out = []
+        for h in data["history"]:
+            p = h.get("p")
+            if p is not None:
+                price = float(p)
+                out.append({"timestamp": h.get("t"), "open": price, "high": price,
+                            "low": price, "close": price, "price": price})
+            else:
+                c = float(h.get("c", 0))
+                out.append({"timestamp": h.get("t"), "open": float(h.get("o", 0)),
+                            "high": float(h.get("h", 0)), "low": float(h.get("l", 0)),
+                            "close": c, "price": c})
+        return out
         
     except Exception as e:
         print(f"Price history error: {e}")

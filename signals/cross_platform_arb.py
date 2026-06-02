@@ -427,7 +427,44 @@ def find_arb_opportunities(
             seen_pairs.add(pair_key)
             unique.append(opp)
     
-    return unique[:MAX_RESULTS]
+    result = unique[:MAX_RESULTS]
+
+    # --- Spread-after-slippage variant (tailored; arb is a platform SPREAD, not
+    # a model-prob edge). Recompute the spread using the executable price of the
+    # Polymarket leg: lift the ASK when buying Poly, hit the BID when selling Poly.
+    # A displayed spread can vanish once the Poly leg is priced at the book.
+    try:
+        from odds import poly_executable_edge as pee
+        from odds import polymarket_clob as clob
+    except Exception:
+        pee = clob = None
+    if pee is not None and clob is not None:
+        for opp in result:
+            cid = opp.get("poly_id")
+            toks = pee.condition_id_to_token_ids(cid) if cid else None
+            if not toks:
+                continue
+            try:
+                book = clob.get_orderbook(toks[0])  # YES token
+            except Exception:
+                book = None
+            if not book or not book.bids or not book.asks:
+                continue
+            best_ask = book.asks[0].price
+            best_bid = book.bids[0].price
+            if opp["buy_platform"] == "polymarket":
+                # buy Poly YES @ ask, sell Kalshi @ its YES
+                realized = (opp["sell_price"] / 100.0 - best_ask) * 100.0
+                opp["poly_exec_price"] = round(best_ask * 100, 1)
+            else:
+                # sell Poly YES @ bid, buy Kalshi @ its YES
+                realized = (best_bid - opp["buy_price"] / 100.0) * 100.0
+                opp["poly_exec_price"] = round(best_bid * 100, 1)
+            opp["book_spread_pp"] = round(book.spread * 100, 1)
+            opp["realized_spread_pp"] = round(realized, 1)
+            opp["tradeable"] = bool(realized >= min_spread)
+
+    return result
 
 
 def scan_cross_platform_arb() -> Dict:

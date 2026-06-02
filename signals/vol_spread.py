@@ -201,9 +201,10 @@ def get_iv_rv_status() -> Dict[str, Dict]:
         conn.row_factory = sqlite3.Row
         for tk in tickers:
             # Get latest IV for this ticker
+            # Use ATM IV — pick strike closest to underlying with reasonable IV
             row = conn.execute(
-                "SELECT iv FROM options_implied WHERE ticker=? AND iv IS NOT NULL ORDER BY date DESC LIMIT 1",
-                (tk,),
+                "SELECT iv, strike, underlying FROM options_implied WHERE ticker=? AND iv IS NOT NULL AND iv < 2.0 AND iv > 0.05 AND date=(SELECT MAX(date) FROM options_implied WHERE ticker=?) ORDER BY ABS(strike - underlying) ASC LIMIT 1",
+                (tk, tk),
             ).fetchone()
             current_iv = row["iv"] if row else None
             rv = fetch_realized_vol(tk)
@@ -211,7 +212,7 @@ def get_iv_rv_status() -> Dict[str, Dict]:
             results[tk] = {
                 "iv": round(current_iv, 4) if current_iv else None,
                 "rv": round(rv, 4) if rv else None,
-                "iv_rv_ratio": ratio,
+                "iv_rv_ratio": min(ratio, 5.0) if ratio else None,
                 "rv_n": _load_cache().get(tk, {}).get("n", 0) if rv else 0,
             }
         conn.close()

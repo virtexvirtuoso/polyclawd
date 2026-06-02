@@ -1118,6 +1118,40 @@ def scan_polymarket_weather() -> List[dict]:
 
     logger.info("Weather scan: %d signals from %d cities × %d dates (parallel)",
                 len(signals), len(active_cities), len(dates_to_check))
+
+    # --- Executable-edge enrichment (order-book reality check; additive) ---
+    # The edge above is vs the Gamma midpoint; the price you can actually take
+    # is the ask of the side token walked to size. Derive the side fair value as
+    # midpoint_side + edge (avoids the ambiguous fair_value field), then gate.
+    try:
+        from odds import poly_executable_edge as pee
+    except Exception:
+        pee = None
+    if pee is not None:
+        for sig in signals:
+            cid = sig.get("market_id")
+            side = sig.get("side")
+            mkt = sig.get("market_price")
+            if not cid or side not in ("YES", "NO") or mkt is None:
+                continue
+            midpoint_side = mkt if side == "YES" else (1.0 - mkt)
+            fair_side = midpoint_side + (sig.get("edge_pct", 0) or 0) / 100.0
+            try:
+                ex = pee.executable_edge(
+                    fair_side, side, condition_id=cid,
+                    outcome_index=0 if side == "YES" else 1, target_usd=100.0,
+                )
+            except Exception:
+                ex = {"available": False}
+            if ex.get("available"):
+                sig["executable_price"] = ex["executable_price"]
+                sig["executable_edge_pct"] = (round(ex["executable_edge"] * 100, 1)
+                                              if ex["executable_edge"] is not None else None)
+                sig["book_spread_pct"] = (round(ex["spread"] * 100, 1)
+                                          if ex["spread"] is not None else None)
+                sig["slippage_bps"] = ex["slippage_bps"]
+                sig["tradeable"] = ex["tradeable"]
+
     return signals
 
 

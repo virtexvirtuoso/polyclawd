@@ -944,6 +944,32 @@ def scan_polymarket_signals() -> List[Dict]:
             },
         })
 
+    # --- Entry-cost reality check (tailored; this is a category win-rate signal,
+    # not a price edge). We BUY NO, so the real entry cost is the NO ask walked to
+    # size; surface it + whether the NO side has depth to fill ($100).
+    try:
+        from odds import poly_executable_edge as pee
+    except Exception:
+        pee = None
+    if pee is not None:
+        for sig in signals:
+            cid = sig.get("market_id")
+            if not cid or sig.get("side") != "NO" or sig.get("price") is None:
+                continue
+            p_no = 1.0 - float(sig["price"])  # displayed NO price
+            try:
+                ex = pee.executable_edge(p_no, "NO", condition_id=cid,
+                                         outcome_index=1, target_usd=100.0)
+            except Exception:
+                ex = {"available": False}
+            if ex.get("available"):
+                sig["no_entry_price"] = (round(ex["executable_price"] * 100, 1)
+                                         if ex["executable_price"] is not None else None)
+                sig["entry_slippage_bps"] = ex["slippage_bps"]
+                sig["book_spread_pct"] = (round(ex["spread"] * 100, 1)
+                                          if ex["spread"] is not None else None)
+                sig["tradeable"] = bool(ex["reason"] in ("full", "resized"))
+
     return signals
 
 

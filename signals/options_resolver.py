@@ -172,7 +172,7 @@ def _get_market_outcome_from_event(event: Dict) -> Dict[str, str]:
     """
     results = {}
     for market in event.get("markets", []):
-        condition_id = market.get("id", "") or market.get("conditionId", "")
+        condition_id = market.get("conditionId", "") or market.get("id", "")
         if not condition_id:
             continue
 

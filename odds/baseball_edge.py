@@ -20,6 +20,7 @@ Usage:
 
 import asyncio
 import json
+import re
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -29,6 +30,11 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 from loguru import logger
+
+try:  # shared order-book executable-edge enrichment
+    from . import poly_executable_edge as pee
+except ImportError:  # pragma: no cover
+    import poly_executable_edge as pee
 
 try:
     from .the_odds_api import (
@@ -95,13 +101,13 @@ def _is_stale_game(commence_time: str) -> bool:
         return True
 
 
-def _update_line_movement(game_id: str, team: str, best_odds: int) -> Dict:
+def _update_line_movement(game_id: str, team: str, best_odds: int, market_type: str = "moneyline") -> Dict:
     """Record a line movement observation and return delta info.
     
     Returns {"delta_3h": int or None, "delta_ticks": int, "direction": str}
     delta_3h = cumulative change over 3h window (None if first observation)
     """
-    key = f"{game_id}|{team}"
+    key = f"{game_id}|{team}|{market_type}"
     now = time.time()
     entry = _LINE_MOVEMENT.get(key)
     
@@ -155,10 +161,10 @@ async def _log_baseball_shadow(edge: "MLBEdge", edge_pct: float, game_id: str):
             except Exception:
                 pass
 
-        platform = "polymarket" if edge.poly_market_id and edge.poly_market_id.startswith("0x") else "polymarket"
+        platform = "polymarket"
         signal = {
             "market_id": edge.poly_market_id or f"mlb_{game_id}_{edge.bet_team.replace(' ', '')}",
-            "market": f"{edge.game_title[:180]} — {edge.bet_team} Moneyline",
+            "market": f"{edge.game_title[:180]} — {edge.bet_team} {edge.market_type.capitalize()}",
             "platform": platform,
             "side": "YES" if edge.direction == "BUY" else "NO",
             "price": edge.polymarket_price,
@@ -234,6 +240,14 @@ class MLBEdge:
     point_value: Optional[float] = None  # spread or total point, e.g. -1.5 or 8.5
     poly_market_id: Optional[str] = None
     poly_event_id: Optional[str] = None
+    # Order-book executable-edge enrichment (Scanner layer; reality check)
+    executable_price: Optional[float] = None  # VWAP fill price for $100, decimal
+    executable_edge: Optional[float] = None    # odds_api_prob - executable_price
+    book_spread: Optional[float] = None         # best_ask - best_bid
+    slippage_bps: Optional[float] = None
+    tradeable: bool = False                     # book ok AND executable_edge > 0
+    poly_move_1h: Optional[float] = None        # Polymarket price drift ~1h (pp)
+    poly_move_6h: Optional[float] = None        # Polymarket price drift ~6h (pp)
 
 
 def _team_in_title(team: str, title: str) -> bool:
@@ -325,9 +339,9 @@ def _extract_moneyline_prices(
         first_is_home = _team_in_title(home_team, first_team_fragment)
 
         if first_is_home:
-            return price0, price1, market.get("id", "")
+            return price0, price1, market.get("conditionId", market.get("id", ""))
         else:
-            return price1, price0, market.get("id", "")
+            return price1, price0, market.get("conditionId", market.get("id", ""))
 
     return None
 
@@ -341,7 +355,7 @@ def _extract_spread_prices(
     parenthetical MUST match the Odds API team name to avoid half-market confusion.
     Returns None if no matching spread market found.
     """
-    abs_point = int(abs(target_point))
+    abs_point = abs(target_point)
     for market in event.get("markets", []):
         q = market.get("question", "")
         if "Spread:" not in q:
@@ -355,8 +369,18 @@ def _extract_spread_prices(
             continue
         spread_team_raw = spread_parts[0].strip()
         
-        # Check point matches our target
-        if str(abs_point) not in spread_parts[1]:
+        # Require an EXACT spread-line match. Parse the signed number from the
+        # parenthetical, e.g. "(-1.5)". Substring matching (plus the old int()
+        # floor of the target) wrongly paired a 1.0 line with a (-1.5) market
+        # and produced cross-number false matches.
+        mspr = re.search(r"\(([+-]?[0-9]+(?:\.[0-9]+)?)\)", q)
+        if not mspr:
+            continue
+        try:
+            poly_point = abs(float(mspr.group(1)))
+        except (ValueError, TypeError):
+            continue
+        if abs(poly_point - abs_point) > 1e-9:
             continue
         
         # Only match if this spread market is for our target team
@@ -397,7 +421,7 @@ def _extract_spread_prices(
         
         # We return (named_team_covers_price, named_team_fails_price, market_id)
         # and let the caller map to the right Odds API side
-        return price0, price1, market.get("id", "")
+        return price0, price1, market.get("conditionId", market.get("id", ""))
     return None
 
 
@@ -409,12 +433,22 @@ def _extract_total_prices(
     Matches Polymarket markets like "Team A vs. Team B: O/U 8.5".
     """
     abs_point = abs(target_point)
-    point_str = str(int(abs_point)) if abs_point == int(abs_point) else str(abs_point)
     for market in event.get("markets", []):
         q = market.get("question", "")
         if "/U " not in q or "O/" not in q:
             continue
-        if point_str not in q:
+        # Require an EXACT total-line match. Polymarket questions look like
+        # "Team A vs. Team B: O/U 8.5". Substring matching wrongly paired a
+        # bookmaker 8.0 line with Polymarket's 8.5 market (a different bet),
+        # corrupting the edge. Parse the number and compare numerically.
+        mtot = re.search(r"O/U\s*([0-9]+(?:\.[0-9]+)?)", q)
+        if not mtot:
+            continue
+        try:
+            poly_point = float(mtot.group(1))
+        except (ValueError, TypeError):
+            continue
+        if abs(poly_point - abs_point) > 1e-9:
             continue
         prices_raw = market.get("outcomePrices", "[]")
         if isinstance(prices_raw, str):
@@ -434,7 +468,7 @@ def _extract_total_prices(
         if price0 <= 0 or price1 <= 0:
             continue
         # outcomePrices[0] = "YES" = Over for total markets
-        return price0, price1, market.get("id", "")
+        return price0, price1, market.get("conditionId", market.get("id", ""))
     return None
 
 
@@ -601,6 +635,8 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
                             commence_time=commence_time,
                             poly_market_id=ml_market_id, poly_event_id=event.get("id"),
                         ))
+                    # Track line movement
+                    _update_line_movement(game_id, team, american_odds, "moneyline")
                     if abs(edge) >= 0.03:
                         await _log_baseball_shadow(MLBEdge(
                             game_title=event.get("title", ""),
@@ -676,6 +712,8 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
                                 point_value=point,
                                 poly_market_id=sp_market_id, poly_event_id=event.get("id"),
                             ))
+                        # Track line movement
+                        _update_line_movement(game_id, team, american_odds, "spread")
                         if abs(edge) >= 0.03:
                             await _log_baseball_shadow(MLBEdge(
                                 game_title=event.get("title", ""),
@@ -716,6 +754,8 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
                             point_value=total_point,
                             poly_market_id=tot_market_id, poly_event_id=event.get("id"),
                         ))
+                    # Track line movement
+                    _update_line_movement(game_id, label.replace(" ", ""), american_odds, "total")
                     if abs(edge) >= 0.03:
                         await _log_baseball_shadow(MLBEdge(
                             game_title=event.get("title", ""),
@@ -729,16 +769,58 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
                             poly_market_id=tot_market_id, poly_event_id=event.get("id"),
                         ), edge, game_id)
 
+    # --- Executable-edge enrichment: the midpoint edge above is vs Polymarket's
+    # last/mid price; the price you can actually TAKE is the ask walked to size.
+    # Enrich only the emitted total edges (clean Over=0/Under=1 token mapping).
+    for _e in edges:
+        if not _e.poly_market_id:
+            continue
+        _mt = _e.market_type
+        if _mt == "total":
+            _oi = 0 if _e.bet_team.lower() == "over" else 1
+        elif _mt == "spread":
+            _oi = 0  # Polymarket "Spread: Team (-x.5)" YES = named team covers
+        elif _mt == "moneyline":
+            # outcomePrices/tokens[0] = first team in "A vs. B" title
+            _first = _e.game_title.split(" vs. ")[0] if " vs. " in _e.game_title else ""
+            _oi = 0 if _team_in_title(_e.bet_team, _first) else 1
+        else:
+            continue
+        try:
+            _ex = pee.executable_edge(
+                _e.odds_api_prob, _e.bet_team,
+                condition_id=_e.poly_market_id,
+                outcome_index=_oi,
+                target_usd=100.0,
+            )
+        except Exception:
+            _ex = {"available": False}
+        if _ex.get("available"):
+            _e.executable_price = _ex["executable_price"]
+            _e.executable_edge = _ex["executable_edge"]
+            _e.book_spread = _ex["spread"]
+            _e.slippage_bps = _ex["slippage_bps"]
+            _e.tradeable = _ex["tradeable"]
+        # Polymarket's own recent price drift (persistent momentum, survives restart)
+        try:
+            _pm = pee.poly_price_move(condition_id=_e.poly_market_id, outcome_index=_oi)
+        except Exception:
+            _pm = {"available": False}
+        if _pm.get("available"):
+            _e.poly_move_1h = _pm["move_1h_pp"]
+            _e.poly_move_6h = _pm["move_6h_pp"]
+
     edges.sort(key=lambda e: abs(e.edge_pct), reverse=True)
     return edges
 
 
-async def get_baseball_edge_summary() -> Dict:
+async def get_baseball_edge_summary(min_edge: float = DEFAULT_MIN_EDGE) -> Dict:
     """
     MLB edge summary for `/api/baseball/edge` response.
-    Mirrors get_soccer_edge_summary() shape.
+    Mirrors get_soccer_edge_summary() shape. `min_edge` now threaded from the
+    route so the dashboard (?min_edge=0.01) surfaces sub-5%% real edges.
     """
-    edges = await find_baseball_edges()
+    edges = await find_baseball_edges(min_edge)
 
     # Build line movement report for games that have it
     games_moved = 0
@@ -776,6 +858,13 @@ async def get_baseball_edge_summary() -> Dict:
                 "commence_time": e.commence_time,
                 "market_id": e.poly_market_id,
                 "event_id": e.poly_event_id,
+                "executable_price": (round(e.executable_price * 100, 1) if e.executable_price is not None else None),
+                "executable_edge": (round(e.executable_edge * 100, 1) if e.executable_edge is not None else None),
+                "book_spread_pct": (round(e.book_spread * 100, 1) if e.book_spread is not None else None),
+                "slippage_bps": e.slippage_bps,
+                "tradeable": e.tradeable,
+                "poly_move_1h": e.poly_move_1h,
+                "poly_move_6h": e.poly_move_6h,
             }
             for e in edges
         ],

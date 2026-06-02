@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS options_implied (
   poly_price REAL, implied_prob REAL, spread_pp REAL,
   underlying REAL, iv REAL, poly_liquidity REAL, poly_vol_24h REAL,
   iv_rv_ratio REAL,
+  executable_price REAL, executable_edge_pp REAL, book_spread_pp REAL,
+  slippage_bps REAL, tradeable INTEGER,
   PRIMARY KEY (date, poly_market_id, strike)
 );
 """
@@ -48,6 +50,17 @@ def init_db(db_path):
     pathlib.Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(db_path)
     con.executescript(SCHEMA)
+    # Migration: add columns that may not exist in older tables
+    for col in ["iv_rv_ratio", "executable_price", "executable_edge_pp",
+                "book_spread_pp", "slippage_bps"]:
+        try:
+            con.execute(f"ALTER TABLE options_implied ADD COLUMN {col} REAL")
+        except sqlite3.OperationalError:
+            pass
+    try:
+        con.execute("ALTER TABLE options_implied ADD COLUMN tradeable INTEGER")
+    except sqlite3.OperationalError:
+        pass
     con.commit()
     con.close()
 
@@ -70,11 +83,17 @@ _FIELDS = [
     "poly_liquidity",
     "poly_vol_24h",
     "iv_rv_ratio",
+    "executable_price",
+    "executable_edge_pp",
+    "book_spread_pp",
+    "slippage_bps",
+    "tradeable",
 ]
 
 
 def upsert_rows(db_path, rows):
     """Insert rows, skipping existing (date,poly_market_id,strike). Returns # written."""
+    init_db(db_path)  # ensure schema + ALTER-TABLE column migrations applied (existing tables too)
     con = sqlite3.connect(db_path)
     con.executescript(SCHEMA)
     written = 0
@@ -90,6 +109,10 @@ def upsert_rows(db_path, rows):
 
 
 GAMMA = "https://gamma-api.polymarket.com"
+try:  # shared order-book executable-edge enrichment
+    from odds import poly_executable_edge as pee
+except Exception:  # pragma: no cover
+    pee = None
 UA = {"User-Agent": "Mozilla/5.0 polyclawd-options"}
 NAMES = ["NVDA", "META", "MSFT", "AAPL", "AMZN"]
 
@@ -193,11 +216,20 @@ def parse_poly_event(event, ticker):
         yes = float(prices[0]) if prices else None
         ql = q.lower()
         nums = _RANGE_RE.findall(q)
+        # Standard patterns: "above $X", "between $X and $Y", "below $X"
         if "between" in ql and nums and nums[0][1]:
             lo, hi, mtype = _money(nums[0][0]), _money(nums[0][1]), "bracket"
         elif ("above" in ql or "higher" in ql) and nums:
             lo, hi, mtype = _money(nums[0][0]), None, "above"
         elif ("below" in ql or "lower" in ql) and nums:
+            lo, hi, mtype = _money(nums[0][0]), None, "below"
+        # Weekly patterns: "at $200-$205", "at <$190", "at >$235"
+        elif nums and nums[0][1]:
+            # "at $200-$205" → range, treated as bracket
+            lo, hi, mtype = _money(nums[0][0]), _money(nums[0][1]), "bracket"
+        elif nums and ">" in q or "above" in q:
+            lo, hi, mtype = _money(nums[0][0]), None, "above"
+        elif nums and "<" in q or "below" in q:
             lo, hi, mtype = _money(nums[0][0]), None, "below"
         else:
             continue
@@ -359,10 +391,27 @@ def run(db_path=DEFAULT_DB):
                     continue
                 snaps = fetch_alpaca_snapshot(tk, exp)
                 T = _years_to(exp, now)
+                # Dedup: same (strike, market_type) can appear from different condition IDs
+                seen_keys = set()
                 for m in pev["markets"]:
                     if (m["poly_liquidity"] or 0) < MIN_LIQ:  # liquidity gate
                         continue
                     K = m["bracket_lo"]
+                    market_type = m["market_type"]
+                    
+                    # Skip strikes too far from money — N(d2) becomes 0% or 100%, no edge
+                    if S and S > 0:
+                        if market_type == "above" and K < S * 0.8:
+                            continue  # too deep ITM, implied prob ~100%
+                        if market_type == "below" and K > S * 1.2:
+                            continue  # too deep ITM, implied prob ~0%
+                    
+                    # Dedup by (strike, market_type)
+                    dedup_key = (K, market_type)
+                    if dedup_key in seen_keys:
+                        continue
+                    seen_keys.add(dedup_key)
+                    
                     iv = pick_iv(snaps, exp, K, right="C")
                     if iv is not None:
                         from signals.vol_spread import get_iv_rv_ratio
@@ -381,6 +430,29 @@ def run(db_path=DEFAULT_DB):
                     if ip is None:
                         continue
                     spread = (m["poly_price"] - ip) * 100.0
+                    # Executable-edge enrichment (order-book reality check).
+                    # Side is direction-aware: fade overpriced YES = buy NO.
+                    # Gated to >=3pp edges to bound CLOB calls in this batch logger.
+                    ex_price = ex_edge_pp = ex_spread_pp = ex_slip = None
+                    ex_tradeable = 0
+                    if pee is not None and abs(spread) >= 3.0 and m.get("conditionId"):
+                        if ip >= m["poly_price"]:
+                            _side, _oi, _tp = "YES", 0, ip
+                        else:
+                            _side, _oi, _tp = "NO", 1, 1.0 - ip
+                        try:
+                            _ex = pee.executable_edge(_tp, _side, condition_id=m["conditionId"],
+                                                      outcome_index=_oi, target_usd=100.0)
+                        except Exception:
+                            _ex = {"available": False}
+                        if _ex.get("available"):
+                            ex_price = _ex["executable_price"]
+                            ex_edge_pp = (round(_ex["executable_edge"] * 100, 2)
+                                          if _ex["executable_edge"] is not None else None)
+                            ex_spread_pp = (round(_ex["spread"] * 100, 2)
+                                            if _ex["spread"] is not None else None)
+                            ex_slip = _ex["slippage_bps"]
+                            ex_tradeable = 1 if _ex["tradeable"] else 0
                     rows.append(
                         {
                             "date": today,
@@ -400,6 +472,11 @@ def run(db_path=DEFAULT_DB):
                             "poly_liquidity": m["poly_liquidity"],
                             "poly_vol_24h": m["poly_vol_24h"],
                             "iv_rv_ratio": iv_rv_ratio_val,
+                            "executable_price": ex_price,
+                            "executable_edge_pp": ex_edge_pp,
+                            "book_spread_pp": ex_spread_pp,
+                            "slippage_bps": ex_slip,
+                            "tradeable": ex_tradeable,
                         }
                     )
         except Exception as e:
