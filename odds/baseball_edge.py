@@ -20,6 +20,7 @@ Usage:
 
 import asyncio
 import json
+import os
 import re
 import time
 from collections import defaultdict
@@ -483,11 +484,33 @@ def _devig_two_way(odds_a: int, odds_b: int) -> Tuple[float, float]:
     return p_a / total, p_b / total
 
 
+_SHARP_BOOKS = ("pinnacle", "betfair_ex_eu", "betfair_ex_uk", "williamhill")
+
+
 def _best_odds_per_team(game: Dict) -> Dict[str, int]:
     """
-    Find best available h2h American odds per team across all bookmakers in a game.
-    "Best" = lowest implied probability (best payout for the bettor).
+    h2h American odds per team.
+
+    Default (legacy): best line across ALL bookmakers (lowest implied prob).
+    With env BASEBALL_SHARP_DEVIG=1 (Phase R): use a single SHARP book (Pinnacle
+    preferred) instead — avoids the best-of-N overround deflation that
+    manufactures phantom BUY edges (2026-06-02 review BLOCKER). Flag is read
+    per-call and defaults OFF, so live behavior is unchanged until validated.
     """
+    if os.getenv("BASEBALL_SHARP_DEVIG", "").lower() in ("1", "true", "yes"):
+        by_book: Dict[str, Dict[str, int]] = {}
+        for bk in game.get("bookmakers", []):
+            for market in bk.get("markets", []):
+                if market.get("key") != "h2h":
+                    continue
+                for o in market.get("outcomes", []):
+                    if o.get("name") is not None and o.get("price") is not None:
+                        by_book.setdefault(bk.get("key", ""), {})[o["name"]] = int(o["price"])
+        for sb in _SHARP_BOOKS:
+            if sb in by_book and len(by_book[sb]) >= 2:
+                return by_book[sb]
+        # no sharp book present → fall through to legacy best-of-all
+
     best: Dict[str, int] = {}
     for bookmaker in game.get("bookmakers", []):
         for market in bookmaker.get("markets", []):
