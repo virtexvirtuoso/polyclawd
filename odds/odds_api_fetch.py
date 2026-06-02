@@ -60,10 +60,33 @@ def _get_api_key():
     return os.getenv("ODDS_API_KEY") or None
 
 
-def _build_url(sport_key: str, markets: str, regions: str, bookmakers: str, event_id: str = "") -> str:
+def upcoming_window(hours: int) -> tuple:
+    """(commenceTimeFrom, commenceTimeTo) ISO8601 strings for the next `hours`.
+    Used to pull only soon-to-start games — smaller payloads, fewer matches to
+    enrich, and avoids re-pulling the whole season's future fixtures."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    return now.strftime(fmt), (now + timedelta(hours=hours)).strftime(fmt)
+
+
+def _build_url(
+    sport_key: str,
+    markets: str,
+    regions: str,
+    bookmakers: str,
+    event_id: str = "",
+    commence_from: str = "",
+    commence_to: str = "",
+) -> str:
     params = {"apiKey": _get_api_key(), "markets": markets, "oddsFormat": "american", "regions": regions}
     if bookmakers:
         params["bookmakers"] = bookmakers
+    if commence_from:
+        params["commenceTimeFrom"] = commence_from
+    if commence_to:
+        params["commenceTimeTo"] = commence_to
     path = f"/sports/{sport_key}/events/{event_id}/odds" if event_id else f"/sports/{sport_key}/odds"
     return f"{ODDS_API_BASE}{path}?{urllib.parse.urlencode(params)}"
 
@@ -81,13 +104,22 @@ def _fetch_sync(url: str, timeout: int = 10):
 
 
 async def get_games_with_markets(
-    sport_key: str, markets: str = "h2h", regions: str = "eu", bookmakers: str = "pinnacle"
+    sport_key: str,
+    markets: str = "h2h",
+    regions: str = "eu",
+    bookmakers: str = "pinnacle",
+    commence_from: str = "",
+    commence_to: str = "",
 ) -> List[Dict]:
-    """Featured-market odds for a sport key. [] if no key / no games / error."""
+    """Featured-market odds for a sport key. [] if no key / no games / error.
+
+    Cost = markets × regions; `bookmakers` overrides regions to 1 unit (10 books
+    = 1 region). Pass commence_from/to (see upcoming_window) to pull only games
+    in a time window."""
     if not _get_api_key():
         logger.warning(f"odds_api_fetch: ODDS_API_KEY unset — {sport_key} empty")
         return []
-    url = _build_url(sport_key, markets, regions, bookmakers)
+    url = _build_url(sport_key, markets, regions, bookmakers, commence_from=commence_from, commence_to=commence_to)
     loop = asyncio.get_event_loop()
     with ThreadPoolExecutor() as pool:
         data = await loop.run_in_executor(pool, _fetch_sync, url)

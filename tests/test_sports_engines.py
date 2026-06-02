@@ -135,3 +135,12 @@ def test_legacy_soccer_edge_decoupled():
     assert not hasattr(t, "get_soccer_edge_summary"), "the_odds_api soccer funcs should be gone"
     assert not hasattr(t, "find_soccer_edges")
     assert hasattr(t, "get_baseball_games_with_all_markets"), "baseball funcs must remain"
+
+
+# ── Odds API efficiency: time-window + commence params ──────────────
+def test_upcoming_window_and_commence_params():
+    from odds.odds_api_fetch import upcoming_window, _build_url
+    cf, ct = upcoming_window(72)
+    assert cf.endswith("Z") and ct.endswith("Z") and cf < ct
+    url = _build_url("soccer_epl", "h2h", "eu", "pinnacle", commence_from=cf, commence_to=ct)
+    assert "commenceTimeFrom=" in url and "commenceTimeTo=" in url and "bookmakers=pinnacle" in url

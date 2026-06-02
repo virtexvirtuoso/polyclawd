@@ -104,10 +104,11 @@ def edges_from_field(
 async def find_soccer_futures_edges(min_edge: float = 0.03) -> List[sec.Edge]:
     poly = await sec.fetch_polymarket_events_by_tag_async("world-cup")
     poly += await sec.fetch_polymarket_events_by_tag_async("soccer")
-    # Outrights: do NOT restrict to Pinnacle (it doesn't carry WC winner). Fetch by
-    # region and let extract_outright_field pick the sharpest book (Betfair Exchange).
+    # Outrights: Pinnacle doesn't carry the WC winner — target Betfair Exchange
+    # directly. `bookmakers=` overrides regions, so 2 betfair books = 1 credit unit
+    # (half the cost of regions="eu,uk") AND pins the sharpest outright source.
     raw = await get_games_with_markets(
-        WC_CFG.odds_api_sport_keys[0], markets="outrights", regions="eu,uk", bookmakers=""
+        WC_CFG.odds_api_sport_keys[0], markets="outrights", regions="eu", bookmakers="betfair_ex_eu,betfair_ex_uk"
     )
     field = extract_outright_field(raw)
     edges = edges_from_field("World Cup Winner", field, poly, WC_CFG, min_edge)

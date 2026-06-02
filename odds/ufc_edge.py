@@ -9,6 +9,7 @@ Method/round props: The Odds API does not reliably expose MMA method-of-victory 
 round markets, so Polymarket prop markets are LISTED for manual review
 (no_api_line=True) and never auto-edged.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -19,10 +20,10 @@ from loguru import logger
 
 try:
     from . import sports_edge_common as sec
-    from .odds_api_fetch import get_games_with_markets, MMA_SPORT_KEYS
+    from .odds_api_fetch import get_games_with_markets, MMA_SPORT_KEYS, upcoming_window
 except ImportError:  # pragma: no cover
     import sports_edge_common as sec
-    from odds_api_fetch import get_games_with_markets, MMA_SPORT_KEYS
+    from odds_api_fetch import get_games_with_markets, MMA_SPORT_KEYS, upcoming_window
 
 CFG = sec.SportConfig(
     name="ufc",
@@ -46,6 +47,7 @@ def ml_market(ev: Dict, fighter: str) -> Optional[Tuple[int, str, float]]:
         idx = sec.outcome_index_for(m, fighter)
         raw = m.get("outcomePrices", "[]")
         import json
+
         arr = json.loads(raw) if isinstance(raw, str) else raw
         try:
             return idx, m.get("conditionId", m.get("id")), float(arr[idx])
@@ -74,13 +76,18 @@ def compute_ufc_edges(fight: Dict, ev: Dict, min_edge: float = 0.03) -> List[sec
         edge = true[fighter] - price
         if abs(edge) >= min_edge:
             e = sec.Edge(
-                event_title=ev.get("title", ""), participant=fighter,
-                market_type="moneyline", market_model="2way",
-                book_prob=true[fighter], american_odds=int(best[fighter]),
-                poly_price=price, edge_pct=edge,
+                event_title=ev.get("title", ""),
+                participant=fighter,
+                market_type="moneyline",
+                market_model="2way",
+                book_prob=true[fighter],
+                american_odds=int(best[fighter]),
+                poly_price=price,
+                edge_pct=edge,
                 direction="BUY" if edge > 0 else "SELL",
                 commence_time=fight.get("commence_time", ""),
-                poly_market_id=cid, poly_event_id=ev.get("id"),
+                poly_market_id=cid,
+                poly_event_id=ev.get("id"),
             )
             e._oi = idx  # type: ignore[attr-defined]
             edges.append(e)
@@ -92,21 +99,33 @@ def compute_ufc_edges(fight: Dict, ev: Dict, min_edge: float = 0.03) -> List[sec
         if q == title:
             continue
         if any(marker in q for marker in _PROP_MARKERS):
-            edges.append(sec.Edge(
-                event_title=title, participant=q[:70],
-                market_type="prop", market_model="2way",
-                book_prob=0.0, american_odds=0, poly_price=sec.price0(m),
-                edge_pct=0.0, direction="REVIEW",
-                commence_time=fight.get("commence_time", ""),
-                poly_market_id=m.get("conditionId", m.get("id")),
-                poly_event_id=ev.get("id"), no_api_line=True,
-            ))
+            edges.append(
+                sec.Edge(
+                    event_title=title,
+                    participant=q[:70],
+                    market_type="prop",
+                    market_model="2way",
+                    book_prob=0.0,
+                    american_odds=0,
+                    poly_price=sec.price0(m),
+                    edge_pct=0.0,
+                    direction="REVIEW",
+                    commence_time=fight.get("commence_time", ""),
+                    poly_market_id=m.get("conditionId", m.get("id")),
+                    poly_event_id=ev.get("id"),
+                    no_api_line=True,
+                )
+            )
     return edges
 
 
 async def find_ufc_edges(min_edge: float = 0.03) -> List[sec.Edge]:
     poly = await sec.fetch_polymarket_events_by_tag_async("ufc")
-    raw = await get_games_with_markets(MMA_SPORT_KEYS["ufc"], "h2h", CFG.regions, CFG.bookmakers)
+    # Fights happen on weekly cards — pull only the next 7 days of bouts.
+    cf, ct = upcoming_window(24 * 7)
+    raw = await get_games_with_markets(
+        MMA_SPORT_KEYS["ufc"], "h2h", CFG.regions, CFG.bookmakers, commence_from=cf, commence_to=ct
+    )
     edges: List[sec.Edge] = []
     for fight in raw or []:
         try:

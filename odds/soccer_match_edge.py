@@ -7,6 +7,7 @@ events, which expose the 3-way as three binary markets:
 
 World-Cup-first: soccer_fifa_world_cup match h2h lights up June 11.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -17,10 +18,10 @@ from loguru import logger
 
 try:
     from . import sports_edge_common as sec
-    from .odds_api_fetch import get_games_with_markets, SOCCER_MATCH_KEYS
+    from .odds_api_fetch import get_games_with_markets, SOCCER_MATCH_KEYS, upcoming_window
 except ImportError:  # pragma: no cover
     import sports_edge_common as sec
-    from odds_api_fetch import get_games_with_markets, SOCCER_MATCH_KEYS
+    from odds_api_fetch import get_games_with_markets, SOCCER_MATCH_KEYS, upcoming_window
 
 CFG = sec.SportConfig(
     name="soccer_match",
@@ -78,15 +79,22 @@ def compute_match_edges(game: Dict, ev: Dict, min_edge: float = 0.03) -> List[se
         edge = tp - price
         if abs(edge) < min_edge:
             continue
-        edges.append(sec.Edge(
-            event_title=ev.get("title", ""), participant=name,
-            market_type=key, market_model="3way",
-            book_prob=tp, american_odds=int(best.get(name, 0)),
-            poly_price=price, edge_pct=edge,
-            direction="BUY" if edge > 0 else "SELL",
-            commence_time=game.get("commence_time", ""),
-            poly_market_id=cid, poly_event_id=ev.get("id"),
-        ))
+        edges.append(
+            sec.Edge(
+                event_title=ev.get("title", ""),
+                participant=name,
+                market_type=key,
+                market_model="3way",
+                book_prob=tp,
+                american_odds=int(best.get(name, 0)),
+                poly_price=price,
+                edge_pct=edge,
+                direction="BUY" if edge > 0 else "SELL",
+                commence_time=game.get("commence_time", ""),
+                poly_market_id=cid,
+                poly_event_id=ev.get("id"),
+            )
+        )
         # stash the matched outcome index for enrichment
         edges[-1].point_value = None
         edges[-1]._oi = idx  # type: ignore[attr-defined]
@@ -96,9 +104,15 @@ def compute_match_edges(game: Dict, ev: Dict, min_edge: float = 0.03) -> List[se
 async def find_soccer_match_edges(min_edge: float = 0.03) -> List[sec.Edge]:
     poly = await sec.fetch_polymarket_events_by_tag_async("soccer")
     edges: List[sec.Edge] = []
+    # Pull matches in the next 7 days. The credit cost is the same regardless of
+    # window (1 unit/league); the window's value is bounding order-book enrichment
+    # during the World Cup (104 matches) without dropping near-term tradeable edges.
+    cf, ct = upcoming_window(24 * 7)
     raws = await asyncio.gather(
-        *[get_games_with_markets(k, "h2h", CFG.regions, CFG.bookmakers)
-          for k in CFG.odds_api_sport_keys],
+        *[
+            get_games_with_markets(k, "h2h", CFG.regions, CFG.bookmakers, commence_from=cf, commence_to=ct)
+            for k in CFG.odds_api_sport_keys
+        ],
         return_exceptions=True,
     )
     for key, raw in zip(CFG.odds_api_sport_keys, raws):
