@@ -15,6 +15,7 @@ Endpoints used:
   GET /v4/sports/{key}/odds                        — featured markets (h2h/spreads/totals/outrights)
   GET /v4/sports/{key}/events/{id}/odds            — per-event props/alternates
 """
+
 from __future__ import annotations
 
 import json
@@ -30,6 +31,7 @@ from loguru import logger
 
 try:
     from api.services.resilient_fetch import _resilient_urlopen
+
     HAS_RESILIENT = True
 except ImportError:  # pragma: no cover
     HAS_RESILIENT = False
@@ -40,7 +42,7 @@ SOURCE_NAME = "the_odds_api"
 
 # Sport keys (verified shapes; live availability confirmed by the Phase-0 probe).
 SOCCER_MATCH_KEYS: Dict[str, str] = {
-    "worldcup": "soccer_fifa_world_cup",          # per-match h2h (3-way) during the tournament
+    "worldcup": "soccer_fifa_world_cup",  # per-match h2h (3-way) during the tournament
     "epl": "soccer_epl",
     "ucl": "soccer_uefa_champs_league",
     "laliga": "soccer_spain_la_liga",
@@ -58,14 +60,11 @@ def _get_api_key():
     return os.getenv("ODDS_API_KEY") or None
 
 
-def _build_url(sport_key: str, markets: str, regions: str, bookmakers: str,
-               event_id: str = "") -> str:
-    params = {"apiKey": _get_api_key(), "markets": markets,
-              "oddsFormat": "american", "regions": regions}
+def _build_url(sport_key: str, markets: str, regions: str, bookmakers: str, event_id: str = "") -> str:
+    params = {"apiKey": _get_api_key(), "markets": markets, "oddsFormat": "american", "regions": regions}
     if bookmakers:
         params["bookmakers"] = bookmakers
-    path = (f"/sports/{sport_key}/events/{event_id}/odds"
-            if event_id else f"/sports/{sport_key}/odds")
+    path = f"/sports/{sport_key}/events/{event_id}/odds" if event_id else f"/sports/{sport_key}/odds"
     return f"{ODDS_API_BASE}{path}?{urllib.parse.urlencode(params)}"
 
 
@@ -81,8 +80,9 @@ def _fetch_sync(url: str, timeout: int = 10):
         return None
 
 
-async def get_games_with_markets(sport_key: str, markets: str = "h2h",
-                                 regions: str = "eu", bookmakers: str = "pinnacle") -> List[Dict]:
+async def get_games_with_markets(
+    sport_key: str, markets: str = "h2h", regions: str = "eu", bookmakers: str = "pinnacle"
+) -> List[Dict]:
     """Featured-market odds for a sport key. [] if no key / no games / error."""
     if not _get_api_key():
         logger.warning(f"odds_api_fetch: ODDS_API_KEY unset — {sport_key} empty")
@@ -94,8 +94,9 @@ async def get_games_with_markets(sport_key: str, markets: str = "h2h",
     return data if isinstance(data, list) else []
 
 
-async def get_event_markets(sport_key: str, event_id: str, markets: str,
-                            regions: str = "us", bookmakers: str = "pinnacle") -> Dict:
+async def get_event_markets(
+    sport_key: str, event_id: str, markets: str, regions: str = "us", bookmakers: str = "pinnacle"
+) -> Dict:
     """Per-event odds (props/alternates). {} if no key / error.
     Credit cost = unique-markets-returned × regions (or 1 unit when bookmakers set)."""
     if not _get_api_key():
@@ -107,12 +108,22 @@ async def get_event_markets(sport_key: str, event_id: str, markets: str,
     return data if isinstance(data, dict) else {}
 
 
+# Sharpest outright sources first. Betfair Exchange leads for tournament winners
+# (Pinnacle does NOT carry World Cup outright winner — confirmed via live probe).
+OUTRIGHT_SHARP_PREFERENCE = ("betfair_ex_eu", "betfair_ex_uk", "pinnacle", "williamhill")
+
+
 def extract_outright_field(raw: List[Dict]) -> List[Dict]:
-    """Pull the outrights outcomes [{name, price}, ...] from a /odds outrights payload.
-    Returns the first bookmaker's outrights market (sharp book when bookmakers=pinnacle)."""
+    """Pull the outrights outcomes [{name, price}, ...] from a /odds outrights payload,
+    preferring the sharpest book that carries the market (Betfair Exchange), falling
+    back to whatever book is present."""
+    by_book: Dict[str, List[Dict]] = {}
     for ev in raw or []:
         for bk in ev.get("bookmakers", []):
             for mk in bk.get("markets", []):
                 if mk.get("key") == "outrights":
-                    return mk.get("outcomes", [])
-    return []
+                    by_book[bk.get("key", "")] = mk.get("outcomes", [])
+    for pref in OUTRIGHT_SHARP_PREFERENCE:
+        if pref in by_book:
+            return by_book[pref]
+    return next(iter(by_book.values()), [])

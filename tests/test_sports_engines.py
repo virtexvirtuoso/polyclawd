@@ -110,3 +110,17 @@ def test_compute_ufc_edges_ml_and_prop_listing():
     assert ml, "expected at least one moneyline edge"
     assert all(hasattr(e, "_oi") for e in ml)
     assert props and props[0].no_api_line is True and props[0].direction == "REVIEW"
+
+
+# ── Outright field sharp-book preference (live-probe fix) ────────────
+def test_extract_outright_prefers_betfair_exchange():
+    from odds.odds_api_fetch import extract_outright_field
+    raw = [{"bookmakers": [
+        {"key": "draftkings", "markets": [{"key": "outrights",
+            "outcomes": [{"name": "Brazil", "price": 800}]}]},
+        {"key": "betfair_ex_eu", "markets": [{"key": "outrights",
+            "outcomes": [{"name": "Brazil", "price": 850}, {"name": "France", "price": 500}]}]},
+    ]}]
+    field = extract_outright_field(raw)
+    # Betfair exchange (sharper) preferred over draftkings
+    assert len(field) == 2 and field[0]["name"] == "Brazil" and field[0]["price"] == 850
