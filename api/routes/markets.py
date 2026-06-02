@@ -2180,3 +2180,149 @@ async def get_odds_api_credits():
     except Exception as e:
         logger.exception("Odds API credit status error")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Soccer / UFC / World Cup edge engines
+# ----------------------------------------------------------------------------
+# Separation-of-concerns: these endpoints SERVE cached results written by
+# scripts/sports_edge_scan.py. They do NOT compute signals (no live Odds API /
+# Gamma calls, no order-book walks), keeping the event loop free and credit
+# spend on a controlled cron cadence. Shadow dashboards are read-only sqlite.
+# ============================================================================
+
+_SPORTS_EDGE_CACHE = {
+    "soccer_match": "soccer_match_edges.json",
+    "soccer_futures": "soccer_futures_edges.json",
+    "ufc": "ufc_edges.json",
+}
+
+
+def _empty_edge_summary(source: str) -> dict:
+    return {
+        "source": source, "total_edges": 0, "edges": [], "top_opportunities": [],
+        "cached": False, "hint": "scanner has not run yet (scripts/sports_edge_scan.py)",
+    }
+
+
+async def _read_edge_cache(key: str, source: str) -> dict:
+    from api.deps import get_storage_service
+    storage = get_storage_service()
+    return await storage.load(_SPORTS_EDGE_CACHE[key], default=_empty_edge_summary(source))
+
+
+@router.get("/soccer/match-edge")
+async def get_soccer_match_edge():
+    """Cached soccer per-match 3-way edges (scanner-populated)."""
+    return await _read_edge_cache("soccer_match", "the_odds_api_soccer_match")
+
+
+@router.get("/soccer/futures-edge")
+async def get_soccer_futures_edge():
+    """Cached soccer outright / World Cup futures edges (scanner-populated)."""
+    return await _read_edge_cache("soccer_futures", "the_odds_api_soccer_futures")
+
+
+@router.get("/ufc/edge")
+async def get_ufc_edge():
+    """Cached UFC moneyline edges + manual-review prop listings (scanner-populated)."""
+    return await _read_edge_cache("ufc", "the_odds_api_ufc")
+
+
+def _sports_shadow_dashboard(strategies: list) -> dict:
+    """Shadow-trade dashboard for the given strategy names (mirrors the baseball
+    dashboard shape). Read-only over storage/shadow_trades.db."""
+    import sqlite3
+    from pathlib import Path
+
+    db_path = Path(__file__).parent.parent.parent / "storage" / "shadow_trades.db"
+    result = {
+        "open_trades": [], "open_count": 0,
+        "resolved": {"total": 0, "wins": 0, "losses": 0, "win_rate": 0, "total_pnl": 0},
+        "recent_trades": [], "collection": {"resolved": 0, "target": 30, "pct": 0},
+        "strategies": strategies,
+    }
+    if not db_path.exists() or not strategies:
+        return result
+
+    ph = ",".join("?" * len(strategies))
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.row_factory = sqlite3.Row
+
+        open_rows = conn.execute(f"""
+            SELECT id, market, side, entry_price, confidence, days_to_close, timestamp, reasoning
+            FROM shadow_trades
+            WHERE resolved = 0 AND strategy IN ({ph})
+            ORDER BY timestamp DESC LIMIT 25
+        """, strategies).fetchall()
+        result["open_trades"] = [
+            {
+                "id": r["id"], "market": r["market"], "side": r["side"],
+                "entry_price": round(r["entry_price"], 3) if r["entry_price"] else None,
+                "confidence": round(r["confidence"], 1) if r["confidence"] else None,
+                "days_to_close": round(r["days_to_close"], 1) if r["days_to_close"] else None,
+                "timestamp": r["timestamp"], "reasoning": r["reasoning"],
+            }
+            for r in open_rows
+        ]
+        result["open_count"] = len(result["open_trades"])
+
+        resolved_row = conn.execute(f"""
+            SELECT COUNT(*) as total,
+                   SUM(CASE WHEN outcome = side AND pnl > 0 THEN 1 ELSE 0 END) as wins,
+                   SUM(CASE WHEN outcome != side THEN 1 ELSE 0 END) as losses,
+                   SUM(COALESCE(pnl, 0)) as total_pnl,
+                   AVG(confidence) as avg_confidence
+            FROM shadow_trades
+            WHERE resolved = 1 AND strategy IN ({ph})
+              AND outcome IN ('YES','NO') AND side IN ('YES','NO')
+        """, strategies).fetchone()
+        if resolved_row and resolved_row["total"]:
+            total = resolved_row["total"]
+            wins = resolved_row["wins"] or 0
+            result["resolved"] = {
+                "total": total, "wins": wins, "losses": resolved_row["losses"] or 0,
+                "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
+                "total_pnl": round(resolved_row["total_pnl"] or 0, 4),
+                "avg_confidence": round(resolved_row["avg_confidence"] or 0, 1),
+            }
+            result["collection"] = {
+                "resolved": total, "target": 30,
+                "pct": min(100, round(total / 30 * 100, 1)),
+            }
+
+        recent_rows = conn.execute(f"""
+            SELECT id, market, side, entry_price, confidence, outcome, pnl, resolved_at
+            FROM shadow_trades
+            WHERE resolved = 1 AND strategy IN ({ph}) AND outcome IN ('YES','NO')
+            ORDER BY resolved_at DESC LIMIT 10
+        """, strategies).fetchall()
+        result["recent_trades"] = [
+            {
+                "id": r["id"], "market": r["market"], "side": r["side"],
+                "entry_price": round(r["entry_price"], 3) if r["entry_price"] else None,
+                "confidence": round(r["confidence"], 1) if r["confidence"] else None,
+                "outcome": r["outcome"],
+                "pnl": round(r["pnl"], 4) if r["pnl"] else None,
+                "resolved_at": r["resolved_at"],
+            }
+            for r in recent_rows
+        ]
+        conn.close()
+    except sqlite3.OperationalError as e:
+        logger.warning(f"sports shadow dashboard query failed: {e}")
+    return result
+
+
+@router.get("/soccer/dashboard")
+async def get_soccer_dashboard():
+    """Soccer shadow-trade dashboard (match 3-way + futures strategies)."""
+    return await run_in_threadpool(
+        _sports_shadow_dashboard, ["soccer_match_3way", "soccer_futures"])
+
+
+@router.get("/ufc/dashboard")
+async def get_ufc_dashboard():
+    """UFC shadow-trade dashboard (moneyline strategy)."""
+    return await run_in_threadpool(_sports_shadow_dashboard, ["ufc_moneyline"])
