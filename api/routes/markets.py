@@ -676,15 +676,9 @@ async def get_soccer_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
     - Bundesliga
     """
     async def _get_soccer():
-        import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
-        try:
-            from the_odds_api import get_soccer_edge_summary
-        except ImportError:
-            from soccer_edge import get_soccer_edge_summary
-        return await get_soccer_edge_summary()
+        # Repointed to the new shared-core futures engine (replaces soccer_edge).
+        from odds.soccer_futures_edge import get_soccer_futures_summary
+        return await get_soccer_futures_summary()
 
     return await handle_edge_request("soccer", _get_soccer())
 
@@ -694,36 +688,19 @@ async def get_soccer_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
 # ----------------------------------------------------------------------------
 
 async def _get_league_edges(league: str, min_edge: float = 0.01):
-    """Helper to get edges for a specific soccer league."""
-    import sys
-    odds_path = _get_odds_modules_path()
-    if odds_path not in sys.path:
-        sys.path.insert(0, odds_path)
-    try:
-        from the_odds_api import find_soccer_edges
-    except ImportError:
-        from soccer_edge import find_soccer_edges
+    """DEPRECATED legacy per-league soccer futures helper.
 
-    all_edges = await find_soccer_edges(min_edge)
-    # Filter to specific league
-    league_edges = [e for e in all_edges if e.league.lower() == league.lower()]
-
+    Superseded by the shared-core engines at /api/soccer/match-edge (per-match
+    3-way) and /api/soccer/futures-edge (World Cup / outright winners). Returns
+    an empty, clearly-deprecated payload rather than calling the removed
+    soccer_edge module.
+    """
     return {
         "league": league.upper(),
         "timestamp": datetime.now().isoformat(),
-        "total_edges": len(league_edges),
-        "edges": [
-            {
-                "team": e.team,
-                "vegas_prob": round(e.vegas_prob, 4),
-                "vegas_odds": e.vegas_odds,
-                "polymarket_price": round(e.polymarket_price, 4),
-                "edge_pct": round(e.edge_pct * 100, 2),
-                "direction": e.direction,
-                "market_id": e.poly_market_id
-            }
-            for e in league_edges
-        ]
+        "total_edges": 0,
+        "deprecated": "use /api/soccer/match-edge or /api/soccer/futures-edge",
+        "edges": [],
     }
 
 

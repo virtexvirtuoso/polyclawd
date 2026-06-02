@@ -124,3 +124,14 @@ def test_extract_outright_prefers_betfair_exchange():
     field = extract_outright_field(raw)
     # Betfair exchange (sharper) preferred over draftkings
     assert len(field) == 2 and field[0]["name"] == "Brazil" and field[0]["price"] == 850
+
+
+# ── Cutover regression: legacy soccer_edge fully removed ─────────────
+def test_legacy_soccer_edge_decoupled():
+    import importlib.util
+    import odds
+    import odds.the_odds_api as t
+    assert importlib.util.find_spec("odds.soccer_edge") is None, "soccer_edge should be deleted"
+    assert not hasattr(t, "get_soccer_edge_summary"), "the_odds_api soccer funcs should be gone"
+    assert not hasattr(t, "find_soccer_edges")
+    assert hasattr(t, "get_baseball_games_with_all_markets"), "baseball funcs must remain"

@@ -86,36 +86,9 @@ def fetch_vegas_edges() -> List[Dict]:
         logger.exception(f"Unexpected error fetching Vegas edges: {e}")
     return signals
 
-def fetch_soccer_edges() -> List[Dict]:
-    """Fetch Soccer edge signals"""
-    signals = []
-    try:
-        resp = urllib.request.urlopen(
-            urllib.request.Request("http://localhost:8420/api/vegas/soccer",
-                                   headers={"User-Agent": "EdgeCache/1.0"}),
-            timeout=25
-        )
-        data = json.loads(resp.read().decode())
-        for edge in data.get("edges", [])[:5]:
-            edge_pct = edge.get("edge_pct", 0)
-            if abs(edge_pct) >= 5:
-                side = "YES" if edge_pct > 0 else "NO"
-                signals.append({
-                    "source": "soccer_edge",
-                    "platform": "polymarket",
-                    "market": f"{edge.get('team', '')} - {edge.get('competition', '')}",
-                    "side": side,
-                    "confidence": min(60, abs(edge_pct) * 2),
-                    "value": abs(edge_pct),
-                    "reasoning": f"Vegas {edge.get('vegas_prob', 0):.0f}% vs Poly {edge.get('polymarket_price', 0):.0f}% ({edge_pct:+.1f}% edge)",
-                    "price": edge.get("polymarket_price", 50) / 100,
-                    "url": edge.get("poly_url")
-                })
-    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
-        logger.debug(f"Soccer edge fetch failed (expected if service down): {e}")
-    except Exception as e:
-        logger.exception(f"Unexpected error fetching soccer edges: {e}")
-    return signals
+# fetch_soccer_edges() REMOVED 2026-06-02: legacy soccer_edge futures signal no
+# longer feeds live execution. The new shadow-first engines (soccer_match_edge /
+# soccer_futures_edge) log to the shadow tracker via /api/soccer/* instead.
 
 def fetch_betfair_edges() -> List[Dict]:
     """Fetch Betfair edge signals"""
@@ -286,7 +259,7 @@ def refresh_edge_cache() -> List[Dict]:
     # Fetch all sources (order by speed)
     all_signals.extend(fetch_vegas_edges())
     all_signals.extend(fetch_betfair_edges())
-    all_signals.extend(fetch_soccer_edges())
+    # soccer removed from live execution aggregation (shadow-first); see edge_cache note
     all_signals.extend(fetch_baseball_edges())
     all_signals.extend(fetch_manifold_edges())
     all_signals.extend(fetch_predictit_edges())
