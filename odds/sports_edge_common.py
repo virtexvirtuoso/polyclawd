@@ -36,6 +36,26 @@ POLY_WINNER_FEE = 0.02  # Polymarket charges ~2% on winnings; edge must clear it
 # Sharp books in preference order. Pinnacle first (sharpest); exchanges next.
 SHARP_BOOKS: Tuple[str, ...] = ("pinnacle", "betfair_ex_eu", "betfair_ex_uk", "williamhill")
 
+# ─── Weighted Consensus Devig ───────────────────────────────
+# Per-book devig → weighted average across books. Same approach as baseball_edge.py
+# to avoid the best-of-all vig collapse artifact.
+BOOK_WEIGHTS: Dict[str, float] = {
+    "pinnacle":        0.35,
+    "betfair_ex_uk":   0.30,
+    "betfair_ex_eu":   0.30,
+    "draftkings":      0.20,
+    "fanduel":         0.15,
+    "betmgm":          0.10,
+    "betrivers":       0.05,
+    "caesars":         0.05,
+    "williamhill_us":  0.05,
+    "williamhill":     0.05,
+    "bovada":          0.02,
+}
+# Comma-separated list for The Odds API `bookmakers` param (overrides regions,
+# still costs 1 credit unit). Kept in sync with BOOK_WEIGHTS keys.
+CONSENSUS_BOOKMAKERS = ",".join(BOOK_WEIGHTS.keys())
+
 # Reject Polymarket prices that indicate an effectively-resolved/illiquid market.
 def VALID_PRICE(p: float) -> bool:
     return 0.02 <= p <= 0.98
@@ -84,6 +104,91 @@ def devig_shin(implied: List[float], iters: int = 50) -> List[float]:
             for p in implied]
     t = sum(true)
     return [x / t for x in true] if t > 0 else [p / s for p in implied]
+
+
+def consensus_devig_2way(game: Dict, market_key: str = "h2h") -> Dict[str, float]:
+    """Per-book devig → weighted consensus for 2-way markets (UFC, MLB moneyline).
+    Returns {outcome: true_prob} or {} if no weighted book has both sides."""
+    weighted: Dict[str, float] = {}
+    total_w = 0.0
+    for bk in game.get("bookmakers", []):
+        w = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        if w <= 0.0:
+            continue
+        for mk in bk.get("markets", []):
+            if mk.get("key") != market_key:
+                continue
+            outs = mk.get("outcomes", [])
+            if len(outs) < 2:
+                continue
+            names = [o.get("name") for o in outs]
+            prices = [o.get("price") for o in outs]
+            if any(n is None or p is None for n, p in zip(names, prices)):
+                continue
+            implied = [american_to_implied_prob(int(p)) for p in prices]
+            total = sum(implied)
+            probs = [ip / total for ip in implied]
+            for nm, pr in zip(names, probs):
+                weighted[nm] = weighted.get(nm, 0.0) + w * pr
+            total_w += w
+            break
+    if total_w == 0.0 or len(weighted) < 2:
+        return {}
+    return {nm: v / total_w for nm, v in weighted.items()}
+
+
+def consensus_devig_3way(game: Dict, market_key: str = "h2h") -> Dict[str, float]:
+    """Per-book Shin devig → weighted consensus for 3-way markets (soccer).
+    Returns {outcome: true_prob} or {} if no weighted book has all 3 sides."""
+    weighted: Dict[str, float] = {}
+    total_w = 0.0
+    for bk in game.get("bookmakers", []):
+        w = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        if w <= 0.0:
+            continue
+        for mk in bk.get("markets", []):
+            if mk.get("key") != market_key:
+                continue
+            outs = mk.get("outcomes", [])
+            if len(outs) < 3:
+                continue
+            names = [o.get("name") for o in outs]
+            prices = [o.get("price") for o in outs]
+            if any(n is None or p is None for n, p in zip(names, prices)):
+                continue
+            implied = [american_to_implied_prob(int(p)) for p in prices]
+            probs = devig_shin(implied)
+            for nm, pr in zip(names, probs):
+                weighted[nm] = weighted.get(nm, 0.0) + w * pr
+            total_w += w
+            break
+    if total_w == 0.0 or len(weighted) < 3:
+        return {}
+    return {nm: v / total_w for nm, v in weighted.items()}
+
+
+def consensus_best_odds(game: Dict, market_key: str = "h2h") -> Dict[str, int]:
+    """Raw American odds from the highest-weighted single book that has all outcomes.
+    Display/line-movement only — true probs come from consensus_devig_*."""
+    best_w = -1.0
+    best: Dict[str, int] = {}
+    for bk in game.get("bookmakers", []):
+        w = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        if w <= 0.0 or w <= best_w:
+            continue
+        for mk in bk.get("markets", []):
+            if mk.get("key") != market_key:
+                continue
+            pair: Dict[str, int] = {}
+            for o in mk.get("outcomes", []):
+                name, price = o.get("name"), o.get("price")
+                if name is not None and price is not None:
+                    pair[name] = int(price)
+            if len(pair) >= 2:
+                best_w = w
+                best = pair
+            break
+    return best
 
 
 def sharp_odds_per_outcome(game: Dict, market_key: str = "h2h") -> Dict[str, int]:
@@ -192,7 +297,7 @@ class SportConfig:
     market_model: str                       # "2way" | "3way" | "outright"
     featured_markets: List[str]
     regions: str = "eu"
-    bookmakers: str = "pinnacle"            # sharp reference; overrides regions (1 credit unit)
+    bookmakers: str = CONSENSUS_BOOKMAKERS  # weighted consensus books; overrides regions (1 credit unit)
     team_aliases: Dict[str, List[str]] = field(default_factory=dict)
     shadow_strategy: str = ""
     archetype: str = "sports_single_game"
@@ -220,6 +325,7 @@ class Edge:
     slippage_bps: Optional[float] = None
     tradeable: bool = False
     no_api_line: bool = False
+    live_book: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -271,9 +377,25 @@ def enrich_executable_edge(edge: Edge, outcome_index: int, target_usd: float = 1
     if not edge.poly_market_id:
         return
     side = "YES" if outcome_index == 0 else "NO"
+    # P3.4: prefer the live WS book when POLY_WS_CONSUME=1 (REST fallback otherwise).
+    _tid = None
+    _book = None
+    import os as _os
+    if _os.environ.get("POLY_WS_CONSUME") == "1":
+        try:
+            from api.services import poly_ws_reader as _pwr
+            _toks = pee.condition_id_to_token_ids(edge.poly_market_id)
+            if _toks:
+                _tid = _toks[outcome_index if outcome_index in (0, 1) else 0]
+                _book = _pwr.get_live_orderbook_sync(_tid)
+                if _book is not None:
+                    edge.live_book = True
+        except Exception:
+            _tid = None
+            _book = None
     try:
-        ex = pee.executable_edge(edge.book_prob, side, condition_id=edge.poly_market_id,
-                                 outcome_index=outcome_index, target_usd=target_usd)
+        ex = pee.executable_edge(edge.book_prob, side, token_id=_tid, condition_id=edge.poly_market_id,
+                                 outcome_index=outcome_index, target_usd=target_usd, book=_book)
     except Exception:
         ex = {"available": False}
     if ex.get("available"):
@@ -347,7 +469,7 @@ def summarize(edges: List[Edge], cfg: SportConfig) -> Dict:
             "executable_edge": (round(e.executable_edge * 100, 1) if e.executable_edge is not None else None),
             "book_spread_pct": (round(e.book_spread * 100, 1) if e.book_spread is not None else None),
             "slippage_bps": e.slippage_bps, "tradeable": e.tradeable,
-            "no_api_line": e.no_api_line,
+            "no_api_line": e.no_api_line, "live_book": e.live_book,
         } for e in edges],
         "top_opportunities": [{
             "event": e.event_title, "participant": e.participant,

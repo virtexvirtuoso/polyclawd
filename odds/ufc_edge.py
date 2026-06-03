@@ -57,16 +57,22 @@ def ml_market(ev: Dict, fighter: str) -> Optional[Tuple[int, str, float]]:
 
 
 def compute_ufc_edges(fight: Dict, ev: Dict, min_edge: float = 0.03) -> List[sec.Edge]:
-    """Pure (no network): 2-way ML edges + prop listings (un-enriched)."""
-    best = sec.sharp_odds_per_outcome(fight, "h2h")
-    if len(best) < 2:
-        return []
-    names = list(best.keys())
-    pa, pb = sec.devig_two_way(best[names[0]], best[names[1]])
-    true = {names[0]: pa, names[1]: pb}
+    """Pure (no network): weighted consensus 2-way ML edges + prop listings (un-enriched)."""
+    # True probabilities from weighted consensus across books.
+    # Falls back to single sharp book if consensus has insufficient data.
+    true = sec.consensus_devig_2way(fight, "h2h")
+    if len(true) < 2:
+        best = sec.sharp_odds_per_outcome(fight, "h2h")
+        if len(best) < 2:
+            return []
+        names = list(best.keys())
+        pa, pb = sec.devig_two_way(best[names[0]], best[names[1]])
+        true = {names[0]: pa, names[1]: pb}
+    # Raw odds for display only
+    best = sec.consensus_best_odds(fight, "h2h") or sec.sharp_odds_per_outcome(fight, "h2h")
 
     edges: List[sec.Edge] = []
-    for fighter in names:
+    for fighter in true:
         mm = ml_market(ev, fighter)
         if not mm:
             continue
@@ -81,7 +87,7 @@ def compute_ufc_edges(fight: Dict, ev: Dict, min_edge: float = 0.03) -> List[sec
                 market_type="moneyline",
                 market_model="2way",
                 book_prob=true[fighter],
-                american_odds=int(best[fighter]),
+                american_odds=int(best.get(fighter, 0)),
                 poly_price=price,
                 edge_pct=edge,
                 direction="BUY" if edge > 0 else "SELL",
@@ -129,8 +135,13 @@ async def find_ufc_edges(min_edge: float = 0.03) -> List[sec.Edge]:
     edges: List[sec.Edge] = []
     for fight in raw or []:
         try:
-            best = sec.sharp_odds_per_outcome(fight, "h2h")
-            fighters = list(best.keys())
+            # Extract fighter names from any available book
+            fighters = sec.consensus_devig_2way(fight, "h2h")
+            if len(fighters) < 2:
+                best = sec.sharp_odds_per_outcome(fight, "h2h")
+                fighters = list(best.keys())
+            else:
+                fighters = list(fighters.keys())
             if len(fighters) < 2:
                 continue
             ev = sec.match_event_by_participants(fighters, poly, CFG.team_aliases)

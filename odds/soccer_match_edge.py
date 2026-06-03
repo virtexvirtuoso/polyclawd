@@ -59,12 +59,18 @@ def map_legs(ev: Dict, home: str, away: str) -> Dict[str, Tuple[str, float, int]
 
 
 def compute_match_edges(game: Dict, ev: Dict, min_edge: float = 0.03) -> List[sec.Edge]:
-    """Pure (no network): sharp-book devig + leg mapping → edges (un-enriched)."""
+    """Pure (no network): weighted consensus devig + leg mapping → edges (un-enriched)."""
     home, away = game.get("home_team", ""), game.get("away_team", "")
-    best = sec.sharp_odds_per_outcome(game, "h2h")
-    if len(best) < 3:
-        return []
-    true = devig_three_way([{"name": n, "price": p} for n, p in best.items()])
+    # True probabilities from weighted consensus across books (Shin devig per book).
+    # Falls back to single sharp book if consensus has insufficient data.
+    true = sec.consensus_devig_3way(game, "h2h")
+    if len(true) < 3:
+        best = sec.sharp_odds_per_outcome(game, "h2h")
+        if len(best) < 3:
+            return []
+        true = devig_three_way([{"name": n, "price": p} for n, p in best.items()])
+    # Raw odds for display only
+    best = sec.consensus_best_odds(game, "h2h") or sec.sharp_odds_per_outcome(game, "h2h")
     draw_name = next((n for n in true if sec._norm(n) == "draw"), None)
     legs = map_legs(ev, home, away)
 
