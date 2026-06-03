@@ -249,6 +249,7 @@ class MLBEdge:
     tradeable: bool = False                     # book ok AND executable_edge > 0
     poly_move_1h: Optional[float] = None        # Polymarket price drift ~1h (pp)
     poly_move_6h: Optional[float] = None        # Polymarket price drift ~6h (pp)
+    live_book: bool = False                     # P3.4: executable edge used live WS book
 
 
 def _team_in_title(team: str, title: str) -> bool:
@@ -484,47 +485,104 @@ def _devig_two_way(odds_a: int, odds_b: int) -> Tuple[float, float]:
     return p_a / total, p_b / total
 
 
-_SHARP_BOOKS = ("pinnacle", "betfair_ex_eu", "betfair_ex_uk", "williamhill")
+# ─── Weighted Consensus Devig ───────────────────────────────
+# Per-book devig -> weighted average across books. Replaces both the legacy
+# best-of-all bug (cherry-picked the lowest implied prob per team across books,
+# collapsing the overround to ~0% and manufacturing phantom BUY edges) AND the
+# old single-sharp-book env-flag fallback.
+#
+# Weights redistribute automatically when a book is absent from a game's data.
+# NOTE: Betfair exchange (betfair_ex_uk/eu) is the sharpest source (true
+# exchange, near-zero vig). Confirm exact Odds API book keys against a live h2h
+# response before tuning — a wrong key silently scores weight 0.
+BOOK_WEIGHTS: Dict[str, float] = {
+    "pinnacle":        0.35,   # sharpest two-sided book, low vig (~2%)
+    "betfair_ex_uk":   0.30,   # true exchange, near-zero vig
+    "betfair_ex_eu":   0.30,   # EU exchange, same depth class
+    "draftkings":      0.20,   # highest volume US retail
+    "fanduel":         0.15,
+    "betmgm":          0.10,
+    "betrivers":       0.05,
+    "caesars":         0.05,
+    "williamhill_us":  0.05,
+    "bovada":          0.02,
+}
+MIN_BOOKS_CONSENSUS = 2
+
+
+def _consensus_devig(game: Dict) -> Dict[str, float]:
+    """
+    Per-book devig -> weighted consensus for MLB moneylines.
+
+    For each weighted book that quotes BOTH teams' h2h odds:
+      1. Convert to implied prob within that book
+      2. Devig (remove vig) so the book's two probs sum to 1.0
+      3. Add weight * prob to a per-team accumulator
+    Then divide by total contributing weight -> consensus prob per team.
+
+    This is the SOLE source of moneyline true-prob (see find_baseball_edges).
+    Returns {team: devigged_prob} or {} if no weighted book has both sides.
+    """
+    weighted_probs: Dict[str, float] = {}
+    total_weight = 0.0
+
+    for bk in game.get("bookmakers", []):
+        weight = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        if weight <= 0.0:
+            continue
+        for market in bk.get("markets", []):
+            if market.get("key") != "h2h":
+                continue
+            outcomes = market.get("outcomes", [])
+            if len(outcomes) < 2:
+                continue
+            o0, o1 = outcomes[0], outcomes[1]
+            name0, name1 = o0.get("name"), o1.get("name")
+            price0, price1 = o0.get("price"), o1.get("price")
+            if name0 is None or name1 is None or price0 is None or price1 is None:
+                continue
+            raw0 = _american_to_implied_prob(int(price0))
+            raw1 = _american_to_implied_prob(int(price1))
+            vig = raw0 + raw1
+            prob0, prob1 = raw0 / vig, raw1 / vig
+            weighted_probs[name0] = weighted_probs.get(name0, 0.0) + weight * prob0
+            weighted_probs[name1] = weighted_probs.get(name1, 0.0) + weight * prob1
+            total_weight += weight
+            break  # one h2h market per book
+
+    if total_weight == 0.0 or len(weighted_probs) < 2:
+        return {}
+    for team in weighted_probs:
+        weighted_probs[team] /= total_weight
+    return weighted_probs
 
 
 def _best_odds_per_team(game: Dict) -> Dict[str, int]:
     """
-    h2h American odds per team.
-
-    Default (legacy): best line across ALL bookmakers (lowest implied prob).
-    With env BASEBALL_SHARP_DEVIG=1 (Phase R): use a single SHARP book (Pinnacle
-    preferred) instead — avoids the best-of-N overround deflation that
-    manufactures phantom BUY edges (2026-06-02 review BLOCKER). Flag is read
-    per-call and defaults OFF, so live behavior is unchanged until validated.
+    h2h American odds from the single highest-weighted book that quotes BOTH
+    teams. Display + line-movement only — moneyline true_prob now comes from
+    _consensus_devig(). Returns {} if no weighted book has both sides.
     """
-    if os.getenv("BASEBALL_SHARP_DEVIG", "").lower() in ("1", "true", "yes"):
-        by_book: Dict[str, Dict[str, int]] = {}
-        for bk in game.get("bookmakers", []):
-            for market in bk.get("markets", []):
-                if market.get("key") != "h2h":
-                    continue
-                for o in market.get("outcomes", []):
-                    if o.get("name") is not None and o.get("price") is not None:
-                        by_book.setdefault(bk.get("key", ""), {})[o["name"]] = int(o["price"])
-        for sb in _SHARP_BOOKS:
-            if sb in by_book and len(by_book[sb]) >= 2:
-                return by_book[sb]
-        # no sharp book present → fall through to legacy best-of-all
-
+    best_weight = -1.0
     best: Dict[str, int] = {}
-    for bookmaker in game.get("bookmakers", []):
-        for market in bookmaker.get("markets", []):
+    for bk in game.get("bookmakers", []):
+        weight = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        if weight <= 0.0 or weight <= best_weight:
+            continue
+        for market in bk.get("markets", []):
             if market.get("key") != "h2h":
                 continue
+            pair: Dict[str, int] = {}
             for outcome in market.get("outcomes", []):
                 name = outcome.get("name")
                 price = outcome.get("price")
                 if name is None or price is None:
                     continue
-                price = int(price)
-                existing = best.get(name)
-                if existing is None or _american_to_implied_prob(price) < _american_to_implied_prob(existing):
-                    best[name] = price
+                pair[name] = int(price)
+            if len(pair) >= 2:
+                best_weight = weight
+                best = pair
+            break
     return best
 
 
@@ -634,11 +692,16 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
             continue
 
         # ── MONEYLINES ──────────────────────────────────────────────
-        team_odds = _best_odds_per_team(game)
-        home_odds = team_odds.get(home_team)
-        away_odds = team_odds.get(away_team)
-        if home_odds and away_odds:
-            home_true_prob, away_true_prob = _devig_two_way(home_odds, away_odds)
+        # True probabilities come from the weighted consensus — NOT a single book.
+        consensus = _consensus_devig(game)
+        home_true_prob = consensus.get(home_team)
+        away_true_prob = consensus.get(away_team)
+        if home_true_prob is not None and away_true_prob is not None:
+            # Raw odds kept ONLY for the american_odds display field and for
+            # line-movement tracking — they never drive true_prob/edge anymore.
+            team_odds = _best_odds_per_team(game)
+            home_odds = team_odds.get(home_team, 0)
+            away_odds = team_odds.get(away_team, 0)
             prices = _extract_moneyline_prices(event, home_team, away_team)
             if prices:
                 home_poly_price, away_poly_price, ml_market_id = prices
@@ -792,9 +855,13 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
                             poly_market_id=tot_market_id, poly_event_id=event.get("id"),
                         ), edge, game_id)
 
-    # --- Executable-edge enrichment: the midpoint edge above is vs Polymarket's
-    # last/mid price; the price you can actually TAKE is the ask walked to size.
-    # Enrich only the emitted total edges (clean Over=0/Under=1 token mapping).
+    # --- Executable-edge enrichment. Midpoint edge above is vs Polymarket's
+    # last/mid price; the executable price is the ask walked to size. (P3.4)
+    # Optionally use the live WS book (POLY_WS_CONSUME=1) and register tokens
+    # with the WS service; both degrade gracefully to today's REST path.
+    import os as _os
+    _ws_consume = _os.environ.get("POLY_WS_CONSUME") == "1"
+    _reg_tokens = []
     for _e in edges:
         if not _e.poly_market_id:
             continue
@@ -809,12 +876,29 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
             _oi = 0 if _team_in_title(_e.bet_team, _first) else 1
         else:
             continue
+        # resolve the side token once (reused for register + live book + edge)
+        _tid = None
+        try:
+            _toks = pee.condition_id_to_token_ids(_e.poly_market_id)
+            if _toks:
+                _tid = _toks[_oi if _oi in (0, 1) else 0]
+                _reg_tokens.append(_tid)
+        except Exception:
+            _tid = None
+        _book = None
+        if _ws_consume and _tid:
+            try:
+                from api.services import poly_ws_reader as _pwr
+                _book = await _pwr.get_live_orderbook(_tid)
+                if _book is not None:
+                    _e.live_book = True
+            except Exception:
+                _book = None
         try:
             _ex = pee.executable_edge(
                 _e.odds_api_prob, _e.bet_team,
-                condition_id=_e.poly_market_id,
-                outcome_index=_oi,
-                target_usd=100.0,
+                token_id=_tid, condition_id=_e.poly_market_id,
+                outcome_index=_oi, target_usd=100.0, book=_book,
             )
         except Exception:
             _ex = {"available": False}
@@ -826,12 +910,20 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
             _e.tradeable = _ex["tradeable"]
         # Polymarket's own recent price drift (persistent momentum, survives restart)
         try:
-            _pm = pee.poly_price_move(condition_id=_e.poly_market_id, outcome_index=_oi)
+            _pm = pee.poly_price_move(token_id=_tid, condition_id=_e.poly_market_id, outcome_index=_oi)
         except Exception:
             _pm = {"available": False}
         if _pm.get("available"):
             _e.poly_move_1h = _pm["move_1h_pp"]
             _e.poly_move_6h = _pm["move_6h_pp"]
+
+    # P3.4: hint the WS service to stream these markets (fire-and-forget, never raises)
+    if _reg_tokens:
+        try:
+            from api.services import poly_ws_reader as _pwr
+            await _pwr.register_watch(_reg_tokens)
+        except Exception:
+            pass
 
     edges.sort(key=lambda e: abs(e.edge_pct), reverse=True)
     return edges
@@ -888,6 +980,7 @@ async def get_baseball_edge_summary(min_edge: float = DEFAULT_MIN_EDGE) -> Dict:
                 "tradeable": e.tradeable,
                 "poly_move_1h": e.poly_move_1h,
                 "poly_move_6h": e.poly_move_6h,
+                "live_book": e.live_book,
             }
             for e in edges
         ],
