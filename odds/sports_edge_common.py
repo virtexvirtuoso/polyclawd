@@ -36,6 +36,23 @@ POLY_WINNER_FEE = 0.02  # Polymarket charges ~2% on winnings; edge must clear it
 # Sharp books in preference order. Pinnacle first (sharpest); exchanges next.
 SHARP_BOOKS: Tuple[str, ...] = ("pinnacle", "betfair_ex_eu", "betfair_ex_uk", "williamhill")
 
+# Sportsbook(Betfair) -> Polymarket nation-name aliases. Keyed by the BOOK name.
+# Verified 2026-06-04 vs the live 2026 World Cup winner market: 45/54 match by
+# unicode-normalization alone; these are the real name-difference cases.
+# (Bolivia/Denmark/Jamaica/Kosovo/Poland are absent from Polymarket's winner
+# market -- inter-confederation playoff teams shown as "Team AG-AO" placeholders.)
+# Used by BOTH the soccer futures and per-match engines so WC matches resolve.
+SOCCER_NATION_ALIASES: Dict[str, List[str]] = {
+    "Bosnia & Herzegovina": ["Bosnia & Herzegovina", "Bosnia-Herzegovina", "Bosnia"],
+    "Czech Republic": ["Czech Republic", "Czechia"],
+    "DR Congo": ["DR Congo", "Congo DR"],
+    "Turkey": ["Turkey", "Turkiye"],
+    "United States": ["United States", "USA", "US"],
+    "South Korea": ["South Korea", "Korea Republic", "Korea"],
+    "Ivory Coast": ["Ivory Coast", "Cote d'Ivoire"],
+    "Cape Verde": ["Cape Verde", "Cabo Verde"],
+}
+
 # ─── Weighted Consensus Devig ───────────────────────────────
 # Per-book devig → weighted average across books. Same approach as baseball_edge.py
 # to avoid the best-of-all vig collapse artifact.
@@ -47,7 +64,6 @@ BOOK_WEIGHTS: Dict[str, float] = {
     "fanduel":         0.15,
     "betmgm":          0.10,
     "betrivers":       0.05,
-    "caesars":         0.05,
     "williamhill_us":  0.05,
     "williamhill":     0.05,
     "bovada":          0.02,
@@ -215,6 +231,132 @@ def sharp_odds_per_outcome(game: Dict, market_key: str = "h2h") -> Dict[str, int
         return {}
     return min(by_book.values(),
                key=lambda d: sum(american_to_implied_prob(v) for v in d.values()))
+
+
+def consensus_devig_spreads(game: Dict, market_key: str = "spreads") -> Dict[float, Dict[str, float]]:
+    """Per-book devig -> weighted consensus for point spreads, keyed by ABSOLUTE
+    point. For each book quoting both sides of a |point| (team_a +X, team_b -X),
+    devig the pair within that book, then weight-average across books at that same
+    |point|. Returns {abs_point: {team: cover_prob}}; {} if none."""
+    acc: Dict[float, Dict[str, float]] = {}
+    wsum: Dict[float, float] = {}
+    for bk in game.get("bookmakers", []):
+        w = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        if w <= 0.0:
+            continue
+        for mk in bk.get("markets", []):
+            if mk.get("key") != market_key:
+                continue
+            by_abs: Dict[float, List[Tuple[str, int]]] = {}
+            for o in mk.get("outcomes", []):
+                name, price, point = o.get("name"), o.get("price"), o.get("point")
+                if name is None or price is None or point is None:
+                    continue
+                by_abs.setdefault(abs(float(point)), []).append((name, int(price)))
+            for ap, items in by_abs.items():
+                if len(items) != 2:
+                    continue
+                (n0, p0), (n1, p1) = items
+                a, b = devig_two_way(p0, p1)
+                d = acc.setdefault(ap, {})
+                d[n0] = d.get(n0, 0.0) + w * a
+                d[n1] = d.get(n1, 0.0) + w * b
+                wsum[ap] = wsum.get(ap, 0.0) + w
+            break
+    out: Dict[float, Dict[str, float]] = {}
+    for ap, d in acc.items():
+        tw = wsum.get(ap, 0.0)
+        if tw > 0.0 and len(d) >= 2:
+            out[ap] = {nm: v / tw for nm, v in d.items()}
+    return out
+
+
+def consensus_best_spread_odds(game: Dict, market_key: str = "spreads") -> Dict[float, Dict[str, Tuple[int, float]]]:
+    """Raw spread odds + signed point per team from the highest-weighted single
+    book quoting both sides of each |point|. Display/line-movement only.
+    Returns {abs_point: {team: (american_odds, signed_point)}}."""
+    best_w: Dict[float, float] = {}
+    out: Dict[float, Dict[str, Tuple[int, float]]] = {}
+    for bk in game.get("bookmakers", []):
+        w = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        if w <= 0.0:
+            continue
+        for mk in bk.get("markets", []):
+            if mk.get("key") != market_key:
+                continue
+            by_abs: Dict[float, Dict[str, Tuple[int, float]]] = {}
+            for o in mk.get("outcomes", []):
+                name, price, point = o.get("name"), o.get("price"), o.get("point")
+                if name is None or price is None or point is None:
+                    continue
+                by_abs.setdefault(abs(float(point)), {})[name] = (int(price), float(point))
+            for ap, pair in by_abs.items():
+                if len(pair) >= 2 and w > best_w.get(ap, -1.0):
+                    best_w[ap] = w
+                    out[ap] = pair
+            break
+    return out
+
+
+def consensus_devig_totals(game: Dict, market_key: str = "totals") -> Dict[float, Dict[str, float]]:
+    """Per-book devig -> weighted consensus for Over/Under totals, keyed by the
+    total point. Returns {point: {"Over": p, "Under": p}}; {} if none."""
+    acc: Dict[float, Dict[str, float]] = {}
+    wsum: Dict[float, float] = {}
+    for bk in game.get("bookmakers", []):
+        w = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        if w <= 0.0:
+            continue
+        for mk in bk.get("markets", []):
+            if mk.get("key") != market_key:
+                continue
+            by_pt: Dict[float, Dict[str, int]] = {}
+            for o in mk.get("outcomes", []):
+                name, price, point = o.get("name"), o.get("price"), o.get("point")
+                if name is None or price is None or point is None:
+                    continue
+                by_pt.setdefault(float(point), {})[str(name).title()] = int(price)
+            for pt, sides in by_pt.items():
+                if "Over" in sides and "Under" in sides:
+                    a, b = devig_two_way(sides["Over"], sides["Under"])
+                    d = acc.setdefault(pt, {})
+                    d["Over"] = d.get("Over", 0.0) + w * a
+                    d["Under"] = d.get("Under", 0.0) + w * b
+                    wsum[pt] = wsum.get(pt, 0.0) + w
+            break
+    out: Dict[float, Dict[str, float]] = {}
+    for pt, d in acc.items():
+        tw = wsum.get(pt, 0.0)
+        if tw > 0.0 and len(d) >= 2:
+            out[pt] = {k: v / tw for k, v in d.items()}
+    return out
+
+
+def consensus_best_total_odds(game: Dict, market_key: str = "totals") -> Dict[float, Tuple[int, int]]:
+    """Raw (over_odds, under_odds) per total point from the highest-weighted single
+    book quoting both sides. Display/line-movement only. {point: (over, under)}."""
+    best_w: Dict[float, float] = {}
+    out: Dict[float, Tuple[int, int]] = {}
+    for bk in game.get("bookmakers", []):
+        w = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        if w <= 0.0:
+            continue
+        for mk in bk.get("markets", []):
+            if mk.get("key") != market_key:
+                continue
+            by_pt: Dict[float, Dict[str, int]] = {}
+            for o in mk.get("outcomes", []):
+                name, price, point = o.get("name"), o.get("price"), o.get("point")
+                if name is None or price is None or point is None:
+                    continue
+                by_pt.setdefault(float(point), {})[str(name).title()] = int(price)
+            for pt, sides in by_pt.items():
+                if "Over" in sides and "Under" in sides and w > best_w.get(pt, -1.0):
+                    best_w[pt] = w
+                    out[pt] = (sides["Over"], sides["Under"])
+            break
+    return out
+
 
 
 # ─────────────────────────────────────────────────────────────────────

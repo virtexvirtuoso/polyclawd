@@ -26,12 +26,7 @@ except ImportError:  # pragma: no cover
     from odds_api_fetch import get_games_with_markets, extract_outright_field, SOCCER_OUTRIGHT_KEYS
 
 # Aliases for World Cup nations where book vs Polymarket naming diverges.
-WC_ALIASES: Dict[str, List[str]] = {
-    "United States": ["United States", "USA", "US"],
-    "Turkey": ["Turkey", "Türkiye"],
-    "South Korea": ["South Korea", "Korea Republic"],
-    "Ivory Coast": ["Ivory Coast", "Côte d'Ivoire"],
-}
+WC_ALIASES = sec.SOCCER_NATION_ALIASES  # shared nation aliases (see sports_edge_common)
 
 WC_CFG = sec.SportConfig(
     name="soccer_futures",

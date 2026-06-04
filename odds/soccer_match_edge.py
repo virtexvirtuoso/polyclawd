@@ -29,6 +29,7 @@ CFG = sec.SportConfig(
     polymarket_tag="soccer",
     market_model="3way",
     featured_markets=["h2h"],
+    team_aliases=sec.SOCCER_NATION_ALIASES,
     shadow_strategy="soccer_match_3way",
 )
 

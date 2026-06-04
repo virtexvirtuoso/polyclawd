@@ -246,3 +246,17 @@ def test_upcoming_window_and_commence_params():
     assert cf.endswith("Z") and ct.endswith("Z") and cf < ct
     url = _build_url("soccer_epl", "h2h", "eu", "pinnacle", commence_from=cf, commence_to=ct)
     assert "commenceTimeFrom=" in url and "commenceTimeTo=" in url and "bookmakers=pinnacle" in url
+
+
+# ── World Cup nation aliases (2026-06-04 readiness) ─────────────────
+def test_wc_nation_aliases_match_polymarket_names():
+    from odds import sports_edge_common as sec
+    a = sec.SOCCER_NATION_ALIASES
+    # book name (Betfair) should match the Polymarket question's nation name
+    assert sec._name_in("Will Czechia win the 2026 FIFA World Cup?", "Czech Republic", a)
+    assert sec._name_in("Will Congo DR win the 2026 FIFA World Cup?", "DR Congo", a)
+    assert sec._name_in("Will Türkiye win the 2026 FIFA World Cup?", "Turkey", a)
+    assert sec._name_in("Will Bosnia-Herzegovina win the 2026 FIFA World Cup?", "Bosnia & Herzegovina", a)
+    # both engines share the same map
+    from odds import soccer_futures_edge as sfe, soccer_match_edge as sme
+    assert sfe.WC_CFG.team_aliases is a and sme.CFG.team_aliases is a
