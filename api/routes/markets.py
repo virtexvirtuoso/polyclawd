@@ -929,6 +929,28 @@ async def get_baseball_dashboard():
     return result
 
 
+@router.get("/baseball/props")
+async def get_baseball_props():
+    """MLB player props (batter_*/pitcher_*) for tonight's games — powers the
+    Player Props tab on baseball.html.
+
+    Data source: The Odds API event-odds endpoint, sharp books only
+    (Pinnacle/FanDuel/DraftKings/BetMGM/Caesars). MLB uses batter_*/pitcher_*
+    market keys (NOT player_*). Result is cached 10 min and hard-stops below the
+    Odds API credit floor so dashboard traffic cannot drain the budget.
+
+    Returns:
+      {source, timestamp, credit_remaining, games: [{away_team, home_team,
+       away_pitcher, home_pitcher, commence_time, props: {market: [rows]}}]}
+    """
+    try:
+        from odds.mlb_props import get_mlb_props
+        return await get_mlb_props()
+    except Exception as e:
+        logger.exception(f"baseball props fetch failed: {e}")
+        return {"source": "the_odds_api_mlb_props", "games": [], "error": str(e)}
+
+
 # ----------------------------------------------------------------------------
 # NFL Futures Endpoints
 # ----------------------------------------------------------------------------
