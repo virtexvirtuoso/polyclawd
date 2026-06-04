@@ -4,6 +4,7 @@ Pure functions only (no network). Synthetic payloads mirror real Polymarket Gamm
 + The Odds API structures probed 2026-06-02. Run:
     venv/bin/python -m pytest tests/test_sports_engines.py -v --noconftest
 """
+
 import pytest
 
 from odds import soccer_futures_edge as sfe
@@ -13,14 +14,30 @@ from odds import ufc_edge as ufc
 
 # ── Soccer futures ───────────────────────────────────────────────────
 def test_futures_maps_winner_market_and_signs_edge():
-    poly = [{"id": "ev1", "title": "World Cup Winner", "markets": [
-        {"question": "Will Brazil win the 2026 FIFA World Cup?",
-         "outcomePrices": '["0.12", "0.88"]', "conditionId": "c1"},
-        {"question": "Will France win the 2026 FIFA World Cup?",
-         "outcomePrices": '["0.15", "0.85"]', "conditionId": "c2"},
-    ]}]
-    field = [{"name": "Brazil", "price": 450}, {"name": "France", "price": 500},
-             {"name": "England", "price": 600}, {"name": "Spain", "price": 650}]
+    poly = [
+        {
+            "id": "ev1",
+            "title": "World Cup Winner",
+            "markets": [
+                {
+                    "question": "Will Brazil win the 2026 FIFA World Cup?",
+                    "outcomePrices": '["0.12", "0.88"]',
+                    "conditionId": "c1",
+                },
+                {
+                    "question": "Will France win the 2026 FIFA World Cup?",
+                    "outcomePrices": '["0.15", "0.85"]',
+                    "conditionId": "c2",
+                },
+            ],
+        }
+    ]
+    field = [
+        {"name": "Brazil", "price": 450},
+        {"name": "France", "price": 500},
+        {"name": "England", "price": 600},
+        {"name": "Spain", "price": 650},
+    ]
     edges = sfe.edges_from_field("World Cup Winner", field, poly, sfe.WC_CFG, min_edge=0.0)
     brazil = next((e for e in edges if e.participant == "Brazil"), None)
     assert brazil is not None
@@ -30,37 +47,81 @@ def test_futures_maps_winner_market_and_signs_edge():
 
 
 def test_futures_rejects_resolved_price():
-    poly = [{"id": "e", "title": "World Cup Winner", "markets": [
-        {"question": "Will Brazil win the 2026 FIFA World Cup?",
-         "outcomePrices": '["0.99", "0.01"]', "conditionId": "c1"}]}]
+    poly = [
+        {
+            "id": "e",
+            "title": "World Cup Winner",
+            "markets": [
+                {
+                    "question": "Will Brazil win the 2026 FIFA World Cup?",
+                    "outcomePrices": '["0.99", "0.01"]',
+                    "conditionId": "c1",
+                }
+            ],
+        }
+    ]
     field = [{"name": "Brazil", "price": -200}, {"name": "France", "price": 500}]
     edges = sfe.edges_from_field("World Cup Winner", field, poly, sfe.WC_CFG, min_edge=0.0)
-    assert edges == []   # 0.99 fails VALID_PRICE
+    assert edges == []  # 0.99 fails VALID_PRICE
 
 
 # ── Soccer per-match 3-way ───────────────────────────────────────────
 def _match_game():
-    return {"home_team": "New England Revolution", "away_team": "Houston Dynamo",
-            "commence_time": "2030-03-07T00:00:00Z",
-            "bookmakers": [{"key": "pinnacle", "markets": [{"key": "h2h", "outcomes": [
-                {"name": "New England Revolution", "price": 120},
-                {"name": "Houston Dynamo", "price": 210},
-                {"name": "Draw", "price": 230}]}]}]}
+    return {
+        "home_team": "New England Revolution",
+        "away_team": "Houston Dynamo",
+        "commence_time": "2030-03-07T00:00:00Z",
+        "bookmakers": [
+            {
+                "key": "pinnacle",
+                "markets": [
+                    {
+                        "key": "h2h",
+                        "outcomes": [
+                            {"name": "New England Revolution", "price": 120},
+                            {"name": "Houston Dynamo", "price": 210},
+                            {"name": "Draw", "price": 230},
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
 
 
 def _match_event():
-    return {"id": "e", "title": "New England Revolution vs. Houston Dynamo", "markets": [
-        {"question": "Will New England Revolution win on 2030-03-07?",
-         "outcomes": '["Yes","No"]', "outcomePrices": '["0.40","0.60"]', "conditionId": "h"},
-        {"question": "Will New England Revolution vs. Houston Dynamo end in a draw?",
-         "outcomes": '["Yes","No"]', "outcomePrices": '["0.25","0.75"]', "conditionId": "d"},
-        {"question": "Will Houston Dynamo win on 2030-03-07?",
-         "outcomes": '["Yes","No"]', "outcomePrices": '["0.28","0.72"]', "conditionId": "a"}]}
+    return {
+        "id": "e",
+        "title": "New England Revolution vs. Houston Dynamo",
+        "markets": [
+            {
+                "question": "Will New England Revolution win on 2030-03-07?",
+                "outcomes": '["Yes","No"]',
+                "outcomePrices": '["0.40","0.60"]',
+                "conditionId": "h",
+            },
+            {
+                "question": "Will New England Revolution vs. Houston Dynamo end in a draw?",
+                "outcomes": '["Yes","No"]',
+                "outcomePrices": '["0.25","0.75"]',
+                "conditionId": "d",
+            },
+            {
+                "question": "Will Houston Dynamo win on 2030-03-07?",
+                "outcomes": '["Yes","No"]',
+                "outcomePrices": '["0.28","0.72"]',
+                "conditionId": "a",
+            },
+        ],
+    }
 
 
 def test_devig_three_way_sums_to_one_with_draw():
-    outs = [{"name": "New England Revolution", "price": 120},
-            {"name": "Houston Dynamo", "price": 210}, {"name": "Draw", "price": 230}]
+    outs = [
+        {"name": "New England Revolution", "price": 120},
+        {"name": "Houston Dynamo", "price": 210},
+        {"name": "Draw", "price": 230},
+    ]
     legs = sme.devig_three_way(outs)
     assert sum(legs.values()) == pytest.approx(1.0, abs=1e-9)
     assert "Draw" in legs
@@ -83,19 +144,41 @@ def test_compute_match_edges_emits_legs_with_outcome_index():
 
 # ── UFC ──────────────────────────────────────────────────────────────
 def _fight():
-    return {"commence_time": "2030-01-01T00:00:00Z",
-            "bookmakers": [{"key": "pinnacle", "markets": [{"key": "h2h", "outcomes": [
-                {"name": "Alex Perez", "price": -150},
-                {"name": "Sumudaerji", "price": 130}]}]}]}
+    return {
+        "commence_time": "2030-01-01T00:00:00Z",
+        "bookmakers": [
+            {
+                "key": "pinnacle",
+                "markets": [
+                    {
+                        "key": "h2h",
+                        "outcomes": [{"name": "Alex Perez", "price": -150}, {"name": "Sumudaerji", "price": 130}],
+                    }
+                ],
+            }
+        ],
+    }
 
 
 def _fight_event():
-    return {"id": "e", "title": "UFC Fight Night: Alex Perez vs. Sumudaerji (Flyweight, Main Card)",
-            "markets": [
-                {"question": "UFC Fight Night: Alex Perez vs. Sumudaerji (Flyweight, Main Card)",
-                 "outcomes": '["Alex Perez","Sumudaerji"]', "outcomePrices": '["0.62","0.38"]', "conditionId": "c"},
-                {"question": "Will Alex Perez win by KO or TKO?",
-                 "outcomes": '["Yes","No"]', "outcomePrices": '["0.30","0.70"]', "conditionId": "p"}]}
+    return {
+        "id": "e",
+        "title": "UFC Fight Night: Alex Perez vs. Sumudaerji (Flyweight, Main Card)",
+        "markets": [
+            {
+                "question": "UFC Fight Night: Alex Perez vs. Sumudaerji (Flyweight, Main Card)",
+                "outcomes": '["Alex Perez","Sumudaerji"]',
+                "outcomePrices": '["0.62","0.38"]',
+                "conditionId": "c",
+            },
+            {
+                "question": "Will Alex Perez win by KO or TKO?",
+                "outcomes": '["Yes","No"]',
+                "outcomePrices": '["0.30","0.70"]',
+                "conditionId": "p",
+            },
+        ],
+    }
 
 
 def test_ml_market_maps_fighter_to_outcome_index():
@@ -115,31 +198,50 @@ def test_compute_ufc_edges_ml_and_prop_listing():
 # ── Outright field sharp-book preference (live-probe fix) ────────────
 def test_extract_outright_prefers_betfair_exchange():
     from odds.odds_api_fetch import extract_outright_field
-    raw = [{"bookmakers": [
-        {"key": "draftkings", "markets": [{"key": "outrights",
-            "outcomes": [{"name": "Brazil", "price": 800}]}]},
-        {"key": "betfair_ex_eu", "markets": [{"key": "outrights",
-            "outcomes": [{"name": "Brazil", "price": 850}, {"name": "France", "price": 500}]}]},
-    ]}]
+
+    raw = [
+        {
+            "bookmakers": [
+                {
+                    "key": "draftkings",
+                    "markets": [{"key": "outrights", "outcomes": [{"name": "Brazil", "price": 800}]}],
+                },
+                {
+                    "key": "betfair_ex_eu",
+                    "markets": [
+                        {
+                            "key": "outrights",
+                            "outcomes": [{"name": "Brazil", "price": 850}, {"name": "France", "price": 500}],
+                        }
+                    ],
+                },
+            ]
+        }
+    ]
     field = extract_outright_field(raw)
     # Betfair exchange (sharper) preferred over draftkings
     assert len(field) == 2 and field[0]["name"] == "Brazil" and field[0]["price"] == 850
 
 
-# ── Cutover regression: legacy soccer_edge fully removed ─────────────
+# ── Cutover regression: live "alternative cutover" reality ──────────
 def test_legacy_soccer_edge_decoupled():
+    """soccer_edge.py is DELETED; its funcs were migrated INTO the_odds_api
+    (the live alternative cutover, 2026-06-02 reconciliation). This differs from
+    the original branch cutover (which removed the soccer funcs from the_odds_api
+    and repointed routes to the new engine). Asserts the DEPLOYED reality."""
     import importlib.util
-    import odds
     import odds.the_odds_api as t
-    assert importlib.util.find_spec("odds.soccer_edge") is None, "soccer_edge should be deleted"
-    assert not hasattr(t, "get_soccer_edge_summary"), "the_odds_api soccer funcs should be gone"
-    assert not hasattr(t, "find_soccer_edges")
+
+    assert importlib.util.find_spec("odds.soccer_edge") is None, "soccer_edge.py should be deleted"
+    # soccer funcs intentionally live in the_odds_api now (migrated, not removed)
+    assert hasattr(t, "get_soccer_edge_summary"), "soccer funcs should be migrated into the_odds_api"
     assert hasattr(t, "get_baseball_games_with_all_markets"), "baseball funcs must remain"
 
 
 # ── Odds API efficiency: time-window + commence params ──────────────
 def test_upcoming_window_and_commence_params():
     from odds.odds_api_fetch import upcoming_window, _build_url
+
     cf, ct = upcoming_window(72)
     assert cf.endswith("Z") and ct.endswith("Z") and cf < ct
     url = _build_url("soccer_epl", "h2h", "eu", "pinnacle", commence_from=cf, commence_to=ct)
