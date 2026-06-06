@@ -676,9 +676,12 @@ async def get_soccer_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
     - Bundesliga
     """
     async def _get_soccer():
-        # Repointed to the new shared-core futures engine (replaces soccer_edge).
-        from odds.soccer_futures_edge import get_soccer_futures_summary
-        return await get_soccer_futures_summary()
+        import sys
+        odds_path = _get_odds_modules_path()
+        if odds_path not in sys.path:
+            sys.path.insert(0, odds_path)
+        from the_odds_api import get_soccer_edge_summary
+        return await get_soccer_edge_summary()
 
     return await handle_edge_request("soccer", _get_soccer())
 
@@ -688,19 +691,33 @@ async def get_soccer_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
 # ----------------------------------------------------------------------------
 
 async def _get_league_edges(league: str, min_edge: float = 0.01):
-    """DEPRECATED legacy per-league soccer futures helper.
+    """Helper to get edges for a specific soccer league."""
+    import sys
+    odds_path = _get_odds_modules_path()
+    if odds_path not in sys.path:
+        sys.path.insert(0, odds_path)
+    from the_odds_api import find_soccer_edges
 
-    Superseded by the shared-core engines at /api/soccer/match-edge (per-match
-    3-way) and /api/soccer/futures-edge (World Cup / outright winners). Returns
-    an empty, clearly-deprecated payload rather than calling the removed
-    soccer_edge module.
-    """
+    all_edges = await find_soccer_edges(min_edge)
+    # Filter to specific league
+    league_edges = [e for e in all_edges if e.league.lower() == league.lower()]
+
     return {
         "league": league.upper(),
         "timestamp": datetime.now().isoformat(),
-        "total_edges": 0,
-        "deprecated": "use /api/soccer/match-edge or /api/soccer/futures-edge",
-        "edges": [],
+        "total_edges": len(league_edges),
+        "edges": [
+            {
+                "team": e.team,
+                "vegas_prob": round(e.vegas_prob, 4),
+                "vegas_odds": e.vegas_odds,
+                "polymarket_price": round(e.polymarket_price, 4),
+                "edge_pct": round(e.edge_pct * 100, 2),
+                "direction": e.direction,
+                "market_id": e.poly_market_id
+            }
+            for e in league_edges
+        ]
     }
 
 
@@ -949,6 +966,30 @@ async def get_baseball_props():
     except Exception as e:
         logger.exception(f"baseball props fetch failed: {e}")
         return {"source": "the_odds_api_mlb_props", "games": [], "error": str(e)}
+
+
+@router.get("/baseball/props/scout")
+async def get_baseball_props_scout(
+    last_n: int = Query(default=10, ge=3, le=30, description="Games back for hit-rate"),
+    min_edge: float = Query(default=-0.99, description="Minimum edge filter (e.g. 0.05 = 5%+)"),
+):
+    """MLB prop scout: enriches today's book props with MLB Stats API game logs.
+
+    For each player in today's batter_home_runs / batter_hits / batter_total_bases /
+    pitcher_strikeouts props, computes:
+      - hit_rate_pct  : % of last N games player cleared the prop line
+      - avg_stat      : rolling average of the stat
+      - edge_pct      : hit_rate_pct - book_over_pct (positive = player cheap vs book)
+
+    Returns results sorted by edge descending. Uses MLB Stats API (free, no key)
+    and reuses the cached Odds API props payload (no extra credits).
+    """
+    try:
+        from odds.mlb_prop_scout import get_prop_scout
+        return await get_prop_scout(last_n=last_n, min_edge=min_edge)
+    except Exception as e:
+        logger.exception(f"baseball prop scout failed: {e}")
+        return {"source": "mlb_prop_scout", "results": [], "error": str(e)}
 
 
 # ----------------------------------------------------------------------------
