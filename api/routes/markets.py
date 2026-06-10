@@ -2421,6 +2421,36 @@ async def get_soccer_dashboard():
         _sports_shadow_dashboard, ["soccer_match_3way", "soccer_futures"])
 
 
+@router.get("/soccer/calibration")
+async def get_soccer_calibration_route():
+    """Soccer/WC closed-loop calibration: per-strategy win-rate, edge-bucket ->
+    realized win% + CLV (vs PM close), CLV summary. The 'is the edge real' view."""
+    try:
+        from signals.soccer_resolver import get_soccer_calibration
+        return await run_in_threadpool(get_soccer_calibration)
+    except Exception as e:
+        logger.exception(f"soccer calibration failed: {e}")
+        return {"by_strategy": [], "calibration": [], "clv": {}, "error": str(e)}
+
+
+@router.get("/soccer/kalshi-wc")
+async def get_soccer_kalshi_wc():
+    """Kalshi World Cup game-winner markets (executable venue). Empty until the WC
+    series lists (~near kickoff). Cross-reference to PM/Betfair edges is done
+    client-side by team name. Kalshi taker fee ~quadratic; maker orders fee-free."""
+    try:
+        from odds.kalshi_sports import fetch_wc_game_markets
+        markets = await run_in_threadpool(fetch_wc_game_markets)
+        return {
+            "markets": markets, "count": len(markets),
+            "note": ("Kalshi WC game-winner venue — cross-ref to PM by team; taker fee ~quadratic, maker fee-free."
+                     if markets else "No Kalshi WC series live yet (KXWC26* lists near kickoff)."),
+        }
+    except Exception as e:
+        logger.exception(f"soccer kalshi-wc failed: {e}")
+        return {"markets": [], "count": 0, "error": str(e)}
+
+
 @router.get("/ufc/dashboard")
 async def get_ufc_dashboard():
     """UFC shadow-trade dashboard (moneyline strategy)."""

@@ -162,6 +162,8 @@ def load_engine_state() -> dict:
     state.setdefault("kalshi_fade_enabled", True)
     # knob 1: best-candidates-first fill ordering (default off = clean baseline)
     state.setdefault("kalshi_fade_ranked_fill", False)
+    # knob 7: Polymarket maker-shadow recorder (evidence only, no positions)
+    state.setdefault("pm_maker_shadow_enabled", True)
     return state
 
 
@@ -964,6 +966,7 @@ async def get_weather_strategies():
         "weather_trading_enabled": bool(state.get("weather_trading_enabled", False)),
         "kalshi_fade_enabled": bool(state.get("kalshi_fade_enabled", True)),
         "kalshi_fade_ranked_fill": bool(state.get("kalshi_fade_ranked_fill", False)),
+        "pm_maker_shadow_enabled": bool(state.get("pm_maker_shadow_enabled", True)),
     }
 
 

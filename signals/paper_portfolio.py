@@ -2189,7 +2189,7 @@ def resolve_open_positions() -> dict:
             data = _fetch(f"{KALSHI_API}/markets/{market_id}")
             if data:
                 market = data.get("market", data)
-                result = (market.get("result") or "").lower()
+                result = (market.get("result") or "").strip().lower()
                 if result in ("yes", "no"):
                     outcome = result.upper()
                 elif result == "void" or (result and market.get("status") == "settled"):
@@ -2206,6 +2206,28 @@ def resolve_open_positions() -> dict:
                     continue
 
         if not outcome:
+            # Zombie guard (2026-06-10 QA): kalshi_weather_fade rows whose
+            # market 404s or settles without a yes/no result would otherwise
+            # stay open FOREVER -- the stop evaluator deliberately skips this
+            # archetype (hold-to-resolution), so nothing else can close them,
+            # and they pin the date-exposure cap. These markets settle the day
+            # after the event; >3 days past event date = unresolvable. Refund
+            # the stake (pnl=0) rather than guess an outcome.
+            if (pos["archetype"] or "") == "kalshi_weather_fade":
+                try:
+                    from signals.kalshi_weather_fade import ticker_event_date
+                    ev = ticker_event_date(market_id)
+                except Exception:
+                    ev = None
+                if ev and (datetime.now(timezone.utc).date() - ev).days > 3:
+                    conn.execute(
+                        """UPDATE paper_positions SET status='stopped', closed_at=?,
+                        exit_price=?, pnl=0, close_reason='auto-resolved: UNRESOLVABLE (>3d past event)'
+                        WHERE id=?""",
+                        (datetime.now(timezone.utc).isoformat(),
+                         pos["entry_price"], pos["id"]))
+                    conn.commit()
+                    logger.warning("Zombie fade row refunded: {}", market_id)
             continue
 
         entry_price = pos["entry_price"]

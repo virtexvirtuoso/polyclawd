@@ -254,6 +254,18 @@ def task_kalshi_fade_scan():
     run_evening_scan()
 
 
+def task_pm_maker_shadow():
+    """Polymarket maker-shadow recorder (knob 7) -- PAPER-less evidence
+    collection: snapshots tomorrow's PM weather brackets in the same evening
+    windows and records hypothetical resting orders. Fills judged next morning
+    from the public trade tape. No positions, no DB writes."""
+    from api.routes.engine import load_engine_state
+    if not load_engine_state().get("pm_maker_shadow_enabled", True):
+        return
+    from signals.pm_maker_shadow import record_evening
+    record_evening()
+
+
 def task_weather_shift_alerts():
     """Alert on significant forecast shifts for open weather positions."""
     conn = _db()
@@ -716,6 +728,34 @@ def task_mlb_props_resolve():
     resolve_scan_log_outcomes()
 
 
+def task_soccer_match_scan():
+    """Soccer/WC: refresh the per-match 3-way edge cache (~every 2h) so the
+    dashboard stays live through the tournament. Odds-API spend is gated upstream
+    (odds_api_fetch.can_make_call + sports_edge_scan credit floor)."""
+    import asyncio
+
+    from scripts.sports_edge_scan import run
+
+    asyncio.run(run(["soccer_match"]))
+
+
+def task_soccer_futures_scan():
+    """Soccer/WC: refresh the outright (World Cup winner) edge cache (daily)."""
+    import asyncio
+
+    from scripts.sports_edge_scan import run
+
+    asyncio.run(run(["soccer_futures"]))
+
+
+def task_soccer_resolve():
+    """Soccer/WC: resolve closed shadows + capture PM closing mid (CLV) + feed
+    soccer_forecast_log calibration."""
+    from signals.soccer_resolver import scan_resolved_soccer_trades
+
+    scan_resolved_soccer_trades()
+
+
 def task_arena_snapshot():
     """AI arena leaderboard snapshot."""
     venv = str(PROJECT_ROOT / "venv" / "bin" / "python3")
@@ -965,6 +1005,12 @@ async def tick_30min():
         await run_in_thread(_run_safe, "mlb_props_alert", task_mlb_props_alert)
         await run_in_thread(_run_safe, "mlb_props_resolve", task_mlb_props_resolve)
         await run_in_thread(_run_safe, "kalshi_fade_scan", task_kalshi_fade_scan)
+        await run_in_thread(_run_safe, "pm_maker_shadow", task_pm_maker_shadow)
+        # Soccer/WC: scan match edges + resolve closed shadows every 2h (4 ticks).
+        _state["soccer_scan_n"] = _state.get("soccer_scan_n", 0) + 1
+        if _state["soccer_scan_n"] % 4 == 0:
+            await run_in_thread(_run_safe, "soccer_match_scan", task_soccer_match_scan)
+            await run_in_thread(_run_safe, "soccer_resolve", task_soccer_resolve)
         logger.info("30-min tick complete")
         await asyncio.sleep(1800)
 
@@ -1039,6 +1085,11 @@ async def tick_scheduled():
         # Daily summary at 22:xx UTC
         if now.hour == 22:
             await run_in_thread(_run_safe, "daily_summary", task_daily_discord_summary)
+
+        # Soccer/WC outright (winner) futures — once daily at 13:00 UTC (~09:00 ET).
+        if now.hour == 13 and _state.get("soccer_futures_day") != now.strftime("%Y-%m-%d"):
+            _state["soccer_futures_day"] = now.strftime("%Y-%m-%d")
+            await run_in_thread(_run_safe, "soccer_futures_scan", task_soccer_futures_scan)
 
         # Daily election snapshot at 6:xx UTC
         if now.hour == 6:

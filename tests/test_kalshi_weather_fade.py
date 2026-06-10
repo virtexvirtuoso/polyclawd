@@ -228,3 +228,59 @@ def test_yes_result_still_resolves_normally(tmp_path, monkeypatch):
     conn.close()
     assert row["status"] == "won"
     assert row["pnl"] == pytest.approx(100 * (1 / (1 - 0.9) - 1))
+
+
+# ------------------------------------------------------- zombie guard (QA fix)
+
+def test_whitespace_result_resolves_as_win(tmp_path, monkeypatch):
+    conn = _tmp_db(tmp_path, monkeypatch)
+    _insert_fade(conn, "KXHIGHNY-26JUN09-T85", "nyc", 100)  # side=NO
+    conn.close()
+
+    def fake_urlopen(req, timeout=10):
+        return _FakeResp(json.dumps(
+            {"market": {"result": "no ", "status": "settled"}}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    pp.resolve_open_positions()
+    conn = pp._get_db()
+    row = conn.execute("SELECT status FROM paper_positions").fetchone()
+    conn.close()
+    assert row["status"] == "won"  # 'no ' must strip to 'no', not book as void
+
+
+def test_zombie_fade_row_refunded_after_3_days(tmp_path, monkeypatch):
+    conn = _tmp_db(tmp_path, monkeypatch)
+    _insert_fade(conn, "KXHIGHNY-26JUN01-T85", "nyc", 100)  # event long past
+    conn.close()
+
+    def fake_urlopen(req, timeout=10):
+        raise OSError("404")  # market gone — fetch returns None
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    pp.resolve_open_positions()
+    conn = pp._get_db()
+    row = conn.execute("SELECT status, pnl, close_reason FROM paper_positions").fetchone()
+    conn.close()
+    assert row["status"] == "stopped"
+    assert row["pnl"] == 0
+    assert "UNRESOLVABLE" in row["close_reason"]
+
+
+def test_recent_fade_row_not_zombie_closed(tmp_path, monkeypatch):
+    from datetime import date as _date, timedelta as _td
+    recent = _date.today() - _td(days=1)
+    ticker = f"KXHIGHNY-{recent.strftime('%y%b%d').upper()}-T85"
+    conn = _tmp_db(tmp_path, monkeypatch)
+    _insert_fade(conn, ticker, "nyc", 100)
+    conn.close()
+
+    def fake_urlopen(req, timeout=10):
+        raise OSError("404")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    pp.resolve_open_positions()
+    conn = pp._get_db()
+    row = conn.execute("SELECT status FROM paper_positions").fetchone()
+    conn.close()
+    assert row["status"] == "open"  # only 1 day past event — leave it alone
