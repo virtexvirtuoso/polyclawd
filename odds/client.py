@@ -6,6 +6,8 @@ Real-time odds from 40+ sportsbooks
 import os
 import httpx
 from typing import Optional
+from datetime import datetime
+from loguru import logger
 
 
 class OddsAPIClient:
@@ -376,7 +378,7 @@ class ExtendedOddsClient(OddsAPIClient):
                         })
                         
             except Exception as e:
-                print(f"Error processing event {event_id}: {e}")
+                logger.error(f"Error processing event {event_id}: {e}")
                 continue
         
         return sorted(edges, key=lambda x: x["edge_pct"], reverse=True)

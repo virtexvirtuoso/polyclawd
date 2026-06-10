@@ -24,6 +24,7 @@ from api.middleware import add_security_headers, global_exception_handler
 from api.routes import (
     edge_scanner_router,
     engine_router,
+    live_router,
     markets_router,
     signals_router,
     system_router,
@@ -131,6 +132,9 @@ app.include_router(engine_router, prefix="/api", tags=["Engine"])
 
 # Edge scanner routes: /api/edge/scan, /api/edge/topics
 app.include_router(edge_scanner_router, tags=["Edge Scanner"])
+
+# Live trading routes: /api/live/portfolio, /positions, /fills, /governor, /edge-capture
+app.include_router(live_router, prefix="/api", tags=["Live"])
 
 # ============================================================================
 # Visitor Tracking

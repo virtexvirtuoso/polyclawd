@@ -7,6 +7,7 @@ import json
 import urllib.request
 from datetime import datetime, timezone
 from typing import List, Dict, Optional
+from loguru import logger
 
 METACULUS_API = "https://www.metaculus.com/api/posts"
 
@@ -118,7 +119,7 @@ def fetch_questions(
         return questions
         
     except Exception as e:
-        print(f"Metaculus fetch error: {e}")
+        logger.error(f"Metaculus fetch error: {e}")
         return []
 
 
@@ -142,7 +143,7 @@ def search_questions(query: str, limit: int = 20) -> List[Dict]:
             for q in data.get("results", [])
         ]
     except Exception as e:
-        print(f"Metaculus search error: {e}")
+        logger.error(f"Metaculus search error: {e}")
         return []
 
 
@@ -235,7 +236,7 @@ def get_prediction_history(question_id: int) -> List[Dict]:
         return history
         
     except Exception as e:
-        print(f"Error getting prediction history: {e}")
+        logger.error(f"Error getting prediction history: {e}")
         return []
 
 
@@ -476,23 +477,23 @@ def get_metaculus_summary(min_forecasters: int = 10) -> Dict:
 if __name__ == "__main__":
     import asyncio
     
-    print("Testing Metaculus integration...")
-    print()
+    logger.info("Testing Metaculus integration...")
+    logger.info()
     
     # Test summary
     summary = get_metaculus_summary()
-    print(f"Total questions: {summary['total_questions']}")
-    print("\nBy category:")
+    logger.info(f"Total questions: {summary['total_questions']}")
+    logger.info("\nBy category:")
     for cat, data in summary["by_category"].items():
-        print(f"  {cat}: {data['count']} questions")
+        logger.info(f"  {cat}: {data['count']} questions")
         for q in data["top_questions"][:2]:
-            print(f"    - {q['prediction']} ({q['forecasters']} forecasters): {q['title'][:50]}...")
+            logger.info(f"    - {q['prediction']} ({q['forecasters']} forecasters): {q['title'][:50]}...")
     
-    print("\n" + "="*50)
-    print("\nTesting edge detection...")
+    logger.info("\n" + "="*50)
+    logger.info("\nTesting edge detection...")
     result = asyncio.run(get_metaculus_edges(min_edge=3.0))
-    print(f"Overlaps found: {result['total_overlaps']}")
-    print(f"Edges (>3%): {result['edges_found']}")
+    logger.info(f"Overlaps found: {result['total_overlaps']}")
+    logger.info(f"Edges (>3%): {result['edges_found']}")
     for e in result["edges"][:3]:
-        print(f"  {e['metaculus_title'][:40]}...")
-        print(f"    Metaculus: {e['metaculus_prob']}% vs Poly: {e['polymarket_price']}% = {e['edge_pct']:+.1f}%")
+        logger.info(f"  {e['metaculus_title'][:40]}...")
+        logger.info(f"    Metaculus: {e['metaculus_prob']}% vs Poly: {e['polymarket_price']}% = {e['edge_pct']:+.1f}%")

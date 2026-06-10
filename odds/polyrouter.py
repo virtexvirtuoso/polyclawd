@@ -11,6 +11,8 @@ Docs: https://docs.polyrouter.io
 import os
 import httpx
 from typing import Optional
+from functools import lru_cache
+from loguru import logger
 
 POLYROUTER_API_KEY = os.environ.get("POLYROUTER_API_KEY", "")
 BASE_URL = "https://api-v2.polyrouter.io"
@@ -332,7 +334,7 @@ async def find_arbitrage_opportunities(min_edge_pct: float = 2.0) -> list:
                         "no_price": no_price,
                     })
         except Exception as e:
-            print(f"Error fetching {platform}: {e}")
+            logger.error(f"Error fetching {platform}: {e}")
             continue
     
     # Find arbitrage across platforms

@@ -972,6 +972,7 @@ async def get_baseball_props():
 async def get_baseball_props_scout(
     last_n: int = Query(default=10, ge=3, le=30, description="Games back for hit-rate"),
     min_edge: float = Query(default=-0.99, description="Minimum edge filter (e.g. 0.05 = 5%+)"),
+    min_games: int = Query(default=5, ge=1, le=30, description="Min games sampled (filters call-ups)"),
 ):
     """MLB prop scout: enriches today's book props with MLB Stats API game logs.
 
@@ -986,10 +987,54 @@ async def get_baseball_props_scout(
     """
     try:
         from odds.mlb_prop_scout import get_prop_scout
-        return await get_prop_scout(last_n=last_n, min_edge=min_edge)
+        return await get_prop_scout(last_n=last_n, min_edge=min_edge, min_games=min_games)
     except Exception as e:
         logger.exception(f"baseball prop scout failed: {e}")
         return {"source": "mlb_prop_scout", "results": [], "error": str(e)}
+
+
+@router.get("/baseball/kalshi/scan")
+async def get_baseball_kalshi_scan(
+    min_edge: float = Query(default=2.0, description="Min |edge vs book| % to include"),
+    last_n: int = Query(default=10, ge=3, le=30, description="Games back for L10 hit rate"),
+):
+    """Kalshi K+HR prop scanner.
+
+    Cross-references Kalshi orderbook mid-prices against Odds API implied probs
+    and MLB Stats API L10 hit rates.
+
+    Signals:
+      STRONG_YES  = book AND L10 both say Kalshi YES is cheap → buy YES on Kalshi
+      STRONG_NO   = book AND L10 both say Kalshi NO is cheap  → buy NO on Kalshi
+      BUY_YES     = book says Kalshi cheap, L10 neutral/missing
+      BUY_NO      = book says Kalshi expensive, L10 neutral/missing
+
+    edge_vs_book_pct > 0 = Kalshi YES priced below sportsbook implied prob.
+    """
+    try:
+        from odds.kalshi_props import get_kalshi_prop_scan
+        return await get_kalshi_prop_scan(min_edge_pct=min_edge, last_n=last_n)
+    except Exception as e:
+        logger.exception(f"kalshi prop scan failed: {e}")
+        return {"source": "kalshi_prop_scan", "results": [], "error": str(e)}
+
+
+@router.get("/baseball/props/alerts")
+async def get_baseball_prop_alerts(
+    limit: int = Query(default=100, ge=1, le=500, description="Max alert rows"),
+):
+    """MLB prop alert history + shadow-trade calibration (WS-A pipeline / WS-D feed).
+
+    Returns fired alerts with their shadow-trade status, CLV vs the independent
+    (Kalshi) close, and the accumulating calibration curve (alerted edge bucket ->
+    realized hit rate). This is the view that answers "is the hit-rate edge real"
+    at Gate 2. Degrades to empty before data accumulates."""
+    try:
+        from signals.mlb_prop_alerts import get_prop_alert_feed
+        return get_prop_alert_feed(limit=limit)
+    except Exception as e:
+        logger.exception(f"baseball prop alerts feed failed: {e}")
+        return {"alerts": [], "summary": {}, "calibration": [], "error": str(e)}
 
 
 # ----------------------------------------------------------------------------

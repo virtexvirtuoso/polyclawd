@@ -15,14 +15,17 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional, List, Dict
-from datetime import datetime
+from datetime import datetime, timezone
+import re
 import os
+import base64
 import time
+from loguru import logger
 
 try:
     from .smart_matcher import create_signature, signatures_match, match_markets
 except ImportError:
-    from odds.smart_matcher import match_markets
+    from odds.smart_matcher import create_signature, signatures_match, match_markets
 
 # Kalshi API endpoints
 KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
@@ -121,7 +124,7 @@ def _get_auth_headers() -> dict:
         # jwt library not installed
         return {"Accept": "application/json"}
     except Exception as e:
-        print(f"Kalshi auth error: {e}")
+        logger.error(f"Kalshi auth error: {e}")
         return {"Accept": "application/json"}
 
 def _fetch_kalshi_series_sync(limit: int = 200) -> List[dict]:
@@ -163,7 +166,7 @@ def _fetch_kalshi_series_sync(limit: int = 200) -> List[dict]:
             else:
                 break
         except Exception as e:
-            print(f"Error fetching series: {e}")
+            logger.error(f"Error fetching series: {e}")
             break
     
     # Fall back to demo if prod fails
@@ -249,7 +252,7 @@ def _fetch_all_kalshi_markets_sync(
             else:
                 break
         except Exception as e:
-            print(f"Error fetching markets page {page}: {e}")
+            logger.error(f"Error fetching markets page {page}: {e}")
             break
     
     # Fall back to demo if prod fails
@@ -424,7 +427,7 @@ def _fetch_polymarket_sync() -> List[dict]:
         )
         return resp.json() if resp.status_code == 200 else []
     except Exception as e:
-        print(f"Error fetching Polymarket: {e}")
+        logger.error(f"Error fetching Polymarket: {e}")
         return []
 
 def find_polymarket_matches(kalshi_title: str, poly_events: List[dict], kalshi_category: str = "") -> List[Dict]:
@@ -856,18 +859,18 @@ async def get_kalshi_all_markets() -> dict:
 
 if __name__ == "__main__":
     async def test():
-        print("Fetching Kalshi vs Polymarket comparison...")
+        logger.debug("Fetching Kalshi vs Polymarket comparison...")
         comparison = await get_kalshi_polymarket_comparison()
         
-        print(f"\nKalshi markets: {comparison['total_kalshi_markets']}")
-        print(f"Polymarket events: {comparison['total_polymarket_events']}")
-        print(f"Overlapping: {comparison['overlapping_markets']}")
-        print(f"\nCategories: {comparison['categories']}")
+        logger.info(f"\nKalshi markets: {comparison['total_kalshi_markets']}")
+        logger.info(f"Polymarket events: {comparison['total_polymarket_events']}")
+        logger.info(f"Overlapping: {comparison['overlapping_markets']}")
+        logger.info(f"\nCategories: {comparison['categories']}")
         
-        print("\nTop overlaps:")
+        logger.info("\nTop overlaps:")
         for o in comparison['overlaps'][:15]:
-            print(f"  • [{o['match_category']}] {o['kalshi_title'][:50]}")
-            print(f"    Poly: {o['polymarket_price']}¢ - {o['polymarket_question'][:50] if o['polymarket_question'] else 'N/A'}")
-            print()
+            logger.info(f"  • [{o['match_category']}] {o['kalshi_title'][:50]}")
+            logger.info(f"    Poly: {o['polymarket_price']}¢ - {o['polymarket_question'][:50] if o['polymarket_question'] else 'N/A'}")
+            logger.info()
     
     asyncio.run(test())

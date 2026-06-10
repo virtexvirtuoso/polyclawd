@@ -1140,6 +1140,7 @@ def scan_polymarket_weather() -> List[dict]:
                 ex = pee.executable_edge(
                     fair_side, side, condition_id=cid,
                     outcome_index=0 if side == "YES" else 1, target_usd=100.0,
+                    category="weather",
                 )
             except Exception:
                 ex = {"available": False}
@@ -1151,6 +1152,14 @@ def scan_polymarket_weather() -> List[dict]:
                                           if ex["spread"] is not None else None)
                 sig["slippage_bps"] = ex["slippage_bps"]
                 sig["tradeable"] = ex["tradeable"]
+                sig["net_edge_maker_pct"] = (
+                    round(ex["net_edge_maker"] * 100, 1)
+                    if ex.get("net_edge_maker") is not None else None
+                )
+                sig["net_edge_taker_pct"] = (
+                    round(ex["net_edge_taker"] * 100, 1)
+                    if ex.get("net_edge_taker") is not None else None
+                )
 
     return signals
 

@@ -10,6 +10,7 @@ Usage:
     venv/bin/python scripts/sports_edge_scan.py                 # all
     venv/bin/python scripts/sports_edge_scan.py soccer_match    # one or more
 """
+
 import asyncio
 import sys
 from pathlib import Path
@@ -27,12 +28,16 @@ CACHE = {
     "ufc": ("ufc_edges.json", get_ufc_summary),
 }
 
-CREDIT_FLOOR = 3000  # don't start a scan with fewer than this many Odds-API credits
+try:
+    from odds.rate_limiter import CREDIT_FLOOR  # single source of truth (5,000)
+except Exception:  # pragma: no cover
+    CREDIT_FLOOR = 5_000  # don't start a scan with fewer than this many Odds-API credits
 
 
 async def _credits_ok() -> bool:
     try:
         from odds.the_odds_api import get_credit_status
+
         rem = get_credit_status().get("remaining")
         return rem is None or rem > CREDIT_FLOOR
     except Exception:
@@ -44,7 +49,7 @@ async def run(which=None):
         print("credit floor reached — skipping scan")
         return
     storage = get_storage_service()
-    for key in (which or list(CACHE)):
+    for key in which or list(CACHE):
         fname, fn = CACHE[key]
         try:
             summary = await fn()

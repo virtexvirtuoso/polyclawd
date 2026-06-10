@@ -119,6 +119,15 @@ async def get_games_with_markets(
     if not _get_api_key():
         logger.warning(f"odds_api_fetch: ODDS_API_KEY unset — {sport_key} empty")
         return []
+    try:
+        from odds.rate_limiter import can_make_call
+
+        _ok, _why = can_make_call("normal")
+        if not _ok:
+            logger.warning(f"odds_api_fetch: credit gate ({sport_key}) — {_why}")
+            return []
+    except Exception:  # pragma: no cover — never let gating break a fetch
+        pass
     url = _build_url(sport_key, markets, regions, bookmakers, commence_from=commence_from, commence_to=commence_to)
     loop = asyncio.get_event_loop()
     with ThreadPoolExecutor() as pool:
@@ -133,6 +142,15 @@ async def get_event_markets(
     Credit cost = unique-markets-returned × regions (or 1 unit when bookmakers set)."""
     if not _get_api_key():
         return {}
+    try:
+        from odds.rate_limiter import can_make_call
+
+        _ok, _why = can_make_call("normal")
+        if not _ok:
+            logger.warning(f"odds_api_fetch: credit gate (event {event_id}) — {_why}")
+            return {}
+    except Exception:  # pragma: no cover
+        pass
     url = _build_url(sport_key, markets, regions, bookmakers, event_id=event_id)
     loop = asyncio.get_event_loop()
     with ThreadPoolExecutor() as pool:

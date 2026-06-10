@@ -2321,6 +2321,149 @@ async def weather_dashboard():
         raise HTTPException(status_code=500, detail="weather dashboard failed")
 
 
+@router.get("/weather/kalshi-fade/dashboard")
+async def kalshi_fade_dashboard():
+    """Dashboard payload for the Kalshi weather tail-fade (PAPER) strategy.
+
+    Validated 2026-06-10 (Weather-Edge-Analysis-Jun2026 sec 10). Aggregates
+    paper_positions (archetype='kalshi_weather_fade'); city/tier/event-date
+    come from entry_forecast_json + the Kalshi ticker, not the PM title regex.
+    Pure SQLite reads, executed off the event loop.
+    """
+    import asyncio
+    import json as _json
+    import re as _re
+    import sqlite3
+    from collections import defaultdict
+    from datetime import datetime, timezone
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from paper_portfolio import DB_PATH as _DB_PATH  # type: ignore
+        from kalshi_weather_fade import (  # type: ignore
+            ARCHETYPE as _KF_ARCH, DATE_EXPOSURE_CAP as _KF_CAP,
+            ticker_event_date as _kf_event_date,
+        )
+
+        def _meta(row):
+            try:
+                return _json.loads(row["entry_forecast_json"] or "{}")
+            except (TypeError, ValueError):
+                return {}
+
+        def _build():
+            conn = sqlite3.connect(str(_DB_PATH), timeout=10)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM paper_positions WHERE archetype=? "
+                    "ORDER BY opened_at DESC", (_KF_ARCH,)).fetchall()
+                resolved = [r for r in rows if r["status"] in ("won", "lost", "stopped")]
+                open_rows = [r for r in rows if r["status"] == "open"]
+
+                wins = sum(1 for r in resolved if r["status"] == "won")
+                losses = sum(1 for r in resolved if r["status"] == "lost")
+                total_pnl = sum(r["pnl"] or 0 for r in resolved)
+                fees_paid = 0.0
+                for r in rows:
+                    m = _meta(r)
+                    fees_paid += (m.get("fee_per_contract") or 0) * (m.get("contracts") or 0)
+
+                totals = {
+                    "resolved": len(resolved), "wins": wins, "losses": losses,
+                    "win_rate": round(100 * wins / max(wins + losses, 1), 1),
+                    "total_pnl": round(total_pnl, 2),
+                    "fees_paid": round(fees_paid, 2),
+                    "open_positions": len(open_rows),
+                    "open_exposure": round(sum(r["bet_size"] or 0 for r in open_rows), 2),
+                }
+
+                # equity curve (cumulative realized pnl by close date)
+                by_day = defaultdict(float)
+                for r in resolved:
+                    day = (r["closed_at"] or "")[:10]
+                    if day:
+                        by_day[day] += r["pnl"] or 0
+                equity_curve, cum = [], 0.0
+                for day in sorted(by_day):
+                    cum += by_day[day]
+                    equity_curve.append({"date": day, "pnl": round(cum, 2)})
+
+                # tier breakdown (strategy column)
+                tiers = defaultdict(lambda: {"n": 0, "wins": 0, "losses": 0,
+                                             "pnl": 0.0, "open": 0})
+                for r in rows:
+                    t = tiers[r["strategy"] or "unknown"]
+                    if r["status"] == "open":
+                        t["open"] += 1
+                        continue
+                    t["n"] += 1
+                    if r["status"] == "won":
+                        t["wins"] += 1
+                    elif r["status"] == "lost":
+                        t["losses"] += 1
+                    t["pnl"] += r["pnl"] or 0
+                tier_breakdown = [
+                    {"tier": k, **{kk: (round(vv, 2) if isinstance(vv, float) else vv)
+                                   for kk, vv in v.items()},
+                     "win_rate": round(100 * v["wins"] / max(v["wins"] + v["losses"], 1), 1)}
+                    for k, v in sorted(tiers.items())]
+
+                # city pnl
+                city = defaultdict(float)
+                for r in resolved:
+                    city[_meta(r).get("city") or "unknown"] += r["pnl"] or 0
+                city_pnl = [{"city": c, "pnl": round(v, 2)}
+                            for c, v in sorted(city.items(), key=lambda kv: kv[1])]
+
+                def _row_out(r):
+                    m = _meta(r)
+                    ev = _kf_event_date(r["market_id"])
+                    return {
+                        "market_id": r["market_id"], "title": r["market_title"],
+                        "side": r["side"], "tier": r["strategy"],
+                        "city": m.get("city"), "event_date": str(ev) if ev else None,
+                        "entry_price": r["entry_price"], "bet_size": r["bet_size"],
+                        "exec_price": m.get("exec_price"), "mid": m.get("mid"),
+                        "spread": m.get("spread"), "depth": m.get("depth"),
+                        "contracts": m.get("contracts"),
+                        "potential_payout": r["potential_payout"],
+                        "opened_at": r["opened_at"], "status": r["status"],
+                        "pnl": r["pnl"], "closed_at": r["closed_at"],
+                        "close_reason": r["close_reason"],
+                    }
+
+                # exposure by event date (open positions) vs cap
+                exposure = defaultdict(float)
+                for r in open_rows:
+                    ev = _kf_event_date(r["market_id"])
+                    if ev:
+                        exposure[str(ev)] += r["bet_size"] or 0
+                exposure_out = {k: round(v, 2) for k, v in sorted(exposure.items())}
+
+                return {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "paper": True,
+                    "totals": totals,
+                    "equity_curve": equity_curve,
+                    "tier_breakdown": tier_breakdown,
+                    "city_pnl": city_pnl,
+                    "open_positions": [_row_out(r) for r in open_rows],
+                    "recent_trades": [_row_out(r) for r in resolved[:50]],
+                    "exposure_by_event_date": exposure_out,
+                    "date_exposure_cap": _KF_CAP,
+                }
+            finally:
+                conn.close()
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _build)
+    except Exception as e:
+        logger.exception(f"Kalshi fade dashboard failed: {e}")
+        raise HTTPException(status_code=500, detail="kalshi fade dashboard failed")
+
+
 @router.get("/signals/weather")
 async def scan_weather():
     """Scan weather markets on Kalshi + Polymarket against Open-Meteo forecasts."""

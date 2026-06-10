@@ -9,6 +9,7 @@ import urllib.request
 from datetime import datetime
 from typing import List, Dict, Optional
 from dataclasses import dataclass
+from loguru import logger
 
 ESPN_API = "https://site.api.espn.com/apis/site/v2/sports"
 
@@ -54,7 +55,7 @@ def fetch_odds(sport: str = "nfl") -> List[GameOdds]:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
-        print(f"ESPN fetch error: {e}")
+        logger.error(f"ESPN fetch error: {e}")
         return []
     
     games = []
@@ -154,7 +155,7 @@ def fetch_all_odds() -> Dict[str, List[GameOdds]]:
         try:
             all_odds[sport] = fetch_odds(sport)
         except Exception as e:
-            print(f"Error fetching {sport}: {e}")
+            logger.error(f"Error fetching {sport}: {e}")
             all_odds[sport] = []
     return all_odds
 
@@ -217,7 +218,7 @@ def get_all_moneylines() -> Dict[str, List[Dict]]:
         try:
             all_ml[sport] = get_moneyline(sport)
         except Exception as e:
-            print(f"Error fetching {sport} moneylines: {e}")
+            logger.error(f"Error fetching {sport} moneylines: {e}")
             all_ml[sport] = []
     return all_ml
 
@@ -256,7 +257,7 @@ def find_polymarket_edges(poly_events: List[Dict], min_edge: float = 5.0) -> Lis
     try:
         from smart_matcher import match_markets
     except ImportError:
-        pass
+        from odds.smart_matcher import match_markets
     
     all_odds = fetch_all_odds()
     edges = []
@@ -439,7 +440,7 @@ def get_injuries(sport: str = "nfl") -> List[Dict]:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
-        print(f"ESPN injuries error: {e}")
+        logger.error(f"ESPN injuries error: {e}")
         return []
     
     injuries = []
@@ -522,7 +523,7 @@ def get_standings(sport: str = "nfl") -> List[Dict]:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
-        print(f"ESPN standings error: {e}")
+        logger.error(f"ESPN standings error: {e}")
         return []
     
     standings = []
@@ -580,32 +581,32 @@ def get_team_form(team_name: str, sport: str = "nfl") -> Dict:
 if __name__ == "__main__":
     import asyncio
     
-    print("Testing ESPN Odds integration...")
-    print()
+    logger.info("Testing ESPN Odds integration...")
+    logger.info()
     
     # Test individual sport
     nfl = fetch_odds("nfl")
-    print(f"NFL Games: {len(nfl)}")
+    logger.info(f"NFL Games: {len(nfl)}")
     for g in nfl:
-        print(f"  {g.away_team} @ {g.home_team}: spread={g.spread}, o/u={g.over_under}")
+        logger.info(f"  {g.away_team} @ {g.home_team}: spread={g.spread}, o/u={g.over_under}")
     
-    print()
+    logger.info()
     
     # Test all sports
     summary = get_espn_summary()
-    print(f"Total games across all sports: {summary['total_games']}")
+    logger.info(f"Total games across all sports: {summary['total_games']}")
     
-    print()
+    logger.info()
     
     # Test edge detection
     result = asyncio.run(get_espn_edges())
-    print(f"Edges found: {result['edges_found']}")
+    logger.info(f"Edges found: {result['edges_found']}")
     for e in result["edges"][:5]:
-        print(f"  {e['game']} - {e['team']}: ESPN {e['espn_prob']}% vs Poly {e['polymarket_price']}% = {e['edge_pct']}%")
+        logger.info(f"  {e['game']} - {e['team']}: ESPN {e['espn_prob']}% vs Poly {e['polymarket_price']}% = {e['edge_pct']}%")
     
-    print("\n" + "="*50)
-    print("\nTesting injuries...")
+    logger.info("\n" + "="*50)
+    logger.info("\nTesting injuries...")
     injuries = get_key_injuries("nfl")
-    print(f"Key injuries: {injuries['key_injuries']}")
+    logger.info(f"Key injuries: {injuries['key_injuries']}")
     for i in injuries.get("impactful", [])[:5]:
-        print(f"  {i['player']} ({i['team']} - {i['position']}): {i['status']} - {i['injury']}")
+        logger.info(f"  {i['player']} ({i['team']} - {i['position']}): {i['status']} - {i['injury']}")

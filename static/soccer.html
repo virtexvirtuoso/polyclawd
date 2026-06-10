@@ -33,6 +33,7 @@
   .badge.sell{background:rgba(239,68,68,.15);color:var(--red)}
   .badge.yes{background:rgba(16,185,129,.18);color:var(--green)}
   .badge.no{background:rgba(239,68,68,.18);color:var(--red)}
+  .badge.live{background:rgba(6,182,212,.15);color:#06b6d4}
   .empty{color:var(--dim);padding:14px;text-align:center;font-style:italic}
   .bar{height:8px;background:var(--card2);border-radius:4px;overflow:hidden;margin-top:6px}
   .bar>span{display:block;height:100%;background:var(--accent)}
@@ -71,6 +72,7 @@
 const MATCH='/polyclawd/api/soccer/match-edge', FUT='/polyclawd/api/soccer/futures-edge',
       DASH='/polyclawd/api/soccer/dashboard', CRED='/polyclawd/api/odds-api/credits';
 const $=id=>document.getElementById(id);
+let _anyLive=false;  // true when any edge has a live WS book → poll faster
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
   document.querySelectorAll('.pane').forEach(x=>x.classList.remove('active'));
@@ -83,7 +85,7 @@ function edgeRows(edges){
     const dir=(e.direction||'').toLowerCase();
     h+=`<tr><td>${e.event||''}</td><td>${e.participant||''} <span style="color:var(--dim)">${e.market_type||''}</span></td>`+
        `<td class="num">${e.book_prob??''}</td><td class="num">${e.polymarket_price??''}¢</td>`+
-       `<td class="num">${e.executable_price??'—'}</td>`+
+       `<td class="num">${e.executable_price??'—'}${e.live_book===true?' <span class="badge live" title="Executable edge from the live WebSocket order book">live</span>':''}</td>`+
        `<td class="num ${e.edge_pct>=0?'pos':'neg'}">${e.edge_pct>0?'+':''}${e.edge_pct}%</td>`+
        `<td><span class="badge ${dir==='buy'?'buy':'sell'}">${e.direction||''}</span></td>`+
        `<td>${e.tradeable?'✅':'—'}</td></tr>`;
@@ -109,6 +111,8 @@ async function load(){
   try{
     const [m,f,d,cr]=await Promise.all([fetch(MATCH),fetch(FUT),fetch(DASH),fetch(CRED)].map(p=>p.then(r=>r.json()).catch(()=>({}))));
     const me=(m.edges||[]),fe=(f.edges||[]);
+    _anyLive=[...me,...fe].some(x=>x&&x.live_book===true);
+    const liveN=[...me,...fe].filter(x=>x&&x.live_book===true).length;
     $('matches-body').innerHTML=edgeRows(me);
     $('futures-body').innerHTML=edgeRows(fe);
     const wc=[...fe,...me].filter(e=>(e.event||'').toLowerCase().includes('world cup'));
@@ -116,7 +120,7 @@ async function load(){
     $('shadow-body').innerHTML=renderShadow(d);
     const cached=m.cached||f.cached;
     $('dot').className='dot '+(cached?'live':'stale');
-    $('statustxt').textContent=cached?`${me.length+fe.length} edges · ${new Date().toLocaleTimeString()}`:'cache cold — scanner not run';
+    $('statustxt').textContent=cached?`${me.length+fe.length} edges${liveN?` · ${liveN} WS live`:''} · ${new Date().toLocaleTimeString()}`:'cache cold — scanner not run';
     $('credits').textContent=cr&&cr.remaining!=null?`Odds API: ${cr.remaining} credits left`:'';
     $('system-body').innerHTML=`<div>Match cache: ${m.cached?'warm':'cold'} (${me.length} edges)</div>`+
       `<div>Futures cache: ${f.cached?'warm':'cold'} (${fe.length} edges)</div>`+
@@ -124,7 +128,9 @@ async function load(){
       `<div class="sub" style="margin-top:8px">${m.hint||f.hint||''}</div>`;
   }catch(e){ $('dot').className='dot err'; $('statustxt').textContent='error: '+e; }
 }
-load(); setInterval(load,60000);
+// Adaptive poll: 5s while any match/futures book is live (WS), 60s otherwise.
+async function loop(){ await load(); setTimeout(loop, _anyLive?5000:60000); }
+loop();
 </script>
 </body>
 </html>

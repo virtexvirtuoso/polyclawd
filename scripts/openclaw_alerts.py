@@ -4,6 +4,10 @@ OpenClaw Alert Integration for Polyclawd
 Sends trading signals and alerts via OpenClaw gateway.
 """
 
+import json
+import urllib.request
+import urllib.error
+from datetime import datetime
 from typing import Optional
 
 # OpenClaw Gateway (check with: openclaw gateway status)

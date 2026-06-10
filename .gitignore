@@ -39,6 +39,8 @@ storage/
 tests/baseline_snapshots/
 tests/load/
 odds/vegas_cache.json
+odds/vegas_nfl_cache.json
+cache/
 mcp/MCP_OPTIMIZATION.md
 mcp/polyrouter/
 

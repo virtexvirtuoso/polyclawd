@@ -8,8 +8,7 @@ Odds comparison module for Polyclawd
 - Sophisticated edge math (Shin method, sharp book weighting)
 """
 
-# Soccer edges now live in soccer_match_edge.py + soccer_futures_edge.py
-# (imported directly by routes/scanner, not re-exported here).
+from .the_odds_api import find_soccer_edges, get_soccer_edge_summary
 from .vegas_scraper import get_vegas_odds_with_fallback, VegasOdds, get_all_vegas_futures
 from .smart_matcher import create_signature, signatures_match, match_markets
 from .edge_math import (
@@ -37,6 +36,8 @@ from . import polymarket_clob
 from . import correlation
 
 __all__ = [
+    "find_soccer_edges",
+    "get_soccer_edge_summary", 
     "get_vegas_odds_with_fallback",
     "get_all_vegas_futures",
     "VegasOdds",

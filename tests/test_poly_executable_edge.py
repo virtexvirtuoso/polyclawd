@@ -84,3 +84,18 @@ def test_price_move_no_history(monkeypatch):
     monkeypatch.setattr(clob, "get_price_history", lambda tid, **k: [])
     r = pee.poly_price_move(token_id="t")
     assert r["available"] is False
+
+
+def test_executable_edge_uses_prefetched_book(monkeypatch):
+    # When a book is passed, it must NOT hit REST (get_orderbook would raise here).
+    def _boom(*a, **k):
+        raise AssertionError("get_orderbook should not be called when book= is provided")
+    monkeypatch.setattr(clob, "get_orderbook", _boom)
+    bk = clob.OrderBook(market_id="m", token_id="t", outcome="Yes",
+                        bids=[clob.OrderBookLevel(0.49, 5000)],
+                        asks=[clob.OrderBookLevel(0.50, 5000)],
+                        spread=0.01, mid_price=0.495, timestamp="t")
+    r = pee.executable_edge(0.55, "YES", token_id="t", book=bk, target_usd=100)
+    assert r["available"] is True
+    assert abs(r["executable_price"] - 0.50) < 1e-9
+    assert r["tradeable"] is True

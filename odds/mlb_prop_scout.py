@@ -30,19 +30,6 @@ try:
 except ImportError:
     from mlb_props import get_mlb_props
 
-try:
-    from .mlb_enrichment import (
-        enrich_row,
-        _get_player_id as _enrich_player_id,
-        get_pitcher_hand,
-        _get_batter_splits,
-        _get_pitcher_k_splits,
-        _load_schedule,
-    )
-    _ENRICHMENT_AVAILABLE = True
-except ImportError:
-    _ENRICHMENT_AVAILABLE = False
-
 MLB_STATS_API = "https://statsapi.mlb.com/api/v1"
 SCOUT_CACHE_TTL_S = 600  # 10 min — same as props cache
 
@@ -212,12 +199,7 @@ def _best_book_rows(props: Dict[str, List[Dict]]) -> Dict[Tuple[str, str], Dict]
 
 # ── Main async entry point ─────────────────────────────────────────────────────
 
-async def get_prop_scout(
-    last_n: int = 10,
-    min_edge: float = -0.99,
-    min_games: int = 5,
-    enrich: bool = True,
-) -> Dict:
+async def get_prop_scout(last_n: int = 10, min_edge: float = -0.99, min_games: int = 5) -> Dict:
     """
     Return prop scout analysis for today's slate.
 
@@ -225,10 +207,10 @@ async def get_prop_scout(
         last_n:    number of recent games to use for hit rate (default 10)
         min_edge:  filter rows below this edge threshold (default show all)
         min_games: minimum games sampled required to include a player (default 5)
-        enrich:    add lineup gate + park factor + platoon adjustment (default True)
+                   guards against noisy edges from rookies/call-ups with tiny samples
     """
     now = time.time()
-    cache_key = f"{last_n}_{min_edge}_{min_games}_enrich{int(enrich and _ENRICHMENT_AVAILABLE)}"
+    cache_key = f"{last_n}_{min_edge}_{min_games}"
 
     # Check in-memory cache first (fastest)
     cached = _SCOUT_CACHE.get("data")
@@ -314,7 +296,7 @@ async def get_prop_scout(
 
     raw_results = [_scout_one(c) for c in all_combos]
 
-    # Step 4: filter, sort by raw edge desc
+    # Step 4: filter, sort by edge desc
     results = [
         r for r in raw_results
         if r is not None
@@ -323,69 +305,6 @@ async def get_prop_scout(
     ]
     results.sort(key=lambda r: r["edge_pct"], reverse=True)
 
-    # Step 5: Enrichment — lineup gate, park factor, platoon adjustment
-    enriched = False
-    if enrich and _ENRICHMENT_AVAILABLE and results:
-        # Pre-warm enrichment caches in parallel before per-row enrichment:
-        # (a) load schedule once (lineup + probable pitchers for all games)
-        # (b) pre-fetch pitcher hands for unique probable pitchers
-        # (c) pre-fetch batter/pitcher splits for all unique players
-        await loop.run_in_executor(_pool, _load_schedule, None)
-
-        # Collect unique player names for split pre-fetch
-        unique_players = list({r["player"] for r in results})
-        unique_pitcher_prop_players = [r["player"] for r in results if r["market"] == "pitcher_strikeouts"]
-
-        def _prefetch_batter_splits(names):
-            for name in names:
-                pid = _enrich_player_id(name)
-                if pid:
-                    _get_batter_splits(pid)
-
-        def _prefetch_pitcher_splits(names):
-            for name in names:
-                pid = _enrich_player_id(name)
-                if pid:
-                    _get_pitcher_k_splits(pid)
-
-        # Also pre-fetch probable pitcher hands from schedule game data
-        from odds.mlb_enrichment import _game_schedule_cache, get_pitcher_hand as _gh
-        from datetime import date as _date
-        today_str = _date.today().isoformat()
-
-        def _prefetch_pitcher_hands():
-            games_sched = _game_schedule_cache.get(today_str, [])
-            for g in games_sched:
-                teams = g.get("teams", {})
-                for side in ("home", "away"):
-                    pp = teams.get(side, {}).get("probablePitcher", {}).get("fullName", "")
-                    if pp:
-                        _gh(pp)
-
-        batch = 10
-        futs = (
-            [loop.run_in_executor(_pool, _prefetch_batter_splits, unique_players[i:i+batch])
-             for i in range(0, len(unique_players), batch)]
-            + [loop.run_in_executor(_pool, _prefetch_pitcher_splits, unique_pitcher_prop_players)]
-            + [loop.run_in_executor(_pool, _prefetch_pitcher_hands)]
-        )
-        await asyncio.gather(*futs)
-
-        # Now enrich each row (pure-CPU after pre-fetch — all API calls cached)
-        def _enrich_one(r):
-            try:
-                return enrich_row(r, r["home_team"], r["away_team"])
-            except Exception as e:
-                logger.debug(f"prop_scout: enrich failed for {r.get('player')}: {e}")
-                return r
-
-        results = [_enrich_one(r) for r in results]
-
-        # Sort by adjusted edge when enrichment succeeded
-        if any("adj_edge_pct" in r for r in results):
-            results.sort(key=lambda r: r.get("adj_edge_pct", r["edge_pct"]), reverse=True)
-            enriched = True
-
     payload = {
         "_cache_key": cache_key,
         "source": "mlb_prop_scout",
@@ -393,7 +312,6 @@ async def get_prop_scout(
             __import__("datetime").timezone.utc
         ).isoformat(),
         "last_n": last_n,
-        "enriched": enriched,
         "total_players_analyzed": len([r for r in raw_results if r is not None]),
         "results": results,
     }

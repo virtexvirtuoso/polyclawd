@@ -6,7 +6,8 @@ Free public API, politics focused
 import json
 import urllib.request
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
+from loguru import logger
 
 PREDICTIT_API = "https://www.predictit.org/api/marketdata/all/"
 
@@ -21,7 +22,7 @@ def fetch_all_markets() -> List[Dict]:
             data = json.loads(resp.read().decode())
             return data.get("markets", [])
     except Exception as e:
-        print(f"PredictIt fetch error: {e}")
+        logger.error(f"PredictIt fetch error: {e}")
         return []
 
 def parse_contracts(market: Dict) -> List[Dict]:
@@ -170,10 +171,10 @@ def get_predictit_summary() -> Dict:
 
 
 if __name__ == "__main__":
-    print("Testing PredictIt integration...")
+    logger.info("Testing PredictIt integration...")
     summary = get_predictit_summary()
-    print(f"Markets: {summary['markets']}")
-    print(f"Contracts: {summary['total_contracts']}")
-    print("\nSample:")
+    logger.info(f"Markets: {summary['markets']}")
+    logger.info(f"Contracts: {summary['total_contracts']}")
+    logger.info("\nSample:")
     for m in summary['sample'][:5]:
-        print(f"  {m['price']*100:.0f}¢ - {m['market']} / {m['contract']}")
+        logger.info(f"  {m['price']*100:.0f}¢ - {m['market']} / {m['contract']}")

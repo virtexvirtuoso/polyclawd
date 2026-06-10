@@ -4,6 +4,7 @@ Direct access to orderbook depth and price history
 """
 
 import json
+import urllib.request  # noqa: F401 (converge w/ VPS copy)
 from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass
@@ -330,6 +331,7 @@ def size_to_book(
     max_slip_bps: float = 50.0,
     min_usd: float = 15.0,
     max_spread: float = 0.05,
+    book: Optional[OrderBook] = None,
 ) -> FillEstimate:
     """Walk the Polymarket CLOB order book to size a position adaptively.
 
@@ -347,14 +349,14 @@ def size_to_book(
     Returns FillEstimate with ok=False and reason="skip:..." when the
     market is not tradeable at acceptable quality.
     """
-    # Resolve token id if only slug given
-    if not token_id and market_slug:
-        outcome = "Yes" if str(side).upper() == "YES" else "No"
-        token_id = get_token_id_for_market(market_slug, outcome)
-    if not token_id:
-        return FillEstimate(False, 0, 0, 0, 0, 0, 0, "skip:no_token_id")
-
-    book = get_orderbook(token_id)
+    # Use a pre-fetched book (e.g. live WS book) if provided; else fetch via REST.
+    if book is None:
+        if not token_id and market_slug:
+            outcome = "Yes" if str(side).upper() == "YES" else "No"
+            token_id = get_token_id_for_market(market_slug, outcome)
+        if not token_id:
+            return FillEstimate(False, 0, 0, 0, 0, 0, 0, "skip:no_token_id")
+        book = get_orderbook(token_id)
     if not book:
         return FillEstimate(False, 0, 0, 0, 0, 0, 0, "skip:no_book")
 

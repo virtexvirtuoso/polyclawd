@@ -12,8 +12,9 @@ Examples:
 
 import re
 from dataclasses import dataclass
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from datetime import datetime
+from loguru import logger
 
 
 @dataclass
@@ -279,4 +280,4 @@ if __name__ == "__main__":
     
     result = scan_correlation_arb(test_markets)
     import json
-    print(json.dumps(result, indent=2))
+    logger.info(json.dumps(result, indent=2))

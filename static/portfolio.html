@@ -164,6 +164,8 @@
   .badge{padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;white-space:nowrap}
   .badge-yes{background:rgba(0,230,118,0.15);color:var(--green);border:1px solid rgba(0,230,118,0.3)}
   .badge-no{background:rgba(255,82,82,0.15);color:var(--red);border:1px solid rgba(255,82,82,0.3)}
+  .badge-kfade{background:rgba(6,182,212,0.15);color:#06b6d4;border:1px solid rgba(6,182,212,0.3)}
+  .badge-paper{background:rgba(139,92,246,0.15);color:#8b5cf6;border:1px solid rgba(139,92,246,0.3)}
   .pos-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
   .pos-stat{background:var(--surface);border-radius:8px;padding:8px 10px}
   .pos-stat-label{font-size:9px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text2);margin-bottom:2px}
@@ -1069,6 +1071,7 @@ function renderPositions(positions) {
       </div>
       <div class="pos-platform">
         <span class="platform-tag">${(p.platform || 'polymarket').toUpperCase()}</span>
+        ${p.archetype === 'kalshi_weather_fade' ? '<span class="badge badge-kfade">KALSHI FADE</span> <span class="badge badge-paper">PAPER</span>' : ''}
         <span class="pos-days${isStale ? ' orange' : ''}">${days}d open</span>
       </div>
     </div>`;

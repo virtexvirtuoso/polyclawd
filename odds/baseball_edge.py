@@ -34,8 +34,10 @@ from loguru import logger
 
 try:  # shared order-book executable-edge enrichment
     from . import poly_executable_edge as pee
+    from . import sports_edge_common as sec
 except ImportError:  # pragma: no cover
     import poly_executable_edge as pee
+    import sports_edge_common as sec
 
 try:
     from .the_odds_api import (
@@ -147,8 +149,19 @@ async def _log_baseball_shadow(edge: "MLBEdge", edge_pct: float, game_id: str):
     if not HAS_SHADOW or not log_shadow_trade:
         return
     try:
+        # P1: edge floor/cap gate (2026-06-06)
+        try:
+            from odds.sports_edge_common import p1_edge_ok, p1_confidence
+            ok, reason = p1_edge_ok(edge_pct)
+            if not ok:
+                logger.debug(f"baseball shadow skip — {reason}")
+                return
+            use_p1_conf = True
+        except ImportError:
+            use_p1_conf = False
+
         # Build confidence from empirical confidence system if available
-        conf = min(75, abs(edge_pct) * 15)
+        conf = p1_confidence(abs(edge_pct)) if use_p1_conf else min(75, abs(edge_pct) * 15)
         if HAS_EMPIRICAL and calculate_empirical_confidence:
             try:
                 ec = calculate_empirical_confidence(
@@ -179,7 +192,7 @@ async def _log_baseball_shadow(edge: "MLBEdge", edge_pct: float, game_id: str):
                 f"({edge.edge_pct*100:+.1f}% edge)"
             ),
             "archetype": "sports_single_game",
-            "strategy": "baseball_moneyline",
+            "strategy": f"baseball_{edge.market_type}",
             "category": "baseball",
             "category_tier": "sports",
         }
@@ -352,78 +365,67 @@ def _extract_spread_prices(
     event: Dict, target_team: str, target_point: float
 ) -> Optional[Tuple[float, float, str]]:
     """
-    Extract (favored_price, underdog_price, market_id) for a specific spread point.
-    Matches Polymarket markets like "Spread: Team (-1.5)" — the team name before the
-    parenthetical MUST match the Odds API team name to avoid half-market confusion.
-    Returns None if no matching spread market found.
+    Price for "target_team covers target_point" from Polymarket runline markets.
+
+    Polymarket lists every runline as "Spread: <team> (-N)" — ALWAYS negative,
+    meaning the named team wins by MORE than N. There is no "(+N)" market. So a
+    book line's sign decides which Polymarket market is the apples-to-apples bet:
+      * Favorite (target_point < 0): the market named after target_team at |N|;
+        the target_team outcome = P(target covers -N).
+      * Underdog (target_point > 0): the market named after the OPPONENT at |N|;
+        the target_team outcome there = 1 - P(opponent covers -N) = P(target +N).
+
+    Matching on |point| alone (the old bug) paired a +1.5 underdog against the
+    team's own -1.5 market — the opposite bet — inventing huge phantom edges.
+
+    Returns (target_cover_price, opponent_cover_price, market_id) or None.
     """
     abs_point = abs(target_point)
+    want_favorite = target_point < 0
     for market in event.get("markets", []):
         q = market.get("question", "")
         if "Spread:" not in q:
             continue
-        # The question format: "Spread: Team Name (-X.5)"
-        # Extract the team name from the question
-        q_after_spread = q.replace("Spread:", "").strip()
-        # Split on the first parenthesis to get team name
-        spread_parts = q_after_spread.split("(")
-        if len(spread_parts) < 2:
+        parts = q.replace("Spread:", "").strip().split("(")
+        if len(parts) < 2:
             continue
-        spread_team_raw = spread_parts[0].strip()
-        
-        # Require an EXACT spread-line match. Parse the signed number from the
-        # parenthetical, e.g. "(-1.5)". Substring matching (plus the old int()
-        # floor of the target) wrongly paired a 1.0 line with a (-1.5) market
-        # and produced cross-number false matches.
+        named_team_raw = parts[0].strip()
         mspr = re.search(r"\(([+-]?[0-9]+(?:\.[0-9]+)?)\)", q)
         if not mspr:
             continue
         try:
-            poly_point = abs(float(mspr.group(1)))
+            poly_point = float(mspr.group(1))
         except (ValueError, TypeError):
             continue
-        if abs(poly_point - abs_point) > 1e-9:
+        # Polymarket runlines are always negative; require |poly| == |target|.
+        if poly_point >= 0 or abs(abs(poly_point) - abs_point) > 1e-9:
             continue
-        
-        # Only match if this spread market is for our target team
-        if not _team_in_title(target_team, spread_team_raw):
+        named_is_target = _team_in_title(target_team, named_team_raw)
+        # Favorite bet -> market named after target. Underdog bet -> named after
+        # the opponent (so target is the NO/cover-the-other-way side).
+        if want_favorite and not named_is_target:
             continue
-        
+        if (not want_favorite) and named_is_target:
+            continue
+
+        # Polymarket convention: the named (favorite) team is outcomes[0]. So the
+        # target is index 0 when it IS the named team (favorite bet), else index 1.
         prices_raw = market.get("outcomePrices", "[]")
-        if isinstance(prices_raw, str):
-            try:
-                prices = json.loads(prices_raw)
-            except (json.JSONDecodeError, ValueError):
-                continue
-        else:
-            prices = prices_raw
+        try:
+            prices = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
+        except (json.JSONDecodeError, ValueError):
+            continue
         if len(prices) < 2:
             continue
+        t_idx = 0 if named_is_target else 1
         try:
-            price0 = float(prices[0])
-            price1 = float(prices[1])
-        except (ValueError, TypeError):
+            target_cover = float(prices[t_idx])
+            opp_cover = float(prices[1 - t_idx])
+        except (ValueError, TypeError, IndexError):
             continue
-        if price0 <= 0 or price1 <= 0:
+        if target_cover <= 0 or opp_cover <= 0:
             continue
-        
-        # outcomePrices[0] = YES = the named team covers the spread
-        # Odds API target_point signs: negative = favored, positive = underdog
-        # Both Polymarket spreads show as "-1.5" — the YES price means
-        # "the named team covers the spread" (i.e., wins by more than 1.5)
-        # The NO price means the other team covers (wins by 1.5+ or the
-        # named team fails to cover)
-        
-        # Poly YES (price0) = named team covers
-        # Poly NO (price1) = named team does NOT cover (= opponent covers)
-        
-        # Odds API: for favored team (negative point), the probability is
-        # the chance they cover the spread (= YES for the named team)
-        # For underdog (positive point), same thing
-        
-        # We return (named_team_covers_price, named_team_fails_price, market_id)
-        # and let the caller map to the right Odds API side
-        return price0, price1, market.get("conditionId", market.get("id", ""))
+        return target_cover, opp_cover, market.get("conditionId", market.get("id", ""))
     return None
 
 
@@ -485,168 +487,27 @@ def _devig_two_way(odds_a: int, odds_b: int) -> Tuple[float, float]:
     return p_a / total, p_b / total
 
 
-# ─── Weighted Consensus Devig ───────────────────────────────
-# Per-book devig -> weighted average across books. Replaces both the legacy
-# best-of-all bug (cherry-picked the lowest implied prob per team across books,
-# collapsing the overround to ~0% and manufacturing phantom BUY edges) AND the
-# old single-sharp-book env-flag fallback.
-#
-# Weights redistribute automatically when a book is absent from a game's data.
-# NOTE: Betfair exchange (betfair_ex_uk/eu) is the sharpest source (true
-# exchange, near-zero vig). Confirm exact Odds API book keys against a live h2h
-# response before tuning — a wrong key silently scores weight 0.
-BOOK_WEIGHTS: Dict[str, float] = {
-    "pinnacle":        0.35,   # sharpest two-sided book, low vig (~2%)
-    "betfair_ex_uk":   0.30,   # true exchange, near-zero vig
-    "betfair_ex_eu":   0.30,   # EU exchange, same depth class
-    "draftkings":      0.20,   # highest volume US retail
-    "fanduel":         0.15,
-    "betmgm":          0.10,
-    "betrivers":       0.05,
-    "caesars":         0.05,
-    "williamhill_us":  0.05,
-    "bovada":          0.02,
-}
-MIN_BOOKS_CONSENSUS = 2
-
-
+# ─── Moneyline consensus devig — dedup'd to the shared core ──────────
+# Per-book devig -> weighted consensus now lives in sports_edge_common (one
+# implementation across MLB / UFC / soccer). These thin wrappers preserve the
+# local call sites and pick up the shared, fuller BOOK_WEIGHTS (incl. the
+# williamhill + betfair_ex aliases).
 def _consensus_devig(game: Dict) -> Dict[str, float]:
-    """
-    Per-book devig -> weighted consensus for MLB moneylines.
-
-    For each weighted book that quotes BOTH teams' h2h odds:
-      1. Convert to implied prob within that book
-      2. Devig (remove vig) so the book's two probs sum to 1.0
-      3. Add weight * prob to a per-team accumulator
-    Then divide by total contributing weight -> consensus prob per team.
-
-    This is the SOLE source of moneyline true-prob (see find_baseball_edges).
-    Returns {team: devigged_prob} or {} if no weighted book has both sides.
-    """
-    weighted_probs: Dict[str, float] = {}
-    total_weight = 0.0
-
-    for bk in game.get("bookmakers", []):
-        weight = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
-        if weight <= 0.0:
-            continue
-        for market in bk.get("markets", []):
-            if market.get("key") != "h2h":
-                continue
-            outcomes = market.get("outcomes", [])
-            if len(outcomes) < 2:
-                continue
-            o0, o1 = outcomes[0], outcomes[1]
-            name0, name1 = o0.get("name"), o1.get("name")
-            price0, price1 = o0.get("price"), o1.get("price")
-            if name0 is None or name1 is None or price0 is None or price1 is None:
-                continue
-            raw0 = _american_to_implied_prob(int(price0))
-            raw1 = _american_to_implied_prob(int(price1))
-            vig = raw0 + raw1
-            prob0, prob1 = raw0 / vig, raw1 / vig
-            weighted_probs[name0] = weighted_probs.get(name0, 0.0) + weight * prob0
-            weighted_probs[name1] = weighted_probs.get(name1, 0.0) + weight * prob1
-            total_weight += weight
-            break  # one h2h market per book
-
-    if total_weight == 0.0 or len(weighted_probs) < 2:
-        return {}
-    for team in weighted_probs:
-        weighted_probs[team] /= total_weight
-    return weighted_probs
+    """MLB moneyline true-probs via the shared weighted consensus (2-way)."""
+    return sec.consensus_devig_2way(game, "h2h")
 
 
 def _best_odds_per_team(game: Dict) -> Dict[str, int]:
-    """
-    h2h American odds from the single highest-weighted book that quotes BOTH
-    teams. Display + line-movement only — moneyline true_prob now comes from
-    _consensus_devig(). Returns {} if no weighted book has both sides.
-    """
-    best_weight = -1.0
-    best: Dict[str, int] = {}
-    for bk in game.get("bookmakers", []):
-        weight = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
-        if weight <= 0.0 or weight <= best_weight:
-            continue
-        for market in bk.get("markets", []):
-            if market.get("key") != "h2h":
-                continue
-            pair: Dict[str, int] = {}
-            for outcome in market.get("outcomes", []):
-                name = outcome.get("name")
-                price = outcome.get("price")
-                if name is None or price is None:
-                    continue
-                pair[name] = int(price)
-            if len(pair) >= 2:
-                best_weight = weight
-                best = pair
-            break
-    return best
+    """Raw h2h odds from the highest-weighted book with both teams (display /
+    line-movement only). Delegates to the shared core."""
+    return sec.consensus_best_odds(game, "h2h")
 
 
-def _best_spreads(game: Dict) -> Dict[str, Tuple[int, float]]:
-    """
-    Find best available spread odds across bookmakers.
-    Returns {team: (american_odds, point)}.
-    Spread markets have outcomes like:
-      {"name": "Team A", "price": -110, "point": 1.5}
-      {"name": "Team B", "price": -110, "point": -1.5}
-    """
-    best: Dict[str, Tuple[int, float]] = {}
-    for bookmaker in game.get("bookmakers", []):
-        for market in bookmaker.get("markets", []):
-            if market.get("key") != "spreads":
-                continue
-            for outcome in market.get("outcomes", []):
-                name = outcome.get("name")
-                price = outcome.get("price")
-                point = outcome.get("point")
-                if name is None or price is None or point is None:
-                    continue
-                price = int(price)
-                point = float(point)
-                existing = best.get(name)
-                if existing is None or _american_to_implied_prob(price) < _american_to_implied_prob(existing[0]):
-                    best[name] = (price, point)
-    return best
-
-
-def _best_totals(game: Dict) -> Dict[float, Tuple[int, int]]:
-    """
-    Find best available total (over/under) odds across bookmakers.
-    Returns {point: (over_odds, under_odds)} using lowest implied prob per side.
-    Total markets have outcomes like:
-      {"name": "Over", "price": -105, "point": 8.0}
-      {"name": "Under", "price": -115, "point": 8.0}
-    """
-    best: Dict[float, Dict[str, int]] = {}
-    for bookmaker in game.get("bookmakers", []):
-        for market in bookmaker.get("markets", []):
-            if market.get("key") != "totals":
-                continue
-            over_odds, under_odds, seen_point = None, None, None
-            for outcome in market.get("outcomes", []):
-                name = outcome.get("name", "")
-                price = outcome.get("price")
-                point = outcome.get("point")
-                if price is None or point is None:
-                    continue
-                price = int(price)
-                point = float(point)
-                seen_point = point
-                if name.lower() == "over":
-                    if over_odds is None or _american_to_implied_prob(price) < _american_to_implied_prob(over_odds):
-                        over_odds = price
-                elif name.lower() == "under":
-                    if under_odds is None or _american_to_implied_prob(price) < _american_to_implied_prob(under_odds):
-                        under_odds = price
-            if seen_point is not None and over_odds is not None and under_odds is not None:
-                existing = best.get(seen_point)
-                if existing is None:
-                    best[seen_point] = (over_odds, under_odds)
-    return best
+# _best_spreads / _best_totals removed: spreads & totals now use per-book weighted
+# consensus via sec.consensus_devig_spreads / sec.consensus_devig_totals (see the
+# SPREADS / TOTALS blocks in find_baseball_edges). The old best-of-all helpers
+# cherry-picked the most favorable line per side across books, collapsing the
+# overround and manufacturing phantom edges.
 
 
 async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdge]:
@@ -736,124 +597,87 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
                         ), edge, game_id)
 
         # ── SPREADS ────────────────────────────────────────────────
-        spreads = _best_spreads(game)
-        if spreads:
-            # Find the most liquid spread (smallest absolute point)
-            # Odds API returns multiple spreads per game
-            # For spreads: Odds API returns h2h for each spread line
-            # Team A: point=1.5 (underdog, need to cover +1.5)
-            # Team B: point=-1.5 (favored, need to win by >1.5)
-            # Polymarket has "Spread: Team X (-1.5)" where YES = named team covers
-            # We match each team's spread market independently
-            
-            # Find the primary spread (smallest point magnitude, usually 1.5)
-            spread_items = [(team, odds, pt) for team, (odds, pt) in spreads.items() 
-                          if pt is not None]
-            # Group by absolute point value
-            spread_groups = {}
-            for team, odds, pt in spread_items:
-                key = abs(int(pt))
-                if key not in spread_groups:
-                    spread_groups[key] = []
-                spread_groups[key].append((team, odds, pt))
-            
-            for abs_point, group in spread_groups.items():
-                if len(group) == 2:
-                    (team_a, odds_a, point_a), (team_b, odds_b, point_b) = group
-                    true_prob_a, true_prob_b = _devig_two_way(odds_a, odds_b)
-                    spread_point = point_a  # e.g. 1.5 or -1.5
-                    
-                    # Get the named team's spread price from Polymarket
-                    # We need the market for the favored team first
-                    prices_a = _extract_spread_prices(event, team_a, point_a)
-                    prices_b = _extract_spread_prices(event, team_b, point_b)
-                    
-                    for team, true_prob, american_odds, point, prices in [
-                        (team_a, true_prob_a, odds_a, point_a, prices_a),
-                        (team_b, true_prob_b, odds_b, point_b, prices_b),
-                    ]:
-                        if not prices:
-                            continue
-                        named_team_covers_price, named_team_fails_price, sp_market_id = prices
-                        
-                        # For this team: if they're the favored side (negative point),
-                        # the Odds API line means "cover the spread" which equals
-                        # Polymarket's YES (named team covers)
-                        # For underdog (positive point), same logic applies
-                        # Odds API prob for this team = P(they cover their spread)
-                        # Polymarket YES = P(named team covers their spread)
-                        # They should match — so YES price = true_prob for the named team
-                        
-                        poly_price = named_team_covers_price
-                        edge = true_prob - poly_price
-                        if abs(edge) >= min_edge:
-                            edges.append(MLBEdge(
-                                game_title=event.get("title", ""),
-                                home_team=home_team, away_team=away_team,
-                                bet_team=team, market_type="spread",
-                                odds_api_prob=true_prob, american_odds=american_odds,
-                                polymarket_price=poly_price, edge_pct=edge,
-                                direction="BUY" if edge > 0 else "SELL",
-                                commence_time=commence_time,
-                                point_value=point,
-                                poly_market_id=sp_market_id, poly_event_id=event.get("id"),
-                            ))
-                        # Track line movement
-                        _update_line_movement(game_id, team, american_odds, "spread")
-                        if abs(edge) >= 0.03:
-                            await _log_baseball_shadow(MLBEdge(
-                                game_title=event.get("title", ""),
-                                home_team=home_team, away_team=away_team,
-                                bet_team=team, market_type="spread",
-                                odds_api_prob=true_prob, american_odds=american_odds,
-                                polymarket_price=poly_price, edge_pct=edge,
-                                direction="BUY" if edge > 0 else "SELL",
-                                commence_time=commence_time,
-                                point_value=point,
-                                poly_market_id=sp_market_id, poly_event_id=event.get("id"),
-                            ), edge, game_id)
-
-        # ── TOTALS ─────────────────────────────────────────────────
-        totals = _best_totals(game)
-        if totals:
-            for total_point, (over_odds, under_odds) in totals.items():
-                true_prob_over, true_prob_under = _devig_two_way(over_odds, under_odds)
-                prices = _extract_total_prices(event, total_point)
+        # Per-book devig -> weighted consensus, keyed by |point|. Raw odds for
+        # display only. Polymarket "Spread: Team (-x.5)" YES = named team covers.
+        spread_consensus = sec.consensus_devig_spreads(game)   # {|pt|: {team: prob}}
+        spread_odds = sec.consensus_best_spread_odds(game)     # {|pt|: {team: (odds, signed_pt)}}
+        for abs_point, team_probs in spread_consensus.items():
+            odds_map = spread_odds.get(abs_point, {})
+            for team, true_prob in team_probs.items():
+                american_odds, point = odds_map.get(team, (0, 0.0))
+                prices = _extract_spread_prices(event, team, point)
                 if not prices:
                     continue
-                over_poly_price, under_poly_price, tot_market_id = prices
+                named_team_covers_price, _named_fails_price, sp_market_id = prices
+                poly_price = named_team_covers_price
+                edge = true_prob - poly_price
+                if abs(edge) >= min_edge:
+                    edges.append(MLBEdge(
+                        game_title=event.get("title", ""),
+                        home_team=home_team, away_team=away_team,
+                        bet_team=team, market_type="spread",
+                        odds_api_prob=true_prob, american_odds=american_odds,
+                        polymarket_price=poly_price, edge_pct=edge,
+                        direction="BUY" if edge > 0 else "SELL",
+                        commence_time=commence_time,
+                        point_value=point,
+                        poly_market_id=sp_market_id, poly_event_id=event.get("id"),
+                    ))
+                _update_line_movement(game_id, team, american_odds, "spread")
+                if abs(edge) >= 0.03:
+                    await _log_baseball_shadow(MLBEdge(
+                        game_title=event.get("title", ""),
+                        home_team=home_team, away_team=away_team,
+                        bet_team=team, market_type="spread",
+                        odds_api_prob=true_prob, american_odds=american_odds,
+                        polymarket_price=poly_price, edge_pct=edge,
+                        direction="BUY" if edge > 0 else "SELL",
+                        commence_time=commence_time,
+                        point_value=point,
+                        poly_market_id=sp_market_id, poly_event_id=event.get("id"),
+                    ), edge, game_id)
 
-                for label, true_prob, poly_price, american_odds in [
-                    ("Over", true_prob_over, over_poly_price, over_odds),
-                    ("Under", true_prob_under, under_poly_price, under_odds),
-                ]:
-                    edge = true_prob - poly_price
-                    if abs(edge) >= min_edge:
-                        edges.append(MLBEdge(
-                            game_title=event.get("title", ""),
-                            home_team=home_team, away_team=away_team,
-                            bet_team=label, market_type="total",
-                            odds_api_prob=true_prob, american_odds=american_odds,
-                            polymarket_price=poly_price, edge_pct=edge,
-                            direction="BUY" if edge > 0 else "SELL",
-                            commence_time=commence_time,
-                            point_value=total_point,
-                            poly_market_id=tot_market_id, poly_event_id=event.get("id"),
-                        ))
-                    # Track line movement
-                    _update_line_movement(game_id, label.replace(" ", ""), american_odds, "total")
-                    if abs(edge) >= 0.03:
-                        await _log_baseball_shadow(MLBEdge(
-                            game_title=event.get("title", ""),
-                            home_team=home_team, away_team=away_team,
-                            bet_team=label, market_type="total",
-                            odds_api_prob=true_prob, american_odds=american_odds,
-                            polymarket_price=poly_price, edge_pct=edge,
-                            direction="BUY" if edge > 0 else "SELL",
-                            commence_time=commence_time,
-                            point_value=total_point,
-                            poly_market_id=tot_market_id, poly_event_id=event.get("id"),
-                        ), edge, game_id)
+        # ── TOTALS ─────────────────────────────────────────────────
+        # Per-book devig -> weighted consensus, keyed by total point.
+        total_consensus = sec.consensus_devig_totals(game)    # {pt: {"Over":p,"Under":p}}
+        total_odds = sec.consensus_best_total_odds(game)      # {pt: (over_odds, under_odds)}
+        for total_point, ou in total_consensus.items():
+            over_odds, under_odds = total_odds.get(total_point, (0, 0))
+            prices = _extract_total_prices(event, total_point)
+            if not prices:
+                continue
+            over_poly_price, under_poly_price, tot_market_id = prices
+            for label, true_prob, poly_price, american_odds in [
+                ("Over", ou.get("Over", 0.0), over_poly_price, over_odds),
+                ("Under", ou.get("Under", 0.0), under_poly_price, under_odds),
+            ]:
+                edge = true_prob - poly_price
+                if abs(edge) >= min_edge:
+                    edges.append(MLBEdge(
+                        game_title=event.get("title", ""),
+                        home_team=home_team, away_team=away_team,
+                        bet_team=label, market_type="total",
+                        odds_api_prob=true_prob, american_odds=american_odds,
+                        polymarket_price=poly_price, edge_pct=edge,
+                        direction="BUY" if edge > 0 else "SELL",
+                        commence_time=commence_time,
+                        point_value=total_point,
+                        poly_market_id=tot_market_id, poly_event_id=event.get("id"),
+                    ))
+                _update_line_movement(game_id, label.replace(" ", ""), american_odds, "total")
+                if abs(edge) >= 0.03:
+                    await _log_baseball_shadow(MLBEdge(
+                        game_title=event.get("title", ""),
+                        home_team=home_team, away_team=away_team,
+                        bet_team=label, market_type="total",
+                        odds_api_prob=true_prob, american_odds=american_odds,
+                        polymarket_price=poly_price, edge_pct=edge,
+                        direction="BUY" if edge > 0 else "SELL",
+                        commence_time=commence_time,
+                        point_value=total_point,
+                        poly_market_id=tot_market_id, poly_event_id=event.get("id"),
+                    ), edge, game_id)
+
 
     # --- Executable-edge enrichment. Midpoint edge above is vs Polymarket's
     # last/mid price; the executable price is the ask walked to size. (P3.4)

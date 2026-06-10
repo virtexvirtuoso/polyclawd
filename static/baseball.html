@@ -234,14 +234,64 @@
 
 <!-- Tab Navigation -->
 <div class="tab-bar">
-  <div class="tab active" onclick="switchTab('today')">📡 Today's Games</div>
-  <div class="tab" onclick="switchTab('edges')">🎯 Edges</div>
+  <div class="tab active" onclick="switchTab('scout')">🎯 Prop Scout</div>
+  <div class="tab" onclick="switchTab('kalshi')">🏛️ Kalshi</div>
+  <div class="tab" onclick="switchTab('alerts')">🔔 Alerts &amp; Calibration</div>
+  <div class="tab" onclick="switchTab('today')">📡 Today's Games</div>
   <div class="tab" onclick="switchTab('movement')">📊 Line Movement</div>
+  <div class="tab" onclick="switchTab('props')">🎯 Player Props</div>
   <div class="tab" onclick="switchTab('system')">⚙️ System Health</div>
+  <div class="tab" onclick="switchTab('edges')">🗄️ Legacy (P2)</div>
+</div>
+
+<!-- ===================== PROP SCOUT TAB ===================== -->
+<div class="section active" id="tab-scout">
+
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">🎯 Prop Scout — Hit-Rate vs Book <span id="scout-meta" style="font-size:0.75rem;color:var(--dim);font-weight:400"></span></div>
+  <div class="subtitle" style="margin-bottom:12px">Edge = recent L{N} hit-rate on the prop line minus the book's implied OVER%. Sorted by edge. Rows ≥+15pp are flagged as alert-grade.</div>
+  <div id="scout-table"><div class="empty-state"><span class="status-dot status-refresh"></span>Loading prop scout…</div></div>
+</div>
+
+</div>
+
+<!-- ===================== KALSHI TAB ===================== -->
+<div class="section" id="tab-kalshi">
+
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">🏛️ Kalshi — Executable Venue <span id="kalshi-meta" style="font-size:0.75rem;color:var(--dim);font-weight:400"></span></div>
+  <div id="kalshi-banner" style="margin-bottom:10px"></div>
+  <div class="subtitle" style="margin-bottom:12px">Kalshi player-prop contracts vs book-implied probability, fee-adjusted. Signal blends edge with L10 realized hit-rate.</div>
+  <div id="kalshi-table"><div class="empty-state"><span class="status-dot status-refresh"></span>Loading Kalshi scan…</div></div>
+</div>
+
+</div>
+
+<!-- ===================== ALERTS & CALIBRATION TAB ===================== -->
+<div class="section" id="tab-alerts">
+
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">🔔 Alert Performance — Is the Edge Real? <span id="alerts-meta" style="font-size:0.75rem;color:var(--dim);font-weight:400"></span></div>
+  <div class="subtitle" style="margin-bottom:12px">Shadow-tracked prop alerts with resolution + closing-line value. This is the Gate-2 truth source for the realized hit-rate.</div>
+  <div id="alerts-summary"></div>
+</div>
+
+<div class="grid grid-2">
+  <div class="card">
+    <div class="section-title">📋 Alert History</div>
+    <div id="alerts-history"><div class="empty-state"><span class="status-dot status-refresh"></span>Loading alerts…</div></div>
+  </div>
+  <div class="card">
+    <div class="section-title">📏 Calibration — Edge Bucket vs Realized</div>
+    <div class="subtitle" style="margin-bottom:10px">Does a claimed +Npp edge actually convert? Each bar shows realized hit% per predicted-edge bucket.</div>
+    <div id="alerts-calibration"><div class="empty-state">No resolved alerts yet to calibrate.</div></div>
+  </div>
+</div>
+
 </div>
 
 <!-- ===================== TODAY'S GAMES TAB ===================== -->
-<div class="section active" id="tab-today">
+<div class="section" id="tab-today">
 
 <!-- Hero Stats -->
 <div class="grid grid-4" id="hero-stats">
@@ -275,15 +325,19 @@
 
 </div>
 
-<!-- ===================== EDGES TAB ===================== -->
+<!-- ===================== LEGACY (PIPELINE 2 — RETIRED) TAB ===================== -->
 <div class="section" id="tab-edges">
 
-<div class="card" style="margin-bottom:16px">
-  <div class="section-title">🎯 Detected Edges</div>
-  <div class="subtitle" style="margin-bottom:12px">Edge = devigged bookmaker probability minus Polymarket YES price. Positive = undervalued on Poly.</div>
-  <div id="edges-table"><div class="empty-state">No edges ≥5% detected. Polymarket MLB is well-calibrated right now.</div></div>
+<div class="card" style="margin-bottom:16px;border-color:rgba(245,158,11,0.35)">
+  <div class="section-title">🗄️ Legacy — Pipeline 2 (retired) <span class="badge badge-stale">RETIRED SIGNAL</span></div>
+  <div class="subtitle" style="margin-bottom:12px">Game-market moneyline/spread/total edges (devigged book vs Polymarket YES). This signal is <strong>killed</strong> — kept here for monitoring only, not for trading. The live edge now lives in <strong>Prop Scout</strong> / <strong>Kalshi</strong>.</div>
+  <div class="section-title" style="font-size:0.85rem;margin-bottom:8px">Detected Game Edges <span id="legacy-toggle" style="font-size:0.7rem;cursor:pointer;color:var(--accent)" onclick="toggleLegacy()">[ show ]</span></div>
+  <div id="legacy-edges-wrap" style="display:none">
+    <div id="edges-table"><div class="empty-state">No edges ≥5% detected. Polymarket MLB is well-calibrated right now.</div></div>
+  </div>
 </div>
 
+<div id="legacy-edges-wrap2" style="display:none">
 <!-- Edge ladder + positioning scatter -->
 <div class="grid grid-2">
   <div class="card">
@@ -315,7 +369,9 @@
   <div id="debug-edges" style="display:none"><div class="empty-state">No moneyline pairs returned yet.</div></div>
 </div>
 
-</div>
+</div><!-- /legacy-edges-wrap2 -->
+
+</div><!-- /tab-edges section -->
 
 <!-- ===================== LINE MOVEMENT TAB ===================== -->
 <div class="section" id="tab-movement">
@@ -355,7 +411,7 @@
 <!-- Credit Budget -->
 <div class="card" style="margin-bottom:16px">
   <div class="section-title">💰 Odds API Credit Budget</div>
-  <div class="subtitle" style="margin-bottom:12px">20,000 credits/month ($30 plan). Baseball uses ~270 credits/day (9 games × 30 scans).</div>
+  <div class="subtitle" style="margin-bottom:12px">100,000 credits/month plan. Turns amber below 20K remaining, red below 5K.</div>
   <div id="credit-meter-area">
     <div class="empty-state"><span class="status-dot status-refresh"></span>Loading credit data…</div>
   </div>
@@ -400,12 +456,29 @@
 
 </div>
 
+<!-- ===================== PLAYER PROPS TAB ===================== -->
+<div class="section" id="tab-props">
+
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">🎯 Player Props — Tonight's MLB</div>
+  <div class="subtitle" style="margin-bottom:12px">Batter HR, Hits, RBI, Total Bases &amp; Pitcher Strikeout props from Pinnacle, FanDuel, DraftKings, BetMGM, and Caesars.</div>
+  <div id="props-content"><div class="empty-state">Loading player props…</div></div>
+</div>
+
+</div>
+
 <script>
 const BASEBALL_API = '/polyclawd/api/baseball/edge';
 const CREDIT_API = '/polyclawd/api/odds-api/credits';
 const DASHBOARD_API = '/polyclawd/api/baseball/dashboard';
+const SCOUT_API = '/polyclawd/api/baseball/props/scout?last_n=10&min_edge=-0.99&min_games=7';
+const KALSHI_API = '/polyclawd/api/baseball/kalshi/scan?min_edge=2.0&last_n=10';
+const ALERTS_API = '/polyclawd/api/baseball/props/alerts?limit=100';
 let charts = {};
-let refreshInterval = 60;
+let activeTab = 'today';
+const REFRESH_FAST = 4;   // Edges tab polls fast so WS-live books feel live
+const REFRESH_SLOW = 60;  // other tabs stay calm (API is cached)
+let refreshInterval = REFRESH_SLOW;
 let countdown = refreshInterval;
 let lastData = null;
 let lastUpdated = null;
@@ -433,6 +506,18 @@ function switchTab(name) {
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.querySelector(`[onclick*="'${name}'"]`).classList.add('active');
   document.getElementById('tab-' + name).classList.add('active');
+  activeTab = name;
+  refreshInterval = (name === 'edges') ? REFRESH_FAST : REFRESH_SLOW;
+  // don't make the user wait a full slow cycle for fast live data
+  if (countdown > refreshInterval) countdown = refreshInterval;
+}
+
+function toggleLegacy() {
+  const els = [document.getElementById('legacy-edges-wrap'), document.getElementById('legacy-edges-wrap2')];
+  const btn = document.getElementById('legacy-toggle');
+  const showing = els[0] && els[0].style.display !== 'none';
+  els.forEach(el => { if (el) el.style.display = showing ? 'none' : 'block'; });
+  if (btn) btn.textContent = showing ? '[ show ]' : '[ hide ]';
 }
 
 function toggleDebug() {
@@ -462,6 +547,8 @@ function setStatus(state, msg) {
 async function load() {
   setStatus('refresh', lastData ? 'Refreshing…' : 'Loading…');
   try {
+    const PROPS_API = '/polyclawd/api/baseball/props';
+    // Load edges+credits+dashboard in parallel (fast)
     const [edgeRes, creditRes, dashRes] = await Promise.all([
       fetch(BASEBALL_API + '?min_edge=0.01'),
       fetch(CREDIT_API),
@@ -482,7 +569,8 @@ async function load() {
     lastData = data;
     lastUpdated = new Date();
 
-    setStatus('live', `Live · ${lastUpdated.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'})}`);
+    const liveBooks = (data.edges || []).filter(e => e && e.live_book === true).length;
+    setStatus('live', `Live · ${lastUpdated.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'})}${liveBooks ? ` · ${liveBooks} WS live` : ''}`);
 
     renderHero(data);
     renderGames(data);
@@ -491,6 +579,26 @@ async function load() {
     renderShadowTrades(dashData);
     renderMovement(data);
     renderSystem(data, creditData);
+
+    // Load props in background (slowest endpoint, don't block the main view)
+    fetch(PROPS_API)
+      .then(r => r.ok ? r.json() : null)
+      .then(pd => { renderProps(pd); })
+      .catch(() => {});
+
+    // Prop Scout (lead view), Kalshi venue + alert/calibration — independent background fetches
+    fetch(SCOUT_API)
+      .then(r => r.ok ? r.json() : null)
+      .then(sd => { renderScout(sd); })
+      .catch(() => { renderScout(null); });
+    fetch(KALSHI_API)
+      .then(r => r.ok ? r.json() : null)
+      .then(kd => { renderKalshi(kd); })
+      .catch(() => { renderKalshi(null); });
+    fetch(ALERTS_API)
+      .then(r => r.ok ? r.json() : null)
+      .then(ad => { renderAlerts(ad); })
+      .catch(() => { renderAlerts(null); });
   } catch(e) {
     console.error('Dashboard load failed:', e);
     if (lastData) {
@@ -665,7 +773,7 @@ function renderEdgesTable(data) {
         <td class="num">${e.odds_api_prob || '—'}%</td>
         <td class="num">${e.polymarket_price || '—'}¢</td>
         <td class="num" style="color:${e.edge_pct > 0 ? 'var(--green)' : 'var(--red)'}">${sign}${e.edge_pct}%</td>
-        <td class="num" style="color:${e.executable_edge==null?'var(--dim)':(e.executable_edge>0?'var(--green)':'var(--red)')}">${e.executable_edge==null?'—':((e.executable_edge>0?'+':'')+e.executable_edge+'%')}</td>
+        <td class="num" style="color:${e.executable_edge==null?'var(--dim)':(e.executable_edge>0?'var(--green)':'var(--red)')}">${e.executable_edge==null?'—':((e.executable_edge>0?'+':'')+e.executable_edge+'%')}${e.live_book===true?' <span class="badge badge-live" title="Executable edge from the live WebSocket order book">live</span>':''}</td>
         <td class="num">${e.book_spread_pct!=null?e.book_spread_pct+'¢':'—'}</td>
         <td>${e.tradeable===true?'<span class="badge badge-buy">✓</span>':(e.tradeable===false?'<span class="badge badge-stale">✗</span>':'<span style="color:var(--dim)">—</span>')}</td>
         <td><span class="badge ${dir}">${e.direction}</span></td>
@@ -692,7 +800,7 @@ function renderEdgesTable(data) {
         <td class="num">${e.odds_api_prob || '—'}%</td>
         <td class="num">${e.polymarket_price || '—'}¢</td>
         <td class="num">${e.edge_pct > 0 ? '+' : ''}${e.edge_pct}%</td>
-        <td class="num" style="color:${e.executable_edge==null?'var(--dim)':(e.executable_edge>0?'var(--green)':'var(--red)')}">${e.executable_edge==null?'—':((e.executable_edge>0?'+':'')+e.executable_edge+'%')}</td>
+        <td class="num" style="color:${e.executable_edge==null?'var(--dim)':(e.executable_edge>0?'var(--green)':'var(--red)')}">${e.executable_edge==null?'—':((e.executable_edge>0?'+':'')+e.executable_edge+'%')}${e.live_book===true?' <span class="badge badge-live" title="Executable edge from the live WebSocket order book">live</span>':''}</td>
         <td class="num">${e.book_spread_pct!=null?e.book_spread_pct+'¢':'—'}</td>
         <td>${e.tradeable===true?'<span class="badge badge-buy">✓</span>':(e.tradeable===false?'<span class="badge badge-stale">✗</span>':'<span style="color:var(--dim)">—</span>')}</td>
         <td>${e.direction || '—'}</td>
@@ -966,6 +1074,294 @@ function renderShadowTrades(dash) {
   container.innerHTML = html;
 }
 
+const PROPS_MARKET_LABELS = {
+  'batter_home_runs': {icon: '🏏', label: 'HR'},
+  'pitcher_strikeouts': {icon: '🥎', label: 'K'},
+  'batter_hits': {icon: '👟', label: 'Hits'},
+  'batter_rbis': {icon: '💪', label: 'RBI'},
+  'batter_total_bases': {icon: '📊', label: 'TB'}
+};
+
+function renderProps(data) {
+  const container = document.getElementById('props-content');
+  if (!container) return;
+  
+  const games = (data && data.games) || [];
+  
+  if (!games.length) {
+    container.innerHTML = emptyState('field', 'No player props available',
+      'Props load once The Odds API returns player prop markets for tonight\'s games. Check back closer to first pitch.');
+    return;
+  }
+  
+  let html = '';
+  
+  for (const game of games) {
+    const away = game.away_team || 'Away';
+    const home = game.home_team || 'Home';
+    const ap = game.away_pitcher || 'TBD';
+    const hp = game.home_pitcher || 'TBD';
+    const ct = game.commence_time ? fmtGameTime(game.commence_time) : '—';
+    
+    html += '<div class="game-card">';
+    html += '<div class="game-card-header">';
+    html += '<div><span class="game-card-teams">' + away + '</span> <span class="teams-vs">@</span> <span class="game-card-teams">' + home + '</span></div>';
+    html += '<span class="game-card-time">🕐 ' + ct + '</span></div>';
+    
+    // Pitchers line
+    html += '<div style="font-size:0.78rem;color:var(--dim);margin-bottom:10px;display:flex;gap:20px;flex-wrap:wrap">';
+    html += '<span>⚾ <strong>' + ap + '</strong> (' + away + ')</span>';
+    html += '<span>⚾ <strong>' + hp + '</strong> (' + home + ')</span>';
+    html += '</div>';
+    
+    const props = game.props || {};
+    const marketOrder = ['batter_home_runs', 'pitcher_strikeouts', 'batter_hits', 'batter_rbis', 'batter_total_bases'];
+    
+    for (const mkt of marketOrder) {
+      const entries = props[mkt];
+      if (!entries || !entries.length) continue;
+      
+      const meta = PROPS_MARKET_LABELS[mkt] || {icon: '📊', label: mkt};
+      
+      html += '<div style="margin-top:10px">';
+      html += '<div class="section-title" style="font-size:0.82rem;margin-bottom:6px">' + meta.icon + ' ' + meta.label + '</div>';
+      html += '<div class="table-wrap"><table><thead><tr>';
+      html += '<th>Player</th><th>Book</th><th class="num">Line</th><th class="num">OVER odds</th><th class="num">OVER IP</th><th class="num">UNDER odds</th><th class="num">UNDER IP</th>';
+      html += '</tr></thead><tbody>';
+      
+      for (const p of entries) {
+        const overIp = p.over_ip || 0;
+        const underIp = p.under_ip || 0;
+        const overColor = overIp >= 50 ? 'var(--green)' : overIp >= 30 ? 'var(--amber)' : 'var(--dim)';
+        const underColor = underIp >= 50 ? 'var(--green)' : underIp >= 30 ? 'var(--amber)' : 'var(--dim)';
+        
+        html += '<tr>';
+        html += '<td><strong>' + (p.player || '—') + '</strong></td>';
+        html += '<td><span class="badge badge-sharp">' + (p.book || '—') + '</span></td>';
+        html += '<td class="num">' + (p.line || '—') + '</td>';
+        html += '<td class="num" style="color:' + overColor + '">' + (p.over_odds || '—') + '</td>';
+        html += '<td class="num" style="color:' + overColor + '">' + overIp + '%</td>';
+        html += '<td class="num" style="color:' + underColor + '">' + (p.under_odds || '—') + '</td>';
+        html += '<td class="num" style="color:' + underColor + '">' + underIp + '%</td>';
+        html += '</tr>';
+      }
+      
+      html += '</tbody></table></div></div>';
+    }
+    
+    // If no props at all for this game
+    let totalProps = 0;
+    for (const mkt of marketOrder) {
+      if (props[mkt]) totalProps += props[mkt].length;
+    }
+    if (totalProps === 0) {
+      html += '<div class="empty-state" style="padding:14px">No prop markets returned for this game yet.</div>';
+    }
+    
+    html += '</div>'; // game-card
+  }
+  
+  container.innerHTML = html;
+}
+
+// ---- Prop Scout: hit-rate vs book, sorted by edge ----
+function scoutEdgeColor(e) {
+  return e >= 15 ? 'var(--green)' : (e >= 5 ? 'var(--amber)' : 'var(--dim)');
+}
+function renderScout(data) {
+  const container = document.getElementById('scout-table');
+  const metaEl = document.getElementById('scout-meta');
+  if (!container) return;
+  if (!data) {
+    container.innerHTML = emptyState('target', 'Prop scout unavailable',
+      'The /baseball/props/scout endpoint did not respond. Retrying on the next refresh.');
+    if (metaEl) metaEl.textContent = '';
+    return;
+  }
+  const rows = (data.results || []).slice().sort((a, b) => (b.edge_pct || 0) - (a.edge_pct || 0));
+  if (metaEl) {
+    const ln = data.last_n != null ? data.last_n : '';
+    metaEl.textContent = `${data.total_players_analyzed != null ? data.total_players_analyzed : rows.length} analyzed · L${ln} window`;
+  }
+  if (!rows.length) {
+    container.innerHTML = emptyState('target', 'No prop edges yet',
+      'The scout compares each player’s recent hit-rate on the posted line against the book’s implied OVER%. Rows appear once props are posted and a player has enough sampled games.');
+    return;
+  }
+  let html = '<div class="table-wrap"><table><thead><tr><th>Player</th><th>Prop</th><th>Matchup</th><th class="num">Book%</th><th class="num">Hit%</th><th class="num">Edge</th></tr></thead><tbody>';
+  for (const r of rows) {
+    const e = r.edge_pct != null ? r.edge_pct : 0;
+    const alert = e >= 15;
+    const prop = (r.stat_label || r.market || '?') + ' o' + (r.prop_line != null ? r.prop_line : '—');
+    const matchup = (r.away_team || '?') + ' @ ' + (r.home_team || '?');
+    const sign = e > 0 ? '+' : '';
+    html += `<tr${alert ? ' style="background:rgba(16,185,129,0.08)"' : ''}>
+      <td><strong>${r.player || '—'}</strong></td>
+      <td>${prop}</td>
+      <td style="color:var(--dim)">${matchup}</td>
+      <td class="num">${r.book_over_pct != null ? r.book_over_pct + '%' : '—'}</td>
+      <td class="num">${r.hit_rate_pct != null ? r.hit_rate_pct + '%' : '—'} <span style="color:var(--dim);font-size:0.65rem">L${r.games_sampled != null ? r.games_sampled : '?'}</span></td>
+      <td class="num" style="color:${scoutEdgeColor(e)};font-weight:700">${sign}${e}pp${alert ? ' <span class="badge badge-buy">★</span>' : ''}</td>
+    </tr>`;
+  }
+  html += '</tbody></table></div>';
+  container.innerHTML = html;
+}
+
+// ---- Kalshi executable venue ----
+function kalshiSignalBadge(sig) {
+  const s = (sig || '').toUpperCase();
+  if (s === 'STRONG_YES') return '<span class="badge badge-buy">STRONG_YES</span>';
+  if (s === 'BUY_YES') return '<span class="badge badge-buy">BUY_YES</span>';
+  if (s === 'BUY_NO' || s === 'STRONG_NO') return '<span class="badge badge-sell">' + s + '</span>';
+  if (!s) return '<span style="color:var(--dim)">—</span>';
+  return '<span class="badge badge-edge">' + s + '</span>';
+}
+function renderKalshi(data) {
+  const container = document.getElementById('kalshi-table');
+  const bannerEl = document.getElementById('kalshi-banner');
+  const metaEl = document.getElementById('kalshi-meta');
+  if (!container) return;
+  if (bannerEl) {
+    if (!data) {
+      bannerEl.innerHTML = '';
+    } else if (data.maker_subsidized) {
+      bannerEl.innerHTML = '<span class="badge badge-buy">LIP maker rewards ACTIVE</span>';
+    } else {
+      bannerEl.innerHTML = '<span class="badge badge-stale">maker fee-free (no LIP on these series)</span>';
+    }
+  }
+  if (!data) {
+    container.innerHTML = emptyState('target', 'Kalshi scan unavailable',
+      'The /baseball/kalshi/scan endpoint did not respond. Retrying on the next refresh.');
+    if (metaEl) metaEl.textContent = '';
+    return;
+  }
+  const rows = (data.results || []).slice().sort((a, b) => (b.fee_adj_edge_pct || 0) - (a.fee_adj_edge_pct || 0));
+  if (metaEl) metaEl.textContent = `${data.total_results != null ? data.total_results : rows.length} contracts`;
+  if (!rows.length) {
+    container.innerHTML = emptyState('target', 'No Kalshi prop edges',
+      'No Kalshi player-prop contracts cleared the fee-adjusted edge threshold right now.');
+    return;
+  }
+  let html = '<div class="table-wrap"><table><thead><tr><th>Player</th><th>Prop</th><th class="num">Kalshi mid</th><th class="num">Spread</th><th class="num">Book IP</th><th class="num">Fee-adj edge</th><th class="num">L10 hit%</th><th>Signal</th></tr></thead><tbody>';
+  for (const r of rows) {
+    const fe = r.fee_adj_edge_pct;
+    const feColor = fe == null ? 'var(--dim)' : (fe >= 15 ? 'var(--green)' : (fe >= 5 ? 'var(--amber)' : (fe < 0 ? 'var(--red)' : 'var(--dim)')));
+    const feStr = fe == null ? '—' : ((fe > 0 ? '+' : '') + fe + 'pp');
+    const mid = r.kalshi_mid != null ? r.kalshi_mid + '%' : (r.kalshi_line != null ? r.kalshi_line : '—');
+    const prop = (r.prop || r.prop_type || '—');
+    html += `<tr title="${(r.ticker || '').replace(/"/g,'')}">
+      <td><strong>${r.player || '—'}</strong></td>
+      <td>${prop}</td>
+      <td class="num">${mid}</td>
+      <td class="num">${r.kalshi_spread_c != null ? r.kalshi_spread_c + '¢' : '—'}</td>
+      <td class="num">${r.avg_book_ip != null ? r.avg_book_ip + '%' : '—'}</td>
+      <td class="num" style="color:${feColor};font-weight:700">${feStr}</td>
+      <td class="num">${r.l10_hit_rate != null ? r.l10_hit_rate + '%' : '—'}</td>
+      <td>${kalshiSignalBadge(r.signal)}</td>
+    </tr>`;
+  }
+  html += '</tbody></table></div>';
+  container.innerHTML = html;
+}
+
+// ---- Alerts & calibration (Gate-2 truth source) ----
+function alertStatusBadge(st) {
+  const s = (st || '').toLowerCase();
+  if (s === 'won') return '<span class="badge badge-won">won</span>';
+  if (s === 'lost') return '<span class="badge badge-lost">lost</span>';
+  if (s === 'open') return '<span class="badge badge-live">open</span>';
+  if (s === 'void') return '<span class="badge badge-stale">void</span>';
+  if (s === 'retracted') return '<span class="badge badge-stale">retracted</span>';
+  return '<span style="color:var(--dim)">' + (st || '—') + '</span>';
+}
+function renderAlerts(data) {
+  const summaryEl = document.getElementById('alerts-summary');
+  const histEl = document.getElementById('alerts-history');
+  const calibEl = document.getElementById('alerts-calibration');
+  const metaEl = document.getElementById('alerts-meta');
+  if (!summaryEl) return;
+
+  if (!data) {
+    summaryEl.innerHTML = emptyState('database', 'Alert data unavailable',
+      'The /baseball/props/alerts endpoint did not respond. Retrying on the next refresh.');
+    if (histEl) histEl.innerHTML = emptyState('clock', 'No alert history', 'Retrying…');
+    if (calibEl) calibEl.innerHTML = '<div class="empty-state">No calibration data.</div>';
+    if (metaEl) metaEl.textContent = '';
+    return;
+  }
+
+  const sum = data.summary || {};
+  const alerts = data.alerts || [];
+  if (metaEl) metaEl.textContent = data.scan_count_24h != null ? `${data.scan_count_24h} scans / 24h` : '';
+
+  // Summary strip
+  const resolved = sum.resolved != null ? sum.resolved : ((sum.won || 0) + (sum.lost || 0) + (sum.void || 0));
+  const avgClv = sum.avg_clv_pp;
+  const clvColor = avgClv == null ? 'var(--dim)' : (avgClv > 0 ? 'var(--green)' : (avgClv < 0 ? 'var(--red)' : 'var(--dim)'));
+  let strip = '<div style="display:flex;gap:18px;flex-wrap:wrap">';
+  strip += `<div><div class="stat-value" style="font-size:1.3rem">${sum.won || 0}–${sum.lost || 0}</div><div class="stat-label">Resolved W–L</div></div>`;
+  strip += `<div><div class="stat-value" style="font-size:1.3rem;color:${(sum.hit_rate_pct||0) >= 50 ? 'var(--green)' : 'var(--amber)'}">${sum.hit_rate_pct != null ? sum.hit_rate_pct + '%' : '—'}</div><div class="stat-label">Hit Rate (n=${resolved})</div></div>`;
+  strip += `<div><div class="stat-value" style="font-size:1.3rem;color:var(--cyan)">${sum.open || 0}</div><div class="stat-label">Open</div></div>`;
+  strip += `<div><div class="stat-value" style="font-size:1.3rem;color:${clvColor}">${avgClv != null ? ((avgClv > 0 ? '+' : '') + avgClv + 'pp') : '—'}</div><div class="stat-label">Avg CLV</div></div>`;
+  strip += `<div><div class="stat-value" style="font-size:1.3rem">${sum.clv_positive_pct != null ? sum.clv_positive_pct + '%' : '—'}</div><div class="stat-label">CLV+ (n=${sum.clv_n != null ? sum.clv_n : 0})</div></div>`;
+  strip += `<div><div class="stat-value" style="font-size:1.3rem">${data.scan_count_24h != null ? data.scan_count_24h : '—'}</div><div class="stat-label">Scans / 24h</div></div>`;
+  strip += '</div>';
+  summaryEl.innerHTML = strip;
+
+  // Alert history
+  if (histEl) {
+    if (!alerts.length) {
+      histEl.innerHTML = emptyState('clock', 'No alerts yet — accumulating shadow data (Gate 1)',
+        'Once the scanner fires prop alerts they are logged here with resolution and closing-line value.');
+    } else {
+      let h = '<div class="table-wrap"><table><thead><tr><th>When</th><th>Player / Prop</th><th class="num">Edge</th><th>Status</th><th class="num">CLV</th><th>Window</th></tr></thead><tbody>';
+      for (const a of alerts) {
+        const e = a.edge_pct;
+        const eStr = e == null ? '—' : ((e > 0 ? '+' : '') + e + 'pp');
+        const clv = a.clv_pp;
+        const clvC = clv == null ? 'var(--dim)' : (clv > 0 ? 'var(--green)' : (clv < 0 ? 'var(--red)' : 'var(--dim)'));
+        const prop = (a.stat_label || a.market || '?') + ' o' + (a.prop_line != null ? a.prop_line : '—');
+        h += `<tr>
+          <td style="color:var(--dim)">${a.alerted_at ? fmtTime(a.alerted_at) : '—'}</td>
+          <td><strong>${a.player || '—'}</strong> <span style="color:var(--dim)">${prop}</span></td>
+          <td class="num" style="color:${e != null && e >= 15 ? 'var(--green)' : 'var(--text)'}">${eStr}</td>
+          <td>${alertStatusBadge(a.status)}</td>
+          <td class="num" style="color:${clvC}">${clv == null ? '—' : ((clv > 0 ? '+' : '') + clv)}</td>
+          <td style="color:var(--dim)">${a.window_kind || '—'}</td>
+        </tr>`;
+      }
+      h += '</tbody></table></div>';
+      histEl.innerHTML = h;
+    }
+  }
+
+  // Calibration bars
+  if (calibEl) {
+    const cal = data.calibration || [];
+    if (!cal.length) {
+      calibEl.innerHTML = '<div class="empty-state">No resolved alerts yet to calibrate. Bars appear once buckets have resolved samples.</div>';
+    } else {
+      let c = '<div class="ladder">';
+      for (const b of cal) {
+        const lo = b.edge_bucket;
+        const hi = lo != null ? lo + 10 : null;
+        const realized = b.realized_hit_pct != null ? b.realized_hit_pct : 0;
+        const w = Math.max(2, Math.min(100, realized));
+        const col = realized >= 60 ? 'var(--green)' : (realized >= 50 ? 'var(--amber)' : 'var(--red)');
+        c += '<div class="ladder-row" style="grid-template-columns:minmax(110px,1.2fr) 2.6fr auto">';
+        c += `<div class="ladder-team"><span style="overflow:hidden;text-overflow:ellipsis">edge ${lo != null ? lo : '?'}–${hi != null ? hi : '?'}pp</span></div>`;
+        c += `<div class="ladder-track"><div class="ladder-bar pos" style="left:0;width:${w}%;background:${col}"></div></div>`;
+        c += `<div class="ladder-val">${realized}% <span style="color:var(--dim);font-weight:400">n=${b.n != null ? b.n : 0}</span></div>`;
+        c += '</div>';
+      }
+      c += '</div>';
+      calibEl.innerHTML = c;
+    }
+  }
+}
+
 function renderSystem(data, creditData) {
   // Pipeline status
   const pipelineEl = document.getElementById('pipeline-status');
@@ -982,21 +1378,24 @@ function renderSystem(data, creditData) {
   const creditEl = document.getElementById('credit-meter-area');
   if (creditData) {
     const remaining = creditData.remaining;
-    const budget = creditData.budget || 20000;
+    const budget = creditData.budget || 100000;
     const used = creditData.used || 0;
     const estimated = creditData.estimated_today || 0;
     
     let html = '';
     html += `<div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:12px">`;
+    const usedPct = budget ? ((budget - (remaining !== null ? remaining : budget)) / budget) * 100 : 0;
+    const fmtK = (n) => n >= 1000 ? (n / 1000).toFixed(1) + 'K' : ('' + n);
+    const remColor = (remaining !== null && remaining < 5000) ? 'var(--red)' : ((remaining !== null && remaining < 20000) ? 'var(--amber)' : 'var(--green)');
+    html += `<div><span style="color:var(--dim)">Plan:</span> <strong style="color:${remColor}">${remaining !== null ? fmtK(remaining) : '—'} / ${fmtK(budget)}</strong> <span style="color:var(--dim)">(${usedPct.toFixed(1)}% used)</span></div>`;
     html += `<div><span style="color:var(--dim)">Budget:</span> <strong>${budget.toLocaleString()}</strong> /mo</div>`;
     html += `<div><span style="color:var(--dim)">Used:</span> <strong>${used.toLocaleString()}</strong></div>`;
-    html += `<div><span style="color:var(--dim)">Remaining:</span> <strong style="color:${remaining !== null && remaining < 5000 ? 'var(--red)' : (remaining !== null && remaining < 10000 ? 'var(--amber)' : 'var(--green)')}">${remaining !== null ? remaining.toLocaleString() : '—'}</strong></div>`;
     html += `<div><span style="color:var(--dim)">Est. Today:</span> <strong>${estimated}</strong></div>`;
     html += `</div>`;
     
     if (remaining !== null) {
       const pct = (remaining / budget) * 100;
-      const meterClass = pct > 50 ? 'meter-fill-safe' : (pct > 25 ? 'meter-fill-warn' : 'meter-fill-danger');
+      const meterClass = remaining < 5000 ? 'meter-fill-danger' : (remaining < 20000 ? 'meter-fill-warn' : 'meter-fill-safe');
       html += `<div class="credit-meter"><span class="meter-end">0</span>
         <div class="meter-track"><div class="meter-fill ${meterClass}" style="width:${pct}%"></div></div>
         <span class="meter-end">${budget.toLocaleString()}</span></div>`;

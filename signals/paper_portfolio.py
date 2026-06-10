@@ -1410,6 +1410,125 @@ def get_position_history(limit: int = 50) -> list:
     return [dict(r) for r in rows]
 
 
+def _route_live_weather(signal: dict, eval_result: dict) -> dict:
+    """Route an eligible weather signal through the risk governor + hybrid
+    maker→taker executor (Phase F).  Only called when live_config.mode() == "LIVE".
+
+    Builds a trade intent from the signal, asks the RiskGovernor to approve it,
+    and on approval hands off to execution.live_executor.execute_intent.
+
+    Returns the executor result dict (action ∈ maker_filled / taker_filled /
+    dropped / skipped_duplicate) or a synthetic {"action": "dropped", "reason": ...}
+    when the governor denies or the intent can't be built.  NEVER writes a
+    paper_positions row.
+    """
+    from datetime import datetime, timezone
+
+    from execution import live_config, live_db, live_executor
+    from execution.risk_governor import RiskGovernor
+
+    side_outcome = (signal.get("side") or signal.get("direction") or "YES").upper()
+    market_slug = signal.get("market_slug") or signal.get("slug") or signal.get("market_id") or "unknown"
+
+    # fair_price: the model's probability / fair value for the chosen outcome.
+    fair_price = (
+        signal.get("model_prob")
+        or signal.get("fair_price")
+        or signal.get("fair_value")
+        or signal.get("true_prob")
+    )
+    if fair_price is None:
+        mp = signal.get("market_price") or signal.get("entry_price") or signal.get("price") or 0.5
+        try:
+            mp = float(mp)
+        except (TypeError, ValueError):
+            mp = 0.5
+        if mp > 1:
+            mp = mp / 100.0
+        fair_price = mp if side_outcome == "YES" else (1.0 - mp)
+    fair_price = float(fair_price)
+
+    # size_usd: bet size from the existing sizing, capped at the live per-trade cap.
+    size_usd = float(eval_result.get("bet_size") or 0.0)
+    size_usd = min(size_usd, live_config.per_trade_cap())
+    if size_usd <= 0:
+        return {"action": "dropped", "reason": "size_usd <= 0 after cap"}
+
+    net_edge_taker = float(signal.get("net_edge_taker_pct", 0) or 0) / 100.0
+
+    # token_id: prefer an explicit field; otherwise resolve from the condition id.
+    token_id = signal.get("token_id")
+    if not token_id:
+        cond = signal.get("market_id") or signal.get("condition_id")
+        if cond:
+            try:
+                from odds.poly_executable_edge import condition_id_to_token_ids
+
+                toks = condition_id_to_token_ids(cond)
+                if toks:
+                    token_id = toks[0] if side_outcome == "YES" else toks[1]
+            except Exception as exc:
+                logger.warning("_route_live_weather: token-id resolution failed: {}", exc)
+    if not token_id:
+        return {"action": "dropped", "reason": "no token_id resolvable for live order"}
+
+    # On the CLOB we always BUY the chosen outcome token (YES-token or NO-token).
+    clob_side = "BUY"
+
+    tick_size = signal.get("tick_size")
+    if tick_size is None:
+        try:
+            from execution import clob_client
+
+            tick_size = clob_client.get_tick_size(token_id)
+        except Exception as exc:
+            logger.warning("_route_live_weather: tick-size lookup failed, default 0.01: {}", exc)
+            tick_size = 0.01
+    tick_size = float(tick_size)
+
+    neg_risk = bool(signal.get("neg_risk", False))
+
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    client_order_ref = f"wx-{date_str}-{market_slug}-{side_outcome}"
+
+    intent = {
+        "size_usd": size_usd,
+        "market_id": token_id,
+        "token_id": token_id,
+        "side": clob_side,
+        "fair_price": fair_price,
+    }
+
+    # I2: own the connection for the whole intent and ALWAYS close it — otherwise
+    # we leak one SQLite connection per signal per scan.
+    conn = live_db.connect()
+    try:
+        governor = RiskGovernor(conn, mode="LIVE")
+        decision = governor.check(intent)
+        if not decision.allowed:
+            logger.info("_route_live_weather: governor denied: {}", decision.reason)
+            return {"action": "dropped", "reason": f"governor: {decision.reason}"}
+
+        return live_executor.execute_intent(
+            conn,
+            governor,
+            token_id=token_id,
+            side=clob_side,
+            fair_price=fair_price,
+            size_usd=size_usd,
+            tick_size=tick_size,
+            neg_risk=neg_risk,
+            net_edge_taker=net_edge_taker,
+            client_order_ref=client_order_ref,
+            category="weather",
+        )
+    finally:
+        try:
+            conn.close()
+        except Exception as exc:
+            logger.warning("_route_live_weather: conn.close() failed: {}", exc)
+
+
 def process_signals(signals: list) -> dict:
     """Process a batch of signals, open positions for eligible ones."""
     results = []
@@ -1431,6 +1550,50 @@ def process_signals(signals: list) -> dict:
         }
         
         if eval_result["eligible"]:
+            # ── LIVE routing (Phase F): weather signals go through the risk
+            # governor + hybrid maker→taker executor instead of the paper
+            # open_position path. PAPER mode (default) and all non-weather
+            # archetypes fall through UNCHANGED to the existing paper path.
+            from execution import live_config
+
+            sig_archetype = (sig.get("archetype") or "").lower()
+            if live_config.mode() == "LIVE" and sig_archetype == "weather":
+                # I4: isolate the LIVE branch — one bad intent must NOT crash the
+                # whole scan loop, and must NOT fall through to the paper
+                # open_position path (that would double-trade). On any exception
+                # we log it and SKIP this signal, then continue with the rest.
+                try:
+                    live_res = _route_live_weather(sig, eval_result)
+                except Exception as exc:
+                    logger.exception(
+                        "process_signals[LIVE]: _route_live_weather raised for {} — "
+                        "skipping signal (NOT falling through to paper open_position): {}",
+                        market_title[:50], exc,
+                    )
+                    skipped += 1
+                    entry["action"] = "skipped"
+                    entry["reason"] = f"live_routing_error: {exc}"
+                    entry["live_action"] = "error"
+                    results.append(entry)
+                    continue
+
+                action = live_res.get("action")
+                if action in ("maker_filled", "taker_filled"):
+                    opened += 1
+                    entry["action"] = "opened"
+                else:
+                    skipped += 1
+                    entry["action"] = "skipped"
+                    entry["reason"] = live_res.get("reason", action or "live_routing")
+                entry["live_action"] = action
+                results.append(entry)
+                logger.info(
+                    "process_signals[LIVE]: {} side={} → {} ({})",
+                    market_title[:50], sig.get("side", "?"), action,
+                    (live_res.get("reason") or "")[:80],
+                )
+                continue
+
             result = open_position(sig)
             if result.get("opened"):
                 opened += 1
@@ -2026,9 +2189,21 @@ def resolve_open_positions() -> dict:
             data = _fetch(f"{KALSHI_API}/markets/{market_id}")
             if data:
                 market = data.get("market", data)
-                result = market.get("result", "")
-                if result:
+                result = (market.get("result") or "").lower()
+                if result in ("yes", "no"):
                     outcome = result.upper()
+                elif result == "void" or (result and market.get("status") == "settled"):
+                    # Voided/scratched market: return stake, never book as a
+                    # loss (result.upper() != side used to book voids as full
+                    # losses). Fixed 2026-06-10.
+                    conn.execute(
+                        """UPDATE paper_positions SET status='stopped', closed_at=?,
+                        exit_price=?, pnl=0, close_reason='auto-resolved: VOID'
+                        WHERE id=?""",
+                        (datetime.now(timezone.utc).isoformat(),
+                         pos["entry_price"], pos["id"]))
+                    conn.commit()
+                    continue
 
         if not outcome:
             continue

@@ -48,6 +48,7 @@ logger = logging.getLogger("scheduler")
 _state = {
     "consecutive_restarts": 0,
     "edge_alert_state": {},        # dedup for edge alerts
+    "mlb_props_alert_state": {},   # dedup for MLB prop alerts (player|market -> {ts, edge})
     "weather_shift_cache": {},     # previous forecast temps
     "pace_alert_sent": {},         # rate limit tweet pace alerts
     "daily_sent": None,            # date string
@@ -216,7 +217,15 @@ def task_weather_fast_scan():
 
     Lower min_edge (8%), higher max_signals (8), includes liquidity filter.
     Also checks for take-profit opportunities on open positions.
+
+    RETIRED 2026-06-10 (Weather-Edge-Analysis-Jun2026): PM day-ahead strategy
+    falsified -- no edge. New entries gated OFF via engine state; existing open
+    positions wind down naturally via task_weather_reeval + stop evaluator.
     """
+    from api.routes.engine import load_engine_state
+    if not load_engine_state().get("weather_trading_enabled", False):
+        return
+
     from signals.paper_portfolio import process_signals
 
     try:
@@ -229,6 +238,20 @@ def task_weather_fast_scan():
                 logger.info("Weather fast scan: opened %d positions", n)
     except Exception as e:
         logger.exception("Weather fast scan failed: %s", e)
+
+
+def task_kalshi_fade_scan():
+    """Kalshi weather tail-fade (PAPER) -- evening-window entries only.
+
+    Validated 2026-06-10 (Weather-Edge-Analysis-Jun2026 sec 10). The module
+    no-ops outside each city's local 19:30-20:30 window, so a 30-min cadence
+    yields 1-2 in-window calls per city; market_id dedup makes repeats no-ops.
+    """
+    from api.routes.engine import load_engine_state
+    if not load_engine_state().get("kalshi_fade_enabled", True):
+        return
+    from signals.kalshi_weather_fade import run_evening_scan
+    run_evening_scan()
 
 
 def task_weather_shift_alerts():
@@ -662,6 +685,35 @@ def task_edge_alerts():
         alert_edge_batch(filtered[:5])
 
 
+def task_mlb_props_alert():
+    """WS-A: scan MLB props inside per-game windows; alert + shadow-log edges.
+
+    No-ops outside game windows. Reuses the prop-scout/Odds-API cache (no new
+    Odds credits); statsapi is free."""
+    import asyncio
+
+    from signals.mlb_prop_alerts import run_prop_alert_scan
+
+    res = asyncio.run(run_prop_alert_scan())
+    if res.get("alerted") or res.get("scanned"):
+        logger.info("mlb_props_alert: %s", res)
+
+
+def task_mlb_props_scratch():
+    """WS-A scratch guard: retract open prop alerts whose player drops from the
+    confirmed lineup (cheap — uses cached schedule)."""
+    from signals.mlb_prop_alerts import retract_scratched_alerts
+
+    retract_scratched_alerts()
+
+
+def task_mlb_props_resolve():
+    """WS-A: box-score auto-resolution of open MLB prop shadows at game final."""
+    from signals.mlb_prop_alerts import resolve_open_prop_shadows
+
+    resolve_open_prop_shadows()
+
+
 def task_arena_snapshot():
     """AI arena leaderboard snapshot."""
     venv = str(PROJECT_ROOT / "venv" / "bin" / "python3")
@@ -887,6 +939,7 @@ async def tick_5min():
         await run_in_thread(_run_safe, "paper_resolution", task_paper_resolution)
         await run_in_thread(_run_safe, "equity_snapshot", task_equity_snapshot)
         await run_in_thread(_run_safe, "resolution_scanner", task_resolution_scanner)
+        await run_in_thread(_run_safe, "mlb_props_scratch", task_mlb_props_scratch)
         await run_in_thread(_run_safe, "weather_reeval", task_weather_reeval)
         await run_in_thread(_run_safe, "weather_fast_scan", task_weather_fast_scan)
         await run_in_thread(_run_safe, "weather_shift_alerts", task_weather_shift_alerts)
@@ -907,6 +960,9 @@ async def tick_30min():
         await run_in_thread(_run_safe, "credit_refresh", task_credit_refresh)
         await run_in_thread(_run_safe, "source_health_touch", task_source_health_touch)
         await run_in_thread(_run_safe, "edge_alerts", task_edge_alerts)
+        await run_in_thread(_run_safe, "mlb_props_alert", task_mlb_props_alert)
+        await run_in_thread(_run_safe, "mlb_props_resolve", task_mlb_props_resolve)
+        await run_in_thread(_run_safe, "kalshi_fade_scan", task_kalshi_fade_scan)
         logger.info("30-min tick complete")
         await asyncio.sleep(1800)
 
@@ -915,7 +971,7 @@ def task_state_cleanup():
     """Prune stale entries from scheduler state dicts to prevent memory growth."""
     pruned = 0
     # edge_alert_state: keep only last 100 entries
-    for key in ("edge_alert_state", "pace_alert_sent", "milestone_sent"):
+    for key in ("edge_alert_state", "mlb_props_alert_state", "pace_alert_sent", "milestone_sent"):
         d = _state.get(key, {})
         if len(d) > 100:
             # Keep most recent 50 (by key insertion order)

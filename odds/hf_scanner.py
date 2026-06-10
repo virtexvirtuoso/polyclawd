@@ -11,9 +11,10 @@ Based on: [[Polymarket 134 to 200K Story]] and [[HF_MODULE_PLAN]]
 
 import json
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
+from loguru import logger
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
@@ -443,28 +444,29 @@ def full_hf_scan(neg_vig_threshold: float = 0.99) -> Dict:
 # ============================================================================
 
 if __name__ == "__main__":
+    import pprint
     
-    print("=" * 60)
-    print("Polyclawd HF Scanner — Phase 1")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("Polyclawd HF Scanner — Phase 1")
+    logger.info("=" * 60)
     
-    print("\n📡 Discovering short-duration crypto markets...")
+    logger.info("\n📡 Discovering short-duration crypto markets...")
     markets = discover_hf_markets()
-    print(f"Found {len(markets)} HF markets")
+    logger.info(f"Found {len(markets)} HF markets")
     
     for m in markets[:10]:
         vig_flag = " 🎯 NEG VIG!" if m.neg_vig else ""
-        print(f"  [{m.asset}] [{m.duration_hint}] {m.question[:60]}... "
+        logger.info(f"  [{m.asset}] [{m.duration_hint}] {m.question[:60]}... "
               f"Y:{m.yes_price} N:{m.no_price} Sum:{m.price_sum}{vig_flag}")
     
     if markets:
-        print(f"\n🔍 Scanning CLOB for negative vig (threshold < $0.99)...")
+        logger.debug(f"\n🔍 Scanning CLOB for negative vig (threshold < $0.99)...")
         opps = scan_neg_vig(markets)
-        print(f"Found {len(opps)} neg vig opportunities")
+        logger.info(f"Found {len(opps)} neg vig opportunities")
         
         for o in opps[:5]:
-            print(f"  🎯 [{o.asset}] [{o.duration}] Edge: {o.free_edge_pct}% "
+            logger.info(f"  🎯 [{o.asset}] [{o.duration}] Edge: {o.free_edge_pct}% "
                   f"(Y:{o.yes_best_ask} + N:{o.no_best_ask} = {o.total_cost}) "
                   f"Max size: ${o.max_risk_free_size}")
     
-    print("\nDone.")
+    logger.info("\nDone.")

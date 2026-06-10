@@ -323,6 +323,35 @@ def alert_edge_batch(signals: list) -> bool:
     })
 
 
+# ── MLB Prop Alerts ──────────────────────────────────────────────────────
+
+def alert_mlb_prop_batch(rows: list) -> bool:
+    """Batched MLB prop-edge alert — lineup-confirmed OVER edges from the scout."""
+    if not rows:
+        return False
+    fields = []
+    for r in rows[:8]:
+        edge = r.get("edge_pct", 0)
+        fields.append({
+            "name": f"\u26be {r.get('player', '?')} — {r.get('stat_label', '')} o{r.get('prop_line', '?')} (+{edge:.0f}pp)",
+            "value": (f"hit **{r.get('hit_rate_pct', 0):.0f}%** (L{r.get('games_sampled', '?')}) "
+                      f"vs book {r.get('book_over_pct', 0):.0f}% · "
+                      f"{r.get('away_team', '')[:14]} @ {r.get('home_team', '')[:14]}"),
+            "inline": False,
+        })
+    return _send([{
+        "title": f"\u26be MLB Prop Edges ({len(rows)}) — lineup-confirmed",
+        "color": COLOR_BLUE,
+        "fields": fields,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "MLB Prop Scout · shadow-logged"},
+    }], alert_type="mlb_prop_batch", alert_meta={
+        "count": len(rows),
+        "props": [{"player": r.get("player"), "market": r.get("market"),
+                   "edge": r.get("edge_pct")} for r in rows[:8]],
+    })
+
+
 # ── Scorecard & Milestones ───────────────────────────────────────────────
 
 def alert_scorecard(strategy: str, n: int, brier: float, win_rate: float,
@@ -709,6 +738,33 @@ def alert_election_report(report: dict) -> bool:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "footer": {"text": f"Election Tracker | {summary.get('total_markets', 0)} markets"},
     }], alert_type="election_report", alert_meta={"total": summary.get("total_markets", 0)})
+
+
+# ── Odds API Credits ─────────────────────────────────────────────────────
+
+def alert_credits_low(remaining: int, watermark: int, used: Optional[int] = None,
+                      **kwargs) -> bool:
+    """Alert when the Odds API real credit balance drops below the low watermark.
+    Latched by the caller (odds.the_odds_api) so it fires once per crossing."""
+    pct = (remaining / 100000 * 100) if remaining is not None else 0
+    fields = [
+        {"name": "Remaining", "value": f"**{remaining:,}**", "inline": True},
+        {"name": "Watermark", "value": f"{watermark:,}", "inline": True},
+        {"name": "Plan Used", "value": f"~{100 - pct:.0f}% of 100K", "inline": True},
+    ]
+    if used is not None:
+        fields.append({"name": "Used", "value": f"{used:,}", "inline": True})
+    return _send([{
+        "title": "\U0001FA99 Odds API Credits Low",
+        "description": f"Real balance **{remaining:,}** is below the {watermark:,} watermark — "
+                       f"paid scans reserved for critical priority below {5000:,}.",
+        "color": COLOR_RED if remaining < watermark // 2 else COLOR_ORANGE,
+        "fields": fields,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "Odds API Budget"},
+    }], alert_type="credits_low", alert_meta={
+        "remaining": remaining, "watermark": watermark, "used": used,
+    })
 
 
 # ── Test ─────────────────────────────────────────────────────────────────

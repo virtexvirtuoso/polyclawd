@@ -86,9 +86,10 @@ def _init_tables(conn: sqlite3.Connection):
 def _fetch_json(url: str, params: dict = None, timeout: int = 10) -> Optional[Any]:
     """Fetch JSON from a URL with User-Agent. Returns None on failure."""
     try:
+        import urllib.parse
+        import urllib.request
         full_url = url
         if params:
-            import urllib.parse
             full_url = url + "?" + urllib.parse.urlencode(params)
         req = urllib.request.Request(full_url, headers={"User-Agent": "Polyclawd/2.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -210,9 +211,14 @@ def _find_matching_event(
     """
     trade_market_id = shadow_trade.get("market_id", "")
 
-    # Try exact market_id match first
+    # Extract base market_id (strip __Team_markettype suffix from new format)
+    base_market_id = trade_market_id.split("__")[0] if "__" in trade_market_id else trade_market_id
+
+    # Try exact market_id match first (both raw and base)
     if trade_market_id and trade_market_id in event_by_market_id:
         return event_by_market_id[trade_market_id]
+    if base_market_id and base_market_id != trade_market_id and base_market_id in event_by_market_id:
+        return event_by_market_id[base_market_id]
 
     # Fallback: match by team name
     trade_market = shadow_trade.get("market", "").lower()
@@ -238,77 +244,112 @@ def _extract_teams_from_title(title: str) -> tuple:
 # ─── Main Resolution Scan ────────────────────────────────────────────
 
 
-def scan_resolved_baseball_games(batch_size: int = 20) -> Dict[str, Any]:
-    """Main entry point. Checks for resolved baseball games, matches to
-    shadow trades, logs forecast data, updates shadow_trade rows.
+def _norm_name(s: str) -> str:
+    return re.sub(r"[^a-z0-9 ]", "", (s or "").lower()).strip()
+
+
+def _names_match(a: str, b: str) -> bool:
+    """Loose team/outcome match: exact, containment, or shared last token
+    ('Rockies' ~ 'Colorado Rockies'). Exact for 'Over'/'Under'."""
+    na, nb = _norm_name(a), _norm_name(b)
+    if not na or not nb:
+        return False
+    if na == nb or na in nb or nb in na:
+        return True
+    return na.split()[-1] == nb.split()[-1]
+
+
+def _parse_bet(market_str: str):
+    """('<bet_label>', '<market_type>') from the shadow 'market' text
+    '<title> — <bet_label> <Moneyline|Spread|Total>'. bet_label is a team
+    name (ml/spread) or 'Over'/'Under' (total)."""
+    s = market_str or ""
+    part = s.split(" — ")[-1].strip() if " — " in s else s
+    m = re.search(r"\s+(Moneyline|Spread|Total)$", part)
+    mt = m.group(1).lower() if m else "moneyline"
+    label = re.sub(r"\s+(Moneyline|Spread|Total)$", "", part).strip()
+    return label, mt
+
+
+def score_baseball_trade(market_str: str, side: str, entry_price: float, winner_name: str):
+    """Pure scorer. side 'YES'=BUY, 'NO'=SELL. winner_name = the winning Polymarket
+    outcome (team or Over/Under) of the trade's OWN market. Returns (is_correct, pnl).
+
+    Win = the trade's chosen outcome won (BUY) / did NOT win (SELL). pnl is the
+    binary settle (1=win, 0=loss) minus the price actually paid for the held token.
+    """
+    bet_label, _mt = _parse_bet(market_str)
+    is_buy = (side or "YES").upper() == "YES"
+    chosen_won = _names_match(winner_name, bet_label)
+    bet_won = chosen_won if is_buy else (not chosen_won)
+    p = entry_price if entry_price is not None else 0.5
+    eff_entry = p if is_buy else (1.0 - p)        # price of the token actually held
+    pnl = (1.0 - eff_entry) if bet_won else -eff_entry
+    return (1 if bet_won else 0), round(pnl, 4)
+
+
+def _clob_winner(market_id: str):
+    """(winner_name, winner_index) for a closed/resolved market, else None (open)."""
+    data = _fetch_json(f"{CLOB_API}/markets/{market_id}", timeout=10)
+    if not data or not (data.get("closed") or data.get("resolved")):
+        return None
+    tokens = data.get("tokens", [])
+    for i, t in enumerate(tokens):
+        if t.get("winner") is True:
+            return (t.get("outcome") or "", i)
+    for i, t in enumerate(tokens):
+        try:
+            if float(t.get("price", 0)) > 0.9:
+                return (t.get("outcome") or "", i)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def scan_resolved_baseball_games(batch_size: int = 200) -> Dict[str, Any]:
+    """Resolve unresolved baseball shadow trades (moneyline/spread/total) against
+    EACH trade's OWN Polymarket market via CLOB. No game-winner heuristic, no
+    event-matching, no head-of-line batch cap (every trade is attempted each run;
+    still-open markets are simply retried next cycle, never blocking newer rows).
     """
     conn = get_db()
     result = {"resolved": 0, "forecast_logged": 0, "skipped": 0, "errors": 0}
 
-    # 1. Get unresolved baseball shadow trades
     trades = _get_unresolved_baseball_trades(conn)
     if not trades:
         conn.close()
         return {**result, "note": "No unresolved baseball trades"}
 
-    # 2. Fetch resolved baseball events from Polymarket
-    resolved_events = _get_resolved_baseball_events()
-    if not resolved_events:
-        conn.close()
-        return {**result, "note": "No resolved events from Polymarket"}
-
-    # Build event lookup by market_id for fast matching
-    event_by_market_id = {}
-    for event in resolved_events:
-        for market in event.get("markets", []):
-            mid = market.get("id", "")
-            if mid:
-                event_by_market_id[mid] = event
-
-    processed = 0
     for trade in trades[:batch_size]:
         market_id = trade.get("market_id", "")
-        if not market_id:
-            continue
-
-        event = _find_matching_event(trade, event_by_market_id, resolved_events)
-        if not event:
+        if not market_id or not market_id.startswith("0x"):
             result["skipped"] += 1
             continue
 
-        outcome = _get_moneyline_outcome(event)
-        if outcome is None:
-            result["skipped"] += 1
+        won = _clob_winner(market_id)
+        if won is None:
+            result["skipped"] += 1            # market still open
+            time.sleep(RATE_DELAY)
             continue
+        winner_name, winner_idx = won
 
-        trade_side = trade.get("side", "")
-        is_correct = 1 if trade_side == outcome else 0
+        market_str = trade.get("market", "")
+        side = trade.get("side", "YES")
+        entry_price = trade.get("entry_price", 0.5)
+        is_correct, pnl = score_baseball_trade(market_str, side, entry_price, winner_name)
+        outcome_yesno = "YES" if winner_idx == 0 else "NO"
+        bet_label, _mt = _parse_bet(market_str)
 
-        # Parse details from reasoning
         reasoning = trade.get("reasoning", "")
         edge_pct = 0.0
-        edge_match = re.search(r'\(([+-]\d+\.?\d*)% edge\)', reasoning)
-        if edge_match:
-            edge_pct = float(edge_match.group(1))
+        m = re.search(r"\(([+-]\d+\.?\d*)% edge\)", reasoning)
+        if m:
+            edge_pct = float(m.group(1))
+        m = re.search(r"Odds API (\d+\.?\d*)%", reasoning)
+        odds_api_prob = float(m.group(1)) / 100.0 if m else 0.0
+        m = re.search(r"Poly (\d+\.?\d*)", reasoning)
+        poly_price = float(m.group(1)) / 100.0 if m else entry_price
 
-        prob_match = re.search(r'Odds API (\d+\.?\d*)%', reasoning)
-        odds_api_prob = float(prob_match.group(1)) / 100.0 if prob_match else 0.0
-
-        price_match = re.search(r'Poly (\d+\.?\d*)¢', reasoning)
-        poly_price = float(price_match.group(1)) / 100.0 if price_match else trade.get("entry_price", 0.5)
-
-        # Extract teams
-        event_title = event.get("title", "")
-        teams_a, teams_b = _extract_teams_from_title(event_title)
-        market_str = trade.get("market", "")
-        bet_team = ""
-        if " — " in market_str:
-            bet_team = market_str.split(" — ")[1].replace("Moneyline", "").strip()
-        opponent = teams_b if bet_team in teams_a or (teams_a and bet_team and teams_a.startswith(bet_team.split()[-1])) else teams_a
-
-        game_date = date.today().isoformat()
-
-        # 3. Log to baseball_forecast_log
         try:
             conn.execute("""
                 INSERT OR IGNORE INTO baseball_forecast_log
@@ -317,69 +358,38 @@ def scan_resolved_baseball_games(batch_size: int = 20) -> Dict[str, Any]:
                  american_odds, books_count, shadow_trade_id, recorded_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                market_id[:20],
-                bet_team or "unknown",
-                opponent or "unknown",
-                game_date,
-                odds_api_prob,
-                poly_price,
-                edge_pct,
-                trade.get("side", ""),
-                outcome,
-                is_correct,
-                0,
-                0,
-                trade["id"],
+                market_id[:20], bet_label or "unknown", winner_name or "unknown",
+                date.today().isoformat(), odds_api_prob, poly_price, edge_pct,
+                side, winner_name, is_correct, 0, 0, trade["id"],
                 datetime.now(timezone.utc).isoformat(),
             ))
             result["forecast_logged"] += 1
         except Exception as e:
             logger.warning(f"forecast_log insert failed: {e}")
-            result["errors"] += 1
-            continue
-
-        # 4. Update shadow_trade row
-        entry_price = trade.get("entry_price", 0.5)
-        if outcome == "YES":
-            pnl = (1.0 - entry_price) if trade_side == "YES" else -entry_price
-        else:
-            pnl = -entry_price if trade_side == "YES" else entry_price
 
         try:
             conn.execute("""
                 UPDATE shadow_trades
-                SET resolved = 1,
-                    resolved_at = ?,
-                    outcome = ?,
-                    pnl = ?,
-                    exit_price = ?
+                SET resolved = 1, resolved_at = ?, outcome = ?, pnl = ?, exit_price = ?
                 WHERE id = ?
             """, (
-                datetime.now(timezone.utc).isoformat(),
-                outcome,
-                round(pnl, 4),
-                1.0 if is_correct else 0.0,
-                trade["id"],
+                datetime.now(timezone.utc).isoformat(), outcome_yesno,
+                pnl, 1.0 if is_correct else 0.0, trade["id"],
             ))
             result["resolved"] += 1
         except Exception as e:
             logger.warning(f"shadow_trade update failed: {e}")
             result["errors"] += 1
 
-        processed += 1
-        if processed < len(trades[:batch_size]):
-            time.sleep(RATE_DELAY)
+        time.sleep(RATE_DELAY)
 
     conn.commit()
     conn.close()
-
     if result["resolved"] > 0:
         logger.info(
             f"baseball_resolver: {result['resolved']} resolved, "
-            f"{result['forecast_logged']} logged, "
             f"{result['skipped']} skipped, {result['errors']} errors"
         )
-
     return result
 
 

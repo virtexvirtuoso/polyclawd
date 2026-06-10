@@ -169,11 +169,11 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     if archetype == 'directional':
         return True, "K5: directional dip/crash (70% NO WR, n=390 — low sample)", archetype
 
-    # K2: price_above + cheap entry (hard kill — 20% WR, n=5)
-    # Defense-in-depth: MIN_ENTRY_PRICE=50 already blocks <50c,
-    # but this catches the specific archetype for future YES-side logic
-    if archetype == 'price_above' and price_cents < 45:
-        return True, "K2: price_above cheap entry <45c (20% WR)", archetype
+    # K2: price_above — hard kill at ANY price (2026-06-06 upgrade from <45c gate)
+    # Shadow analysis N=11: 27% WR, -$3.73 total. Crypto price predictions not calibrated.
+    # All 11 entries across the full 45-99c range lost. No edge zone found.
+    if archetype == 'price_above':
+        return True, "K2: price_above (27% WR, n=11, -$3.73 — crypto price predictions uncalibrated)", archetype
 
     # K7: Game totals — 52% NO WR population, 41% traded WR (n=10,999). Coin flip after fees.
     if archetype == 'game_total':
@@ -191,15 +191,21 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     if archetype == 'ai_model':
         return True, "K10: ai_model (0/10 shadow, 0% WR)", archetype
 
-    # K11: MAX_ENTRY_PRICE gate — NO bets on markets priced >70c YES lose 83% of the time.
-    # Affects deadline_binary (3% WR >70c vs 82% WR <=70c) and geopolitical (9% WR >70c vs 42% WR <=70c).
-    if price_cents > 70 and archetype in ('deadline_binary', 'geopolitical'):
-        return True, f"K11: {archetype} entry {price_cents}c > 70c MAX_ENTRY_PRICE (3-9% WR above 70c)", archetype
+    # K11: deadline_binary — hard kill at ANY price (2026-06-06 upgrade from >70c gate)
+    # Shadow analysis N=10: 10% WR, -$7.01 total, avg entry 89c. Pattern: buy near-certain events that flip.
+    # Was only gated >70c but even in-zone (45-70c) the archetype has no edge.
+    if archetype == 'deadline_binary':
+        return True, "K11: deadline_binary (10% WR, n=10, -$7.01 — near-certain events that flip)", archetype
+
+    # K12: geopolitical — hard kill at ANY price (2026-06-06 upgrade from >70c gate)
+    # Shadow analysis N=9: 11% WR, -$4.08 total, 0 wins in last 6. High noise, no model edge.
+    if archetype == 'geopolitical':
+        return True, "K12: geopolitical (11% WR, n=9, -$4.08 — 0 wins in last 6, no edge)", archetype
 
     # K6: Kill sports (efficient) and truly unknown archetypes
-    # Allow: geopolitical, deadline_binary, social_count, weather, entertainment, parlay, financial_price
-    # KILLED: election (K9), ai_model (K10)
-    ALLOWED_NEW = {'geopolitical', 'deadline_binary', 'social_count', 'weather', 'entertainment', 'parlay', 'financial_price'}
+    # Allow: social_count, weather, entertainment, parlay, financial_price
+    # KILLED: election (K9), ai_model (K10), deadline_binary (K11), geopolitical (K12)
+    ALLOWED_NEW = {'social_count', 'weather', 'entertainment', 'parlay', 'financial_price'}
     # Sports: allow through with warning flag (unverified — no sharp odds cross-ref yet)
     # if archetype in ('sports_winner', 'sports_single_game'):
     #     return True, "K6: sports — efficient market", archetype

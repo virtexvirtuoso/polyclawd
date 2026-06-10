@@ -90,7 +90,10 @@ PROP_WINDOW_HOURS = 30  # next full slate — in the evening, tonight's games ha
 #                         games are filtered out, so the extra reach is ~free.
 MAX_GAMES = 12  # cap event-odds calls per refresh (one full MLB slate)
 CACHE_TTL_S = 600  # 10 min — dashboard re-loads reuse this, no new credits
-CREDIT_FLOOR = 300  # below this remaining, do not spend on props
+try:
+    from odds.rate_limiter import CREDIT_FLOOR  # single source of truth (5,000)
+except Exception:  # pragma: no cover
+    CREDIT_FLOOR = 5_000  # below this remaining, do not spend on props (100K plan)
 
 _CACHE: Dict[str, object] = {"ts": 0.0, "data": None}
 

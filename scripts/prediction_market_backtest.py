@@ -34,6 +34,7 @@ from mispriced_category_signal import (
     _check_kill_rules,
     _is_subdaily_noise,
     calculate_signal_confidence,
+    extract_category,
     MISPRICED_CATEGORIES,
     EFFICIENT_CATEGORIES,
     MIN_VOLUME_KALSHI,

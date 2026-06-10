@@ -86,6 +86,10 @@ def compute_match_edges(game: Dict, ev: Dict, min_edge: float = 0.03) -> List[se
         edge = tp - price
         if abs(edge) < min_edge:
             continue
+        # P1: apply edge floor/cap before enrichment (saves CLOB API calls)
+        ok, _ = sec.p1_edge_ok(edge)
+        if not ok:
+            continue
         edges.append(
             sec.Edge(
                 event_title=ev.get("title", ""),

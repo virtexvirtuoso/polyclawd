@@ -31,6 +31,8 @@ DESIGN
 from typing import Dict, Optional, Tuple
 import json
 
+from execution.fee_model import fee_per_share as _fee_per_share
+
 try:  # match the dual-import pattern used across odds/*
     from . import polymarket_clob as clob
 except ImportError:  # pragma: no cover
@@ -81,6 +83,8 @@ def executable_edge(
     max_slip_bps: float = 50.0,
     min_usd: float = 15.0,
     max_spread: float = 0.05,
+    book=None,
+    category: Optional[str] = None,
 ) -> Dict:
     """Compute the order-book-executable edge for a single signal.
 
@@ -115,6 +119,7 @@ def executable_edge(
         max_slip_bps=max_slip_bps,
         min_usd=min_usd,
         max_spread=max_spread,
+        book=book,
     )
 
     # Book unavailable (no token / no book) -> let caller keep its midpoint edge.
@@ -129,10 +134,20 @@ def executable_edge(
             "fillable_usd": None,
             "tradeable": False,
             "reason": fe.reason,
+            "fee_per_share": None,
+            "net_edge_maker": None,
+            "net_edge_taker": None,
         }
 
     exec_price = fe.avg_price if fe.ok else (fe.best_price or None)
     exec_edge = round(true_prob - exec_price, 4) if exec_price else None
+    # Fee only when the category is known; an unknown category must not silently
+    # inherit the weather (5%) rate for a non-weather caller.
+    fps = round(_fee_per_share(exec_price, category), 5) if (exec_price is not None and category is not None) else None
+    # net_edge_maker == executable_edge by definition (a maker fill pays no fee);
+    # kept as an explicit, fee-aware name for the executor/dashboard to consume.
+    net_maker = round(true_prob - exec_price, 4) if exec_price is not None else None
+    net_taker = round(true_prob - exec_price - fps, 4) if (exec_price is not None and fps is not None) else None
     return {
         "available": True,
         "executable_price": exec_price,
@@ -143,6 +158,9 @@ def executable_edge(
         "fillable_usd": fe.actual_usd,
         "tradeable": bool(fe.ok and exec_edge is not None and exec_edge > 0),
         "reason": fe.reason,
+        "fee_per_share": fps,
+        "net_edge_maker": net_maker,
+        "net_edge_taker": net_taker,
     }
 
 

@@ -13,22 +13,41 @@ from loguru import logger
 
 RISK_FREE = 0.045  # short T-bill proxy
 
+# IV sanity band. Single-name equity weekly IV realistically lives in [8%, 300%];
+# values outside are stale/garbage OPRA ticks (e.g. a 5.9% AAPL print) that collapse
+# the lognormal and manufacture phantom bracket edges. Reject them -> the row is skipped.
+IV_FLOOR, IV_CEIL = 0.08, 3.0
+
+
+def _sane_iv(iv):
+    """Return iv if within the plausible band, else None (caller skips the row)."""
+    return iv if (iv is not None and IV_FLOOR <= iv <= IV_CEIL) else None
+
 
 def implied_prob_above(S, K, T_years, sigma, r=RISK_FREE):
-    """Risk-neutral P(S_T > K) = N(d2) via Black-Scholes. None on degenerate input."""
-    if not (S and S > 0) or not (K and K > 0) or T_years is None or T_years <= 0 or not sigma or sigma <= 0:
+    """Risk-neutral P(S_T > K) = N(d2) via Black-Scholes. None on degenerate/implausible input."""
+    if not (S and S > 0) or not (K and K > 0) or T_years is None or T_years <= 0:
+        return None
+    if sigma is None or not (IV_FLOOR <= sigma <= IV_CEIL):
         return None
     d2 = (math.log(S / K) + (r - 0.5 * sigma * sigma) * T_years) / (sigma * math.sqrt(T_years))
     return 0.5 * math.erfc(-d2 / math.sqrt(2.0))  # Phi(d2)
 
 
-def prob_in_bracket(S, lo, hi, T_years, sigma, r=RISK_FREE):
-    """P(lo <= S_T < hi) = N(d2@lo) - N(d2@hi). hi=None => open-ended top bracket."""
-    p_lo = implied_prob_above(S, lo, T_years, sigma, r)
+def prob_in_bracket(S, lo, hi, T_years, sigma_lo, sigma_hi=None, r=RISK_FREE):
+    """P(lo <= S_T < hi) = N(d2@lo; iv_lo) - N(d2@hi; iv_hi), each leg using its OWN
+    strike's implied vol (skew-aware; Breeden-Litzenberger-consistent CDF). hi=None =>
+    open-ended top bracket. None if either leg's IV is missing/implausible."""
+    p_lo = implied_prob_above(S, lo, T_years, sigma_lo, r)
     if p_lo is None:
         return None
-    p_hi = implied_prob_above(S, hi, T_years, sigma, r) if hi else 0.0
-    return max(0.0, p_lo - (p_hi or 0.0))
+    if hi:
+        p_hi = implied_prob_above(S, hi, T_years, sigma_hi if sigma_hi is not None else sigma_lo, r)
+        if p_hi is None:
+            return None
+    else:
+        p_hi = 0.0
+    return max(0.0, p_lo - p_hi)
 
 
 SCHEMA = """
@@ -40,7 +59,7 @@ CREATE TABLE IF NOT EXISTS options_implied (
   underlying REAL, iv REAL, poly_liquidity REAL, poly_vol_24h REAL,
   iv_rv_ratio REAL,
   executable_price REAL, executable_edge_pp REAL, book_spread_pp REAL,
-  slippage_bps REAL, tradeable INTEGER,
+  slippage_bps REAL, tradeable INTEGER, live_book INTEGER,
   PRIMARY KEY (date, poly_market_id, strike)
 );
 """
@@ -59,6 +78,10 @@ def init_db(db_path):
             pass
     try:
         con.execute("ALTER TABLE options_implied ADD COLUMN tradeable INTEGER")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        con.execute("ALTER TABLE options_implied ADD COLUMN live_book INTEGER")
     except sqlite3.OperationalError:
         pass
     con.commit()
@@ -88,6 +111,7 @@ _FIELDS = [
     "book_spread_pp",
     "slippage_bps",
     "tradeable",
+    "live_book",
 ]
 
 
@@ -412,7 +436,7 @@ def run(db_path=DEFAULT_DB):
                         continue
                     seen_keys.add(dedup_key)
                     
-                    iv = pick_iv(snaps, exp, K, right="C")
+                    iv = _sane_iv(pick_iv(snaps, exp, K, right="C"))  # reject stale/garbage OPRA ticks
                     if iv is not None:
                         from signals.vol_spread import get_iv_rv_ratio
                         iv_rv_ratio_val = get_iv_rv_ratio(tk, iv)
@@ -421,7 +445,8 @@ def run(db_path=DEFAULT_DB):
                     if iv is None or m["poly_price"] is None:
                         continue
                     if m["market_type"] == "bracket":
-                        ip = prob_in_bracket(S, m["bracket_lo"], m["bracket_hi"], T, iv)
+                        iv_hi = _sane_iv(pick_iv(snaps, exp, m["bracket_hi"], right="C")) if m["bracket_hi"] else None
+                        ip = prob_in_bracket(S, m["bracket_lo"], m["bracket_hi"], T, iv, iv_hi)
                     elif m["market_type"] == "below":
                         pa = implied_prob_above(S, K, T, iv)
                         ip = (1 - pa) if pa is not None else None
@@ -435,14 +460,30 @@ def run(db_path=DEFAULT_DB):
                     # Gated to >=3pp edges to bound CLOB calls in this batch logger.
                     ex_price = ex_edge_pp = ex_spread_pp = ex_slip = None
                     ex_tradeable = 0
+                    ex_live_book = 0
                     if pee is not None and abs(spread) >= 3.0 and m.get("conditionId"):
                         if ip >= m["poly_price"]:
                             _side, _oi, _tp = "YES", 0, ip
                         else:
                             _side, _oi, _tp = "NO", 1, 1.0 - ip
+                        # Prefer the live WS book when POLY_WS_CONSUME=1 (REST fallback otherwise).
+                        _tid = None
+                        _book = None
+                        if os.environ.get("POLY_WS_CONSUME") == "1":
+                            try:
+                                from api.services import poly_ws_reader as _pwr
+                                _toks = pee.condition_id_to_token_ids(m["conditionId"])
+                                if _toks:
+                                    _tid = _toks[_oi if _oi in (0, 1) else 0]
+                                    _book = _pwr.get_live_orderbook_sync(_tid)
+                                    if _book is not None:
+                                        ex_live_book = 1
+                            except Exception:
+                                _tid = None
+                                _book = None
                         try:
-                            _ex = pee.executable_edge(_tp, _side, condition_id=m["conditionId"],
-                                                      outcome_index=_oi, target_usd=100.0)
+                            _ex = pee.executable_edge(_tp, _side, token_id=_tid, condition_id=m["conditionId"],
+                                                      outcome_index=_oi, target_usd=100.0, book=_book)
                         except Exception:
                             _ex = {"available": False}
                         if _ex.get("available"):
@@ -477,6 +518,7 @@ def run(db_path=DEFAULT_DB):
                             "book_spread_pp": ex_spread_pp,
                             "slippage_bps": ex_slip,
                             "tradeable": ex_tradeable,
+                            "live_book": ex_live_book,
                         }
                     )
         except Exception as e:
