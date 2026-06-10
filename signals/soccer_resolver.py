@@ -25,24 +25,30 @@ from typing import Dict, Any, List, Optional
 
 from loguru import logger
 
-# Reuse the baseball resolver's Polymarket plumbing (DRY).
-try:
-    from signals.baseball_resolver import _fetch_json, DB_PATH, CLOB_API, RATE_DELAY
-except Exception:  # pragma: no cover
-    from pathlib import Path
-    DB_PATH = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
-    CLOB_API = "https://clob.polymarket.com"
-    RATE_DELAY = 5.0
+# Self-contained Polymarket plumbing. NOTE: do NOT import _fetch_json from
+# baseball_resolver — the deployed copy of that module has carried a urllib-scoping
+# bug in its _fetch_json (caught by /qa 2026-06-10), which would silently break
+# every CLOB call here. Own the fetch so this resolver can't inherit that rot.
+import json as _json
+import urllib.parse as _uparse
+import urllib.request as _urequest
+from pathlib import Path as _Path
 
-    def _fetch_json(url, params=None, timeout=10):
-        import json, urllib.request, urllib.parse
-        try:
-            u = url + ("?" + urllib.parse.urlencode(params) if params else "")
-            req = urllib.request.Request(u, headers={"User-Agent": "Polyclawd/2.0"})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.loads(r.read().decode())
-        except Exception:
-            return None
+DB_PATH = _Path(__file__).parent.parent / "storage" / "shadow_trades.db"
+CLOB_API = "https://clob.polymarket.com"
+RATE_DELAY = 5.0
+
+
+def _fetch_json(url, params=None, timeout=10):
+    try:
+        u = url + ("?" + _uparse.urlencode(params) if params else "")
+        req = _urequest.Request(u, headers={"User-Agent": "Polyclawd/2.0"})
+        with _urequest.urlopen(req, timeout=timeout) as r:
+            return _json.loads(r.read().decode())
+    except Exception as e:  # pragma: no cover
+        logger.debug(f"soccer_resolver fetch failed: {str(url)[:60]} — {e}")
+        return None
+
 
 SOCCER_STRATEGIES = ("soccer_match_3way", "soccer_futures")
 
@@ -129,7 +135,7 @@ def _score(side: str, entry_price: float, winner_idx: int):
     """Binary 'Will X win?' market. side YES=BUY participant, NO=SELL. Held token
     is YES (BUY) or NO (SELL), bought at entry_price. Returns (correct, pnl)."""
     is_buy = (side or "YES").upper() == "YES"
-    participant_won = (winner_idx == 0)
+    participant_won = winner_idx == 0
     bet_won = participant_won if is_buy else (not participant_won)
     p = entry_price if entry_price is not None else 0.5
     pnl = (1.0 - p) if bet_won else -p
@@ -146,6 +152,7 @@ def _clv(side: str, entry_price: float, closing_yes_mid: Optional[float]) -> Opt
 
 def _edge_from_reasoning(reasoning: str) -> float:
     import re
+
     m = re.search(r"exec edge ([+-]?\d+\.?\d*)%", reasoning or "")
     if m:
         return float(m.group(1))
@@ -158,11 +165,15 @@ def scan_resolved_soccer_trades(batch_size: int = 200) -> Dict[str, Any]:
     result = {"resolved": 0, "clv_captured": 0, "skipped": 0, "errors": 0}
     conn = get_db()
     try:
-        trades = [dict(r) for r in conn.execute(
-            "SELECT id, market_id, side, entry_price, market, reasoning, strategy, "
-            "closing_yes_mid FROM shadow_trades "
-            "WHERE resolved = 0 AND strategy IN (?, ?) ORDER BY timestamp ASC",
-            SOCCER_STRATEGIES).fetchall()]
+        trades = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, market_id, side, entry_price, market, reasoning, strategy, "
+                "closing_yes_mid FROM shadow_trades "
+                "WHERE resolved = 0 AND strategy IN (?, ?) ORDER BY timestamp ASC",
+                SOCCER_STRATEGIES,
+            ).fetchall()
+        ]
     except sqlite3.OperationalError:
         conn.close()
         return {**result, "note": "shadow_trades not ready"}
@@ -214,17 +225,31 @@ def scan_resolved_soccer_trades(batch_size: int = 200) -> Dict[str, Any]:
                     book_prob, poly_entry, edge_pct, direction, closing_yes_mid, clv_pct,
                     outcome, predicted_correct, pnl, recorded_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (t["id"], strat, model, event_title[:180], participant[:80],
-                 None, entry, _edge_from_reasoning(t.get("reasoning", "")),
-                 ("BUY" if side == "YES" else "SELL"), close_mid, clv,
-                 outcome, correct, pnl, datetime.now(timezone.utc).isoformat()))
+                (
+                    t["id"],
+                    strat,
+                    model,
+                    event_title[:180],
+                    participant[:80],
+                    None,
+                    entry,
+                    _edge_from_reasoning(t.get("reasoning", "")),
+                    ("BUY" if side == "YES" else "SELL"),
+                    close_mid,
+                    clv,
+                    outcome,
+                    correct,
+                    pnl,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
         except Exception as e:
             logger.warning(f"soccer forecast insert failed: {e}")
         try:
             conn.execute(
                 "UPDATE shadow_trades SET resolved=1, resolved_at=?, outcome=?, pnl=?, exit_price=? WHERE id=?",
-                (datetime.now(timezone.utc).isoformat(), outcome, pnl,
-                 1.0 if correct else 0.0, t["id"]))
+                (datetime.now(timezone.utc).isoformat(), outcome, pnl, 1.0 if correct else 0.0, t["id"]),
+            )
             result["resolved"] += 1
         except Exception as e:
             logger.warning(f"soccer shadow update failed: {e}")
@@ -244,28 +269,46 @@ def get_soccer_calibration() -> Dict:
     try:
         conn = get_db()
         out["by_strategy"] = [
-            {"strategy": r["strategy"], "n": r["n"], "wins": r["w"],
-             "win_pct": round(r["w"] / r["n"] * 100, 1) if r["n"] else None,
-             "avg_pnl": round(r["ap"], 4) if r["ap"] is not None else None,
-             "clv_n": r["cn"], "avg_clv_pp": round(r["ac"], 1) if r["ac"] is not None else None}
+            {
+                "strategy": r["strategy"],
+                "n": r["n"],
+                "wins": r["w"],
+                "win_pct": round(r["w"] / r["n"] * 100, 1) if r["n"] else None,
+                "avg_pnl": round(r["ap"], 4) if r["ap"] is not None else None,
+                "clv_n": r["cn"],
+                "avg_clv_pp": round(r["ac"], 1) if r["ac"] is not None else None,
+            }
             for r in conn.execute(
                 "SELECT strategy, COUNT(*) n, SUM(predicted_correct) w, AVG(pnl) ap, "
-                "COUNT(clv_pct) cn, AVG(clv_pct) ac FROM soccer_forecast_log GROUP BY strategy").fetchall()]
+                "COUNT(clv_pct) cn, AVG(clv_pct) ac FROM soccer_forecast_log GROUP BY strategy"
+            ).fetchall()
+        ]
         out["calibration"] = [
-            {"edge_bucket": r["b"], "n": r["n"],
-             "win_pct": round(r["w"] / r["n"] * 100, 1) if r["n"] else None,
-             "avg_clv_pp": round(r["ac"], 1) if r["ac"] is not None else None}
+            {
+                "edge_bucket": r["b"],
+                "n": r["n"],
+                "win_pct": round(r["w"] / r["n"] * 100, 1) if r["n"] else None,
+                "avg_clv_pp": round(r["ac"], 1) if r["ac"] is not None else None,
+            }
             for r in conn.execute(
                 "SELECT CAST(edge_pct/3 AS INT)*3 AS b, COUNT(*) n, SUM(predicted_correct) w, "
-                "AVG(clv_pct) ac FROM soccer_forecast_log GROUP BY b ORDER BY b DESC").fetchall()]
+                "AVG(clv_pct) ac FROM soccer_forecast_log GROUP BY b ORDER BY b DESC"
+            ).fetchall()
+        ]
         tot = conn.execute(
             "SELECT COUNT(*) n, SUM(predicted_correct) w, COUNT(clv_pct) cn, AVG(clv_pct) ac, "
-            "SUM(CASE WHEN clv_pct>0 THEN 1 ELSE 0 END) cpos FROM soccer_forecast_log").fetchone()
-        out["totals"] = {"resolved": tot["n"] or 0, "wins": tot["w"] or 0,
-                         "win_pct": round(tot["w"] / tot["n"] * 100, 1) if tot["n"] else None}
-        out["clv"] = {"n": tot["cn"] or 0,
-                      "avg_clv_pp": round(tot["ac"], 1) if tot["ac"] is not None else None,
-                      "clv_positive_pct": round(tot["cpos"] / tot["cn"] * 100, 1) if tot["cn"] else None}
+            "SUM(CASE WHEN clv_pct>0 THEN 1 ELSE 0 END) cpos FROM soccer_forecast_log"
+        ).fetchone()
+        out["totals"] = {
+            "resolved": tot["n"] or 0,
+            "wins": tot["w"] or 0,
+            "win_pct": round(tot["w"] / tot["n"] * 100, 1) if tot["n"] else None,
+        }
+        out["clv"] = {
+            "n": tot["cn"] or 0,
+            "avg_clv_pp": round(tot["ac"], 1) if tot["ac"] is not None else None,
+            "clv_positive_pct": round(tot["cpos"] / tot["cn"] * 100, 1) if tot["cn"] else None,
+        }
         conn.close()
     except Exception as e:  # pragma: no cover
         out["error"] = str(e)
