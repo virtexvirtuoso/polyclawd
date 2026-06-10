@@ -160,6 +160,8 @@ def load_engine_state() -> dict:
     # (paper) validated sec 10 -> ON.
     state.setdefault("weather_trading_enabled", False)
     state.setdefault("kalshi_fade_enabled", True)
+    # knob 1: best-candidates-first fill ordering (default off = clean baseline)
+    state.setdefault("kalshi_fade_ranked_fill", False)
     return state
 
 
@@ -961,6 +963,7 @@ async def get_weather_strategies():
     return {
         "weather_trading_enabled": bool(state.get("weather_trading_enabled", False)),
         "kalshi_fade_enabled": bool(state.get("kalshi_fade_enabled", True)),
+        "kalshi_fade_ranked_fill": bool(state.get("kalshi_fade_ranked_fill", False)),
     }
 
 
@@ -968,6 +971,7 @@ async def get_weather_strategies():
 async def update_weather_strategies(
     weather_trading_enabled: Optional[bool] = Query(None),
     kalshi_fade_enabled: Optional[bool] = Query(None),
+    kalshi_fade_ranked_fill: Optional[bool] = Query(None),
 ):
     """Toggle weather strategies (PM legacy / Kalshi fade paper)."""
     state = load_engine_state()
@@ -975,6 +979,8 @@ async def update_weather_strategies(
         state["weather_trading_enabled"] = bool(weather_trading_enabled)
     if kalshi_fade_enabled is not None:
         state["kalshi_fade_enabled"] = bool(kalshi_fade_enabled)
+    if kalshi_fade_ranked_fill is not None:
+        state["kalshi_fade_ranked_fill"] = bool(kalshi_fade_ranked_fill)
     save_engine_state(state)
     logger.info(
         "Weather strategies updated: pm=%s kalshi_fade=%s",

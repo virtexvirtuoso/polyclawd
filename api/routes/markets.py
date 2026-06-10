@@ -1037,6 +1037,20 @@ async def get_baseball_prop_alerts(
         return {"alerts": [], "summary": {}, "calibration": [], "error": str(e)}
 
 
+@router.get("/baseball/props/scan-analytics")
+async def get_baseball_scan_analytics():
+    """Control-sample analytics over mlb_prop_scan_log (WS-D): calibration-integrity
+    overlay (alerted vs below-threshold control realized hit%), lookback-window
+    predictive power (L7/10/15/20), and scan-window timing. Defends the Gate-2
+    calibration curve against the censored top-of-sort sample."""
+    try:
+        from signals.mlb_prop_alerts import get_scan_analytics
+        return get_scan_analytics()
+    except Exception as e:
+        logger.exception(f"baseball scan analytics failed: {e}")
+        return {"calibration_integrity": [], "lookback_sweep": [], "timing": [], "error": str(e)}
+
+
 # ----------------------------------------------------------------------------
 # NFL Futures Endpoints
 # ----------------------------------------------------------------------------

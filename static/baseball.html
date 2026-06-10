@@ -270,10 +270,30 @@
 <!-- ===================== ALERTS & CALIBRATION TAB ===================== -->
 <div class="section" id="tab-alerts">
 
+<!-- Gate tracker + heartbeat band -->
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">🚦 Validation Gates <span id="alerts-heartbeat" style="font-size:0.72rem;color:var(--dim);font-weight:400;margin-left:auto"></span></div>
+  <div id="gate-tracker"><div class="empty-state" style="padding:14px"><span class="status-dot status-refresh"></span>Loading gate status…</div></div>
+</div>
+
+<!-- CLV hero -->
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">🎯 Closing-Line Value — The Leading Indicator</div>
+  <div class="subtitle" style="margin-bottom:12px">CLV beats W/L for small samples: if you consistently beat the close, the edge is real even before outcomes resolve.</div>
+  <div id="clv-hero"><div class="empty-state" style="padding:14px"><span class="status-dot status-refresh"></span>Loading CLV…</div></div>
+</div>
+
 <div class="card" style="margin-bottom:16px">
   <div class="section-title">🔔 Alert Performance — Is the Edge Real? <span id="alerts-meta" style="font-size:0.75rem;color:var(--dim);font-weight:400"></span></div>
   <div class="subtitle" style="margin-bottom:12px">Shadow-tracked prop alerts with resolution + closing-line value. This is the Gate-2 truth source for the realized hit-rate.</div>
   <div id="alerts-summary"></div>
+</div>
+
+<!-- Per-market breakdown -->
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">📦 Per-Market Breakdown</div>
+  <div class="subtitle" style="margin-bottom:10px">Record, hit% and CLV split by prop market. A market turns green once it has ≥50 resolved (Gate-3 per-market sample threshold).</div>
+  <div id="by-market"><div class="empty-state">Accumulating — needs resolved scans.</div></div>
 </div>
 
 <div class="grid grid-2">
@@ -285,6 +305,31 @@
     <div class="section-title">📏 Calibration — Edge Bucket vs Realized</div>
     <div class="subtitle" style="margin-bottom:10px">Does a claimed +Npp edge actually convert? Each bar shows realized hit% per predicted-edge bucket.</div>
     <div id="alerts-calibration"><div class="empty-state">No resolved alerts yet to calibrate.</div></div>
+  </div>
+</div>
+
+<!-- Scan analytics -->
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">🔬 Scan Analytics — Edge Diagnostics <span id="scan-analytics-meta" style="font-size:0.75rem;color:var(--dim);font-weight:400"></span></div>
+  <div class="subtitle" style="margin-bottom:10px">Censored-sample diagnostics on every scanned prop (not just alerts). Answers: is the edge noise, which lookback predicts, and which scan window prices best?</div>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title" style="font-size:0.88rem">📐 Calibration Integrity</div>
+  <div class="subtitle" style="margin-bottom:10px">Alerted props should beat the below-threshold control AND realized hit% should rise with edge. Flat or inverted = the edge is noise (censored-sample check).</div>
+  <div id="sa-calibration"><div class="empty-state">Accumulating — needs resolved scans.</div></div>
+</div>
+
+<div class="grid grid-2">
+  <div class="card">
+    <div class="section-title" style="font-size:0.88rem">🔭 Lookback Sweep</div>
+    <div class="subtitle" style="margin-bottom:10px">Realized hit% when the player was HOT (≥60% recent) vs COLD, per lookback window. Bigger spread = that window is more predictive.</div>
+    <div id="sa-lookback"><div class="empty-state">Accumulating — needs resolved scans.</div></div>
+  </div>
+  <div class="card">
+    <div class="section-title" style="font-size:0.88rem">⏱️ Scan-Window Timing</div>
+    <div class="subtitle" style="margin-bottom:10px">Which scan window delivered the best prices / outcomes.</div>
+    <div id="sa-timing"><div class="empty-state">Accumulating — needs resolved scans.</div></div>
   </div>
 </div>
 
@@ -474,6 +519,7 @@ const DASHBOARD_API = '/polyclawd/api/baseball/dashboard';
 const SCOUT_API = '/polyclawd/api/baseball/props/scout?last_n=10&min_edge=-0.99&min_games=7';
 const KALSHI_API = '/polyclawd/api/baseball/kalshi/scan?min_edge=2.0&last_n=10';
 const ALERTS_API = '/polyclawd/api/baseball/props/alerts?limit=100';
+const SCAN_ANALYTICS_API = '/polyclawd/api/baseball/props/scan-analytics';
 let charts = {};
 let activeTab = 'today';
 const REFRESH_FAST = 4;   // Edges tab polls fast so WS-live books feel live
@@ -599,6 +645,10 @@ async function load() {
       .then(r => r.ok ? r.json() : null)
       .then(ad => { renderAlerts(ad); })
       .catch(() => { renderAlerts(null); });
+    fetch(SCAN_ANALYTICS_API)
+      .then(r => r.ok ? r.json() : null)
+      .then(sa => { renderScanAnalytics(sa); })
+      .catch(() => { renderScanAnalytics(null); });
   } catch(e) {
     console.error('Dashboard load failed:', e);
     if (lastData) {
@@ -1165,6 +1215,33 @@ function renderProps(data) {
 }
 
 // ---- Prop Scout: hit-rate vs book, sorted by edge ----
+// Inline mini-sparkline (SVG ~70x18) of last_n_vals with a baseline at prop_line.
+// Lets you SEE streak shape: consistent vs 1-2 spikes. Bars above the line = green hits.
+function sparkline(vals, line) {
+  if (!Array.isArray(vals) || !vals.length) return '<span style="color:var(--dim)">—</span>';
+  const W = 70, H = 18, n = vals.length;
+  const nums = vals.map(v => (typeof v === 'number' && !isNaN(v)) ? v : 0);
+  const lo = Math.min(line != null ? line : Infinity, ...nums);
+  const hi = Math.max(line != null ? line : -Infinity, ...nums);
+  const span = (hi - lo) || 1;
+  const bw = W / n;
+  const yOf = (v) => H - ((v - lo) / span) * (H - 2) - 1;
+  let bars = '';
+  for (let i = 0; i < n; i++) {
+    const v = nums[i];
+    const hit = (line != null) && (v >= line);
+    const y = yOf(v);
+    const x = i * bw + 0.6;
+    const w = Math.max(1.4, bw - 1.2);
+    bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${(H - y - 1).toFixed(1)}" fill="${hit ? '#10b981' : 'rgba(148,163,184,0.55)'}" rx="0.8"/>`;
+  }
+  let baseline = '';
+  if (line != null) {
+    const ly = yOf(line);
+    baseline = `<line x1="0" y1="${ly.toFixed(1)}" x2="${W}" y2="${ly.toFixed(1)}" stroke="rgba(245,158,11,0.85)" stroke-width="1" stroke-dasharray="2 2"/>`;
+  }
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="vertical-align:middle" aria-label="recent values vs line">${bars}${baseline}</svg>`;
+}
 function scoutEdgeColor(e) {
   return e >= 15 ? 'var(--green)' : (e >= 5 ? 'var(--amber)' : 'var(--dim)');
 }
@@ -1188,17 +1265,19 @@ function renderScout(data) {
       'The scout compares each player’s recent hit-rate on the posted line against the book’s implied OVER%. Rows appear once props are posted and a player has enough sampled games.');
     return;
   }
-  let html = '<div class="table-wrap"><table><thead><tr><th>Player</th><th>Prop</th><th>Matchup</th><th class="num">Book%</th><th class="num">Hit%</th><th class="num">Edge</th></tr></thead><tbody>';
+  let html = '<div class="table-wrap"><table><thead><tr><th>Player</th><th>Prop</th><th>Matchup</th><th class="num">Recent</th><th class="num">Book%</th><th class="num">Hit%</th><th class="num">Edge</th></tr></thead><tbody>';
   for (const r of rows) {
     const e = r.edge_pct != null ? r.edge_pct : 0;
     const alert = e >= 15;
     const prop = (r.stat_label || r.market || '?') + ' o' + (r.prop_line != null ? r.prop_line : '—');
     const matchup = (r.away_team || '?') + ' @ ' + (r.home_team || '?');
     const sign = e > 0 ? '+' : '';
+    const spark = sparkline(r.last_n_vals, r.prop_line);
     html += `<tr${alert ? ' style="background:rgba(16,185,129,0.08)"' : ''}>
       <td><strong>${r.player || '—'}</strong></td>
       <td>${prop}</td>
       <td style="color:var(--dim)">${matchup}</td>
+      <td class="num" title="recent per-game values vs prop line">${spark}</td>
       <td class="num">${r.book_over_pct != null ? r.book_over_pct + '%' : '—'}</td>
       <td class="num">${r.hit_rate_pct != null ? r.hit_rate_pct + '%' : '—'} <span style="color:var(--dim);font-size:0.65rem">L${r.games_sampled != null ? r.games_sampled : '?'}</span></td>
       <td class="num" style="color:${scoutEdgeColor(e)};font-weight:700">${sign}${e}pp${alert ? ' <span class="badge badge-buy">★</span>' : ''}</td>
@@ -1244,25 +1323,37 @@ function renderKalshi(data) {
       'No Kalshi player-prop contracts cleared the fee-adjusted edge threshold right now.');
     return;
   }
-  let html = '<div class="table-wrap"><table><thead><tr><th>Player</th><th>Prop</th><th class="num">Kalshi mid</th><th class="num">Spread</th><th class="num">Book IP</th><th class="num">Fee-adj edge</th><th class="num">L10 hit%</th><th>Signal</th></tr></thead><tbody>';
+  let html = '<div class="table-wrap"><table><thead><tr><th>Player</th><th>Prop</th><th class="num">Kalshi mid</th><th class="num">Spread</th><th class="num">Depth</th><th class="num">Book IP</th><th class="num">Fee-adj edge</th><th class="num">L10 hit%</th><th>Fillable?</th><th>Signal</th></tr></thead><tbody>';
   for (const r of rows) {
     const fe = r.fee_adj_edge_pct;
-    const feColor = fe == null ? 'var(--dim)' : (fe >= 15 ? 'var(--green)' : (fe >= 5 ? 'var(--amber)' : (fe < 0 ? 'var(--red)' : 'var(--dim)')));
+    // fee_adj_edge: green clears the taker fee (>0), red does not (<=0).
+    const feColor = fe == null ? 'var(--dim)' : (fe > 0 ? 'var(--green)' : 'var(--red)');
     const feStr = fe == null ? '—' : ((fe > 0 ? '+' : '') + fe + 'pp');
     const mid = r.kalshi_mid != null ? r.kalshi_mid + '%' : (r.kalshi_line != null ? r.kalshi_line : '—');
     const prop = (r.prop || r.prop_type || '—');
-    html += `<tr title="${(r.ticker || '').replace(/"/g,'')}">
+    const sc = r.kalshi_spread_c, dp = r.kalshi_depth;
+    const fillable = (sc != null && sc <= 4 && dp != null && dp >= 5000);
+    const fillBadge = (sc == null && dp == null)
+      ? '<span style="color:var(--dim)">—</span>'
+      : (fillable
+          ? '<span class="badge badge-buy" title="tight spread + ≥$5k depth">✓ fillable</span>'
+          : '<span class="badge badge-sharp" title="tight spread ≠ size">~ thin</span>');
+    const tf = r.taker_fee_c != null ? ` · taker fee ${r.taker_fee_c}¢` : '';
+    html += `<tr title="${(r.ticker || '').replace(/"/g,'')}${tf}">
       <td><strong>${r.player || '—'}</strong></td>
       <td>${prop}</td>
       <td class="num">${mid}</td>
-      <td class="num">${r.kalshi_spread_c != null ? r.kalshi_spread_c + '¢' : '—'}</td>
+      <td class="num">${sc != null ? sc + '¢' : '—'}</td>
+      <td class="num">${dp != null ? '$' + (dp >= 1000 ? (dp/1000).toFixed(1) + 'k' : dp) : '—'}</td>
       <td class="num">${r.avg_book_ip != null ? r.avg_book_ip + '%' : '—'}</td>
       <td class="num" style="color:${feColor};font-weight:700">${feStr}</td>
       <td class="num">${r.l10_hit_rate != null ? r.l10_hit_rate + '%' : '—'}</td>
+      <td>${fillBadge}</td>
       <td>${kalshiSignalBadge(r.signal)}</td>
     </tr>`;
   }
   html += '</tbody></table></div>';
+  html += '<div style="font-size:0.7rem;color:var(--dim);margin-top:8px">Fillable = spread ≤4¢ AND depth ≥$5k. Tight spread ≠ size — thin books fill small. Fee-adj edge in green clears the Kalshi taker fee.</div>';
   container.innerHTML = html;
 }
 
@@ -1289,6 +1380,14 @@ function renderAlerts(data) {
     if (histEl) histEl.innerHTML = emptyState('clock', 'No alert history', 'Retrying…');
     if (calibEl) calibEl.innerHTML = '<div class="empty-state">No calibration data.</div>';
     if (metaEl) metaEl.textContent = '';
+    const gtEl = document.getElementById('gate-tracker');
+    if (gtEl) gtEl.innerHTML = '<div class="empty-state">Gate status unavailable.</div>';
+    const clvEl = document.getElementById('clv-hero');
+    if (clvEl) clvEl.innerHTML = '<div class="empty-state">CLV unavailable.</div>';
+    const bmEl = document.getElementById('by-market');
+    if (bmEl) bmEl.innerHTML = '<div class="empty-state">Per-market data unavailable.</div>';
+    const hbEl = document.getElementById('alerts-heartbeat');
+    if (hbEl) hbEl.textContent = '';
     return;
   }
 
@@ -1309,6 +1408,11 @@ function renderAlerts(data) {
   strip += `<div><div class="stat-value" style="font-size:1.3rem">${data.scan_count_24h != null ? data.scan_count_24h : '—'}</div><div class="stat-label">Scans / 24h</div></div>`;
   strip += '</div>';
   summaryEl.innerHTML = strip;
+
+  renderGateTracker(sum, data.by_market || []);
+  renderClvHero(sum, data.clv_coverage || {});
+  renderByMarket(data.by_market || []);
+  renderHeartbeat(data, alerts);
 
   // Alert history
   if (histEl) {
@@ -1358,6 +1462,223 @@ function renderAlerts(data) {
       }
       c += '</div>';
       calibEl.innerHTML = c;
+    }
+  }
+}
+
+function propMarketLabel(m) {
+  const map = {
+    batter_home_runs: 'HR', batter_hits: 'Hits', batter_total_bases: 'TB',
+    batter_rbis: 'RBI', pitcher_strikeouts: 'Ks'
+  };
+  return map[m] || m || '—';
+}
+
+// ---- BUNDLE 4: Gate tracker ----
+function renderGateTracker(sum, byMarket) {
+  const el = document.getElementById('gate-tracker');
+  if (!el) return;
+  const resolved = sum.resolved != null ? sum.resolved : ((sum.won || 0) + (sum.lost || 0) + (sum.void || 0));
+  const avgClv = sum.avg_clv_pp;
+  const g2pct = Math.max(0, Math.min(100, (resolved / 100) * 100));
+  const g2color = g2pct >= 100 ? 'var(--green)' : (g2pct >= 50 ? 'var(--amber)' : 'var(--accent)');
+  // Gate 3 checklist: per-market resolved>=50, and CLV positive.
+  const marketsAt50 = (byMarket || []).filter(m => (m.resolved || 0) >= 50);
+  const g3market = marketsAt50.length > 0;
+  const g3clv = avgClv != null && avgClv > 0;
+  const chk = (ok) => ok ? '<span style="color:var(--green)">✅</span>' : '<span style="color:var(--dim)">⬜</span>';
+
+  let h = '<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start">';
+  // Gate 1
+  h += '<div style="flex:1;min-width:150px"><div style="font-weight:600;font-size:0.85rem;margin-bottom:4px">Gate 1 — Shipped <span style="color:var(--green)">✅</span></div>'
+    + '<div style="font-size:0.72rem;color:var(--dim)">Shadow pipeline live, logging alerts.</div></div>';
+  // Gate 2
+  h += '<div style="flex:1.4;min-width:200px"><div style="font-weight:600;font-size:0.85rem;margin-bottom:4px">Gate 2 — ' + resolved + '/100 resolved</div>'
+    + '<div class="meter-track"><div class="meter-fill" style="width:' + g2pct + '%;background:' + g2color + '"></div></div>'
+    + '<div style="font-size:0.72rem;color:var(--dim);margin-top:4px">' + (resolved >= 100 ? '✅ Sample target met' : (100 - resolved) + ' more resolutions to clear') + '</div></div>';
+  // Gate 3
+  h += '<div style="flex:1.2;min-width:190px"><div style="font-weight:600;font-size:0.85rem;margin-bottom:4px">Gate 3 — Checklist</div>'
+    + '<div style="font-size:0.74rem;line-height:1.7">'
+    + chk(g3market) + ' Per-market ≥50 resolved' + (marketsAt50.length ? ' <span style="color:var(--dim)">(' + marketsAt50.map(m => propMarketLabel(m.market)).join(', ') + ')</span>' : '') + '<br>'
+    + chk(g3clv) + ' Beating the close (avg CLV > 0)'
+    + '</div></div>';
+  h += '</div>';
+  el.innerHTML = h;
+}
+
+// ---- BUNDLE 2: CLV hero ----
+function renderClvHero(sum, cov) {
+  const el = document.getElementById('clv-hero');
+  if (!el) return;
+  const avgClv = sum.avg_clv_pp;
+  const clvN = sum.clv_n != null ? sum.clv_n : 0;
+  const clvPos = sum.clv_positive_pct;
+  const color = avgClv == null ? 'var(--dim)' : (avgClv > 0 ? 'var(--green)' : 'var(--red)');
+  let verdict;
+  if (avgClv != null && avgClv > 0) verdict = 'Beating the close — edge likely real (leading indicator)';
+  else if (avgClv != null && avgClv <= 0 && clvN >= 20) verdict = 'Not beating the close — lean kill regardless of W/L';
+  else verdict = 'Too few closes yet';
+
+  let h = '<div style="display:flex;gap:28px;flex-wrap:wrap;align-items:flex-end">';
+  h += '<div><div style="font-size:2.4rem;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;color:' + color + '">'
+     + (avgClv != null ? ((avgClv > 0 ? '+' : '') + avgClv + 'pp') : '—') + '</div>'
+     + '<div class="stat-label">Avg CLV (n=' + clvN + ')</div></div>';
+  h += '<div><div style="font-size:1.6rem;font-weight:700;line-height:1;font-variant-numeric:tabular-nums">'
+     + (clvPos != null ? clvPos + '%' : '—') + '</div><div class="stat-label">Closes beaten</div></div>';
+  h += '<div style="flex:1;min-width:200px;font-size:0.85rem;color:' + color + ';font-weight:600;align-self:center">' + verdict + '</div>';
+  h += '</div>';
+
+  // coverage note
+  const covMk = (cov.covered_markets || []).map(propMarketLabel).join(', ');
+  const covN = cov.covered_clv_n != null ? cov.covered_clv_n : 0;
+  const covAvg = cov.covered_avg_clv_pp;
+  const unTot = cov.uncovered_total != null ? cov.uncovered_total : 0;
+  h += '<div style="font-size:0.72rem;color:var(--dim);margin-top:12px;line-height:1.5">'
+     + 'CLV covers ' + (covMk || 'hits/HR/Ks') + ' via Kalshi (n=' + covN
+     + (covAvg != null ? ', avg ' + (covAvg > 0 ? '+' : '') + covAvg + 'pp' : '')
+     + '); TB/RBI have no independent close (' + unTot + ' uncovered'
+     + (cov.uncovered_open != null ? ', ' + cov.uncovered_open + ' open' : '') + ').</div>';
+  el.innerHTML = h;
+}
+
+// ---- BUNDLE 2: Per-market breakdown ----
+function renderByMarket(byMarket) {
+  const el = document.getElementById('by-market');
+  if (!el) return;
+  if (!byMarket || !byMarket.length) {
+    el.innerHTML = '<div class="empty-state">Accumulating — needs resolved scans.</div>';
+    return;
+  }
+  let h = '<div class="table-wrap"><table><thead><tr><th>Market</th><th class="num">Open</th><th class="num">Resolved</th><th class="num">Record</th><th class="num">Hit%</th><th class="num">CLV n</th><th class="num">Avg CLV</th></tr></thead><tbody>';
+  for (const m of byMarket) {
+    const resolved = m.resolved || 0;
+    const gate3 = resolved >= 50;
+    const hit = m.hit_pct;
+    const hitColor = hit == null ? 'var(--dim)' : (hit >= 50 ? 'var(--green)' : 'var(--amber)');
+    const clv = m.avg_clv_pp;
+    const clvColor = clv == null ? 'var(--dim)' : (clv > 0 ? 'var(--green)' : 'var(--red)');
+    h += '<tr' + (gate3 ? ' style="background:rgba(16,185,129,0.08)"' : '') + '>'
+       + '<td><strong>' + propMarketLabel(m.market) + '</strong>' + (gate3 ? ' <span class="badge badge-buy" title="≥50 resolved (Gate-3)">✓50</span>' : '') + '</td>'
+       + '<td class="num">' + (m.open != null ? m.open : 0) + '</td>'
+       + '<td class="num">' + resolved + '</td>'
+       + '<td class="num">' + (m.won != null ? m.won : 0) + '–' + (m.lost != null ? m.lost : 0) + '</td>'
+       + '<td class="num" style="color:' + hitColor + '">' + (hit != null ? hit + '%' : '—') + '</td>'
+       + '<td class="num">' + (m.clv_n != null ? m.clv_n : 0) + '</td>'
+       + '<td class="num" style="color:' + clvColor + '">' + (clv != null ? ((clv > 0 ? '+' : '') + clv + 'pp') : '—') + '</td>'
+       + '</tr>';
+  }
+  h += '</tbody></table></div>';
+  el.innerHTML = h;
+}
+
+// ---- BUNDLE 4: Heartbeat ----
+function renderHeartbeat(data, alerts) {
+  const el = document.getElementById('alerts-heartbeat');
+  if (!el) return;
+  const scans = data.scan_count_24h;
+  let parts = [];
+  parts.push((scans != null ? scans : 0) + ' scans/24h');
+  if (alerts && alerts.length) {
+    // most-recent alerted_at
+    let latest = null;
+    for (const a of alerts) {
+      if (a.alerted_at) {
+        const t = new Date(a.alerted_at).getTime();
+        if (!latest || t > latest) latest = t;
+      }
+    }
+    parts.push(latest ? 'last alert ' + fmtTime(new Date(latest).toISOString()) : 'pipeline idle');
+  } else {
+    parts.push('pipeline idle — next game window');
+  }
+  if (lastUpdated) parts.push('updated ' + lastUpdated.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'}));
+  el.textContent = parts.join(' · ');
+}
+
+// ---- BUNDLE 1: Scan analytics ----
+function saPct(v) { return v == null ? '—' : v + '%'; }
+function renderScanAnalytics(data) {
+  const calEl = document.getElementById('sa-calibration');
+  const lbEl = document.getElementById('sa-lookback');
+  const tmEl = document.getElementById('sa-timing');
+  const metaEl = document.getElementById('scan-analytics-meta');
+  const EMPTY = '<div class="empty-state">Accumulating — needs resolved scans.</div>';
+  if (!calEl) return;
+  if (!data) {
+    calEl.innerHTML = EMPTY;
+    if (lbEl) lbEl.innerHTML = EMPTY;
+    if (tmEl) tmEl.innerHTML = EMPTY;
+    if (metaEl) metaEl.textContent = '';
+    return;
+  }
+  const tot = data.totals || {};
+  if (metaEl) metaEl.textContent = (tot.scanned != null ? tot.scanned + ' scanned' : '')
+    + (tot.alerted != null ? ' · ' + tot.alerted + ' alerted' : '')
+    + (tot.resolved != null ? ' · ' + tot.resolved + ' resolved' : '');
+
+  // Calibration integrity: alerted vs control, per edge bucket (5pp step, desc)
+  const ci = data.calibration_integrity || [];
+  if (!ci.length) {
+    calEl.innerHTML = EMPTY;
+  } else {
+    let h = '<div class="table-wrap"><table><thead><tr><th>Edge bucket</th><th class="num">Alerted hit%</th><th class="num">Control hit%</th></tr></thead><tbody>';
+    for (const b of ci) {
+      const lo = b.edge_bucket;
+      const hi = lo != null ? lo + 5 : null;
+      const a = b.alerted_hit_pct, c = b.control_hit_pct;
+      const aColor = a == null ? 'var(--dim)' : (a >= 55 ? 'var(--green)' : (a >= 50 ? 'var(--amber)' : 'var(--red)'));
+      h += '<tr>'
+        + '<td><strong>' + (lo != null ? lo + '–' + hi + 'pp' : '?') + '</strong></td>'
+        + '<td class="num" style="color:' + aColor + ';font-weight:700">' + saPct(a) + ' <span style="color:var(--dim);font-weight:400;font-size:0.65rem">n=' + (b.alerted_n != null ? b.alerted_n : 0) + '</span></td>'
+        + '<td class="num" style="color:var(--dim)">' + saPct(c) + ' <span style="font-size:0.65rem">n=' + (b.control_n != null ? b.control_n : 0) + '</span></td>'
+        + '</tr>';
+    }
+    h += '</tbody></table></div>';
+    calEl.innerHTML = h;
+  }
+
+  // Lookback sweep: hot vs cold, spread per window
+  const ls = data.lookback_sweep || [];
+  if (lbEl) {
+    if (!ls.length) {
+      lbEl.innerHTML = EMPTY;
+    } else {
+      let h = '<div class="table-wrap"><table><thead><tr><th class="num">Window</th><th class="num">Hot hit%</th><th class="num">Cold hit%</th><th class="num">Spread</th></tr></thead><tbody>';
+      for (const w of ls) {
+        const sp = w.spread_pp;
+        const spColor = sp == null ? 'var(--dim)' : (sp >= 10 ? 'var(--green)' : (sp >= 3 ? 'var(--amber)' : 'var(--dim)'));
+        h += '<tr>'
+          + '<td class="num"><strong>L' + (w.window != null ? w.window : '?') + '</strong></td>'
+          + '<td class="num" style="color:var(--green)">' + saPct(w.hot_hit_pct) + ' <span style="color:var(--dim);font-size:0.65rem">n=' + (w.hot_n != null ? w.hot_n : 0) + '</span></td>'
+          + '<td class="num" style="color:var(--dim)">' + saPct(w.cold_hit_pct) + ' <span style="font-size:0.65rem">n=' + (w.cold_n != null ? w.cold_n : 0) + '</span></td>'
+          + '<td class="num" style="color:' + spColor + ';font-weight:700">' + (sp != null ? sp + 'pp' : '—') + '</td>'
+          + '</tr>';
+      }
+      h += '</tbody></table></div>';
+      lbEl.innerHTML = h;
+    }
+  }
+
+  // Scan-window timing
+  const tm = data.timing || [];
+  if (tmEl) {
+    if (!tm.length) {
+      tmEl.innerHTML = EMPTY;
+    } else {
+      const kindLabel = { posting: 'Posting', lineup_confirm: 'Lineup confirm', pre_lock: 'Pre-lock' };
+      let h = '<div class="table-wrap"><table><thead><tr><th>Window</th><th class="num">Scans</th><th class="num">Avg book O%</th><th class="num">Hit%</th></tr></thead><tbody>';
+      for (const t of tm) {
+        const hit = t.hit_pct;
+        const hitColor = hit == null ? 'var(--dim)' : (hit >= 55 ? 'var(--green)' : (hit >= 50 ? 'var(--amber)' : 'var(--red)'));
+        h += '<tr>'
+          + '<td><strong>' + (kindLabel[t.window_kind] || t.window_kind || '—') + '</strong></td>'
+          + '<td class="num">' + (t.scans != null ? t.scans : 0) + '</td>'
+          + '<td class="num">' + saPct(t.avg_book_over_pct) + '</td>'
+          + '<td class="num" style="color:' + hitColor + ';font-weight:700">' + saPct(hit) + ' <span style="color:var(--dim);font-weight:400;font-size:0.65rem">n=' + (t.resolved_n != null ? t.resolved_n : 0) + '</span></td>'
+          + '</tr>';
+      }
+      h += '</tbody></table></div>';
+      tmEl.innerHTML = h;
     }
   }
 }

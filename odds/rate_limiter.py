@@ -63,6 +63,10 @@ def _load_usage() -> UsageStats:
                     return UsageStats(
                         month=current_month, calls_used=0, calls_remaining=MONTHLY_LIMIT, last_call=None, daily_calls={}
                     )
+                # Recompute remaining against the CURRENT limit — persisted
+                # values written under an older (smaller) MONTHLY_LIMIT would
+                # otherwise pin calls_remaining at 0 for the rest of the month.
+                data["calls_remaining"] = max(0, MONTHLY_LIMIT - int(data.get("calls_used", 0)))
                 return UsageStats(**data)
         except:
             pass

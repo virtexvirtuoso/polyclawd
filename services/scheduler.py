@@ -708,10 +708,12 @@ def task_mlb_props_scratch():
 
 
 def task_mlb_props_resolve():
-    """WS-A: box-score auto-resolution of open MLB prop shadows at game final."""
-    from signals.mlb_prop_alerts import resolve_open_prop_shadows
+    """WS-A: box-score auto-resolution of open MLB prop shadows at game final,
+    plus control-sample grading (calibration integrity)."""
+    from signals.mlb_prop_alerts import resolve_open_prop_shadows, resolve_scan_log_outcomes
 
     resolve_open_prop_shadows()
+    resolve_scan_log_outcomes()
 
 
 def task_arena_snapshot():

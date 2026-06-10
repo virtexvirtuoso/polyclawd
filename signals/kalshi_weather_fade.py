@@ -457,32 +457,57 @@ def run_evening_scan(now: datetime = None, dry_run: bool = False, force_window: 
         "dry_run": dry_run,
     }
 
+    # knob 1 (2026-06-10 /optimize): ranked fill — spend the date cap on the
+    # best candidates first (QA-measured: executable EV in the 0.05-0.15 mid
+    # bin with tight spread is ~2x the sub-0.05 bin). Default OFF so the
+    # baseline shadow stays clean; flip via engine_state kalshi_fade_ranked_fill.
+    ranked = False
+    try:
+        from api.routes.engine import load_engine_state
+        ranked = bool(load_engine_state().get("kalshi_fade_ranked_fill", False))
+    except Exception:
+        pass
+    config["ranked_fill"] = ranked
+
     if in_window:
         conn = _get_db()
         try:
             open_rows = _open_fade_rows(conn)
+            # Phase 1: evaluate everything in-window (no inserts yet)
+            pending = []  # (cand, city, target_date, local_ts)
             for series, city, tz_name, target_date in in_window:
                 local_ts = now.astimezone(ZoneInfo(tz_name)).isoformat()
                 for m in fetch_open_markets(series):
                     if ticker_event_date(m.get("ticker", "")) != target_date:
                         continue
                     cand = evaluate_market(m, city, series, target_date)
-                    if cand["action"] == "candidate":
-                        if _market_exists(conn, cand["ticker"]):
-                            cand["action"], cand["skip_reason"] = "skipped", "already_traded"
-                        elif _count_city_date(open_rows, city, target_date) >= MAX_PER_CITY_DATE:
-                            cand["action"], cand["skip_reason"] = "skipped", "city_date_cap"
-                        elif _date_exposure(open_rows, target_date) + cand["bet_size"] > DATE_EXPOSURE_CAP:
-                            cand["action"], cand["skip_reason"] = "skipped", "date_exposure_cap"
-                        elif dry_run:
-                            cand["action"], cand["skip_reason"] = "dry_run", None
-                        else:
-                            _insert_position(conn, cand, local_ts)
-                            open_rows = _open_fade_rows(conn)  # refresh caps
-                            cand["action"] = "entered"
-                            entered += 1
                     candidates.append(cand)
+                    if cand["action"] == "candidate":
+                        pending.append((cand, city, target_date, local_ts))
                 time.sleep(0.1)
+
+            # Phase 2: caps + inserts. Flag off = scan order (baseline-identical).
+            if ranked:
+                def _rank(item):
+                    c = item[0]
+                    preferred = 0 if (c["tier"] == STRATEGY_NO and 0.05 <= (c.get("mid") or 0) < 0.15) else 1
+                    spread = c.get("spread") if c.get("spread") is not None else 9
+                    return (preferred, spread)
+                pending.sort(key=_rank)
+            for cand, city, target_date, local_ts in pending:
+                if _market_exists(conn, cand["ticker"]):
+                    cand["action"], cand["skip_reason"] = "skipped", "already_traded"
+                elif _count_city_date(open_rows, city, target_date) >= MAX_PER_CITY_DATE:
+                    cand["action"], cand["skip_reason"] = "skipped", "city_date_cap"
+                elif _date_exposure(open_rows, target_date) + cand["bet_size"] > DATE_EXPOSURE_CAP:
+                    cand["action"], cand["skip_reason"] = "skipped", "date_exposure_cap"
+                elif dry_run:
+                    cand["action"], cand["skip_reason"] = "dry_run", None
+                else:
+                    _insert_position(conn, cand, local_ts)
+                    open_rows = _open_fade_rows(conn)  # refresh caps
+                    cand["action"] = "entered"
+                    entered += 1
         finally:
             conn.close()
 

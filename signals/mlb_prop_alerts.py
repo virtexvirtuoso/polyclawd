@@ -144,6 +144,12 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_prop_shadow_status ON mlb_prop_shadow(status);
         """
     )
+    # Migrate: control-sample outcome columns (idempotent — added 2026-06-10 for
+    # the calibration-integrity overlay so below-threshold props get graded too).
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(mlb_prop_scan_log)")}
+    for col, decl in (("result_hit", "INTEGER"), ("result_stat", "REAL"), ("resolved_at", "TEXT")):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE mlb_prop_scan_log ADD COLUMN {col} {decl}")
     conn.commit()
 
 
@@ -662,6 +668,160 @@ def get_prop_alert_feed(limit: int = 100) -> Dict:
         out["scan_count_24h"] = conn.execute(
             "SELECT COUNT(*) FROM mlb_prop_scan_log WHERE scanned_at >= ?",
             ((datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(),)).fetchone()[0]
+
+        # Per-market breakdown (plan: each market needs its own >=50-resolved sample).
+        out["by_market"] = [
+            {"market": r["market"], "open": r["o"], "resolved": r["res"],
+             "won": r["w"], "lost": r["res"] - r["w"] if r["res"] else 0,
+             "hit_pct": round(r["w"] / r["res"] * 100, 1) if r["res"] else None,
+             "clv_n": r["cn"], "avg_clv_pp": round(r["ac"], 2) if r["ac"] is not None else None}
+            for r in conn.execute(
+                "SELECT market, "
+                "SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) o, "
+                "SUM(CASE WHEN status IN ('won','lost') THEN 1 ELSE 0 END) res, "
+                "SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) w, "
+                "COUNT(clv_pp) cn, AVG(clv_pp) ac "
+                "FROM mlb_prop_shadow GROUP BY market ORDER BY res DESC, o DESC").fetchall()]
+
+        # CLV coverage: Kalshi carries hits/HR/Ks (independent close); TB/RBI do not.
+        covered = ("batter_hits", "batter_home_runs", "pitcher_strikeouts")
+        ph = ",".join("?" * len(covered))
+        cov = conn.execute(
+            f"SELECT COUNT(clv_pp) cn, AVG(clv_pp) ac FROM mlb_prop_shadow WHERE market IN ({ph})",
+            covered).fetchone()
+        unc = conn.execute(
+            f"SELECT SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) o, COUNT(*) n "
+            f"FROM mlb_prop_shadow WHERE market NOT IN ({ph})", covered).fetchone()
+        out["clv_coverage"] = {
+            "covered_markets": list(covered),
+            "covered_clv_n": cov["cn"] or 0,
+            "covered_avg_clv_pp": round(cov["ac"], 2) if cov["ac"] is not None else None,
+            "uncovered_total": unc["n"] or 0, "uncovered_open": unc["o"] or 0}
+        conn.close()
+    except Exception as e:  # pragma: no cover
+        out["error"] = str(e)
+    return out
+
+
+def _player_stat_from_feed(feed: dict, player_id: int, market: str):
+    """Pull a player's game stat for a market from a feed/live payload.
+    Returns (stat_value, is_final) — stat_value None if player not in box."""
+    gd = feed.get("gameData", {})
+    if gd.get("status", {}).get("abstractGameState") != "Final":
+        return (None, False)
+    box = feed.get("liveData", {}).get("boxscore", {}).get("teams", {})
+    group, field = MARKET_STAT.get(market, ("batting", "hits"))
+    pkey = f"ID{player_id}"
+    for side in ("home", "away"):
+        players = box.get(side, {}).get("players", {})
+        if pkey in players:
+            stats = players[pkey].get("stats", {}).get(group, {})
+            if not stats:
+                return (None, True)  # in roster, did not play that way
+            return (stats.get(field, 0) or 0, True)
+    return (None, True)  # not in box -> DNP
+
+
+def resolve_scan_log_outcomes() -> Dict:
+    """Grade the CONTROL SAMPLE: for every distinct scanned prop in a finalized
+    game, fetch the box score ONCE per game and record whether the prop hit
+    (result_hit 1/0). One feed/live call per game (cheap, free). Without this the
+    Gate-2 calibration curve is censored to the alerted top-of-sort."""
+    counts = {"games": 0, "graded": 0}
+    try:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT DISTINCT game_pk, player_id, market, prop_line FROM mlb_prop_scan_log "
+            "WHERE result_hit IS NULL AND game_pk IS NOT NULL AND player_id IS NOT NULL"
+        ).fetchall()
+        by_game: Dict[int, list] = {}
+        for r in rows:
+            by_game.setdefault(r["game_pk"], []).append(r)
+        for game_pk, props in by_game.items():
+            feed = _mlb_get(f"{STATS_API_11}/game/{game_pk}/feed/live")
+            if not feed:
+                continue
+            if feed.get("gameData", {}).get("status", {}).get("abstractGameState") != "Final":
+                continue
+            counts["games"] += 1
+            for p in props:
+                stat, _final = _player_stat_from_feed(feed, p["player_id"], p["market"])
+                if stat is None:
+                    hit, rstat = None, None  # DNP -> leave unresolved (void), don't pollute
+                else:
+                    line = p["prop_line"] if p["prop_line"] is not None else 0.5
+                    hit, rstat = (1 if stat > line else 0), float(stat)
+                if hit is None:
+                    continue
+                conn.execute(
+                    "UPDATE mlb_prop_scan_log SET result_hit=?, result_stat=?, resolved_at=? "
+                    "WHERE game_pk=? AND player_id=? AND market=? AND result_hit IS NULL",
+                    (hit, rstat, datetime.now(timezone.utc).isoformat(),
+                     game_pk, p["player_id"], p["market"]),
+                )
+                counts["graded"] += 1
+        conn.commit()
+        conn.close()
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"resolve_scan_log_outcomes failed: {e}")
+    if counts["graded"]:
+        logger.info(f"mlb_prop_alerts: scan-log graded {counts}")
+    return counts
+
+
+def get_scan_analytics(limit_buckets: int = 12) -> Dict:
+    """Analytics over the control sample (mlb_prop_scan_log) for the dashboard /
+    WS-D: calibration-integrity overlay (alerted vs control), lookback-window
+    predictive power, and scan-window timing. Degrades to empty pre-data."""
+    out = {"calibration_integrity": [], "lookback_sweep": [], "timing": [],
+           "totals": {}}
+    try:
+        conn = _db()
+        t = conn.execute(
+            "SELECT COUNT(*) scanned, SUM(alerted) alerted, "
+            "SUM(CASE WHEN result_hit IS NOT NULL THEN 1 ELSE 0 END) resolved "
+            "FROM mlb_prop_scan_log").fetchone()
+        out["totals"] = {"scanned": t["scanned"] or 0, "alerted": t["alerted"] or 0,
+                         "resolved": t["resolved"] or 0}
+
+        # Calibration integrity: realized hit% by edge bucket, alerted vs control.
+        out["calibration_integrity"] = [
+            {"edge_bucket": r["bucket"],
+             "alerted_n": r["an"], "alerted_hit_pct": round(r["ah"] * 100, 1) if r["an"] else None,
+             "control_n": r["cn"], "control_hit_pct": round(r["ch"] * 100, 1) if r["cn"] else None}
+            for r in conn.execute(
+                "SELECT CAST(edge_pct/5 AS INT)*5 AS bucket, "
+                "SUM(alerted) an, AVG(CASE WHEN alerted=1 THEN result_hit END) ah, "
+                "SUM(CASE WHEN alerted=0 THEN 1 ELSE 0 END) cn, "
+                "AVG(CASE WHEN alerted=0 THEN result_hit END) ch "
+                "FROM mlb_prop_scan_log WHERE result_hit IS NOT NULL "
+                "GROUP BY bucket ORDER BY bucket DESC LIMIT ?", (limit_buckets,)).fetchall()]
+
+        # Lookback sweep: does a HOT window (>=60% recent) predict the hit? Per
+        # window, realized hit% when hot vs cold — bigger spread = more predictive.
+        for w in LOOKBACK_WINDOWS:
+            col = f"hr_l{w}"
+            r = conn.execute(
+                f"SELECT "
+                f"AVG(CASE WHEN {col}>=60 THEN result_hit END) hot, SUM(CASE WHEN {col}>=60 THEN 1 ELSE 0 END) hot_n, "
+                f"AVG(CASE WHEN {col}<60 THEN result_hit END) cold, SUM(CASE WHEN {col}<60 THEN 1 ELSE 0 END) cold_n "
+                f"FROM mlb_prop_scan_log WHERE result_hit IS NOT NULL AND {col} IS NOT NULL").fetchone()
+            hot = round(r["hot"] * 100, 1) if r["hot"] is not None else None
+            cold = round(r["cold"] * 100, 1) if r["cold"] is not None else None
+            out["lookback_sweep"].append({
+                "window": w, "hot_hit_pct": hot, "hot_n": r["hot_n"] or 0,
+                "cold_hit_pct": cold, "cold_n": r["cold_n"] or 0,
+                "spread_pp": round(hot - cold, 1) if (hot is not None and cold is not None) else None})
+
+        # Timing: count + avg book price + realized hit% by scan window.
+        out["timing"] = [
+            {"window_kind": r["window_kind"], "scans": r["n"],
+             "avg_book_over_pct": round(r["abp"], 1) if r["abp"] is not None else None,
+             "resolved_n": r["rn"], "hit_pct": round(r["hp"] * 100, 1) if r["hp"] is not None else None}
+            for r in conn.execute(
+                "SELECT window_kind, COUNT(*) n, AVG(book_over_pct) abp, "
+                "SUM(CASE WHEN result_hit IS NOT NULL THEN 1 ELSE 0 END) rn, AVG(result_hit) hp "
+                "FROM mlb_prop_scan_log GROUP BY window_kind ORDER BY n DESC").fetchall()]
         conn.close()
     except Exception as e:  # pragma: no cover
         out["error"] = str(e)
