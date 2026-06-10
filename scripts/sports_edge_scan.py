@@ -18,13 +18,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from odds.soccer_match_edge import get_soccer_match_summary
-from odds.soccer_futures_edge import get_soccer_futures_summary
+from odds.soccer_futures_edge import get_soccer_futures_summary, get_soccer_wc_board_summary
 from odds.ufc_edge import get_ufc_summary
 from api.deps import get_storage_service
 
 CACHE = {
     "soccer_match": ("soccer_match_edges.json", get_soccer_match_summary),
     "soccer_futures": ("soccer_futures_edges.json", get_soccer_futures_summary),
+    "soccer_wc_board": ("soccer_wc_board.json", get_soccer_wc_board_summary),
     "ufc": ("ufc_edges.json", get_ufc_summary),
 }
 

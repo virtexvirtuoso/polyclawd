@@ -120,3 +120,10 @@ async def find_soccer_futures_edges(min_edge: float = 0.03) -> List[sec.Edge]:
 
 async def get_soccer_futures_summary() -> Dict:
     return sec.summarize(await find_soccer_futures_edges(), WC_CFG)
+
+
+async def get_soccer_wc_board_summary() -> Dict:
+    """Full PM<->Betfair fair-value board for World Cup outrights — ALL matched
+    team pairs with NO 3% edge floor, so the dashboard can show fair value even
+    when there is no tradeable edge (the WC-winner market is efficient)."""
+    return sec.summarize(await find_soccer_futures_edges(min_edge=0.0), WC_CFG)

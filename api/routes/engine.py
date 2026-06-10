@@ -164,6 +164,8 @@ def load_engine_state() -> dict:
     state.setdefault("kalshi_fade_ranked_fill", False)
     # knob 7: Polymarket maker-shadow recorder (evidence only, no positions)
     state.setdefault("pm_maker_shadow_enabled", True)
+    # knob 6 prep: evening 82-member ensemble snapshots (pure data capture)
+    state.setdefault("ensemble_recorder_enabled", True)
     return state
 
 

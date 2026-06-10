@@ -70,6 +70,7 @@
 <div class="pane active" id="worldcup">
   <div class="wc-banner"><b>🌍 World Cup 2026 command center.</b> <span class="sub" style="display:inline">Betfair is the sharp reference for outrights · per-match 3-way devigged off Pinnacle · Kalshi cross-venue spread below.</span></div>
   <div class="card"><div class="ttl">🏆 WC Winner — Outright Board</div><div class="sub" style="margin-bottom:10px">Betfair sharp book vs Polymarket. Sorted by edge.</div><div class="scroll" id="wc-outright-body"><div class="empty">loading…</div></div></div>
+  <div class="card"><div class="ttl">📋 WC Winner — Fair-value board</div><div class="sub" style="margin-bottom:10px">Every matched Betfair↔Polymarket pair, no edge floor — fair value even when nothing is tradeable (the outright market is efficient). Favorites first; Diff = PM − Betfair (|Diff| ≥ 3pp ≈ where an edge would appear).</div><div class="scroll" id="wc-board-body"><div class="empty">loading…</div></div></div>
   <div class="card"><div class="ttl">⚽ WC Matches — 3-way (upcoming, soonest first)</div><div class="scroll" id="wc-matches-body"><div class="empty">loading…</div></div></div>
   <div class="card"><div class="ttl">🎰 Kalshi WC venue — cross-venue spread</div><div class="sub" id="kalshi-note" style="margin-bottom:10px"></div><div class="scroll" id="kalshi-wc-body"><div class="empty">loading…</div></div></div>
 </div>
@@ -88,7 +89,8 @@
 <script>
 const MATCH='/polyclawd/api/soccer/match-edge', FUT='/polyclawd/api/soccer/futures-edge',
       DASH='/polyclawd/api/soccer/dashboard', CRED='/polyclawd/api/odds-api/credits',
-      CALIB='/polyclawd/api/soccer/calibration', KWC='/polyclawd/api/soccer/kalshi-wc';
+      CALIB='/polyclawd/api/soccer/calibration', KWC='/polyclawd/api/soccer/kalshi-wc',
+      WCBOARD='/polyclawd/api/soccer/wc-board';
 const $=id=>document.getElementById(id);
 let _anyLive=false;  // true when any edge has a live WS book → poll faster
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
@@ -144,6 +146,24 @@ function wcOutrightRows(edges){
        `<td class="num ${(ee||0)>0?'pos':'neg'}">${ee!=null?(ee>0?'+':'')+ee+'%':'—'}</td>`+
        `<td class="num">${kfmt(e.fillable_usd)} ${fillBadge(e)}</td>`+
        `<td><span class="badge ${dir==='buy'?'buy':'sell'}">${esc(e.direction)}</span></td></tr>`;
+  }
+  return h+'</tbody></table>';
+}
+// WC fair-value board — ALL matched PM<->Betfair pairs (no edge floor), favorites first
+function wcBoardRows(edges){
+  if(!edges||!edges.length) return '<div class="empty">Fair-value board populates after the daily futures scan.</div>';
+  const rows=edges.slice().sort((a,b)=>(num(b.book_prob)||0)-(num(a.book_prob)||0));
+  let h='<table><thead><tr><th>Team</th><th class="num">Betfair%</th><th class="num">PM%</th>'+
+        '<th class="num">Diff</th><th class="num">Exec</th><th class="num">Fillable</th></tr></thead><tbody>';
+  for(const e of rows){
+    const bp=num(e.book_prob), pp=num(e.polymarket_price);
+    const diff=(bp!=null&&pp!=null)?Math.round((pp-bp)*10)/10:null;
+    const dcls=diff!=null&&Math.abs(diff)>=3?(diff>0?'pos':'neg'):'';
+    h+=`<tr><td>${esc(e.participant||e.event)}</td>`+
+       `<td class="num">${bp??'—'}</td><td class="num">${pp!=null?pp+'¢':'—'}</td>`+
+       `<td class="num ${dcls}">${diff!=null?(diff>0?'+':'')+diff:'—'}</td>`+
+       `<td class="num">${e.executable_price!=null?e.executable_price+'¢':'—'}</td>`+
+       `<td class="num">${kfmt(e.fillable_usd)}</td></tr>`;
   }
   return h+'</tbody></table>';
 }
@@ -252,8 +272,8 @@ function renderCalib(calib){
 function isWC(e){ return (e&&(e.event||'')).toLowerCase().includes('world cup'); }
 async function load(){
   try{
-    const [m,f,d,cr,calib,kwc]=await Promise.all(
-      [fetch(MATCH),fetch(FUT),fetch(DASH),fetch(CRED),fetch(CALIB),fetch(KWC)]
+    const [m,f,d,cr,calib,kwc,wb]=await Promise.all(
+      [fetch(MATCH),fetch(FUT),fetch(DASH),fetch(CRED),fetch(CALIB),fetch(KWC),fetch(WCBOARD)]
         .map(p=>p.then(r=>r.json()).catch(()=>({}))));
     const me=(m.edges||[]),fe=(f.edges||[]);
     _anyLive=[...me,...fe].some(x=>x&&x.live_book===true);
@@ -265,6 +285,8 @@ async function load(){
     const wcOut=fe.filter(e=>{const mt=(e.market_type||'').toLowerCase();
       return isWC(e)||mt==='outright'||mt===''; });
     $('wc-outright-body').innerHTML=wcOutrightRows(wcOut);
+    // B1b — fair-value board (all matched pairs, no edge floor)
+    $('wc-board-body').innerHTML=wcBoardRows(wb.edges||[]);
     // B2 — WC matches from match-edge
     const wcMatch=me.filter(isWC);
     $('wc-matches-body').innerHTML=wcMatchRows(wcMatch);

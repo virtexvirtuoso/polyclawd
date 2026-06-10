@@ -2293,6 +2293,7 @@ async def get_odds_api_credits():
 _SPORTS_EDGE_CACHE = {
     "soccer_match": "soccer_match_edges.json",
     "soccer_futures": "soccer_futures_edges.json",
+    "soccer_wc_board": "soccer_wc_board.json",
     "ufc": "ufc_edges.json",
 }
 
@@ -2431,6 +2432,14 @@ async def get_soccer_calibration_route():
     except Exception as e:
         logger.exception(f"soccer calibration failed: {e}")
         return {"by_strategy": [], "calibration": [], "clv": {}, "error": str(e)}
+
+
+@router.get("/soccer/wc-board")
+async def get_soccer_wc_board():
+    """World Cup outright FAIR-VALUE board — every matched PM<->Betfair team pair
+    with NO edge floor (the WC-winner market is efficient, so this shows fair value
+    even when nothing clears the 3% tradeable threshold). Scanner-populated."""
+    return await _read_edge_cache("soccer_wc_board", "the_odds_api_soccer_futures")
 
 
 @router.get("/soccer/kalshi-wc")

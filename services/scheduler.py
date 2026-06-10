@@ -266,6 +266,16 @@ def task_pm_maker_shadow():
     record_evening()
 
 
+def task_ensemble_recorder():
+    """Evening 82-member ensemble snapshot per city (knob 6 training data --
+    perishable; see signals/ensemble_recorder.py). Pure data capture."""
+    from api.routes.engine import load_engine_state
+    if not load_engine_state().get("ensemble_recorder_enabled", True):
+        return
+    from signals.ensemble_recorder import record
+    record()
+
+
 def task_weather_shift_alerts():
     """Alert on significant forecast shifts for open weather positions."""
     conn = _db()
@@ -745,7 +755,7 @@ def task_soccer_futures_scan():
 
     from scripts.sports_edge_scan import run
 
-    asyncio.run(run(["soccer_futures"]))
+    asyncio.run(run(["soccer_futures", "soccer_wc_board"]))
 
 
 def task_soccer_resolve():
@@ -1006,6 +1016,7 @@ async def tick_30min():
         await run_in_thread(_run_safe, "mlb_props_resolve", task_mlb_props_resolve)
         await run_in_thread(_run_safe, "kalshi_fade_scan", task_kalshi_fade_scan)
         await run_in_thread(_run_safe, "pm_maker_shadow", task_pm_maker_shadow)
+        await run_in_thread(_run_safe, "ensemble_recorder", task_ensemble_recorder)
         # Soccer/WC: scan match edges + resolve closed shadows every 2h (4 ticks).
         _state["soccer_scan_n"] = _state.get("soccer_scan_n", 0) + 1
         if _state["soccer_scan_n"] % 4 == 0:
