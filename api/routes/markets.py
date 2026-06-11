@@ -2442,22 +2442,37 @@ async def get_soccer_wc_board():
     return await _read_edge_cache("soccer_wc_board", "the_odds_api_soccer_futures")
 
 
+_KWC_TTL_S = 300  # Kalshi WC prices move slowly; 5-min board freshness is plenty.
+
+
 @router.get("/soccer/kalshi-wc")
 async def get_soccer_kalshi_wc():
-    """Kalshi World Cup game-winner markets (executable venue). Empty until the WC
-    series lists (~near kickoff). Cross-reference to PM/Betfair edges is done
-    client-side by team name. Kalshi taker fee ~quadratic; maker orders fee-free."""
+    """Kalshi World Cup game-winner markets (executable venue), DISK-cached 5 min so
+    the ~5s/216-market live fetch happens once per 5 min and is SHARED across uvicorn
+    workers (an in-process cache wouldn't be — requests round-robin across workers).
+    Empty until the WC series lists. PM/Betfair cross-ref is client-side."""
+    import time as _t
+    from api.deps import get_storage_service
+
+    storage = get_storage_service()
+    fname = "soccer_kalshi_wc.json"
+    cached = await storage.load(fname, default=None)
+    if cached and (_t.time() - cached.get("_ts", 0)) < _KWC_TTL_S:
+        return cached
     try:
         from odds.kalshi_sports import fetch_wc_game_markets
         markets = await run_in_threadpool(fetch_wc_game_markets)
-        return {
+        payload = {
             "markets": markets, "count": len(markets),
+            "cached_ttl_s": _KWC_TTL_S, "_ts": _t.time(),
             "note": ("Kalshi WC game-winner venue — cross-ref to PM by team; taker fee ~quadratic, maker fee-free."
                      if markets else "No Kalshi WC series live yet (KXWC26* lists near kickoff)."),
         }
+        await storage.save(fname, payload)
+        return payload
     except Exception as e:
         logger.exception(f"soccer kalshi-wc failed: {e}")
-        return {"markets": [], "count": 0, "error": str(e)}
+        return cached or {"markets": [], "count": 0, "error": str(e)}
 
 
 @router.get("/ufc/dashboard")

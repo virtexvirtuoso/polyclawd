@@ -738,6 +738,28 @@ def task_mlb_props_resolve():
     resolve_scan_log_outcomes()
 
 
+def task_mlb_dashboard_warm():
+    """Pre-warm the baseball dashboard's disk caches so NO user request ever eats a
+    cold compute (scout cold ~ seconds, kalshi scan cold ~28s). The dashboard uses
+    last_n=10 (the alert scan warms last_n=20, a different cache key). Free: reuses
+    the cached Odds props + Kalshi (free) + statsapi (free)."""
+    import asyncio
+
+    async def _warm():
+        from odds.mlb_prop_scout import get_prop_scout
+        from odds.kalshi_props import get_kalshi_prop_scan
+        try:
+            await get_prop_scout(last_n=10, min_edge=-0.99, min_games=7)
+        except Exception as e:
+            logger.debug("scout warm skipped: %s", e)
+        try:
+            await get_kalshi_prop_scan(min_edge=2.0, last_n=10)
+        except Exception as e:
+            logger.debug("kalshi warm skipped: %s", e)
+
+    asyncio.run(_warm())
+
+
 def task_soccer_match_scan():
     """Soccer/WC: refresh the per-match 3-way edge cache (~every 2h) so the
     dashboard stays live through the tournament. Odds-API spend is gated upstream
@@ -992,6 +1014,7 @@ async def tick_5min():
         await run_in_thread(_run_safe, "equity_snapshot", task_equity_snapshot)
         await run_in_thread(_run_safe, "resolution_scanner", task_resolution_scanner)
         await run_in_thread(_run_safe, "mlb_props_scratch", task_mlb_props_scratch)
+        await run_in_thread(_run_safe, "mlb_dashboard_warm", task_mlb_dashboard_warm)
         await run_in_thread(_run_safe, "weather_reeval", task_weather_reeval)
         await run_in_thread(_run_safe, "weather_fast_scan", task_weather_fast_scan)
         await run_in_thread(_run_safe, "weather_shift_alerts", task_weather_shift_alerts)

@@ -58,6 +58,38 @@ OB_DELAY_S = 0.15  # delay between orderbook requests (rate limit)
 
 _CACHE: Dict = {"ts": 0.0, "data": None, "key": ""}
 
+# Disk cache shared across uvicorn workers (in-memory _CACHE is per-worker, so with
+# multiple workers most requests would still eat the ~28s cold scan). Mirrors
+# mlb_prop_scout's disk cache.
+_DISK_CACHE_PATH = "/tmp/polyclawd_kalshi_scan_cache.json"
+
+
+def _read_disk_cache(key: str):
+    try:
+        import os
+        if not os.path.exists(_DISK_CACHE_PATH):
+            return None
+        with open(_DISK_CACHE_PATH) as f:
+            p = json.load(f)
+        if p.get("_cache_key") != key or (time.time() - p.get("_disk_ts", 0)) > CACHE_TTL_S:
+            return None
+        return p
+    except Exception:
+        return None
+
+
+def _write_disk_cache(payload: Dict) -> None:
+    try:
+        import os
+        p = dict(payload)
+        p["_disk_ts"] = time.time()
+        tmp = _DISK_CACHE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(p, f)
+        os.replace(tmp, _DISK_CACHE_PATH)
+    except Exception as e:
+        logger.debug(f"kalshi_props disk cache write failed: {e}")
+
 # Ticker pattern examples:
 #   KXMLBKS-26JUN061610PITATL-ATLSSTRIDER99-7
 #   KXMLBHR-26JUN061507BALTOR-TORGSPRINGER4-1
@@ -282,6 +314,10 @@ async def get_kalshi_prop_scan(
     cache_key = f"{min_edge_pct}_{last_n}"
     if _CACHE["data"] and _CACHE["key"] == cache_key and now - _CACHE["ts"] < CACHE_TTL_S:
         return _CACHE["data"]
+    disk = _read_disk_cache(cache_key)
+    if disk is not None:
+        _CACHE["data"], _CACHE["ts"], _CACHE["key"] = disk, now, cache_key
+        return disk
 
     loop = asyncio.get_event_loop()
 
@@ -445,6 +481,7 @@ async def get_kalshi_prop_scan(
     maker_subsidized = _lip_covers_mlb_props(programs)
 
     payload = {
+        "_cache_key": cache_key,
         "source": "kalshi_prop_scan",
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "last_n": last_n,
@@ -458,4 +495,5 @@ async def get_kalshi_prop_scan(
     _CACHE["data"] = payload
     _CACHE["ts"] = now
     _CACHE["key"] = cache_key
+    _write_disk_cache(payload)
     return payload
