@@ -302,11 +302,19 @@ def _get_dynamic_kelly(conn, confidence: float = 0.60) -> Dict[str, Any]:
     drawdown_pct = (peak - bankroll) / peak if peak > 0 else 0
 
     # ── Layer 1: Rolling WR sets the safety floor ─────────────────
+    # Log pause/resume ONLY on state transition (this runs every ~30s; an
+    # unconditional warning here spammed the journal 112x/hour).
+    _paused_now = drawdown_pct >= DRAWDOWN_PAUSE_PCT
+    if _paused_now != _KELLY_PAUSE_STATE["paused"]:
+        if _paused_now:
+            logger.warning("🛑 KELLY PAUSED: drawdown={:.1%} >= threshold {:.0%}", drawdown_pct, DRAWDOWN_PAUSE_PCT)
+        else:
+            logger.info("✅ KELLY RESUMED: drawdown {:.1%} < threshold {:.0%}", drawdown_pct, DRAWDOWN_PAUSE_PCT)
+        _KELLY_PAUSE_STATE["paused"] = _paused_now
     if drawdown_pct >= DRAWDOWN_PAUSE_PCT:
         fraction = 0
         status = "paused"
         reason = f"Drawdown {drawdown_pct:.1%} >= {DRAWDOWN_PAUSE_PCT:.0%} — trading paused"
-        logger.warning("🛑 KELLY PAUSED: drawdown={}%% (threshold {}%%)", drawdown_pct * 100, DRAWDOWN_PAUSE_PCT * 100)
     elif rolling_trades < BOOTSTRAP_TRADES:
         # Bootstrap mode: seed WR assumption until enough data
         fraction = KELLY_FRACTION_BOOTSTRAP
@@ -373,6 +381,9 @@ KELLY_FRACTION_COLD = 1 / 12  # Half size when win rate drops
 KELLY_ROLLING_WINDOW = 20     # Trades to evaluate rolling WR
 KELLY_MIN_WR = 0.55           # Below this → downshift to KELLY_FRACTION_COLD
 DRAWDOWN_PAUSE_PCT = 0.30     # 30% drawdown → pause trading (raised from 15% — paper mode needs data)
+# Per-worker pause-state latch so the Kelly pause logs only on STATE TRANSITION
+# (entry/recovery) instead of every ~30s evaluation (was 112 log lines/hour).
+_KELLY_PAUSE_STATE = {"paused": False}
 BOOTSTRAP_TRADES = 20         # Minimum trades before trusting rolling stats
 BOOTSTRAP_WR = 0.57           # Seeded WR during bootstrap (Becker-validated)
 KELLY_FRACTION_BOOTSTRAP = 1 / 8  # Between cold (1/12) and normal (1/6)

@@ -617,6 +617,48 @@ def alert_tweet_pace(handle: str, market_title: str, side: str,
 
 # ── Whale Wall Alerts ────────────────────────────────────────────────────
 
+def alert_whale_scan(alert: dict) -> bool:
+    """Alert from thin-market whale scanner (Kalshi weather + Polymarket props)."""
+    sev = alert.get("severity", "LOW")
+    score = alert.get("score", 0)
+    platform = alert.get("platform", "?")
+    market = alert.get("market", "?")
+    reasons = alert.get("reasons", "")
+    
+    emoji = "🚨" if sev == "CRITICAL" else "⚠️" if sev == "HIGH" else "🐟"
+    plat_icon = "📊" if platform == "kalshi" else "🔵"
+    
+    description = f"Score: **{score}/10** | {reasons}"
+    
+    if platform == "kalshi":
+        url = f"https://kalshi.com/markets/{market.split('-')[0]}"
+    else:
+        url = f"https://polymarket.com/event/{market}"
+    description += f"\n[View Market]({url})"
+    
+    fields = []
+    if "best_bid" in alert:
+        fields.append({"name": "Bid/Ask", "value": f"{alert['best_bid']:.3f} / {alert['best_ask']:.3f}", "inline": True})
+    if "current_price" in alert:
+        fields.append({"name": "Price", "value": f"{alert['current_price']:.3f}", "inline": True})
+    if "bid_depth" in alert:
+        bid = alert["bid_depth"]
+        ask = alert["ask_depth"]
+        ratio = alert.get("ratio", 0)
+        fields.append({"name": "Depth", "value": f"{bid:.0f}B / {ask:.0f}A ({ratio:.1f}x)", "inline": True})
+    
+    title_short = alert.get("title", market)[:70]
+    
+    return _send([{
+        "title": f"{emoji} {plat_icon} {sev} Whale — {title_short}",
+        "description": description,
+        "color": COLOR_ORANGE if sev == "CRITICAL" else COLOR_CYAN,
+        "fields": fields,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": f"Whale Shark — {platform}"},
+    }], alert_type="whale_scan", alert_meta=alert)
+
+
 def alert_whale_wall(market_title: str, side: str, imbalance_ratio: float,
                      bid_depth: float, ask_depth: float,
                      bid_walls: int = 0, ask_walls: int = 0,

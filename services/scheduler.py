@@ -522,6 +522,41 @@ def task_options_scan():
         logger.exception("Options paper trade failed: %s", e)
 
 
+def task_whale_scanner():
+    """Thin-market whale scanner: Kalshi weather + Polymarket props, 5-min tick."""
+    from signals.whale_scanner import run_scan
+    from signals.discord_alerts import alert_whale_scan
+
+    COOLDOWN = 1200  # 20 min per market
+    now = time.time()
+
+    if "whale_alert_cooldown" not in _state:
+        _state["whale_alert_cooldown"] = {}
+
+    try:
+        alerts = run_scan()
+        for a in alerts:
+            market = a.get("market", "")
+            score = a.get("score", 0)
+            severity = a.get("severity", "LOW")
+
+            if score < 5:
+                continue
+
+            last = _state["whale_alert_cooldown"].get(market, 0)
+            if now - last < COOLDOWN:
+                continue
+
+            _state["whale_alert_cooldown"][market] = now
+            alert_whale_scan(a)
+            logger.info(
+                "Whale scanner alert [%s]: %s score=%d %s",
+                severity, market, score, a.get("reasons", ""),
+            )
+    except Exception as e:
+        logger.exception("Whale scanner failed: %s", e)
+
+
 def task_whale_wall_alerts():
     """Alert on new whale wall detections (dedup by market_id, 4h cooldown)."""
     from signals.whale_wall_scanner import scan_whale_walls
@@ -1023,6 +1058,7 @@ async def tick_5min():
         await run_in_thread(_run_safe, "weather_reeval", task_weather_reeval)
         await run_in_thread(_run_safe, "weather_fast_scan", task_weather_fast_scan)
         await run_in_thread(_run_safe, "weather_shift_alerts", task_weather_shift_alerts)
+        await run_in_thread(_run_safe, "whale_scanner", task_whale_scanner)
         await run_in_thread(_run_safe, "tweet_pace_alerts", task_tweet_pace_alerts)
         await run_in_thread(_run_safe, "calibration_check", task_calibration_check)
         logger.debug("5-min tick complete")
