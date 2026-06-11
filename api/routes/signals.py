@@ -3531,14 +3531,33 @@ async def get_clarity_widget_data():
         content=out,
     )
 
+_IVRV_TTL_S = 600  # IV/RV moves slowly; 10-min board freshness is plenty.
+
+
 @router.get("/options/iv-rv")
 async def get_options_iv_rv():
-    """Get IV/RV ratios for all tracked options tickers."""
+    """Get IV/RV ratios for all tracked options tickers. DISK-cached 10 min (shared
+    across uvicorn workers) — the cold compute is ~8s of yfinance RV fetches and
+    blocks the event loop if run inline, so it runs in the threadpool and the result
+    is cached to disk so no user request repeats it per-worker."""
+    import time as _t
+    from fastapi.concurrency import run_in_threadpool
+    from api.deps import get_storage_service
+
+    storage = get_storage_service()
+    fname = "options_iv_rv_cache.json"
+    cached = await storage.load(fname, default=None)
+    if cached and (_t.time() - cached.get("_ts", 0)) < _IVRV_TTL_S:
+        return cached.get("data", {})
     try:
         from signals.vol_spread import get_iv_rv_status
-        return get_iv_rv_status()
+        data = await run_in_threadpool(get_iv_rv_status)
+        await storage.save(fname, {"_ts": _t.time(), "data": data})
+        return data
     except Exception as e:
         logger.exception("Options IV/RV error")
+        if cached:
+            return cached.get("data", {})
         raise HTTPException(status_code=500, detail=str(e))
 
 

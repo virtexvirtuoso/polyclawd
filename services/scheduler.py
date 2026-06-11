@@ -738,11 +738,11 @@ def task_mlb_props_resolve():
     resolve_scan_log_outcomes()
 
 
-def task_mlb_dashboard_warm():
-    """Pre-warm the baseball dashboard's disk caches so NO user request ever eats a
-    cold compute (scout cold ~ seconds, kalshi scan cold ~28s). The dashboard uses
-    last_n=10 (the alert scan warms last_n=20, a different cache key). Free: reuses
-    the cached Odds props + Kalshi (free) + statsapi (free)."""
+def task_dashboard_warm():
+    """Pre-warm slow dashboard caches so NO user request ever eats a cold compute:
+    baseball scout (last_n=10, the dashboard key vs the alert scan's last_n=20),
+    baseball Kalshi scan (cold ~28s), and options IV/RV (cold ~8s yfinance refetch
+    on the 1h RV-cache expiry). All effectively free (reuse cached/free upstreams)."""
     import asyncio
 
     async def _warm():
@@ -758,6 +758,11 @@ def task_mlb_dashboard_warm():
             logger.debug("kalshi warm skipped: %s", e)
 
     asyncio.run(_warm())
+    try:
+        from signals.vol_spread import get_iv_rv_status
+        get_iv_rv_status()  # options.html — warms vol_cache.json (yfinance RV)
+    except Exception as e:
+        logger.debug("iv-rv warm skipped: %s", e)
 
 
 def task_soccer_match_scan():
@@ -1014,7 +1019,7 @@ async def tick_5min():
         await run_in_thread(_run_safe, "equity_snapshot", task_equity_snapshot)
         await run_in_thread(_run_safe, "resolution_scanner", task_resolution_scanner)
         await run_in_thread(_run_safe, "mlb_props_scratch", task_mlb_props_scratch)
-        await run_in_thread(_run_safe, "mlb_dashboard_warm", task_mlb_dashboard_warm)
+        await run_in_thread(_run_safe, "dashboard_warm", task_dashboard_warm)
         await run_in_thread(_run_safe, "weather_reeval", task_weather_reeval)
         await run_in_thread(_run_safe, "weather_fast_scan", task_weather_fast_scan)
         await run_in_thread(_run_safe, "weather_shift_alerts", task_weather_shift_alerts)
