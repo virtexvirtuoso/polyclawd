@@ -45,7 +45,7 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 
 EPS = 0.005            # |move| below this = no-move, correctness stays NULL
 H1, H6 = 3600, 6 * 3600
-BACKFILL_CAP = 300     # price lookups per run (batched, so cheap)
+BACKFILL_CAP = 500     # price lookups per run (batched, so cheap)
 GIVE_UP_AFTER = 35 * 24 * 3600   # stop chasing resolution after 35 days
 
 
@@ -225,7 +225,7 @@ def backfill(meta: sqlite3.Connection) -> dict:
     k_tickers = sorted({r["market"] for r in due if r["platform"] == "kalshi"})
     p_slugs = sorted({r["market"] for r in due if r["platform"] == "polymarket"})
     k = kalshi_lookup(k_tickers) if k_tickers else {}
-    pm = pm_lookup(p_slugs[:80]) if p_slugs else {}   # gamma is 1 call/slug; cap
+    pm = pm_lookup(p_slugs[:150]) if p_slugs else {}   # gamma is 1 call/slug; cap
 
     filled = resolved = 0
     for r in due:

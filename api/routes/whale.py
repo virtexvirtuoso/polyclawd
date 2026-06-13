@@ -422,6 +422,13 @@ def whale_top(limit: int = Query(10, ge=1, le=50),
             continue
         w = r["top_wallet"] or ""
         wallet_short = w[:10] + "..." if len(w) > 16 else w
+        # Cost-adjusted EV: wallet_win_rate - price - half_spread (YES direction default)
+        _wr = r["wallet_win_rate"]
+        _price = r["price_at_alert"]
+        _sp = r["spread_bps"]
+        _half_sp = (_sp / 2 / 10000) if (_sp and _sp > 0) else 0.005
+        ev_net = round(_wr - _price - _half_sp, 3) if (_wr is not None and _price is not None) else None
+
         entry = {
             "market": r["market"],
             "platform": r["platform"],
@@ -434,6 +441,7 @@ def whale_top(limit: int = Query(10, ge=1, le=50),
             "spread_bps": r["spread_bps"],
             "hours_to_resolve": r["hours_to_resolve"],
             "archetype": r["market_archetype"],
+            "ev_net": ev_net,
             "url": ("https://polymarket.com/market/" + r["market"]) if r["platform"] == "polymarket" else ("https://kalshi.com/markets/" + r["market"].split("-")[0]),
         }
         if r["market"] not in seen or s > seen[r["market"]]["score"]:
