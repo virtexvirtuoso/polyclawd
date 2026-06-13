@@ -16,7 +16,7 @@ OPENCLAW_GATEWAY = "http://localhost:18789"
 DEFAULT_CHAT_ID = "468298295"  # Mr. V
 
 
-def _telegram_http_send(message: str, silent: bool = False) -> bool:
+def _telegram_http_send(message: str, silent: bool = False, parse_mode: str = "Markdown") -> bool:
     """Direct Telegram Bot API send — the delivery path on hosts without the
     openclaw CLI (the VPS). Token comes from the service EnvironmentFile
     (TELEGRAM_BOT_TOKEN in /etc/default/polyclawd); never hardcoded."""
@@ -28,14 +28,14 @@ def _telegram_http_send(message: str, silent: bool = False) -> bool:
         print("[OpenClaw] no openclaw CLI and TELEGRAM_BOT_TOKEN unset — telegram alert dropped")
         return False
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", DEFAULT_CHAT_ID)
-    payload = urllib.parse.urlencode(
-        {
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "Markdown",
-            "disable_notification": "true" if silent else "false",
-        }
-    ).encode()
+    fields = {
+        "chat_id": chat_id,
+        "text": message,
+        "disable_notification": "true" if silent else "false",
+    }
+    if parse_mode:  # omit entirely for plain text (avoids 400 on stray _ / * in data)
+        fields["parse_mode"] = parse_mode
+    payload = urllib.parse.urlencode(fields).encode()
     try:
         req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=payload)
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -48,7 +48,7 @@ def _telegram_http_send(message: str, silent: bool = False) -> bool:
         return False
 
 
-def alert_openclaw(message: str, channel: str = "telegram", silent: bool = False) -> bool:
+def alert_openclaw(message: str, channel: str = "telegram", silent: bool = False, parse_mode: str = "Markdown") -> bool:
     """
     Send an alert via OpenClaw CLI.
 
@@ -81,7 +81,7 @@ def alert_openclaw(message: str, channel: str = "telegram", silent: bool = False
 
     except FileNotFoundError:
         if channel == "telegram":
-            return _telegram_http_send(message, silent=silent)
+            return _telegram_http_send(message, silent=silent, parse_mode=parse_mode)
         print("[OpenClaw] CLI not found - openclaw not in PATH")
         return False
     except subprocess.TimeoutExpired:
