@@ -12,9 +12,13 @@ STATE_FILE = "/tmp/whale_alert_tg_state.json"
 
 # Thresholds for sending
 MIN_SCORE = 0.48
-MAX_HTR = 72          # hours — only alert if resolves within 48h
+MIN_HTR = 1.0         # hours — skip if resolves in < 1h (not actionable)
+MAX_HTR = 72          # hours — only alert if resolves within 72h
 MIN_FLOW = 5000       # minimum $5K flow to alert
 MIN_WALLET_WR = 0.45  # wallet win rate threshold (or unknown)
+# Extreme wallet WR (1.0 or 0.0) almost certainly means n=1 resolved trade — treat as unknown
+EXTREME_WR_LO = 0.01
+EXTREME_WR_HI = 0.99
 
 def load_state():
     try:
@@ -61,15 +65,17 @@ def is_actionable(alert):
     htr = alert.get("hours_to_resolve")
     flow = alert.get("flow_dollars", 0)
     wr = alert.get("wallet_win_rate")
-    
+
     if score < MIN_SCORE:
         return False
-    if htr is not None and (htr < 0.25 or htr > MAX_HTR):
+    if htr is not None and (htr < MIN_HTR or htr > MAX_HTR):
         return False
     if flow < MIN_FLOW:
         return False
-    if wr is not None and wr < MIN_WALLET_WR:
-        return False  # Known bad wallet
+    # Treat extreme wallet WR (1.0 / 0.0) as unknown — almost certainly n=1
+    if wr is not None and EXTREME_WR_LO < wr < EXTREME_WR_HI:
+        if wr < MIN_WALLET_WR:
+            return False  # Known bad wallet with sufficient sample
     return True
 
 def format_alert(alert, rank):

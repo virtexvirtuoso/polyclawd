@@ -422,12 +422,18 @@ def whale_top(limit: int = Query(10, ge=1, le=50),
             continue
         w = r["top_wallet"] or ""
         wallet_short = w[:10] + "..." if len(w) > 16 else w
-        # Cost-adjusted EV: wallet_win_rate - price - half_spread (YES direction default)
+        # Cost-adjusted EV: wallet_win_rate - entry_price - half_spread
+        # direction=-1 means whale bet NO, so entry price is (1 - YES_price)
         _wr = r["wallet_win_rate"]
         _price = r["price_at_alert"]
+        _dir = r["direction"]
         _sp = r["spread_bps"]
         _half_sp = (_sp / 2 / 10000) if (_sp and _sp > 0) else 0.005
-        ev_net = round(_wr - _price - _half_sp, 3) if (_wr is not None and _price is not None) else None
+        if _wr is not None and _price is not None:
+            _entry = (1.0 - _price) if _dir == -1 else _price
+            ev_net = round(_wr - _entry - _half_sp, 3)
+        else:
+            ev_net = None
 
         entry = {
             "market": r["market"],
