@@ -369,15 +369,20 @@ Sports archetype was initially weighted 0.7 (bonus). Real data showed 35.7% = be
 
 ### Known Limitations
 
-- **PM direction**: Only set for ~5% of PM alerts (those with `flow_desc` where one side has ≥67% of flow). `flow_yes`/`flow_no` was hardcoded as total flow — fixed in scanner.
-- **PM resolution**: 0 resolved PM outcomes (PM markets are 2 days old; will resolve naturally as tonight's WC/MLB games end)
-- **EV calculation**: Assumes YES direction (most PM whale flow); not directional-aware yet
-- **Auto-tuning**: Bayesian weight updates blocked until 200+ resolved CRITICAL alerts (currently 32, from single 35-min window)
+- **PM direction**: Only set for ~5% of PM alerts (those with `flow_desc` where one side has ≥67% of flow). `flow_yes`/`flow_no` was hardcoded as total flow — fixed in scanner (f56ee40).
+- **PM resolution**: Resolves naturally as games/events settle. CLV and direction backfill runs hourly.
+- **EV calculation**: Direction-aware since 2026-06-14 (Fix 2, commit 644b091). NO bets use `1-price` as entry. PM alerts with `direction=None` still fall back to YES price assumption.
+- **Auto-tuning**: Bayesian weight updates blocked until 200+ resolved CRITICAL alerts. Growing steadily.
+- **wallet_n coverage**: Only ~4% of alerts have pm_wallets entries. wallet_n=None alerts bypass WR gate (treated unknown). Coverage grows as pm_wallets is refreshed.
 
-### Next Steps (Week 2+)
+### QA Audit (2026-06-14)
+Full /qa pass run against June 13 implementation. 4 bugs found and fixed, all verified. See `05-Decisions/2026-06-14-QA-Whale-Autolearning.md`.
 
-- [ ] Wait for PM resolution data to accumulate (tonight's WC games)
+Commits: 644b091 (fixes 1-4), 54f4f3b (Fix 3 proper — wallet_n schema).
+
+### Next Steps
+
 - [ ] Add position sizing: Kelly fraction, max daily loss $250, max 5 concurrent positions
-- [ ] Bayesian weight updates once 200 CRITICAL resolved (est. Week 3)
+- [ ] Bayesian weight updates once 200 CRITICAL resolved
 - [ ] CLOB historical price backfill (conditionId batch API, limited by rate limits)
-- [ ] Add `fade_score` (inverse signal for known bad wallets)
+- [ ] `fade_score` for known bad wallets (wr=0.0, n≥20 wallets are strong fade signals)
