@@ -77,7 +77,11 @@ def _init_table(conn: sqlite3.Connection):
 def record_success(source: str, latency_ms: float):
     """Record a successful fetch for a source."""
     logger.debug("source_health: %s SUCCESS latency=%.0fms", source, latency_ms)
-    conn = _get_db()
+    try:
+        conn = _get_db()
+    except Exception as e:
+        logger.debug("source_health: %s record_success skipped (db busy): %s", source, e)
+        return
     now = datetime.now(timezone.utc).isoformat()
 
     row = conn.execute("SELECT * FROM source_health WHERE source=?", (source,)).fetchone()
@@ -115,7 +119,11 @@ def touch_source(source: str):
     (e.g. to keep dashboard freshness signals green) without claiming a real fetch.
     Consumers checking 'did we really fetch?' should read last_success; consumers
     checking 'is this source under active surveillance?' should read last_touched."""
-    conn = _get_db()
+    try:
+        conn = _get_db()
+    except Exception as e:
+        logger.debug("source_health: %s touch_source skipped (db busy): %s", source, e)
+        return
     now = datetime.now(timezone.utc).isoformat()
     row = conn.execute("SELECT 1 FROM source_health WHERE source=?", (source,)).fetchone()
     if row:
@@ -133,7 +141,11 @@ def touch_source(source: str):
 def record_failure(source: str, error_msg: str):
     """Record a failed fetch for a source."""
     logger.debug("source_health: %s FAILURE error=%s", source, error_msg[:100])
-    conn = _get_db()
+    try:
+        conn = _get_db()
+    except Exception as e:
+        logger.debug("source_health: %s record_failure skipped (db busy): %s", source, e)
+        return
     now = datetime.now(timezone.utc).isoformat()
 
     row = conn.execute("SELECT * FROM source_health WHERE source=?", (source,)).fetchone()

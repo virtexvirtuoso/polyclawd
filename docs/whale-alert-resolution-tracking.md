@@ -279,9 +279,9 @@ Week 5+: Build Auto-Learning (ongoing)
 After Week 1 (Step 1 + Step 0 + Step 0b):
 - [ ] Accurate win/loss results for all whale_follows
 - [ ] Win rate known by archetype, exit reason, platform (but treat as provisional — <1 week of data)
-- [ ] flow_dollars, top_wallet, spread_bps extracted into queryable columns
-- [ ] market_archetype classifier built and applied to all 59K alerts
-- [ ] Basic ranked feed showing top 10 alerts by flat weighted score
+- [x] flow_dollars, top_wallet, spread_bps extracted into queryable columns (f56ee40, 2026-06-13)
+- [x] market_archetype classifier built and applied to all 59K alerts (f56ee40, 2026-06-13)
+- [x] Basic ranked feed showing top 10 alerts by flat weighted score (f56ee40 + 2f70341, 2026-06-13)
 
 **Gate for Week 2-3:** 7+ days of continuous data, 200+ resolved CRITICAL alerts
 
