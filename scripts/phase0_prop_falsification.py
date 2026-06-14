@@ -40,6 +40,7 @@ USAGE
   python3 scripts/phase0_prop_falsification.py --pull-historical \
       --sport soccer_fifa_world_cup --date 2026-06-12T18:00:00Z --data-dir ./phase0_data
 """
+
 from __future__ import annotations
 
 import argparse
@@ -50,6 +51,17 @@ import sys
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from datetime import datetime
+
+
+def _parse_iso(s):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
 
 # ── Reuse the repo's de-vig functions if importable; else inline copies ───────
 # (Reusing proves B13's point: the Shin method the spec needs ALREADY exists in
@@ -61,6 +73,7 @@ try:
         american_to_implied_prob,
         devig_shin,
     )
+
     _SRC = "odds.sports_edge_common"
 except Exception:  # standalone fallback — exact copies
     _SRC = "inlined fallback"
@@ -78,13 +91,13 @@ except Exception:  # standalone fallback — exact copies
         for _ in range(iters):
             roots = [(z * z + 4 * (1 - z) * (p * p) / s) ** 0.5 for p in implied]
             f = sum(roots) - 2.0 - z * (n - 2.0)
-            df = sum(((2 * z - 4 * (p * p) / s) / (2 * r) if r > 0 else 0.0)
-                     for p, r in zip(implied, roots)) - (n - 2.0)
+            df = sum(((2 * z - 4 * (p * p) / s) / (2 * r) if r > 0 else 0.0) for p, r in zip(implied, roots)) - (
+                n - 2.0
+            )
             if abs(df) < 1e-12:
                 break
             z = min(0.999, max(0.0, z - f / df))
-        true = [(((z * z + 4 * (1 - z) * (p * p) / s) ** 0.5) - z) / (2 * (1 - z)) if z < 1 else p / s
-                for p in implied]
+        true = [(((z * z + 4 * (1 - z) * (p * p) / s) ** 0.5) - z) / (2 * (1 - z)) if z < 1 else p / s for p in implied]
         t = sum(true)
         return [x / t for x in true] if t > 0 else [p / s for p in implied]
 
@@ -97,12 +110,11 @@ OLD_SHARP_BOOK = "pinnacle"
 SOCCER_PROP_SHARP_WEIGHTS = {
     "betfair_ex_uk": 0.40,
     "betfair_ex_eu": 0.40,
-    "pinnacle":      0.15,
-    "williamhill":   0.05,
+    "pinnacle": 0.15,
+    "williamhill": 0.05,
 }
 
-SOFT_BOOKS = {"draftkings", "fanduel", "betrivers", "betmgm",
-              "caesars", "onexbet", "skybet", "williamhill_us"}
+SOFT_BOOKS = {"draftkings", "fanduel", "betrivers", "betmgm", "caesars", "onexbet", "skybet", "williamhill_us"}
 
 PROP_MARKETS = {"player_goal_scorer_anytime", "player_to_receive_card"}
 SIDE_NAMES = {"yes", "no", "over", "under"}
@@ -139,7 +151,7 @@ def devig_shin_yes(yes_imp: float, no_imp: float) -> float:
 
 # ── Parse one event JSON → {(player, market): {book: {"yes": imp, "no": imp}}} ─
 def parse_event(ev: dict, odds_format: str):
-    title = f"{ev.get('home_team','?')} vs {ev.get('away_team','?')}"
+    title = f"{ev.get('home_team', '?')} vs {ev.get('away_team', '?')}"
     book_data: dict = defaultdict(lambda: defaultdict(dict))
     for bk in ev.get("bookmakers", []):
         bkey = bk.get("key", "")
@@ -154,11 +166,11 @@ def parse_event(ev: dict, odds_format: str):
                 if imp is None:
                     continue
                 low = name.lower()
-                if low in SIDE_NAMES and desc:        # Over/Under/Yes/No + player in description
+                if low in SIDE_NAMES and desc:  # Over/Under/Yes/No + player in description
                     player, side = desc, ("yes" if low in ("yes", "over") else "no")
                 elif low in SIDE_NAMES and not desc:  # malformed — skip
                     continue
-                else:                                  # name = player, yes-implied market
+                else:  # name = player, yes-implied market
                     player, side = name, "yes"
                 book_data[(player, mkey)][bkey][side] = imp
     return title, book_data
@@ -219,35 +231,58 @@ def _get(url: str):
         return json.loads(r.read().decode())
 
 
-def pull_historical(sport: str, date: str, data_dir: str, markets: str):
+def pull_historical(sport, date, data_dir, markets, within_hours=6.0, max_events=8):
+    """Pull per-event prop snapshots, but ONLY for games kicking off within
+    `within_hours` of the snapshot (props are posted ~4-6h pre-kickoff; games
+    already started are in-play/poisoned and skipped). Capped at `max_events`.
+    Each per-event call bills ~10x credits, so the window filter is the cost gate."""
     key = os.getenv("ODDS_API_KEY")
     if not key:
         sys.exit("ODDS_API_KEY not set — cannot pull historical data.")
     books = ",".join(list(SOCCER_PROP_SHARP_WEIGHTS) + sorted(SOFT_BOOKS))
-    ev_url = (f"{ODDS_API_BASE}/historical/sports/{sport}/events?"
-              f"apiKey={key}&date={urllib.parse.quote(date)}")
-    print(f"[pull] historical events @ {date} …  (WARNING: props bill 10x credits)")
-    events = _get(ev_url).get("data", [])
+    ev_url = f"{ODDS_API_BASE}/historical/sports/{sport}/events?apiKey={key}&date={urllib.parse.quote(date)}"
+    print(f"[pull] historical events @ {date}  (props bill ~10x credits)")
+    snap = _get(ev_url)
+    events = snap.get("data", [])
+    t0 = _parse_iso(snap.get("timestamp") or date)
+    windowed = []
+    for ev in events:
+        dt = _parse_iso(ev.get("commence_time"))
+        if dt is None or t0 is None:
+            continue
+        hrs = (dt - t0).total_seconds() / 3600.0
+        if 0.0 <= hrs <= within_hours:  # upcoming & props-posted, not yet live
+            windowed.append((hrs, ev))
+    windowed.sort()
+    windowed = windowed[:max_events]
+    print(
+        f"[pull] {len(events)} events in snapshot; {len(windowed)} within "
+        f"{within_hours}h kickoff window (cap {max_events}) → pulling props"
+    )
     os.makedirs(data_dir, exist_ok=True)
     saved = 0
-    for ev in events:
+    for hrs, ev in windowed:
         eid = ev.get("id")
         if not eid:
             continue
-        od_url = (f"{ODDS_API_BASE}/historical/sports/{sport}/events/{eid}/odds?"
-                  f"apiKey={key}&date={urllib.parse.quote(date)}"
-                  f"&markets={markets}&bookmakers={books}&oddsFormat=american")
+        od_url = (
+            f"{ODDS_API_BASE}/historical/sports/{sport}/events/{eid}/odds?"
+            f"apiKey={key}&date={urllib.parse.quote(date)}"
+            f"&markets={markets}&bookmakers={books}&oddsFormat=american"
+        )
         try:
-            snap = _get(od_url).get("data", {})
+            snap2 = _get(od_url).get("data", {})
         except Exception as e:
             print(f"  [skip] {eid}: {e}")
             continue
-        if snap.get("bookmakers"):
-            path = os.path.join(data_dir, f"{eid}.json")
-            with open(path, "w") as f:
-                json.dump(snap, f)
+        if snap2.get("bookmakers"):
+            with open(os.path.join(data_dir, f"{eid}.json"), "w") as f:
+                json.dump(snap2, f)
             saved += 1
-            print(f"  [save] {snap.get('home_team')} vs {snap.get('away_team')}")
+            books_present = sorted(b.get("key") for b in snap2.get("bookmakers", []))
+            print(f"  [save] (+{hrs:.1f}h) {snap2.get('home_team')} vs {snap2.get('away_team')}  books={books_present}")
+        else:
+            print(f"  [empty] (+{hrs:.1f}h) {ev.get('home_team')} vs {ev.get('away_team')} — no props")
     print(f"[pull] saved {saved} event snapshots to {data_dir}")
 
 
@@ -257,7 +292,7 @@ def run(data_dir: str, min_edge: float, odds_format: str, market_filter: str | N
     if not files:
         sys.exit(f"No event JSON files in {data_dir}. Capture snapshots or use --pull-historical.")
 
-    rows = []           # (title, player, market, edge_old, edge_new, pin_yes, cons_yes, soft_book)
+    rows = []  # (title, player, market, edge_old, edge_new, pin_yes, cons_yes, soft_book)
     parse_skips = 0
     for fp in files:
         try:
@@ -311,7 +346,7 @@ def run(data_dir: str, min_edge: float, odds_format: str, market_filter: str | N
             if r[4] >= min_edge:
                 bym[r[2]][1] += 1
         for m, (f_, s_) in sorted(bym.items()):
-            print(f"    {short(m):8} flagged={f_:3}  survived={s_:3}  ({(s_/f_ if f_ else 0):5.1%})")
+            print(f"    {short(m):8} flagged={f_:3}  survived={s_:3}  ({(s_ / f_ if f_ else 0):5.1%})")
 
     # evaporated detail
     if evaporated:
@@ -319,22 +354,27 @@ def run(data_dir: str, min_edge: float, odds_format: str, market_filter: str | N
         print(f"  {'match':28} {'player':20} {'mkt':6} {'old':>6} {'new':>6} {'pin→cons':>12}")
         for r in sorted(evaporated, key=lambda x: x[3] - x[4], reverse=True)[:25]:
             title, player, mkey, eo, en, pin, cons, _ = r
-            print(f"  {title[:28]:28} {player[:20]:20} {short(mkey):6} "
-                  f"{eo:+6.1f} {en:+6.1f} {pin:5.1%}→{cons:5.1%}")
+            print(f"  {title[:28]:28} {player[:20]:20} {short(mkey):6} {eo:+6.1f} {en:+6.1f} {pin:5.1%}→{cons:5.1%}")
 
     # verdict
     print("\n" + "═" * 74)
     if not flagged_old:
         verdict = "NO EDGES FLAGGED — widen data or lower --min-edge to test the method."
     elif surv_rate < 0.50:
-        verdict = (f"PREMISE WEAK — {1-surv_rate:.0%} of edges are method artifacts. "
-                   "STOP and rethink the anchor/de-vig before building (spec §9 Phase 0).")
+        verdict = (
+            f"PREMISE WEAK — {1 - surv_rate:.0%} of edges are method artifacts. "
+            "STOP and rethink the anchor/de-vig before building (spec §9 Phase 0)."
+        )
     elif surv_rate < 0.80:
-        verdict = (f"MIXED — {surv_rate:.0%} survive. Real core exists but proportional/Pinnacle "
-                   "inflates count. Build on the consensus+Shin path only.")
+        verdict = (
+            f"MIXED — {surv_rate:.0%} survive. Real core exists but proportional/Pinnacle "
+            "inflates count. Build on the consensus+Shin path only."
+        )
     else:
-        verdict = (f"ROBUST — {surv_rate:.0%} survive. Edges are not just method artifacts. "
-                   "Proceed to build (still validate on CLV, not W/L).")
+        verdict = (
+            f"ROBUST — {surv_rate:.0%} survive. Edges are not just method artifacts. "
+            "Proceed to build (still validate on CLV, not W/L)."
+        )
     print(f"  VERDICT: {verdict}")
     print("═" * 74 + "\n")
     return surv_rate
@@ -346,19 +386,36 @@ def main():
     ap.add_argument("--min-edge", type=float, default=5.0, help="edge threshold in pp")
     ap.add_argument("--odds-format", choices=["auto", "american", "decimal"], default="auto")
     ap.add_argument("--market", default=None, help="substring filter, e.g. 'card' or 'scorer'")
-    ap.add_argument("--pull-historical", action="store_true",
-                    help="fetch past snapshots first (ODDS_API_KEY; 10x credit cost)")
+    ap.add_argument(
+        "--pull-historical", action="store_true", help="fetch past snapshots first (ODDS_API_KEY; 10x credit cost)"
+    )
     ap.add_argument("--sport", default="soccer_fifa_world_cup")
     ap.add_argument("--date", default=None, help="ISO UTC snapshot time for --pull-historical")
     ap.add_argument("--markets", default="player_goal_scorer_anytime,player_to_receive_card")
+    ap.add_argument(
+        "--within-hours",
+        type=float,
+        default=6.0,
+        help="pull only games kicking off within N hours of snapshot (cost gate)",
+    )
+    ap.add_argument("--max-events", type=int, default=8, help="cap events pulled per snapshot")
+    ap.add_argument("--no-run", action="store_true", help="pull only; skip the comparison")
     args = ap.parse_args()
 
     if args.pull_historical:
         if not args.date:
             sys.exit("--pull-historical requires --date (ISO UTC, e.g. 2026-06-12T18:00:00Z)")
-        pull_historical(args.sport, args.date, args.data_dir, args.markets)
+        pull_historical(
+            args.sport,
+            args.date,
+            args.data_dir,
+            args.markets,
+            within_hours=args.within_hours,
+            max_events=args.max_events,
+        )
 
-    run(args.data_dir, args.min_edge, args.odds_format, args.market)
+    if not args.no_run:
+        run(args.data_dir, args.min_edge, args.odds_format, args.market)
 
 
 if __name__ == "__main__":
