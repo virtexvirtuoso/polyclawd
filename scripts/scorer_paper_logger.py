@@ -42,6 +42,7 @@ import sqlite3
 import sys
 import unicodedata
 import urllib.parse
+import urllib.request
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -61,8 +62,6 @@ def send_telegram(text: str):
         return
     data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
     try:
-        import urllib.request
-
         urllib.request.urlopen(f"https://api.telegram.org/bot{tok}/sendMessage", data=data, timeout=20)
         print("[send] alert sent")
     except Exception as e:
