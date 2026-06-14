@@ -29,6 +29,7 @@ MODES
   python3 scripts/scorer_paper_logger.py --db storage/scorer_clv.db --snapshot   # cron ~/30min
   python3 scripts/scorer_paper_logger.py --db storage/scorer_clv.db --report
 """
+
 from __future__ import annotations
 
 import argparse
@@ -45,9 +46,27 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import phase0 as P  # noqa: E402  (consensus anchor, parsing, fetch helpers)
+import phase0_prop_falsification as P  # noqa: E402  (consensus anchor, parsing, fetch helpers)
 
 SCORER_MARKET = "player_goal_scorer_anytime"
+
+
+def send_telegram(text: str):
+    """Direct Bot API send (no LLM). Reads TELEGRAM_BOT_TOKEN/CHAT_ID from env
+    (sourced from ~/.config/polyclawd/alerts.env in cron). Plain text — no
+    parse_mode, to dodge the Markdown-400 trap."""
+    tok, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+    if not tok or not chat:
+        print("[send] TELEGRAM_BOT_TOKEN/CHAT_ID not set — skipping")
+        return
+    data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
+    try:
+        import urllib.request
+
+        urllib.request.urlopen(f"https://api.telegram.org/bot{tok}/sendMessage", data=data, timeout=20)
+        print("[send] alert sent")
+    except Exception as e:
+        print(f"[send] failed: {e}")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -104,7 +123,8 @@ def db_connect(path):
 
 
 def _insert(con, **r):
-    cols = ",".join(r); ph = ",".join("?" * len(r))
+    cols = ",".join(r)
+    ph = ",".join("?" * len(r))
     try:
         con.execute(f"INSERT INTO scorer_snapshot ({cols}) VALUES ({ph})", tuple(r.values()))
         return 1
@@ -126,10 +146,22 @@ def seed_historical(con, entry_dir, close_dir):
             ctd = P._parse_iso(ct)
             snap_at = (ctd - timedelta(minutes=mins)).strftime("%Y-%m-%dT%H:%M:%SZ") if ctd else src
             for pc, praw, cons, sb, si, ns in scorer_props(ev):
-                total += _insert(con, snapshot_at=snap_at, source=src, event_id=eid,
-                                 event_title=title, commence_time=ct, player=pc, player_raw=praw,
-                                 consensus_fair=cons, best_soft_book=sb, best_soft_implied=si,
-                                 edge_pct=(cons - si) * 100.0, n_sharp=ns, mins_to_kickoff=mins)
+                total += _insert(
+                    con,
+                    snapshot_at=snap_at,
+                    source=src,
+                    event_id=eid,
+                    event_title=title,
+                    commence_time=ct,
+                    player=pc,
+                    player_raw=praw,
+                    consensus_fair=cons,
+                    best_soft_book=sb,
+                    best_soft_implied=si,
+                    edge_pct=(cons - si) * 100.0,
+                    n_sharp=ns,
+                    mins_to_kickoff=mins,
+                )
     con.commit()
     print(f"[seed] inserted {total} scorer snapshot rows from pilot matches")
 
@@ -149,11 +181,13 @@ def live_snapshot(con, sport, window_hours):
         if ct is None:
             continue
         mins = (ct - now).total_seconds() / 60.0
-        if mins <= 0 or mins > window_hours * 60:   # skip in-play & far-future
+        if mins <= 0 or mins > window_hours * 60:  # skip in-play & far-future
             continue
         eid = ev["id"]
-        url = (f"{P.ODDS_API_BASE}/sports/{sport}/events/{eid}/odds?apiKey={key}"
-               f"&regions=us,uk,eu&markets={SCORER_MARKET}&oddsFormat=american&bookmakers={books}")
+        url = (
+            f"{P.ODDS_API_BASE}/sports/{sport}/events/{eid}/odds?apiKey={key}"
+            f"&regions=us,uk,eu&markets={SCORER_MARKET}&oddsFormat=american&bookmakers={books}"
+        )
         try:
             od = P._get(url)
         except Exception as e:
@@ -162,14 +196,26 @@ def live_snapshot(con, sport, window_hours):
         title = f"{od.get('home_team')} vs {od.get('away_team')}"
         got = 0
         for pc, praw, cons, sb, si, ns in scorer_props(od):
-            got += _insert(con, snapshot_at=snap_at, source="live", event_id=eid,
-                           event_title=title, commence_time=ev.get("commence_time"),
-                           player=pc, player_raw=praw, consensus_fair=cons, best_soft_book=sb,
-                           best_soft_implied=si, edge_pct=(cons - si) * 100.0,
-                           n_sharp=ns, mins_to_kickoff=round(mins, 1))
+            got += _insert(
+                con,
+                snapshot_at=snap_at,
+                source="live",
+                event_id=eid,
+                event_title=title,
+                commence_time=ev.get("commence_time"),
+                player=pc,
+                player_raw=praw,
+                consensus_fair=cons,
+                best_soft_book=sb,
+                best_soft_implied=si,
+                edge_pct=(cons - si) * 100.0,
+                n_sharp=ns,
+                mins_to_kickoff=round(mins, 1),
+            )
         if got:
-            n_ev += 1; n_rows += got
-            print(f"  [snap] T-{mins/60:.1f}h {title}: {got} scorer props")
+            n_ev += 1
+            n_rows += got
+            print(f"  [snap] T-{mins / 60:.1f}h {title}: {got} scorer props")
     con.commit()
     print(f"[snapshot] {n_rows} rows across {n_ev} matches @ {snap_at}")
 
@@ -178,13 +224,14 @@ def live_snapshot(con, sport, window_hours):
 def wilson(k, n, z=1.96):
     if n == 0:
         return (0.0, 0.0)
-    p = k / n; d = 1 + z * z / n
+    p = k / n
+    d = 1 + z * z / n
     c = (p + z * z / (2 * n)) / d
     h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
     return (max(0.0, c - h), min(1.0, c + h))
 
 
-def report(con, min_edge):
+def report(con, min_edge, send=False):
     rows = con.execute("""SELECT event_id, event_title, player, snapshot_at, best_soft_implied,
                                  edge_pct, mins_to_kickoff FROM scorer_snapshot""").fetchall()
     by_prop = defaultdict(list)
@@ -193,17 +240,17 @@ def report(con, min_edge):
         by_prop[(eid, player)].append((snap, soft, edge, mins))
         titles[eid] = title
 
-    prop_clv = []           # (eid, player, soft_move_pp)
+    prop_clv = []  # (eid, player, soft_move_pp)
     for (eid, player), snaps in by_prop.items():
-        snaps.sort(key=lambda x: x[0])                       # by snapshot_at
+        snaps.sort(key=lambda x: x[0])  # by snapshot_at
         flagged = [s for s in snaps if s[2] is not None and s[2] >= min_edge]
         if not flagged:
-            continue                                          # never a survivor edge
-        entry = flagged[0]                                    # first time it flagged
+            continue  # never a survivor edge
+        entry = flagged[0]  # first time it flagged
         pre = [s for s in snaps if s[3] is not None and s[3] >= 0]  # pre-kickoff snaps
         close = max(pre, key=lambda x: x[0]) if pre else snaps[-1]  # closest to kickoff
         if close[0] <= entry[0]:
-            continue                                          # need a later close snapshot
+            continue  # need a later close snapshot
         prop_clv.append((eid, player, (close[1] - entry[1]) * 100.0))
 
     by_match = defaultdict(list)
@@ -220,14 +267,16 @@ def report(con, min_edge):
     print("  SCORER PAPER LOGGER — CLV REPORT (match-level, non-circular)")
     print("═" * 74)
     print(f"  matches with gradable flagged props: {n_matches}")
-    print(f"  match-level beat-rate (mean soft-move > 0): {beats}/{n_matches}"
-          f"{(' = %.0f%%' % (100*beats/n_matches)) if n_matches else ''}")
+    print(
+        f"  match-level beat-rate (mean soft-move > 0): {beats}/{n_matches}"
+        f"{(' = %.0f%%' % (100 * beats / n_matches)) if n_matches else ''}"
+    )
     print(f"  Wilson 95% CI: [{lo:.2f}, {hi:.2f}]")
     print(f"  (pooled prop-level: {pool_beat}/{pool_n} props moved toward you)")
     if by_match:
         print("\n  Per match (mean soft-move pp):")
         for eid, m in sorted(match_mean.items(), key=lambda x: x[1], reverse=True):
-            print(f"    {('+' if m>0 else '')}{m:5.1f}pp  {titles.get(eid,'?')[:40]} (n={len(by_match[eid])})")
+            print(f"    {('+' if m > 0 else '')}{m:5.1f}pp  {titles.get(eid, '?')[:40]} (n={len(by_match[eid])})")
 
     print("\n" + "═" * 74)
     if n_matches < 12:
@@ -241,6 +290,16 @@ def report(con, min_edge):
     print(f"  VERDICT: {v}")
     print("═" * 74 + "\n")
 
+    if send:
+        pct = f"{100 * beats / n_matches:.0f}%" if n_matches else "n/a"
+        msg = (
+            f"⚽ Scorer CLV paper logger\n"
+            f"matches: {n_matches}  beat-rate: {beats}/{n_matches} ({pct})\n"
+            f"Wilson 95% CI: [{lo:.2f}, {hi:.2f}]  pooled props: {pool_beat}/{pool_n}\n"
+            f"VERDICT: {v}"
+        )
+        send_telegram(msg)
+
 
 def main():
     ap = argparse.ArgumentParser(description="Goalscorer paper CLV logger (spec §6 Step 1).")
@@ -253,6 +312,7 @@ def main():
     ap.add_argument("--close-dir", default="/tmp/phase0_close")
     ap.add_argument("--snapshot", action="store_true")
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--send", action="store_true", help="send report summary to Telegram")
     args = ap.parse_args()
 
     con = db_connect(args.db)
@@ -261,7 +321,7 @@ def main():
     if args.snapshot:
         live_snapshot(con, args.sport, args.window_hours)
     if args.report or not (args.seed_historical or args.snapshot):
-        report(con, args.min_edge)
+        report(con, args.min_edge, send=args.send)
     con.close()
 
 
