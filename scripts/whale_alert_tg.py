@@ -15,10 +15,8 @@ MIN_SCORE = 0.48
 MIN_HTR = 1.0         # hours — skip if resolves in < 1h (not actionable)
 MAX_HTR = 72          # hours — only alert if resolves within 72h
 MIN_FLOW = 5000       # minimum $5K flow to alert
-MIN_WALLET_WR = 0.45  # wallet win rate threshold (or unknown)
-# Extreme wallet WR (1.0 or 0.0) almost certainly means n=1 resolved trade — treat as unknown
-EXTREME_WR_LO = 0.01
-EXTREME_WR_HI = 0.99
+MIN_WALLET_WR = 0.45  # wallet win rate threshold
+MIN_WALLET_N = 5      # require >= 5 resolved trades before trusting wallet_win_rate
 
 def load_state():
     try:
@@ -72,10 +70,11 @@ def is_actionable(alert):
         return False
     if flow < MIN_FLOW:
         return False
-    # Treat extreme wallet WR (1.0 / 0.0) as unknown — almost certainly n=1
-    if wr is not None and EXTREME_WR_LO < wr < EXTREME_WR_HI:
+    # Only gate on wallet WR if sample size is sufficient (>= MIN_WALLET_N resolved trades)
+    wallet_n = alert.get("wallet_n")
+    if wr is not None and wallet_n is not None and wallet_n >= MIN_WALLET_N:
         if wr < MIN_WALLET_WR:
-            return False  # Known bad wallet with sufficient sample
+            return False  # Known underperforming wallet with sufficient history
     return True
 
 def format_alert(alert, rank):

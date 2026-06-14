@@ -72,6 +72,17 @@ def get_meta_db(path: Optional[Path] = None) -> sqlite3.Connection:
             done INTEGER DEFAULT 0,       -- 1 = nothing left to backfill
             updated REAL
         )""")
+    # Migrations for columns added post-launch
+    for col, definition in [
+        ("top_wallet",    "TEXT"),
+        ("flow_dollars",  "REAL"),
+        ("wallet_win_rate", "REAL"),
+        ("wallet_n",      "INTEGER"),  # closed_positions count at alert time
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE whale_outcomes ADD COLUMN {col} {definition}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     conn.commit()
     return conn
 
@@ -197,13 +208,28 @@ def ingest_new_alerts(meta: sqlite3.Connection,
         else:
             p0 = p.get("current_price")
             direction = None   # needs gamma outcomes; resolved on first backfill
+
+        # Enrich with wallet stats from pm_wallets (same DB)
+        top_wallet = p.get("top_wallet") or None
+        flow_dollars = p.get("flow_dollars")
+        wallet_win_rate, wallet_n = None, None
+        if top_wallet:
+            wrow = meta.execute(
+                "SELECT closed_positions, win_rate FROM pm_wallets WHERE wallet=?",
+                (top_wallet,)).fetchone()
+            if wrow:
+                wallet_n = wrow[0]
+                wallet_win_rate = wrow[1]
+
         meta.execute(
             "INSERT OR IGNORE INTO whale_outcomes"
             " (alert_id, ts, platform, market, severity, score, reasons,"
-            "  condition_id, direction, price_at_alert, updated)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "  condition_id, direction, price_at_alert, updated,"
+            "  top_wallet, flow_dollars, wallet_win_rate, wallet_n)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (r["id"], r["ts"], r["platform"], r["market"], r["severity"],
-             r["score"], r["reasons"], p.get("condition_id"), direction, p0, time.time()))
+             r["score"], r["reasons"], p.get("condition_id"), direction, p0, time.time(),
+             top_wallet, flow_dollars, wallet_win_rate, wallet_n))
         n += 1
     meta.commit()
     return n
@@ -277,6 +303,27 @@ def backfill(meta: sqlite3.Connection) -> dict:
         filled += 1
     meta.commit()
     return {"due": len(due), "filled": filled, "resolved": resolved}
+
+
+def backfill_wallet_n(conn: sqlite3.Connection) -> int:
+    """One-time backfill: set wallet_n on rows that have top_wallet but no wallet_n.
+    Safe to call repeatedly — skips rows already populated."""
+    rows = conn.execute(
+        "SELECT alert_id, top_wallet FROM whale_outcomes"
+        " WHERE top_wallet IS NOT NULL AND top_wallet != '' AND wallet_n IS NULL LIMIT 5000"
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        wrow = conn.execute(
+            "SELECT closed_positions FROM pm_wallets WHERE wallet=?",
+            (row["top_wallet"],)).fetchone()
+        if wrow and wrow[0] is not None:
+            conn.execute(
+                "UPDATE whale_outcomes SET wallet_n=? WHERE alert_id=?",
+                (wrow[0], row["alert_id"]))
+            updated += 1
+    conn.commit()
+    return updated
 
 
 def run_pass(meta: Optional[sqlite3.Connection] = None) -> dict:
