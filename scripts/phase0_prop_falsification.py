@@ -265,6 +265,11 @@ def pull_historical(sport, date, data_dir, markets, within_hours=6.0, max_events
         eid = ev.get("id")
         if not eid:
             continue
+        if os.path.exists(os.path.join(data_dir, f"{eid}.json")):
+            print(
+                f"  [cached] (+{hrs:.1f}h) {ev.get('home_team')} vs {ev.get('away_team')} — already pulled, no re-bill"
+            )
+            continue
         od_url = (
             f"{ODDS_API_BASE}/historical/sports/{sport}/events/{eid}/odds?"
             f"apiKey={key}&date={urllib.parse.quote(date)}"
