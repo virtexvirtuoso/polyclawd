@@ -6,13 +6,13 @@ Thesis: Retail FOMO drives volume spikes → YES gets overpriced → best NO ent
 Uses existing signal_snapshots table for historical volume baselines.
 """
 
+from loguru import logger
 import logging
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent
 DB_PATH = BASE_DIR / "storage" / "shadow_trades.db"
@@ -77,7 +77,7 @@ def detect_spike(market_id: str, current_volume: int, conn: Optional[sqlite3.Con
         level: "none" | "spike" (3x) | "mega" (10x)
     """
     if current_volume < MIN_VOLUME:
-        logger.debug("Volume too low for spike check: market=%s vol=%d min=%d", market_id, current_volume, MIN_VOLUME)
+        logger.debug("Volume too low for spike check: market={} vol={} min={}", market_id, current_volume, MIN_VOLUME)
         return {"spike": False, "ratio": 0, "level": "none", "avg_volume": 0, "data_points": 0}
 
     baseline = get_volume_baseline(market_id, conn)
@@ -166,7 +166,7 @@ def enrich_signals(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             enriched += 1
 
     conn.close()
-    logger.info("Volume spike enrichment: %d/%d signals spiking", enriched, len(signals))
+    logger.info("Volume spike enrichment: {}/{} signals spiking", enriched, len(signals))
     return signals
 
 
@@ -215,7 +215,7 @@ def scan_all_spikes(limit: int = 50) -> List[Dict[str, Any]]:
     conn.close()
     spikes.sort(key=lambda x: x["spike_ratio"], reverse=True)
 
-    logger.info("Volume spike scan: %d spikes found from %d markets", len(spikes), len(rows))
+    logger.info("Volume spike scan: {} spikes found from {} markets", len(spikes), len(rows))
     return spikes
 
 

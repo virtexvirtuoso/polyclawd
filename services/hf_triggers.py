@@ -13,13 +13,12 @@ Output: EdgeDecision written to memcached as polymarket:edge:{symbol}
 """
 
 import json
-import logging
 import time
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from loguru import logger
 
-logger = logging.getLogger("hf_triggers")
 
 # ============================================================================
 # Session Schedule (UTC)
@@ -548,12 +547,12 @@ def build_edge_payload(decision: EdgeDecision, oracle_state: Dict = None) -> Dic
 # ============================================================================
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("HF Trigger Engine — CLI Test")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("HF Trigger Engine — CLI Test")
+    logger.info("=" * 60)
 
     session_name, session_config = get_session()
-    print(f"\nSession: {session_name} (active={session_config['active']}, "
+    logger.info(f"\nSession: {session_name} (active={session_config['active']}, "
           f"min_conf={session_config['min_confidence']})")
 
     # Test with mock data
@@ -603,11 +602,11 @@ if __name__ == "__main__":
     trackers = {"imbalance": imb, "cvd": cvd, "liquidation": liq}
 
     decision = evaluate_edge(mock_enrichment, mock_fast, trackers)
-    print(f"\nDecision: {decision.action}")
-    print(f"Direction: {decision.direction}")
-    print(f"Confidence: {decision.confidence:.1%}")
-    print(f"Trigger: {decision.trigger_type}")
-    print(f"Reason: {decision.reason}")
-    print(f"Gates: {json.dumps(decision.gates, indent=2)}")
+    logger.info(f"\nDecision: {decision.action}")
+    logger.info(f"Direction: {decision.direction}")
+    logger.info(f"Confidence: {decision.confidence:.1%}")
+    logger.info(f"Trigger: {decision.trigger_type}")
+    logger.info(f"Reason: {decision.reason}")
+    logger.info(f"Gates: {json.dumps(decision.gates, indent=2)}")
     if decision.sizing:
-        print(f"Sizing: {json.dumps(decision.sizing, indent=2)}")
+        logger.info(f"Sizing: {json.dumps(decision.sizing, indent=2)}")

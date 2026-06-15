@@ -36,6 +36,13 @@ class PolymarketClient:
         response.raise_for_status()
         return response.json()
 
+    def get_events(self, **kwargs) -> list:
+        """Fetch events from Gamma API."""
+        data = self._get(f"{self.gamma_url}/events", params=kwargs)
+        if isinstance(data, list):
+            return data
+        return data.get("events", [data] if data else [])
+
     def get_markets(self, limit: int = 500, offset: int = 0, **kwargs) -> list[Market]:
         """Fetch markets from Gamma API."""
         params = {"limit": limit, "offset": offset, **kwargs}

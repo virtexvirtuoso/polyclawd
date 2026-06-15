@@ -10,13 +10,13 @@ Thesis: Fading peak optimism, not catching falling knives.
 Uses signal_snapshots table for price history.
 """
 
+from loguru import logger
 import logging
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent
 DB_PATH = BASE_DIR / "storage" / "shadow_trades.db"
@@ -77,7 +77,7 @@ def calculate_momentum(market_id: str, current_price: float = None, conn: Option
     history = get_price_history(market_id, LOOKBACK_HOURS, conn)
 
     if len(history) < MIN_DATA_POINTS and current_price is None:
-        logger.debug("Insufficient price history: market=%s points=%d", market_id[:30], len(history))
+        logger.debug("Insufficient price history: market={} points={}", market_id[:30], len(history))
         return {
             "momentum": 0,
             "direction": "unknown",
@@ -232,5 +232,5 @@ def enrich_signals(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             boosted += 1
 
     conn.close()
-    logger.info("Momentum enrichment: %d boosted, %d would-skip out of %d signals", boosted, skipped, len(signals))
+    logger.info("Momentum enrichment: {} boosted, {} would-skip out of {} signals", boosted, skipped, len(signals))
     return signals

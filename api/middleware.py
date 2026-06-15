@@ -9,6 +9,11 @@ from fastapi import Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 from api.deps import get_settings
 import logging
+try:
+    from api.activity_feed import emit_event
+    HAS_ACTIVITY_FEED = True
+except ImportError:
+    HAS_ACTIVITY_FEED = False
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +51,18 @@ async def add_security_headers(request: Request, call_next):
 async def global_exception_handler(request: Request, exc: Exception):
     """Catch-all exception handler - never leak internal details."""
     logger.exception(f"Unhandled error on {request.url.path}: {exc}")
+    
+    # Emit activity event for critical errors
+    if HAS_ACTIVITY_FEED:
+        try:
+            emit_event(
+                "error", "critical",
+                f"Unhandled error on {request.url.path}",
+                str(exc)[:200]
+            )
+        except Exception:
+            pass
+    
     return JSONResponse(
         status_code=500,
         content={"error": "Internal server error", "path": request.url.path}

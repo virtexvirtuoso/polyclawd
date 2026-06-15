@@ -13,6 +13,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional
+from loguru import logger
 
 
 @dataclass
@@ -275,26 +276,26 @@ class LiquidationProximityTracker:
 
 
 if __name__ == "__main__":
-    print("Velocity Tracker Tests")
-    print("=" * 40)
+    logger.info("Velocity Tracker Tests")
+    logger.info("=" * 40)
 
     # Test imbalance tracker
     imb = ImbalanceVelocityTracker(window_size=5)
     for i in range(5):
         imb.update(bid_depth=100 + i * 10, ask_depth=80)
         time.sleep(0.01)
-    print(f"Imbalance ratio: {imb.current_ratio:.2f}")
-    print(f"Imbalance velocity: {imb.velocity:.4f}/s")
-    print(f"Is cliff: {imb.is_cliff}")
+    logger.info(f"Imbalance ratio: {imb.current_ratio:.2f}")
+    logger.info(f"Imbalance velocity: {imb.velocity:.4f}/s")
+    logger.info(f"Is cliff: {imb.is_cliff}")
 
     # Test CVD tracker
     cvd = CVDAccelerationTracker(window_size=5)
     for i in range(5):
         cvd.update(cvd_level=100 + i * 5 + i * i)  # Accelerating
         time.sleep(0.01)
-    print(f"\nCVD level: {cvd.current_level:.1f}")
-    print(f"CVD velocity: {cvd.velocity:.2f}/s")
-    print(f"CVD acceleration: {cvd.acceleration:.2f}/s^2")
+    logger.info(f"\nCVD level: {cvd.current_level:.1f}")
+    logger.info(f"CVD velocity: {cvd.velocity:.2f}/s")
+    logger.info(f"CVD acceleration: {cvd.acceleration:.2f}/s^2")
 
     # Test liq proximity
     liq = LiquidationProximityTracker(price_window=10)
@@ -303,4 +304,4 @@ if __name__ == "__main__":
         time.sleep(0.01)
     zones = [{"price": 65500, "size": 50_000_000}]
     cluster = liq.cascade_imminent(zones, max_distance_pct=1.0)
-    print(f"\nNearest cluster: {cluster}")
+    logger.info(f"\nNearest cluster: {cluster}")
