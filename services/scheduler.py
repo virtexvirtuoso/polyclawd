@@ -522,6 +522,56 @@ def task_options_scan():
         logger.exception("Options paper trade failed: %s", e)
 
 
+def task_ufc_edge_scan():
+    """UFC edge scan: compares Polymarket + Kalshi vs Pinnacle.
+    Self-gating: skips if no events within 6h window (0 credits)."""
+    from signals.ufc_edge_cron import run_ufc_edge_scan
+    result = run_ufc_edge_scan()
+    if result.get("scanned"):
+        logger.info("UFC edge scan: %d edges, %d alerts, %d credits",
+                     result["edges_found"], result["alerts_sent"], result["credits_used"])
+    else:
+        logger.debug("UFC edge scan: no active events, skipped")
+
+
+def task_ufc_event_discovery():
+    """UFC event discovery: polls Odds API events list (FREE, 0 credits)."""
+    from odds.ufc_event_discovery import discover_events, store_events, _get_db
+    events = discover_events()
+    if events:
+        conn = _get_db()
+        store_events(conn, events)
+        conn.close()
+        logger.info("UFC event discovery: %d events stored", len(events))
+
+
+def task_ufc_prop_scan():
+    """UFC cross-platform prop edge scan (Polymarket Gamma vs Kalshi), alerts on
+    tradeable edges. Free APIs + self-gating (Kalshi prop series only list near
+    fight night), so most runs send nothing. Sole delivery path (no cron)."""
+    from odds.ufc_prop_edge import run_prop_edge_scan
+    result = run_prop_edge_scan()
+    if result.get("edges_found") or result.get("alerts_sent"):
+        logger.info("UFC prop scan: %d edges, %d alerts, %d suppressed",
+                     result["edges_found"], result["alerts_sent"], result.get("suppressed", 0))
+    else:
+        logger.debug("UFC prop scan: no prop edges")
+
+
+def task_stale_line_scan():
+    """Multi-book stale line scan: soft sportsbooks vs Pinnacle across active sports.
+    Self-gating via NEAR_WINDOW_HOURS (0 credits when no events are near kickoff).
+    Sole delivery path — do NOT also run this as a cron (two schedulers would
+    double the Odds API spend and the cooldown store is per-process best-effort)."""
+    from signals.stale_line_alerts import run_stale_line_scan
+    result = run_stale_line_scan()
+    if result.get("lines_found") or result.get("alerts_sent"):
+        logger.info("Stale line scan: %d lines, %d alerts, %d suppressed",
+                     result["lines_found"], result["alerts_sent"], result.get("suppressed", 0))
+    else:
+        logger.debug("Stale line scan: no stale lines")
+
+
 def task_whale_scanner():
     """Thin-market whale scanner: Kalshi weather + Polymarket props, 5-min tick."""
     from signals.whale_scanner import run_scan
@@ -540,7 +590,7 @@ def task_whale_scanner():
             score = a.get("score", 0)
             severity = a.get("severity", "LOW")
 
-            if score < 5:
+            if score < 8:   # CRITICAL only (per Mr. V 2026-06-11)
                 continue
 
             last = _state["whale_alert_cooldown"].get(market, 0)
@@ -555,6 +605,36 @@ def task_whale_scanner():
             )
     except Exception as e:
         logger.exception("Whale scanner failed: %s", e)
+
+
+def task_whale_follower():
+    """PAPER shadow follower of informed whale flow. No real orders ever —
+    writes only whale_follows in whale_meta.db (see signals/whale_follower.py
+    docstring + the 2026-06-12 design doc for kill criteria K1-K6)."""
+    from signals.whale_follower import run_pass
+    stats = run_pass()
+    if stats.get("entered") or stats.get("closed"):
+        logger.info("Whale follower: %s", stats)
+
+
+def task_whale_outcomes():
+    """Label whale alerts with subsequent prices + resolution (shadow loop)."""
+    from signals.whale_outcomes import run_pass
+    stats = run_pass()
+    if stats.get("ingested") or stats.get("filled"):
+        logger.info("Whale outcomes: %s", stats)
+
+
+def task_whale_wallets():
+    """Refresh the PM wallet ledger from the seen-queue."""
+    from signals.whale_wallets import get_meta_db, refresh_wallets
+    conn = get_meta_db()
+    try:
+        stats = refresh_wallets(conn)
+        if stats.get("refreshed"):
+            logger.info("Whale wallets: %s", stats)
+    finally:
+        conn.close()
 
 
 def task_whale_wall_alerts():
@@ -670,7 +750,7 @@ def task_edge_alerts():
             edge = s.get("edge_pct", 0)
             if edge >= 25:
                 slug = s.get("event_slug", "")
-                url = f"https://polymarket.com/event/{slug}" if slug else ""
+                url = f"https://polymarket.com/market/{slug}" if slug else ""
                 raw_signals.append({
                     "market": s.get("market_title", "")[:60],
                     "side": s.get("side", ""), "edge": edge,
@@ -692,7 +772,7 @@ def task_edge_alerts():
                 side = s.get("side", "NO")
                 eff_price = yes_p if side == "YES" else (1 - yes_p) if yes_p else 0
                 slug = s.get("slug", "")
-                url = f"https://polymarket.com/event/{slug}" if slug else ""
+                url = f"https://polymarket.com/market/{slug}" if slug else ""
                 raw_signals.append({
                     "market": s.get("market", "")[:60],
                     "side": side, "edge": edge,
@@ -1058,11 +1138,26 @@ async def tick_5min():
         await run_in_thread(_run_safe, "weather_reeval", task_weather_reeval)
         await run_in_thread(_run_safe, "weather_fast_scan", task_weather_fast_scan)
         await run_in_thread(_run_safe, "weather_shift_alerts", task_weather_shift_alerts)
-        await run_in_thread(_run_safe, "whale_scanner", task_whale_scanner)
         await run_in_thread(_run_safe, "tweet_pace_alerts", task_tweet_pace_alerts)
         await run_in_thread(_run_safe, "calibration_check", task_calibration_check)
+        # UFC edge scan: runs every 15min (every 3rd tick), self-gating
+        _state["ufc_scan_n"] = _state.get("ufc_scan_n", 0) + 1
+        if _state["ufc_scan_n"] % 3 == 0:
+            await run_in_thread(_run_safe, "ufc_edge_scan", task_ufc_edge_scan)
         logger.debug("5-min tick complete")
         await asyncio.sleep(300)
+
+
+async def tick_whale():
+    """Whale scanner on its own loop: the full-exchange sweep + book pass can
+    take minutes and must never delay stop evaluation in tick_5min."""
+    while True:
+        t0 = time.time()
+        await run_in_thread(_run_safe, "whale_scanner", task_whale_scanner)
+        # follower rides the whale tick so ts_entry stays close to ts_alert
+        # (the K1 latency budget); paper-only, reads alerts written above
+        await run_in_thread(_run_safe, "whale_follower", task_whale_follower)
+        await asyncio.sleep(max(60, 300 - (time.time() - t0)))
 
 
 async def tick_30min():
@@ -1073,8 +1168,12 @@ async def tick_30min():
         await run_in_thread(_run_safe, "options_resolution", task_options_resolution)
         await run_in_thread(_run_safe, "options_monitor", task_options_monitor)
         await run_in_thread(_run_safe, "whale_wall_alerts", task_whale_wall_alerts)
+        await run_in_thread(_run_safe, "whale_outcomes", task_whale_outcomes)
+        await run_in_thread(_run_safe, "whale_wallets", task_whale_wallets)
         await run_in_thread(_run_safe, "credit_refresh", task_credit_refresh)
         await run_in_thread(_run_safe, "source_health_touch", task_source_health_touch)
+        await run_in_thread(_run_safe, "stale_line_scan", task_stale_line_scan)
+        await run_in_thread(_run_safe, "ufc_prop_scan", task_ufc_prop_scan)
         await run_in_thread(_run_safe, "edge_alerts", task_edge_alerts)
         await run_in_thread(_run_safe, "mlb_props_alert", task_mlb_props_alert)
         await run_in_thread(_run_safe, "mlb_props_resolve", task_mlb_props_resolve)
@@ -1088,6 +1187,33 @@ async def tick_30min():
             await run_in_thread(_run_safe, "soccer_resolve", task_soccer_resolve)
         logger.info("30-min tick complete")
         await asyncio.sleep(1800)
+
+
+def task_vpin_scan():
+    """VPIN scan for top liquidity markets every 10 minutes.
+
+    Has its own async loop (tick_vpin) — NOT inside tick_5min to avoid
+    overloading the stop_evaluator path.
+    """
+    from signals.vpin import run_scan
+    result = run_scan()
+    n_scanned = len(result.get("scan_results", []))
+    if n_scanned > 0:
+        logger.info("VPIN scan: %d markets, top VPIN=%.4f", n_scanned,
+                     result["scan_results"][0]["vpin"] if result["scan_results"] else 0)
+
+    # Log accuracy gate status
+    acc = result.get("accuracy", {})
+    if acc.get("verdict", "") == "INFORMATIONAL_ONLY":
+        logger.warning(
+            "VPIN accuracy gate FAILED: %.1f%% accuracy — informational only",
+            acc.get("high_vpin", {}).get("accuracy", 0),
+        )
+    elif acc.get("verdict", "") == "SIGNAL":
+        logger.info(
+            "VPIN accuracy gate PASSED: %.1f%% accuracy — active signal",
+            acc.get("high_vpin", {}).get("accuracy", 0),
+        )
 
 
 def task_state_cleanup():
@@ -1141,14 +1267,27 @@ def task_db_maintenance():
         logger.warning("VACUUM failed: %s", e)
 
 
+async def tick_vpin():
+    """VPIN scanner on its own loop (600s interval).
+
+    Per the CE-4 spec, VPIN gets its OWN async loop, NOT inside tick_5min,
+    to avoid overloading the stop_evaluator path.
+    """
+    while True:
+        t0 = time.time()
+        await run_in_thread(_run_safe, "vpin_scan", task_vpin_scan)
+        await asyncio.sleep(max(60, 600 - (time.time() - t0)))
+
+
 async def tick_6h():
-    """Every 6 hours: arena snapshot, state cleanup, DB maintenance, GDELT/IE refresh."""
+    """Every 6 hours: arena snapshot, state cleanup, DB maintenance, GDELT/IE refresh, UFC event discovery."""
     while True:
         await run_in_thread(_run_safe, "arena_snapshot", task_arena_snapshot)
         await run_in_thread(_run_safe, "state_cleanup", task_state_cleanup)
         await run_in_thread(_run_safe, "db_maintenance", task_db_maintenance)
         await run_in_thread(_run_safe, "gdelt_refresh", task_gdelt_refresh)
         await run_in_thread(_run_safe, "ie_spending_refresh", task_ie_spending_refresh)
+        await run_in_thread(_run_safe, "ufc_event_discovery", task_ufc_event_discovery)
         await asyncio.sleep(21600)
 
 
@@ -1194,6 +1333,8 @@ async def main():
         asyncio.create_task(_delayed_start(3, tick_1min)),
         asyncio.create_task(_delayed_start(5, tick_5min)),
         asyncio.create_task(_delayed_start(15, tick_30min)),
+        asyncio.create_task(_delayed_start(20, tick_whale)),
+        asyncio.create_task(_delayed_start(120, tick_vpin)),
         asyncio.create_task(_delayed_start(60, tick_6h)),
         asyncio.create_task(_delayed_start(30, tick_scheduled)),
     ]
