@@ -51,6 +51,13 @@ import phase0_prop_falsification as P  # noqa: E402  (consensus anchor, parsing,
 
 SCORER_MARKET = "player_goal_scorer_anytime"
 
+# [OQ2 / spec §3.2] De-bias the Betfair-weighted consensus YES with a flat haircut.
+# The raw consensus carries a ~+1.2pp positive bias (it never removes the YES-side
+# vig); goalscorer vig is empirically ~4.4% and FLAT across buckets (n=48 Pinnacle
+# two-way), so a flat factor de-vigs as well as Shin without a NO side. PROVISIONAL —
+# refit on resolution data. Applies to the fair-value anchor ONLY; soft price stays raw.
+GOALSCORER_YES_HAIRCUT = 0.958
+
 
 def send_telegram(text: str):
     """Direct Bot API send (no LLM). Reads TELEGRAM_BOT_TOKEN/CHAT_ID from env
@@ -102,6 +109,7 @@ def scorer_props(ev: dict):
         soft = best_soft_raw(books)
         if cons is None or soft is None:
             continue
+        cons *= GOALSCORER_YES_HAIRCUT  # [OQ2] de-bias fair-value anchor (soft stays raw)
         n_sharp = sum(1 for b in P.SOCCER_PROP_SHARP_WEIGHTS if b in books)
         yield canon(player), player, cons, soft[0], soft[1], n_sharp
 
