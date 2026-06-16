@@ -46,6 +46,20 @@ OUT_PATH = PROJECT_ROOT / "data" / "kalshi_maker_shadow.jsonl"
 BET_NO, BET_YES = 100.0, 50.0
 CANCEL_LOCAL = (23, 15)  # cancel resting orders before the 00Z model drop
 
+SYNOPTIC_BLACKOUT_MIN = 10  # blindspots 2026-06-10: named sniper bots (DSM Bot,
+# 6-Hour Bot, OMO) pick off stale resting orders at scheduled NWS releases. The
+# 6-hourly synoptic METAR times (00/06/12/18Z) fall INSIDE evening rest windows
+# for some timezones. Model the order as CANCELED +/-10min around each release
+# (conservative both ways: no sniper losses counted, no lucky fills either).
+
+
+def in_release_blackout(ts: float) -> bool:
+    """True if a unix timestamp falls within +/-SYNOPTIC_BLACKOUT_MIN minutes
+    of a 6-hourly synoptic time (00/06/12/18 UTC)."""
+    minutes_into_6h = (ts % 21600) / 60.0
+    return minutes_into_6h <= SYNOPTIC_BLACKOUT_MIN or minutes_into_6h >= 360 - SYNOPTIC_BLACKOUT_MIN
+
+
 
 def _jget(url, timeout=20, retries=3):
     for a in range(retries):
@@ -137,6 +151,13 @@ def judge_fill(order: dict, trades: list) -> dict:
     price_key = "no_price_dollars" if side == "NO" else "yes_price_dollars"
     through = at_level = 0.0
     for t in trades:
+        try:
+            trade_ts = datetime.fromisoformat(
+                t["created_time"].replace("Z", "+00:00")).timestamp()
+            if in_release_blackout(trade_ts):
+                continue  # order modeled as canceled around scheduled releases
+        except (KeyError, TypeError, ValueError):
+            pass
         try:
             p = float(t.get(price_key))
             c = float(t.get("count_fp") or t.get("count") or 0)

@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Whale Flow — Polyclawd</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --abyss:#0a0a0f; --deep:#060b14; --mid:#0e0f16; --border:#1d2030;
+  --text:#e7eaf2; --dim:#8d93a8; --faint:#4d5268;
+  --crit:#ff3b52; --crit-glow:rgba(255,59,82,.55);
+  --high:#f0a050; --high-glow:rgba(240,160,80,.45);
+  --low:#4ecdc4; --low-glow:rgba(78,205,196,.35);
+  --yes:#00d68f; --no:#f65164; --gold:#ffd700;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:40;
+  background:repeating-linear-gradient(0deg,rgba(160,180,220,.022) 0 1px,transparent 1px 4px)}
+::selection{background:var(--crit);color:#fff}
+h1 em{font-style:normal;color:var(--crit)}
+html,body{height:100%}
+body{
+  background:var(--abyss); color:var(--text); overflow:hidden;
+  font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:13px;
+}
+/* ── depth atmosphere behind everything ── */
+#bg{position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:
+    radial-gradient(120% 60% at 50% -10%, rgba(45,140,212,.10), transparent 60%),
+    linear-gradient(180deg, #0b0c12 0%, #0a0a0f 35%, #08080c 70%, #060608 100%);}
+#bg::after{content:"";position:absolute;inset:0;opacity:.05;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.6'/%3E%3C/svg%3E");}
+
+.shell{position:relative;z-index:1;display:flex;flex-direction:column;height:100vh}
+
+/* ── masthead ── */
+header{display:flex;align-items:center;gap:18px;padding:14px 22px 10px;flex-wrap:wrap}
+h1{font-family:'Big Shoulders Display','Arial Narrow',sans-serif;text-transform:uppercase;font-weight:800;font-size:24px;font-weight:700;letter-spacing:.04em;
+   display:flex;align-items:center;gap:10px}
+h1 .fin{color:var(--low)}
+.sonar{width:9px;height:9px;border-radius:50%;background:var(--low);position:relative;flex:0 0 auto}
+.sonar::after{content:"";position:absolute;inset:-5px;border-radius:50%;
+  border:1px solid var(--low);animation:ping 2.2s ease-out infinite}
+.sonar.stale{background:var(--crit)} .sonar.stale::after{border-color:var(--crit)}
+@keyframes ping{0%{transform:scale(.4);opacity:.9}100%{transform:scale(1.8);opacity:0}}
+.pills{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
+.pill{font-size:11px;color:var(--dim);border:1px solid var(--border);
+  background:rgba(14,15,22,.7);border-radius:999px;padding:4px 12px;backdrop-filter:blur(4px)}
+.pill b{color:var(--text);font-weight:700}
+.pill b.c{color:var(--crit)} .pill b.h{color:var(--high)} .pill b.l{color:var(--low)}
+
+/* ── controls ── */
+.controls{display:flex;align-items:center;gap:10px;padding:0 22px 8px;flex-wrap:wrap}
+.chip{cursor:pointer;user-select:none;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  padding:5px 12px;border-radius:6px;border:1px solid var(--border);color:var(--dim);
+  background:rgba(14,15,22,.6);transition:all .15s}
+.chip:hover{color:var(--text);border-color:#23406e}
+.chip.on{color:var(--text);border-color:transparent}
+.chip.on[data-sev="CRITICAL"]{background:rgba(255,59,82,.16);box-shadow:0 0 14px rgba(255,59,82,.25);color:var(--crit)}
+.chip.on[data-sev="HIGH"]{background:rgba(240,160,80,.14);box-shadow:0 0 14px rgba(240,160,80,.2);color:var(--high)}
+.chip.on[data-sev="LOW"]{background:rgba(78,205,196,.12);box-shadow:0 0 14px rgba(78,205,196,.18);color:var(--low)}
+.chip.on[data-plat]{background:rgba(45,140,212,.14);color:#8d93a8}
+.sep{width:1px;height:18px;background:var(--border)}
+.minusd{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:11px}
+.minusd input{accent-color:var(--low);width:130px}
+.minusd b{color:var(--gold);min-width:52px;display:inline-block}
+.nav{margin-left:auto;display:flex;gap:14px}
+.nav a{color:var(--faint);text-decoration:none;font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+.nav a:hover{color:var(--low)}
+
+/* ── stage: canvas + tape ── */
+.stage{flex:1;display:flex;min-height:0;padding:0 22px 18px;gap:14px}
+.tank{flex:1;position:relative;border:1px solid var(--border);border-radius:14px;overflow:hidden;
+  background:linear-gradient(180deg, rgba(17,19,28,.25) 0%, rgba(10,11,16,.4) 30%, rgba(6,6,8,.7) 100%);}
+canvas{display:block;width:100%;height:100%;cursor:crosshair}
+.depthlbl{position:absolute;left:10px;font-size:10px;color:var(--faint);letter-spacing:.12em;pointer-events:none}
+.axislbl{position:absolute;bottom:6px;font-size:10px;color:var(--faint);letter-spacing:.12em;pointer-events:none}
+
+/* tooltip card */
+#tip{position:absolute;display:none;z-index:5;max-width:340px;pointer-events:none;
+  background:rgba(11,12,18,.92);border:1px solid #272b40;border-radius:10px;
+  padding:10px 12px;backdrop-filter:blur(6px);box-shadow:0 8px 30px rgba(0,0,0,.6)}
+#tip .t{font-family:'Big Shoulders Display','Arial Narrow',sans-serif;font-weight:600;font-size:13px;margin-bottom:4px}
+#tip .m{color:var(--faint);font-size:10px;margin-bottom:6px;word-break:break-all}
+#tip .row{display:flex;justify-content:space-between;gap:14px;font-size:11px;color:var(--dim);padding:1px 0}
+#tip .row b{color:var(--text);font-weight:500}
+#tip .sig{margin-top:6px;font-size:10px;color:var(--faint);word-break:break-word}
+#tip .sev{display:inline-block;padding:1px 8px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:.08em}
+
+/* ── tape ── */
+.tape{width:330px;flex:0 0 330px;display:flex;flex-direction:column;border:1px solid var(--border);
+  border-radius:14px;background:rgba(13,14,21,.55);backdrop-filter:blur(6px);overflow:hidden}
+.tape h2{font-family:'Big Shoulders Display','Arial Narrow',sans-serif;font-size:12px;letter-spacing:.18em;color:var(--dim);
+  text-transform:uppercase;padding:12px 14px 8px;border-bottom:1px solid var(--border)}
+.tape h2 span{color:var(--low)}
+#tapeList{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#272b40 transparent}
+.trow{padding:9px 14px;border-bottom:1px solid rgba(29,32,48,.6);cursor:pointer;transition:background .12s;
+  animation:drop .4s ease both}
+@keyframes drop{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+.trow:hover{background:rgba(23,26,38,.35)}
+.trow .l1{display:flex;align-items:center;gap:8px;font-size:10px;color:var(--faint)}
+.trow .dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+.trow .usd{margin-left:auto;color:var(--gold);font-weight:700;font-size:11px}
+.trow .ttl{font-size:12px;color:var(--text);margin:3px 0 2px;line-height:1.35;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.trow .fl{font-size:10px;color:var(--dim)}
+.trow .fl .y{color:var(--yes)} .trow .fl .n{color:var(--no)}
+.empty{padding:30px 16px;color:var(--faint);text-align:center;font-size:11px;line-height:1.8}
+@media (max-width:980px){.tape{display:none}}
+</style>
+</head>
+<body>
+<div id="bg"></div>
+<div class="shell">
+  <header>
+    <h1><span class="sonar" id="sonar"></span>WHALE<em>//</em>FLOW</h1>
+    <div class="pills">
+      <span class="pill">24h <b class="c" id="cCrit">–</b> crit · <b class="h" id="cHigh">–</b> high · <b class="l" id="cLow">–</b> low</span>
+      <span class="pill">window $ <b id="cUsd">–</b></span>
+      <span class="pill">scan <b id="cAge">–</b></span>
+    </div>
+  </header>
+
+  <div class="controls">
+    <span class="chip on" data-sev="CRITICAL">Critical</span>
+    <span class="chip on" data-sev="HIGH">High</span>
+    <span class="chip" data-sev="LOW">Low</span>
+    <span class="sep"></span>
+    <span class="chip on" data-plat="kalshi">Kalshi</span>
+    <span class="chip on" data-plat="polymarket">Polymarket</span>
+    <span class="sep"></span>
+    <label class="minusd">min flow <input type="range" id="minUsd" min="0" max="4" step="0.1" value="2">
+      <b id="minUsdLbl">$100</b></label>
+  </div>
+
+  <div class="stage">
+    <div class="tank" id="tank">
+      <canvas id="cv"></canvas>
+      <div id="tip"></div>
+    </div>
+    <aside class="tape">
+      <h2>Live tape <span id="tapeN"></span></h2>
+      <div id="tapeList"><div class="empty">listening for whales…</div></div>
+    </aside>
+  </div>
+</div>
+
+<script>
+'use strict';
+const API = '/polyclawd/api';
+const HOURS = 12;                       // time window on the X axis
+const SEV_COLOR = {CRITICAL:'#ff3b52', HIGH:'#f0a050', LOW:'#4ecdc4'};
+const SEV_GLOW  = {CRITICAL:'rgba(255,59,82,', HIGH:'rgba(240,160,80,', LOW:'rgba(78,205,196,'};
+
+const state = {
+  alerts: [],                            // raw from API
+  orbs: [],                              // renderable
+  sev: new Set(['CRITICAL','HIGH']),
+  plat: new Set(['kalshi','polymarket']),
+  minUsd: 100,
+  hover: null,
+  seenIds: new Set(),
+};
+
+/* ── data ── */
+async function fetchAlerts(){
+  try{
+    const r = await fetch(`${API}/whale/alerts?hours=${HOURS}&limit=200`);
+    const d = await r.json();
+    const fresh = [];
+    for(const a of (d.alerts||[])){
+      if(!state.seenIds.has(a.id)) fresh.push(a);
+    }
+    state.alerts = d.alerts || [];
+    rebuildOrbs(fresh);
+    renderTape();
+    const c = d.counts || {};
+    el('cCrit').textContent = c.CRITICAL ?? 0;
+    el('cHigh').textContent = c.HIGH ?? 0;
+    el('cLow').textContent  = c.LOW ?? 0;
+    const usd = state.alerts.reduce((s,a)=>s+(a.flow_dollars||0),0);
+    el('cUsd').textContent = fmtUsd(usd);
+  }catch(e){ console.error(e); }
+}
+async function fetchStats(){
+  try{
+    const d = await (await fetch(`${API}/whale/stats`)).json();
+    const age = d.health?.last_scan_age_s;
+    el('cAge').textContent = age==null ? 'n/a' : age<120 ? age+'s ago' : Math.round(age/60)+'m ago';
+    el('sonar').classList.toggle('stale', age==null || age>900);
+  }catch(e){ console.error(e); }
+}
+
+/* ── orbs ── */
+function rebuildOrbs(freshAlerts){
+  const freshIds = new Set((freshAlerts||[]).map(a=>a.id));
+  state.orbs = state.alerts.map(a=>{
+    const usd = a.flow_dollars || 0;
+    const old = state.orbs.find(o=>o.id===a.id);
+    state.seenIds.add(a.id);
+    return {
+      id:a.id, a, usd,
+      r: 4 + Math.min(26, Math.pow(Math.log10(Math.max(usd,1))/5,1.25)*26),
+      phase: old?.phase ?? Math.random()*Math.PI*2,
+      wob: old?.wob ?? (.4+Math.random()*.8),
+      born: old?.born ?? (freshIds.has(a.id) ? performance.now() : 0),
+      dir: dirOf(a),
+    };
+  });
+}
+function dirOf(a){
+  const y=a.flow_yes||0, n=a.flow_no||0;
+  if(y>=2*n && y>0) return 'YES';
+  if(n>=2*y && n>0) return 'NO';
+  return null;
+}
+function visible(o){
+  return state.sev.has(o.a.severity) && state.plat.has(o.a.platform) && o.usd>=state.minUsd;
+}
+
+/* ── canvas ── */
+const cv = el('cv'), ctx = cv.getContext('2d');
+let W=0,H=0,DPR=1;
+const PAD = {l:64, r:24, t:26, b:34};
+function resize(){
+  const tank = el('tank');
+  DPR = window.devicePixelRatio||1;
+  W = tank.clientWidth; H = tank.clientHeight;
+  cv.width = W*DPR; cv.height = H*DPR;
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize', resize);
+
+// Y: log10($) — surface $10 at top, abyss $100k at bottom
+const LOG_MIN=1, LOG_MAX=5;
+const yOf = usd => {
+  const lg = Math.min(LOG_MAX, Math.max(LOG_MIN, Math.log10(Math.max(usd,10))));
+  return PAD.t + (lg-LOG_MIN)/(LOG_MAX-LOG_MIN) * (H-PAD.t-PAD.b);
+};
+const xOf = ts => {
+  const now = Date.now()/1000;
+  const f = 1 - Math.min(1,(now-ts)/(HOURS*3600));
+  return PAD.l + f*(W-PAD.l-PAD.r);
+};
+
+/* marine snow */
+const snow = Array.from({length:90},()=>({x:Math.random(),y:Math.random(),s:.3+Math.random()*1.2,v:.008+Math.random()*.02}));
+
+function draw(now){
+  ctx.clearRect(0,0,W,H);
+
+  /* caustic light shafts from the surface */
+  for(let i=0;i<3;i++){
+    const cx = W*(.2+.3*i) + Math.sin(now/4200+i*2.1)*40;
+    const g = ctx.createLinearGradient(cx,0,cx+90,H*.7);
+    g.addColorStop(0,'rgba(80,160,220,.05)'); g.addColorStop(1,'rgba(80,160,220,0)');
+    ctx.fillStyle=g;
+    ctx.beginPath();
+    ctx.moveTo(cx-30,0); ctx.lineTo(cx+60,0); ctx.lineTo(cx+150,H*.72); ctx.lineTo(cx-90,H*.72);
+    ctx.closePath(); ctx.fill();
+  }
+
+  /* depth grid + labels */
+  ctx.font='10px "IBM Plex Mono"'; ctx.textBaseline='middle';
+  for(let lg=LOG_MIN;lg<=LOG_MAX;lg++){
+    const y=yOf(Math.pow(10,lg));
+    ctx.strokeStyle='rgba(70,100,150,.12)'; ctx.beginPath();
+    ctx.moveTo(PAD.l,y); ctx.lineTo(W-PAD.r,y); ctx.stroke();
+    ctx.fillStyle='rgba(110,140,180,.5)'; ctx.textAlign='right';
+    ctx.fillText('$'+fmtUsd(Math.pow(10,lg)), PAD.l-10, y);
+  }
+  /* time ticks */
+  ctx.textAlign='center'; ctx.fillStyle='rgba(110,140,180,.45)';
+  for(let h=0;h<=HOURS;h+=3){
+    const x = PAD.l + (1-h/HOURS)*(W-PAD.l-PAD.r);
+    ctx.fillText(h===0?'now':`-${h}h`, x, H-PAD.b/2);
+    ctx.strokeStyle='rgba(70,100,150,.07)';
+    ctx.beginPath(); ctx.moveTo(x,PAD.t); ctx.lineTo(x,H-PAD.b); ctx.stroke();
+  }
+
+  /* marine snow */
+  ctx.fillStyle='rgba(160,190,230,.16)';
+  for(const p of snow){
+    p.y += p.v/100; if(p.y>1)p.y=0;
+    ctx.beginPath(); ctx.arc(PAD.l+p.x*(W-PAD.l-PAD.r), PAD.t+p.y*(H-PAD.t-PAD.b), p.s, 0, 7); ctx.fill();
+  }
+
+  /* orbs — draw small/dim first so whales sit on top */
+  const orbs = state.orbs.filter(visible).sort((a,b)=>a.usd-b.usd);
+  for(const o of orbs){
+    const x = xOf(o.a.ts) + Math.sin(now/1400*o.wob+o.phase)*3;
+    const y = yOf(o.usd)  + Math.cos(now/1700*o.wob+o.phase)*2.5;
+    o.sx=x; o.sy=y;
+    const col = SEV_COLOR[o.a.severity]||'#888';
+    const glow = SEV_GLOW[o.a.severity]||'rgba(136,136,136,';
+    const pulse = o.a.severity==='CRITICAL' ? .75+.25*Math.sin(now/420+o.phase) : 1;
+    const spawn = o.born ? Math.min(1,(now-o.born)/700) : 1;
+    const r = o.r * (0.4+0.6*spawn) * (o.hover?1.18:1);
+
+    /* spawn ripple */
+    if(o.born && now-o.born<900){
+      const f=(now-o.born)/900;
+      ctx.strokeStyle=glow+(0.5*(1-f))+')';
+      ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.arc(x,y,r+f*34,0,7); ctx.stroke();
+    }
+    /* bioluminescent glow */
+    const g=ctx.createRadialGradient(x,y,0,x,y,r*3.2);
+    g.addColorStop(0, glow+(.5*pulse*spawn)+')');
+    g.addColorStop(1, glow+'0)');
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(x,y,r*3.2,0,7); ctx.fill();
+    /* body */
+    ctx.fillStyle=col; ctx.globalAlpha=.92*spawn;
+    ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.fill();
+    ctx.globalAlpha=1;
+    /* inner highlight */
+    ctx.fillStyle='rgba(255,255,255,.35)';
+    ctx.beginPath(); ctx.arc(x-r*.3,y-r*.35,r*.3,0,7); ctx.fill();
+    /* taker-direction ring */
+    if(o.dir){
+      ctx.strokeStyle = o.dir==='YES' ? 'rgba(0,214,143,.85)' : 'rgba(246,81,100,.85)';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.arc(x,y,r+3,0,7); ctx.stroke();
+    }
+  }
+  requestAnimationFrame(draw);
+}
+
+/* ── hover / click ── */
+const tip = el('tip');
+cv.addEventListener('mousemove', e=>{
+  const rect=cv.getBoundingClientRect();
+  const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+  let best=null,bd=1e9;
+  for(const o of state.orbs){
+    if(!visible(o)||o.sx==null) continue;
+    const d=Math.hypot(o.sx-mx,o.sy-my);
+    if(d<Math.max(o.r+6,12) && d<bd){best=o;bd=d;}
+  }
+  state.orbs.forEach(o=>o.hover=false);
+  if(best){
+    best.hover=true; cv.style.cursor='pointer';
+    showTip(best, mx, my);
+  } else { cv.style.cursor='crosshair'; tip.style.display='none'; }
+});
+cv.addEventListener('click', ()=>{
+  const o=state.orbs.find(o=>o.hover);
+  if(o) window.open(linkOf(o.a),'_blank');
+});
+function showTip(o,mx,my){
+  const a=o.a;
+  const col=SEV_COLOR[a.severity];
+  tip.innerHTML = `
+    <div><span class="sev" style="background:${col}22;color:${col}">${a.severity} ${a.score}/10</span></div>
+    <div class="t">${esc(a.title||a.market)}${a.sub_title?` <span style="color:var(--dim)">[${esc(a.sub_title)}]</span>`:''}</div>
+    <div class="m">${esc(a.market)}</div>
+    <div class="row"><span>flow this window</span><b style="color:var(--gold)">$${fmtUsd(a.flow_dollars||0)}</b></div>
+    ${a.flow_yes!=null?`<div class="row"><span>taker</span><b><span style="color:var(--yes)">${Math.round(a.flow_yes)} Y</span> / <span style="color:var(--no)">${Math.round(a.flow_no)} N</span></b></div>`:''}
+    ${a.best_bid!=null?`<div class="row"><span>book</span><b>${(+a.best_bid).toFixed(2)} / ${(+a.best_ask).toFixed(2)}</b></div>`:''}
+    ${a.bid_depth!=null?`<div class="row"><span>depth</span><b>${fmtUsd(a.bid_depth)}B / ${fmtUsd(a.ask_depth)}A</b></div>`:''}
+    <div class="row"><span>when</span><b>${ago(a.ts)}</b></div>
+    <div class="sig">${esc(a.reasons)}</div>`;
+  tip.style.display='block';
+  const tw=tip.offsetWidth, th=tip.offsetHeight;
+  tip.style.left = Math.min(mx+16, W-tw-10)+'px';
+  tip.style.top  = Math.max(8, Math.min(my-th/2, H-th-10))+'px';
+}
+
+/* ── tape ── */
+function renderTape(){
+  const list=el('tapeList');
+  const rows=state.alerts.filter(a=>state.sev.has(a.severity)&&state.plat.has(a.platform)&&(a.flow_dollars||0)>=state.minUsd).slice(0,40);
+  el('tapeN').textContent = rows.length?`· ${rows.length}`:'';
+  if(!rows.length){list.innerHTML='<div class="empty">no alerts match the current filters<br>— the abyss is quiet —</div>';return;}
+  list.innerHTML = rows.map(a=>{
+    const col=SEV_COLOR[a.severity];
+    const dir = (a.flow_yes||0)>=(2*(a.flow_no||0))&&a.flow_yes>0 ? `<span class="y">▲ YES</span>`
+              : (a.flow_no||0)>=(2*(a.flow_yes||0))&&a.flow_no>0 ? `<span class="n">▼ NO</span>` : '';
+    return `<div class="trow" onclick="window.open('${linkOf(a)}','_blank')">
+      <div class="l1"><span class="dot" style="background:${col};box-shadow:0 0 8px ${col}"></span>
+        ${a.platform==='kalshi'?'KALSHI':'POLY'} · ${ago(a.ts)}
+        <span class="usd">$${fmtUsd(a.flow_dollars||0)}</span></div>
+      <div class="ttl">${esc(a.title||a.market)}</div>
+      <div class="fl">${dir} ${a.flow_yes!=null?`${Math.round(a.flow_yes)}Y/${Math.round(a.flow_no)}N · `:''}score ${a.score}/10</div>
+    </div>`;
+  }).join('');
+}
+
+/* ── controls ── */
+document.querySelectorAll('.chip[data-sev]').forEach(ch=>ch.addEventListener('click',()=>{
+  ch.classList.toggle('on');
+  ch.classList.contains('on') ? state.sev.add(ch.dataset.sev) : state.sev.delete(ch.dataset.sev);
+  renderTape();
+}));
+document.querySelectorAll('.chip[data-plat]').forEach(ch=>ch.addEventListener('click',()=>{
+  ch.classList.toggle('on');
+  ch.classList.contains('on') ? state.plat.add(ch.dataset.plat) : state.plat.delete(ch.dataset.plat);
+  renderTape();
+}));
+el('minUsd').addEventListener('input',e=>{
+  state.minUsd = Math.round(Math.pow(10,+e.target.value));
+  el('minUsdLbl').textContent='$'+fmtUsd(state.minUsd);
+  renderTape();
+});
+
+/* ── utils ── */
+function el(id){return document.getElementById(id)}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function fmtUsd(v){
+  if(v>=1e6) return (v/1e6).toFixed(1)+'M';
+  if(v>=1e3) return (v/1e3).toFixed(v>=1e4?0:1)+'K';
+  return Math.round(v).toString();
+}
+function ago(ts){
+  const s=Date.now()/1000-ts;
+  if(s<90) return Math.round(s)+'s ago';
+  if(s<5400) return Math.round(s/60)+'m ago';
+  return (s/3600).toFixed(1)+'h ago';
+}
+function linkOf(a){
+  return a.platform==='kalshi'
+    ? `https://kalshi.com/markets/${a.market.split('-')[0]}`
+    : `https://polymarket.com/market/${a.market}`;
+}
+
+/* ── boot ── */
+resize();
+state.minUsd=100;
+requestAnimationFrame(draw);
+fetchAlerts(); fetchStats();
+setInterval(fetchAlerts, 45000);
+setInterval(fetchStats, 60000);
+</script>
+<script src="whale-nav.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Polyclawd — Design System</title>
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
+<style>
+/* page-local layout only — every visual decision below comes from polyclawd.css */
+.wrap{max-width:1100px;margin:0 auto;padding:8px 24px 60px;position:relative;z-index:1}
+.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.swatches{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:1px;background:var(--pc-line);border:1px solid var(--pc-line)}
+.sw{background:var(--pc-panel);padding:12px 14px}
+.sw .chip{height:34px;border:1px solid var(--pc-line-2);margin-bottom:8px}
+.sw .n{font-size:10px;color:var(--pc-dim)}
+.sw .h{font-size:9.5px;color:var(--pc-faint)}
+.demo{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+code{font-size:11px;color:var(--pc-accent-ink);background:var(--pc-raised);padding:1px 6px;border:1px solid var(--pc-line)}
+.type-line{border-bottom:1px solid var(--pc-line);padding:10px 0;display:flex;align-items:baseline;gap:18px}
+.type-line .lbl{font-size:9.5px;color:var(--pc-faint);width:170px;flex:none;letter-spacing:.14em;text-transform:uppercase}
+</style>
+</head>
+<body data-pc-section="Design system">
+
+<main class="wrap">
+
+  <div class="pc-rule" style="margin-top:20px"><span class="idx">00 /</span>
+    <h1 style="font:inherit;letter-spacing:inherit;display:inline">Probability Bureau — living style guide</h1>
+    <small>css/polyclawd.css v1 · adopt with 2 lines (see CLAUDE.md → Design System)</small>
+  </div>
+  <p class="pc-dim" style="max-width:74ch;line-height:1.8;font-size:12px">
+    A mid-century forecast bureau rebuilt as a terminal. Warm carbon chart paper,
+    paper ink, square corners, hairline borders, one orange. Everything on this
+    page is rendered by the system itself — if it looks wrong here, fix the CSS,
+    not the page. <b class="pc-accent">Banned:</b> Inter, border-radius, glow
+    shadows, glassmorphism, decorative gradients, new font pairings.
+  </p>
+
+  <div class="pc-rule"><span class="idx">01 /</span> Tokens — surfaces &amp; ink</div>
+  <div class="swatches">
+    <div class="sw"><div class="chip" style="background:var(--pc-bg)"></div><div class="n">--pc-bg</div><div class="h">#0d0d0b · page</div></div>
+    <div class="sw"><div class="chip" style="background:var(--pc-panel)"></div><div class="n">--pc-panel</div><div class="h">#131310 · card</div></div>
+    <div class="sw"><div class="chip" style="background:var(--pc-raised)"></div><div class="n">--pc-raised</div><div class="h">#1a1a15 · hover/raised</div></div>
+    <div class="sw"><div class="chip" style="background:var(--pc-line)"></div><div class="n">--pc-line</div><div class="h">#26261f · hairline</div></div>
+    <div class="sw"><div class="chip" style="background:var(--pc-ink)"></div><div class="n">--pc-ink</div><div class="h">#ece9df · text</div></div>
+    <div class="sw"><div class="chip" style="background:var(--pc-dim)"></div><div class="n">--pc-dim</div><div class="h">#9a968a · secondary</div></div>
+    <div class="sw"><div class="chip" style="background:var(--pc-accent)"></div><div class="n">--pc-accent</div><div class="h">#ff5c1f · THE stamp, &lt;20%</div></div>
+    <div class="sw"><div class="chip" style="background:var(--pc-up)"></div><div class="n">--pc-up</div><div class="h">#2fbf71 · gains/yes</div></div>
+    <div class="sw"><div class="chip" style="background:var(--pc-down)"></div><div class="n">--pc-down</div><div class="h">#e4484d · losses/no</div></div>
+    <div class="sw"><div class="chip" style="background:var(--pc-crit)"></div><div class="n">--pc-crit</div><div class="h">#ff3b52 · CRITICAL</div></div>
+    <div class="sw"><div class="chip" style="background:var(--pc-warn)"></div><div class="n">--pc-warn / --pc-high</div><div class="h">#f0a050 · HIGH</div></div>
+    <div class="sw"><div class="chip" style="background:var(--pc-gold)"></div><div class="n">--pc-gold</div><div class="h">#d8b13c · smart/awards</div></div>
+  </div>
+
+  <div class="pc-rule"><span class="idx">02 /</span> Type</div>
+  <div class="pc-card">
+    <div class="type-line"><span class="lbl">display · Unica One</span>
+      <span class="pc-num" style="font-size:34px">PROBABILITY 0.847 — $12,408</span></div>
+    <div class="type-line"><span class="lbl">wordmark</span>
+      <span class="pc-num" style="font-size:23px">POLY<i style="font-style:normal;color:var(--pc-accent)">//</i>CLAWD</span></div>
+    <div class="type-line"><span class="lbl">body · Spline Sans Mono</span>
+      <span style="font-size:13px">Aggressive YES flow: 29,597 contracts ≈ $28,961 against 1,946 of resting depth.</span></div>
+    <div class="type-line"><span class="lbl">label</span>
+      <span style="font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--pc-faint)">open interest · 24h window · settle T+0</span></div>
+    <div class="pc-note"><b>Rules:</b> display face for wordmarks and headline numerals only. Body never tracks; labels always track (.14–.24em) and uppercase. Numbers in tables are tabular.</div>
+  </div>
+
+  <div class="pc-rule"><span class="idx">03 /</span> Stamps — <code>.pc-stamp</code></div>
+  <div class="pc-card demo">
+    <span class="pc-stamp">DEFAULT</span>
+    <span class="pc-stamp pc-stamp--accent">PAPER</span>
+    <span class="pc-stamp pc-stamp--up">LIVE</span>
+    <span class="pc-stamp pc-stamp--crit">CRITICAL</span>
+    <span class="pc-stamp pc-stamp--high">HIGH</span>
+    <span class="pc-stamp pc-stamp--low">LOW</span>
+    <span class="pc-stamp pc-stamp--gold">SMART</span>
+    <span class="pc-stamp pc-stamp--down">HALTED</span>
+  </div>
+
+  <div class="pc-rule"><span class="idx">04 /</span> Stat blocks — <code>.pc-stats &gt; .pc-stat</code></div>
+  <div class="pc-stats">
+    <div class="pc-stat"><div class="k">Paper P&amp;L (net)</div><div class="v pos">$109.8K</div><div class="s">after fees + slippage</div></div>
+    <div class="pc-stat"><div class="k">Open exposure</div><div class="v">$14,000</div><div class="s">14 positions riding</div></div>
+    <div class="pc-stat"><div class="k">Drawdown</div><div class="v neg">−4.2%</div><div class="s">vs high-water mark</div></div>
+    <div class="pc-stat"><div class="k">Verdict progress</div><div class="v accent">217/500</div><div class="s">first read at 150</div></div>
+  </div>
+
+  <div class="pc-rule"><span class="idx">05 /</span> Cards — <code>.pc-card</code> · corner ticks for the page's ONE primary card</div>
+  <div class="row">
+    <div class="pc-card pc-card--tick">
+      <h2>Primary card · --tick</h2>
+      <p class="pc-dim" style="font-size:12px;line-height:1.7">Corner ticks mark the single
+      most important surface on a page. Never more than one per view.</p>
+    </div>
+    <div class="pc-card">
+      <h2>Standard card</h2>
+      <div class="pc-kv"><span>edge <b class="pc-pos">+3.4¢</b></span><span>fee <b>1.75¢</b></span><span>net <b class="pc-pos">+1.65¢</b></span></div>
+    </div>
+    <div class="pc-card">
+      <h2>Empty state</h2>
+      <div class="pc-empty">no qualifying whales yet —<br>the desk enters when flow ≥ $750 clears INFO 0.55</div>
+    </div>
+  </div>
+
+  <div class="pc-rule"><span class="idx">06 /</span> Table — <code>.pc-table</code></div>
+  <div class="pc-card" style="padding:6px 12px 2px">
+    <table class="pc-table">
+      <thead><tr><th>market</th><th>side</th><th class="r">flow</th><th class="r">price</th><th class="r">net P&amp;L</th><th>state</th></tr></thead>
+      <tbody>
+        <tr><td><b>Will it rain in NYC on Jun 14?</b></td><td class="pc-pos">YES</td><td class="r">$4,820</td><td class="r">0.37 → 0.44</td><td class="r"><b class="pc-pos">+$189.40</b></td><td><span class="pc-stamp pc-stamp--up">LIVE</span></td></tr>
+        <tr><td><b>Fed cuts ≥25bps at September FOMC</b></td><td class="pc-neg">NO</td><td class="r">$28,961</td><td class="r">0.91 → 0.89</td><td class="r"><b class="pc-pos">+$2,019</b></td><td><span class="pc-stamp pc-stamp--accent">PAPER</span></td></tr>
+        <tr><td><b>Hwang Hee-chan: 1+ goals</b></td><td class="pc-pos">YES</td><td class="r">$95</td><td class="r">0.17 → 0.11</td><td class="r"><b class="pc-neg">−$33.71</b></td><td><span class="pc-stamp">CLOSED</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="pc-rule"><span class="idx">07 /</span> Buttons &amp; chips — <code>.pc-btn · .pc-chip</code></div>
+  <div class="pc-card demo">
+    <button class="pc-btn pc-btn--primary">Execute paper trade</button>
+    <button class="pc-btn">↻ refresh</button>
+    <span style="width:14px"></span>
+    <span class="pc-chip on">Critical</span>
+    <span class="pc-chip">High</span>
+    <span class="pc-chip">Low</span>
+    <span class="pc-chip on">Kalshi</span>
+    <span class="pc-chip">Polymarket</span>
+  </div>
+
+  <div class="pc-rule"><span class="idx">08 /</span> Chart palette — read via <code>getComputedStyle</code>, never hardcode</div>
+  <div class="pc-card demo">
+    <span class="pc-stamp" style="color:var(--pc-chart-1)">chart-1</span>
+    <span class="pc-stamp" style="color:var(--pc-chart-2)">chart-2</span>
+    <span class="pc-stamp" style="color:var(--pc-chart-3)">chart-3</span>
+    <span class="pc-stamp" style="color:var(--pc-chart-4)">chart-4</span>
+    <span class="pc-stamp" style="color:var(--pc-chart-5)">chart-5</span>
+    <span class="pc-stamp" style="color:var(--pc-chart-6)">chart-6</span>
+    <span class="pc-dim" style="font-size:11px">canvas: grid rgba(236,233,223,.05) · up/down for P&amp;L series only</span>
+  </div>
+
+  <div class="pc-note" style="margin-top:30px">
+    <b>Adoption:</b> <code>&lt;link rel="stylesheet" href="css/polyclawd.css?v=1"&gt;</code> +
+    <code>&lt;script src="polyclawd-shell.js" defer&gt;&lt;/script&gt;</code> — two lines, nothing else.
+    Legacy virtuoso.css pages: add both lines AFTER the virtuoso.css link; the bridge does the rest.
+    Reference implementation: <a href="index.html" style="color:var(--pc-accent-ink)">index.html</a>.
+  </div>
+
+</main>
+
+<script src="polyclawd-shell.js" defer></script>
+</body>
+</html>

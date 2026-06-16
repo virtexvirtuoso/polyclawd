@@ -379,3 +379,69 @@ def estimate_sharp_line(market_odds: List[dict]) -> Optional[dict]:
         "american_yes": implied_to_american(yes_prob),
         "american_no": implied_to_american(no_prob)
     }
+
+
+# ============================================================================
+# Cross-Platform Arb Fee Adjustments
+# ============================================================================
+
+# Exchange fee rates (as fraction of contract value)
+# Kalshi: ~1% per contract (10¢ per $10 face value)
+# Polymarket: ~2% on net winnings
+# Both are CLOBs — no bookmaker vig in mid-prices; these are pure exchange fees.
+FEE_MAP = {"polymarket": 0.02, "kalshi": 0.01}
+
+
+def net_arb_edge(buy_price: float, sell_price: float, buy_platform: str, sell_platform: str, estimated_slippage: float = 0.005) -> dict:
+    """
+    Compute fee-adjusted arbitrage edge for cross-platform CLOB arb.
+
+    Both Polymarket and Kalshi are order-book exchanges with no embedded vig
+    in mid-prices (unlike sportsbook odds). The real cost of executing arb is:
+      1. Exchange buy fee (percentage of purchase price)
+      2. Exchange sell fee (percentage of profit, if profitable)
+      3. Estimated slippage from crossing the spread
+
+    Args:
+        buy_price: Price paid on the buy side (fraction of 1.0, e.g. 0.70)
+        sell_price: Price received on the sell side (fraction of 1.0, e.g. 0.75)
+        buy_platform: "polymarket" or "kalshi"
+        sell_platform: "polymarket" or "kalshi"
+        estimated_slippage: Fraction of contract value lost to spread-crossing (default 0.005 = 0.5pp)
+
+    Returns:
+        dict with keys:
+        - gross_return: raw return fraction (e.g. 0.0714 for 7.14%)
+        - net_return: return after fees & slippage
+        - buy_fee: fee fraction incurred on purchase
+        - sell_fee: fee fraction incurred on profitable sale
+        - slippage: slippage fraction deducted
+        - net_edge_pp: net edge in percentage points (e.g. 4.2 for 4.2pp)
+    """
+    # Gross return
+    gross_return = (sell_price / buy_price) - 1.0 if buy_price > 0 else 0.0
+
+    # Buy fee — charged on purchase price
+    buy_fee = buy_price * FEE_MAP.get(buy_platform, 0.0)
+
+    # Sell fee — charged on profit when positive
+    profit = sell_price - buy_price
+    sell_fee = profit * FEE_MAP.get(sell_platform, 0.0) if profit > 0 else 0.0
+
+    # Slippage deduction
+    slippage = estimated_slippage
+
+    # Net return after all costs
+    net_return = gross_return - buy_fee - sell_fee - slippage
+
+    # Net edge in percentage points
+    net_edge_pp = net_return * 100.0
+
+    return {
+        "gross_return": round(gross_return, 6),
+        "net_return": round(net_return, 6),
+        "buy_fee": round(buy_fee, 6),
+        "sell_fee": round(sell_fee, 6),
+        "slippage": round(slippage, 6),
+        "net_edge_pp": round(net_edge_pp, 2),
+    }

@@ -136,6 +136,10 @@ app.include_router(edge_scanner_router, tags=["Edge Scanner"])
 # Live trading routes: /api/live/portfolio, /positions, /fills, /governor, /edge-capture
 app.include_router(live_router, prefix="/api", tags=["Live"])
 
+# Whale Shark dashboard: /api/whale/alerts, /stats, /wallets
+from api.routes.whale import router as whale_router
+app.include_router(whale_router, prefix="/api", tags=["Whale"])
+
 # ============================================================================
 # Visitor Tracking
 # ============================================================================

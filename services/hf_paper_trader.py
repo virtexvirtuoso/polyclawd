@@ -270,7 +270,7 @@ def open_hf_paper_position(
                 try:
                     from signals.discord_alerts import alert_position_opened
                     slug = market.get("slug", "")
-                    mkt_url = f"https://polymarket.com/event/{slug}" if slug else ""
+                    mkt_url = f"https://polymarket.com/market/{slug}" if slug else ""
                     alert_position_opened(
                         market["question"], "YES" if direction == "UP" else "NO",
                         entry_price, bet_size, f"hf_{trigger_type}",
@@ -616,6 +616,19 @@ def resolve_hf_positions() -> Dict:
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
+        
+        # Ensure table exists (resolve can run before process on first cycle)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS hf_paper_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id TEXT, asset TEXT, direction TEXT,
+                trigger_type TEXT, strength TEXT, confidence REAL,
+                edge_pct REAL, bet_size REAL, entry_price REAL,
+                market_question TEXT, market_end_time TEXT,
+                outcome TEXT, pnl REAL,
+                opened_at TEXT, resolved_at TEXT
+            )
+        """)
         
         # Get unresolved HF trades
         open_trades = conn.execute(

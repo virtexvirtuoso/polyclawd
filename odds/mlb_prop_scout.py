@@ -36,15 +36,15 @@ SCOUT_CACHE_TTL_S = 600  # 10 min — same as props cache
 # Market key → (stat_group, stat_field, description)
 # stat_field is the key in the MLB Stats API game log split.
 MARKET_STAT_MAP: Dict[str, Tuple[str, str, str]] = {
-    "batter_home_runs":    ("hitting", "homeRuns",      "HR"),
-    "batter_hits":         ("hitting", "hits",          "H"),
-    "batter_total_bases":  ("hitting", "totalBases",    "TB"),
-    "pitcher_strikeouts":  ("pitching", "strikeOuts",   "K"),
-    "batter_rbis":         ("hitting", "rbi",           "RBI"),
+    "batter_home_runs": ("hitting", "homeRuns", "HR"),
+    "batter_hits": ("hitting", "hits", "H"),
+    "batter_total_bases": ("hitting", "totalBases", "TB"),
+    "pitcher_strikeouts": ("pitching", "strikeOuts", "K"),
+    "batter_rbis": ("hitting", "rbi", "RBI"),
 }
 
-_PLAYER_ID_CACHE: Dict[str, Optional[int]] = {}   # name → mlb id (or None)
-_GAME_LOG_CACHE: Dict[str, Dict] = {}              # "{pid}_{group}" → {ts, splits}
+_PLAYER_ID_CACHE: Dict[str, Optional[int]] = {}  # name → mlb id (or None)
+_GAME_LOG_CACHE: Dict[str, Dict] = {}  # "{pid}_{group}" → {ts, splits}
 _SCOUT_CACHE: Dict[str, object] = {"ts": 0.0, "data": None}
 
 _pool = ThreadPoolExecutor(max_workers=20, thread_name_prefix="prop_scout")
@@ -57,6 +57,7 @@ def _read_disk_cache(cache_key: str) -> Optional[Dict]:
     """Return disk-cached payload if fresh and matching cache_key, else None."""
     try:
         import os
+
         if not os.path.exists(_DISK_CACHE_PATH):
             return None
         with open(_DISK_CACHE_PATH, "r") as f:
@@ -75,6 +76,7 @@ def _write_disk_cache(payload: Dict) -> None:
     """Write payload to disk cache (atomic via temp file)."""
     try:
         import os
+
         payload["_disk_ts"] = time.time()
         tmp = _DISK_CACHE_PATH + ".tmp"
         with open(tmp, "w") as f:
@@ -85,6 +87,7 @@ def _write_disk_cache(payload: Dict) -> None:
 
 
 # ── MLB Stats API helpers ──────────────────────────────────────────────────────
+
 
 def _mlb_get(path: str) -> dict:
     url = f"{MLB_STATS_API}{path}"
@@ -113,10 +116,7 @@ def _fetch_game_log(pid: int, stat_group: str, last_n: int) -> List[Dict]:
     if cached and time.time() - cached["ts"] < SCOUT_CACHE_TTL_S:
         return cached["splits"][-last_n:]
     try:
-        data = _mlb_get(
-            f"/people/{pid}/stats"
-            f"?stats=gameLog&group={stat_group}&season=2026&gameType=R"
-        )
+        data = _mlb_get(f"/people/{pid}/stats?stats=gameLog&group={stat_group}&season=2026&gameType=R")
         splits = data.get("stats", [{}])[0].get("splits", [])
         _GAME_LOG_CACHE[cache_key] = {"ts": time.time(), "splits": splits}
         return splits[-last_n:]
@@ -126,6 +126,7 @@ def _fetch_game_log(pid: int, stat_group: str, last_n: int) -> List[Dict]:
 
 
 # ── Edge calculation ───────────────────────────────────────────────────────────
+
 
 def _implied_prob(american: str) -> float:
     """'+330' or '-110' → 0.0–1.0."""
@@ -144,9 +145,7 @@ def _scout_player(
     last_n: int,
 ) -> Optional[Dict]:
     """Return scout row for one player/market combo, or None on failure."""
-    stat_group, stat_field, stat_label = MARKET_STAT_MAP.get(
-        market_key, ("hitting", "hits", "H")
-    )
+    stat_group, stat_field, stat_label = MARKET_STAT_MAP.get(market_key, ("hitting", "hits", "H"))
     pid = _lookup_player_id(player)
     if not pid:
         return None
@@ -155,7 +154,18 @@ def _scout_player(
     if not splits:
         return None
 
-    vals = [s.get("stat", {}).get(stat_field, 0) or 0 for s in splits]
+    games_meta = []
+    for s in splits:
+        opp = ((s.get("opponent") or {}).get("name") or "").split()
+        games_meta.append(
+            {
+                "d": s.get("date", ""),
+                "opp": opp[-1] if opp else "",
+                "home": bool(s.get("isHome")),
+                "v": (s.get("stat", {}) or {}).get(stat_field, 0) or 0,
+            }
+        )
+    vals = [g["v"] for g in games_meta]
     games = len(vals)
     if games == 0:
         return None
@@ -177,10 +187,12 @@ def _scout_player(
         "edge_pct": round(edge * 100, 1),
         "games_sampled": games,
         "last_n_vals": vals,
+        "last_n_games": games_meta,
     }
 
 
 # ── Dedup: best book price per (player, market) ───────────────────────────────
+
 
 def _best_book_rows(props: Dict[str, List[Dict]]) -> Dict[Tuple[str, str], Dict]:
     """Return {(player, market_key): row_with_highest_over_ip} across all games."""
@@ -199,6 +211,7 @@ def _best_book_rows(props: Dict[str, List[Dict]]) -> Dict[Tuple[str, str], Dict]
 
 # ── Main async entry point ─────────────────────────────────────────────────────
 
+
 async def get_prop_scout(last_n: int = 10, min_edge: float = -0.99, min_games: int = 5) -> Dict:
     """
     Return prop scout analysis for today's slate.
@@ -210,7 +223,8 @@ async def get_prop_scout(last_n: int = 10, min_edge: float = -0.99, min_games: i
                    guards against noisy edges from rookies/call-ups with tiny samples
     """
     now = time.time()
-    cache_key = f"{last_n}_{min_edge}_{min_games}"
+    # v2: invalidates caches that predate the last_n_games (date/opponent) field
+    cache_key = f"{last_n}_{min_edge}_{min_games}_v2"
 
     # Check in-memory cache first (fastest)
     cached = _SCOUT_CACHE.get("data")
@@ -263,7 +277,7 @@ async def get_prop_scout(last_n: int = 10, min_edge: float = -0.99, min_games: i
     # pool actually runs them concurrently rather than in one blocking lambda.
     batch_size = 10
     lookup_futs = [
-        loop.run_in_executor(_pool, _bulk_lookup, unique_names[i:i + batch_size])
+        loop.run_in_executor(_pool, _bulk_lookup, unique_names[i : i + batch_size])
         for i in range(0, len(unique_names), batch_size)
     ]
     await asyncio.gather(*lookup_futs)
@@ -279,10 +293,7 @@ async def get_prop_scout(last_n: int = 10, min_edge: float = -0.99, min_games: i
         pid, grp = pid_group
         _fetch_game_log(pid, grp, last_n)
 
-    log_futs = [
-        loop.run_in_executor(_pool, _fetch_one_log, pg)
-        for pg in unique_pid_groups
-    ]
+    log_futs = [loop.run_in_executor(_pool, _fetch_one_log, pg) for pg in unique_pid_groups]
     await asyncio.gather(*log_futs)
 
     # Phase C — pure-CPU stat computation (no more I/O, fast)
@@ -298,19 +309,14 @@ async def get_prop_scout(last_n: int = 10, min_edge: float = -0.99, min_games: i
 
     # Step 4: filter, sort by edge desc
     results = [
-        r for r in raw_results
-        if r is not None
-        and r["edge_pct"] >= min_edge * 100
-        and r["games_sampled"] >= min_games
+        r for r in raw_results if r is not None and r["edge_pct"] >= min_edge * 100 and r["games_sampled"] >= min_games
     ]
     results.sort(key=lambda r: r["edge_pct"], reverse=True)
 
     payload = {
         "_cache_key": cache_key,
         "source": "mlb_prop_scout",
-        "timestamp": __import__("datetime").datetime.now(
-            __import__("datetime").timezone.utc
-        ).isoformat(),
+        "timestamp": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
         "last_n": last_n,
         "total_players_analyzed": len([r for r in raw_results if r is not None]),
         "results": results,

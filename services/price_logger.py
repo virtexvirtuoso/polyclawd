@@ -15,6 +15,7 @@ Called from scheduler tick_5min().
 """
 
 import sqlite3
+import time
 import urllib.request
 import json
 from datetime import datetime, timezone
@@ -78,6 +79,10 @@ def _fetch_position_price(pos: dict) -> tuple:
         data = _fetch_url(f"{KALSHI_API}/markets/{market_id}")
         if data:
             market = data.get("market", data)
+            # Fractional markets null legacy cents fields; *_dollars first
+            cp = market.get("last_price_dollars")
+            if cp not in (None, ""):
+                return (pos_id, float(cp))
             cp = market.get("last_price")
             if cp and cp > 1:
                 cp = cp / 100

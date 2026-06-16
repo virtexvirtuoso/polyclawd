@@ -257,6 +257,13 @@ def apply_livegame_ceiling(alert: dict, platform: str, market: str,
             alert["reasons"] += ",pregame_steam"
             return
 
+    # Pierce 4: whale-sized flow bypasses live-game ceiling entirely.
+    # Game-day churn is typically $50-$5K; $25K+ is a genuine whale signal
+    # regardless of game state (e.g. $157K on Uruguay -1.5 goals).
+    if fd >= CRITICAL_FLOW_USD:
+        alert["reasons"] += f",whale_flow_pierce_{fd:.0f}"
+        return
+
     alert["severity"] = "HIGH"
     alert["reasons"] += ",livegame_capped"
 
@@ -278,7 +285,6 @@ CRITICAL_FLOW_USD  = 25000.0 # Telegram-delivered CRITICAL needs genuine whale
 NEAR_SETTLED_BID   = 0.95    # bid >= this: market effectively resolved YES
 NEAR_SETTLED_ASK   = 0.05    # ask <= this: effectively resolved NO
 NEAR_SETTLED_LAST  = 0.97    # last-trade fallback when no book snapshot
-GAME_DAY_SUPPRESS  = True    # same-day dated Kalshi tickers = in/near-game flow
 
 _MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
            "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
@@ -325,10 +331,6 @@ def alert_gate(platform: str, market: str, det: Optional[dict],
             or (ask is not None and ask <= NEAR_SETTLED_ASK)
             or (last is not None and not (1 - NEAR_SETTLED_LAST) < last < NEAR_SETTLED_LAST)):
         return "near_settled"
-    if platform == "kalshi" and GAME_DAY_SUPPRESS:
-        ev = _ticker_event_date(market)
-        if ev is not None and ev == _today_et():
-            return "game_day"
     return None
 
 SNAPSHOT_RETENTION_HOURS = 48
@@ -1411,7 +1413,7 @@ def format_alert(a: dict) -> str:
     if a["platform"] == "kalshi":
         lines.append(f"Link: https://kalshi.com/markets/{a['market'].split('-')[0]}")
     else:
-        lines.append(f"Link: https://polymarket.com/event/{a['market']}")
+        lines.append(f"Link: https://polymarket.com/market/{a['market']}")
     return "\n".join(lines)
 
 

@@ -134,7 +134,7 @@ def enrich_polymarket_metadata(slug: str) -> Optional[Dict]:
     end date, related markets.
     """
     data = _browser_request(
-        url=f"https://polymarket.com/event/{slug}",
+        url=f"https://polymarket.com/market/{slug}",
         selectors={
             "title": "h1",
             "description": "[data-testid='market-description']",

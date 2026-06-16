@@ -67,6 +67,7 @@ _DISK_CACHE_PATH = "/tmp/polyclawd_kalshi_scan_cache.json"
 def _read_disk_cache(key: str):
     try:
         import os
+
         if not os.path.exists(_DISK_CACHE_PATH):
             return None
         with open(_DISK_CACHE_PATH) as f:
@@ -81,6 +82,7 @@ def _read_disk_cache(key: str):
 def _write_disk_cache(payload: Dict) -> None:
     try:
         import os
+
         p = dict(payload)
         p["_disk_ts"] = time.time()
         tmp = _DISK_CACHE_PATH + ".tmp"
@@ -89,6 +91,7 @@ def _write_disk_cache(payload: Dict) -> None:
         os.replace(tmp, _DISK_CACHE_PATH)
     except Exception as e:
         logger.debug(f"kalshi_props disk cache write failed: {e}")
+
 
 # Ticker pattern examples:
 #   KXMLBKS-26JUN061610PITATL-ATLSSTRIDER99-7
@@ -169,6 +172,10 @@ def _parse_ticker(ticker: str) -> Optional[Dict]:
         "game_code": game_code,  # e.g. "26JUN061610PITATL"
         "team": team,  # e.g. "ATL"
         "last_name": lastname.upper(),
+        # Full letter blob (team+initial+lastname). The fixed-width regex
+        # mis-splits 2-letter team codes (KC: "KCMWACHA52" -> last_name "ACHA"),
+        # so matching uses suffix-of-blob, not the parsed last_name alone.
+        "name_blob": f"{team}{initial}{lastname}".upper(),
         "jersey": int(jersey),
         "line": int(line),  # e.g. 7 for "7+ Ks"
         "ticker": ticker,
@@ -190,9 +197,20 @@ def _get_orderbook(ticker: str) -> Optional[Dict]:
     Fetch orderbook for one ticker.
     Returns {bid, ask, mid, spread_c, depth} or None if illiquid.
     """
+    # The shared 20-worker pool can burst past Kalshi's public rate limit —
+    # a 429 here is a transient fetch error, NOT illiquidity. Retry with
+    # backoff before giving up, so liquid markets aren't silently dropped.
+    d = None
+    for attempt in (1, 2, 3):
+        try:
+            time.sleep(OB_DELAY_S * attempt)
+            d = _kalshi_get(f"/markets/{ticker}/orderbook")
+            break
+        except Exception as e:
+            if attempt == 3:
+                logger.debug(f"kalshi_props: orderbook fetch failed {ticker}: {e}")
+                return None
     try:
-        time.sleep(OB_DELAY_S)
-        d = _kalshi_get(f"/markets/{ticker}/orderbook")
         ob = d.get("orderbook_fp", {})
         yes = [(float(l[0]), float(l[1])) for l in ob.get("yes_dollars", [])]
         no = [(float(l[0]), float(l[1])) for l in ob.get("no_dollars", [])]
@@ -269,7 +287,24 @@ def _match_odds(parsed: Dict, odds_rows: List[Dict]) -> Optional[Dict]:
     cands = [
         r for r in odds_rows if r["market_key"] == mkey and abs(r["line"] - target_line) < 0.6 and r["last_name"] == ln
     ]
-    # Fallback: prefix match (handles suffixes like "Jr.")
+    # Fallback 1: odds last name is a suffix of the ticker's full name blob —
+    # handles 2-letter team codes (KC) where the regex mis-splits the last name
+    # ("KCMWACHA52" -> parsed "ACHA", blob "KCMWACHA" endswith "WACHA").
+    # Longest suffix wins (guards "SMITH" vs "HIGHSMITH").
+    if not cands:
+        blob = parsed.get("name_blob", "")
+        suffix_cands = [
+            r
+            for r in odds_rows
+            if r["market_key"] == mkey
+            and abs(r["line"] - target_line) < 0.6
+            and len(r["last_name"]) >= 4
+            and blob.endswith(r["last_name"])
+        ]
+        if suffix_cands:
+            best_len = max(len(r["last_name"]) for r in suffix_cands)
+            cands = [r for r in suffix_cands if len(r["last_name"]) == best_len]
+    # Fallback 2: prefix match (handles suffixes like "Jr.")
     if not cands:
         cands = [
             r

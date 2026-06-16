@@ -2173,7 +2173,7 @@ function escHtml(s) {
 }
 
 function marketUrl(m) {
-  if (m.platform === 'polymarket' && m.slug) return 'https://polymarket.com/event/' + encodeURIComponent(m.slug);
+  if (m.platform === 'polymarket' && m.slug) return 'https://polymarket.com/market/' + encodeURIComponent(m.slug);
   if (m.platform === 'kalshi' && m.id) return 'https://kalshi.com/markets/' + encodeURIComponent(m.id);
   return '';
 }
@@ -3852,7 +3852,7 @@ function renderSmartMoney() {
     const whalePct = m.whale_pct || 0;
     const whaleWarn = whalePct > 0.3 ? ' <span style="color:var(--terracotta);font-size:9px;font-weight:700">WHALE</span>' : '';
     const yesPricePct = m.yes_price ? (m.yes_price * 100).toFixed(0) + '¢' : '—';
-    const url = m.slug ? 'https://polymarket.com/event/' + encodeURIComponent(m.slug) : '';
+    const url = m.slug ? 'https://polymarket.com/market/' + encodeURIComponent(m.slug) : '';
     const qText = escHtml((m.question || '').substring(0, 50));
     const qLink = url ? `<a href="${url}" target="_blank" rel="noopener" class="market-link">${qText}</a>` : qText;
     html += `<tr>
@@ -4092,7 +4092,7 @@ function renderPolicyPulse() {
         // Build link if possible
         let nameHtml = qText;
         if (platform === 'polymarket' && m.slug) {
-          nameHtml = '<a href="https://polymarket.com/event/' + escHtml(m.slug) + '" target="_blank" rel="noopener" class="market-link">' + qText + '</a>';
+          nameHtml = '<a href="https://polymarket.com/market/' + escHtml(m.slug) + '" target="_blank" rel="noopener" class="market-link">' + qText + '</a>';
         } else if (platform === 'kalshi' && m.ticker) {
           nameHtml = '<a href="https://kalshi.com/markets/' + escHtml(m.ticker) + '" target="_blank" rel="noopener" class="market-link">' + qText + '</a>';
         }
@@ -4612,7 +4612,7 @@ function renderClarityAct() {
           const qText = escHtml((m.question || '').substring(0, 90));
           let nameHtml = qText;
           if (platform === 'polymarket' && m.slug) {
-            nameHtml = '<a href="https://polymarket.com/event/' + escHtml(m.slug) + '" target="_blank" rel="noopener" class="market-link">' + qText + '</a>';
+            nameHtml = '<a href="https://polymarket.com/market/' + escHtml(m.slug) + '" target="_blank" rel="noopener" class="market-link">' + qText + '</a>';
           } else if (platform === 'kalshi' && m.ticker) {
             nameHtml = '<a href="https://kalshi.com/markets/' + escHtml(m.ticker) + '" target="_blank" rel="noopener" class="market-link">' + qText + '</a>';
           }

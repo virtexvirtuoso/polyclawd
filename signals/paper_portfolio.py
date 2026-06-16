@@ -396,8 +396,8 @@ ARCHETYPE_MIN_EDGE = {
 }
 MIN_PRICE = 0.05  # Price floor — reject garbage contracts below 5 cents
 MAX_PRICE = 0.95  # Price ceiling — reject near-certain markets (no edge)
-MIN_BET = 100.0  # Bootstrap: meaningful minimum bet size
-MAX_BET = 1000.0  # Scaled for $10K bankroll
+MIN_BET = 250.0  # Bootstrap: meaningful minimum bet size
+MAX_BET = 2500.0  # Scaled for $15K+ bankroll
 # Per-strategy max bet overrides (0W/4L strategies get capped)
 STRATEGY_MAX_BET = {
     'MispricedCategoryWhale': 200.0,  # Was losing $100-543/trade. Cap until WR improves.
@@ -1205,7 +1205,7 @@ def open_position(signal: dict) -> dict:
     # Discord alert
     try:
         from signals.discord_alerts import alert_position_opened
-        mkt_url = f"https://polymarket.com/event/{slug}" if slug else ""
+        mkt_url = f"https://polymarket.com/market/{slug}" if slug else ""
         alert_position_opened(market_title, side, market_price, bet_size, strategy,
                               eval_result.get("edge", 0) * 100, market_url=mkt_url,
                               confidence=confidence, archetype=archetype,
@@ -1698,6 +1698,11 @@ def _fetch_live_positions() -> dict:
             data = _fetch(f"{KALSHI_API}/markets/{market_id}")
             if data:
                 market = data.get("market", data)
+                # Fractional-trading markets null out the legacy integer-cent
+                # fields; price lives in last_price_dollars (string, 0-1 scale).
+                cp = market.get("last_price_dollars")
+                if cp not in (None, ""):
+                    return float(cp), ""
                 cp = market.get("last_price")
                 if cp and cp > 1:
                     cp = cp / 100

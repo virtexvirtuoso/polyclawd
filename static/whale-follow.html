@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Whale Follow — Paper Strategy — Polyclawd</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --abyss:#0a0a0f; --panel:#0e0f16; --panel2:#11131c; --border:#1d2030;
+  --text:#e7eaf2; --dim:#8d93a8; --faint:#4d5268;
+  --crit:#ff3b52; --high:#f0a050; --low:#4ecdc4; --gold:#ffd700;
+  --yes:#00d68f; --no:#f65164; --blue:#4ea1e0;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:40;
+  background:repeating-linear-gradient(0deg,rgba(160,180,220,.022) 0 1px,transparent 1px 4px)}
+::selection{background:var(--crit);color:#fff}
+h1 em{font-style:normal;color:var(--crit)}
+body{background:var(--abyss);color:var(--text);font-family:'IBM Plex Mono',ui-monospace,monospace;
+  font-size:13px;min-height:100vh;
+  background-image:radial-gradient(100% 50% at 50% -10%, rgba(45,140,212,.08), transparent 60%)}
+header{display:flex;align-items:center;gap:16px;padding:16px 24px 8px;flex-wrap:wrap}
+h1{font-family:'Big Shoulders Display','Arial Narrow',sans-serif;text-transform:uppercase;font-weight:800;font-size:22px;letter-spacing:.04em}
+h1 span{color:var(--low)}
+.paper{font-size:10px;letter-spacing:.18em;color:var(--gold);border:1px solid rgba(255,215,0,.4);
+  border-radius:4px;padding:3px 9px;text-transform:uppercase}
+.nav{margin-left:auto;display:flex;gap:14px}
+.nav a{color:var(--faint);text-decoration:none;font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+.nav a:hover{color:var(--low)}
+
+.wrap{padding:8px 24px 28px;max-width:1380px;margin:0 auto}
+
+/* stat cards */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:10px 0 16px}
+.stat{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px;position:relative}
+.stat::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;border-radius:3px 0 0 3px;background:var(--low);opacity:.7}
+.stat.gold::before{background:var(--gold)} .stat.crit::before{background:var(--crit)}
+.stat .k{font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint)}
+.stat .v{font-family:'Big Shoulders Display','Arial Narrow',sans-serif;font-size:24px;font-weight:700;margin-top:4px}
+.stat .v.pos{color:var(--yes)} .stat .v.neg{color:var(--no)}
+.stat .s{font-size:10px;color:var(--dim);margin-top:2px}
+
+.grid{display:grid;grid-template-columns:1.4fr 1fr;gap:14px}
+@media (max-width:980px){.grid{grid-template-columns:1fr}}
+.card{background:rgba(13,14,21,.55);border:1px solid var(--border);border-radius:14px;padding:14px 16px;backdrop-filter:blur(6px)}
+.card h2{font-family:'Big Shoulders Display','Arial Narrow',sans-serif;font-size:12px;letter-spacing:.18em;color:var(--dim);
+  text-transform:uppercase;margin-bottom:10px}
+.card h2 small{color:var(--faint);letter-spacing:.04em;text-transform:none;font-weight:400}
+
+canvas{display:block;width:100%}
+
+/* cell matrix */
+table{width:100%;border-collapse:collapse;font-size:11.5px}
+th{font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);
+  text-align:left;padding:6px 8px;border-bottom:1px solid var(--border)}
+td{padding:7px 8px;border-bottom:1px solid rgba(29,32,48,.55);color:var(--dim)}
+td b{color:var(--text);font-weight:600}
+td .pos{color:var(--yes)} td .neg{color:var(--no)}
+.bar{display:inline-block;height:6px;border-radius:3px;background:var(--blue);vertical-align:middle;opacity:.7}
+.prog{font-size:9.5px;color:var(--faint)}
+tr.verdict-ready td{background:rgba(78,205,196,.05)}
+
+/* tape rows */
+.trow{padding:9px 2px;border-bottom:1px solid rgba(29,32,48,.55)}
+.trow .l1{display:flex;gap:8px;align-items:center;font-size:10px;color:var(--faint)}
+.trow .dir{font-weight:700}
+.trow .dir.yes{color:var(--yes)} .trow .dir.no{color:var(--no)}
+.trow .pnl{margin-left:auto;font-weight:700}
+.trow .pnl.pos{color:var(--yes)} .trow .pnl.neg{color:var(--no)}
+.trow .ttl{font-size:12px;color:var(--text);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trow .meta{font-size:10px;color:var(--dim);margin-top:2px}
+.tag{font-size:9px;letter-spacing:.08em;border-radius:3px;padding:1px 6px;text-transform:uppercase}
+.tag.arch{background:rgba(78,161,224,.14);color:#8d93a8}
+.tag.exit{background:rgba(240,160,80,.12);color:var(--high)}
+.empty{padding:24px 8px;color:var(--faint);text-align:center;font-size:11px;line-height:1.8}
+
+.note{margin-top:14px;font-size:10.5px;color:var(--faint);line-height:1.7;border-top:1px solid var(--border);padding-top:10px}
+.note b{color:var(--dim)}
+</style>
+</head>
+<body>
+<header>
+  <h1>WHALE<em>//</em>FOLLOW</h1>
+  <span class="paper">paper · shadow only</span>
+</header>
+
+<div class="wrap">
+  <div class="stats">
+    <div class="stat gold"><div class="k">Paper P&L (net)</div><div class="v" id="sPnl">–</div><div class="s">after Kalshi fees + slippage</div></div>
+    <div class="stat"><div class="k">Open positions</div><div class="v" id="sOpen">–</div><div class="s" id="sOpenSub">riding the decay</div></div>
+    <div class="stat"><div class="k">Round-trips</div><div class="v" id="sClosed">–</div><div class="s" id="sWr">win rate –</div></div>
+    <div class="stat crit"><div class="k">Verdict progress</div><div class="v" id="sProg">–</div><div class="s">N≥500/cell → K1-K6 verdict (~3wk)</div></div>
+  </div>
+
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>Equity curve <small>— cumulative net paper P&L per $1,000 follows</small></h2>
+        <canvas id="eq" height="180"></canvas>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h2>Decay curve <small>— mean move in the whale's direction after entry (the K1 evidence)</small></h2>
+        <canvas id="decay" height="170"></canvas>
+        <div class="note" id="decayNote" style="display:none">
+          Points with <b>n &lt; 30</b> render hollow — too few observations to trust.
+          If the curve is flat by +5m, the edge is gone before we can enter (kill criterion K1).
+        </div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h2>Verdict matrix <small>— archetype × INFO tercile (kill/keep decided per cell)</small></h2>
+        <table id="cells">
+          <thead><tr><th>archetype</th><th>info</th><th>n</th><th>closed</th><th>net P&L</th><th>win rate</th><th>data progress</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="note">
+          <b>How to read this:</b> each row is one strategy cell. A cell earns a verdict at
+          <b>n≥500</b> (first read at 150). Pre-registered kill criteria: K1 edge gone by entry lag ·
+          K2 net ≤ 0 after fees · K3 no better than matched controls · K4 reactive contamination ·
+          K5 no INFO monotonicity · K6 paper Sharpe &lt; 0. Expected survivor (per the literature):
+          high-INFO weather/econ/policy on Polymarket with proven smart wallets.
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2>Entry funnel <small id="funnelScope">— today UTC</small></h2>
+        <div id="funnel"><div class="empty">no passes recorded yet today</div></div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h2>Open positions <small id="openN"></small></h2>
+        <div id="openList"><div class="empty">no open follows — waiting for qualifying whales</div></div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h2>Recent round-trips <small id="closedN"></small></h2>
+        <div id="closedList"><div class="empty">no completed round-trips yet</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const API = '/polyclawd/api';
+const ARCH_COLOR = {weather:'#4ecdc4', econ:'#5e6f8d', policy:'#f0a050',
+                    sports:'#ffd700', crypto:'#f0a050', other:'#8d93a8'};
+
+function el(id){return document.getElementById(id)}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function ago(ts){return dur(Date.now()/1000-ts)}
+function dur(s){if(!isFinite(s)||s<0)return '—'; if(s<90)return Math.round(s)+'s';
+  if(s<5400)return Math.round(s/60)+'m'; if(s<172800)return (s/3600).toFixed(1)+'h';
+  return Math.round(s/86400)+'d'}
+function money(v){const sign=v<0?'-':''; v=Math.abs(v);
+  return sign+'$'+(v>=1000?(v/1000).toFixed(2)+'K':v.toFixed(2))}
+
+async function load(){
+  let d;
+  try{ d = await (await fetch(`${API}/whale/follows?limit=60`)).json(); }
+  catch(e){ console.error(e); return; }
+  const t = d.totals||{};
+
+  const pnl = t.pnl_net||0;
+  const sp = el('sPnl'); sp.textContent = money(pnl);
+  sp.className = 'v ' + (pnl>0?'pos':pnl<0?'neg':'');
+  el('sOpen').textContent = t.open??0;
+  el('sClosed').textContent = t.closed??0;
+  el('sWr').textContent = t.win_rate!=null ? `win rate ${(t.win_rate*100).toFixed(0)}%` : 'win rate —';
+  const maxN = Math.max(0, ...(d.cells||[]).map(c=>c.n||0));
+  el('sProg').textContent = `${maxN}/500`;
+
+  drawEquity(d.equity||[]);
+  drawDecay(d.decay||[]);
+  renderFunnel(d.funnel||{});
+  renderCells(d.cells||[]);
+  renderOpen(d.open||[]);
+  renderClosed(d.closed||[]);
+}
+
+/* ── equity curve ── */
+function drawEquity(eq){
+  const cv = el('eq'), ctx = cv.getContext('2d');
+  const DPR = window.devicePixelRatio||1;
+  const W = cv.clientWidth, H = 180;
+  cv.width = W*DPR; cv.height = H*DPR; ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.clearRect(0,0,W,H);
+  ctx.font = '10px "IBM Plex Mono"';
+  if(eq.length < 2){
+    ctx.fillStyle = 'rgba(122,138,165,.6)'; ctx.textAlign = 'center';
+    ctx.fillText(eq.length ? 'one round-trip — curve starts at two' :
+                 'no closed round-trips yet — curve appears as trades complete', W/2, H/2);
+    return;
+  }
+  const PAD = {l:46, r:10, t:12, b:18};
+  const xs = eq.map(p=>p.ts), ys = eq.map(p=>p.eq);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  let y0 = Math.min(0,...ys), y1 = Math.max(0,...ys);
+  if(y1-y0 < 1){y1+=1;y0-=1}
+  const X = t=>PAD.l+(t-x0)/((x1-x0)||1)*(W-PAD.l-PAD.r);
+  const Y = v=>PAD.t+(1-(v-y0)/(y1-y0))*(H-PAD.t-PAD.b);
+
+  // zero line + axis labels
+  ctx.strokeStyle='rgba(122,138,165,.3)'; ctx.setLineDash([4,4]);
+  ctx.beginPath(); ctx.moveTo(PAD.l,Y(0)); ctx.lineTo(W-PAD.r,Y(0)); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle='rgba(110,140,180,.55)'; ctx.textAlign='right';
+  for(const v of [y0,0,y1]) ctx.fillText(money(v), PAD.l-6, Y(v)+3);
+
+  // area fill
+  const last = ys[ys.length-1];
+  const grad = ctx.createLinearGradient(0,PAD.t,0,H);
+  grad.addColorStop(0, last>=0?'rgba(0,214,143,.25)':'rgba(246,81,100,.22)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.beginPath(); ctx.moveTo(X(xs[0]),Y(0));
+  eq.forEach(p=>ctx.lineTo(X(p.ts),Y(p.eq)));
+  ctx.lineTo(X(xs[xs.length-1]),Y(0)); ctx.closePath();
+  ctx.fillStyle=grad; ctx.fill();
+
+  // line
+  ctx.beginPath();
+  eq.forEach((p,i)=>i?ctx.lineTo(X(p.ts),Y(p.eq)):ctx.moveTo(X(p.ts),Y(p.eq)));
+  ctx.strokeStyle = last>=0?'#00d68f':'#f65164';
+  ctx.lineWidth = 1.8; ctx.stroke();
+  // endpoint glow
+  const ex=X(xs[xs.length-1]), ey=Y(last);
+  const g=ctx.createRadialGradient(ex,ey,0,ex,ey,10);
+  g.addColorStop(0, last>=0?'rgba(0,214,143,.8)':'rgba(246,81,100,.8)');
+  g.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=g; ctx.beginPath(); ctx.arc(ex,ey,10,0,7); ctx.fill();
+}
+
+/* ── entry funnel ── */
+function renderFunnel(f){
+  const t = (f.today && Object.keys(f.today).length) ? f.today : (f.d7||{});
+  el('funnelScope').textContent = (f.today && Object.keys(f.today).length) ? '— today UTC' : '— last 7d';
+  const scanned = t.scanned||0;
+  if(!scanned){ el('funnel').innerHTML = '<div class="empty">no passes recorded yet today</div>'; return; }
+  let v = scanned;
+  const stages = [['fresh alerts scanned', scanned, '']];
+  v -= (t.skip_stale||0); stages.push(['after staleness', v, t.skip_stale?`−${t.skip_stale} stale`:'' ]);
+  v -= (t.skip_info||0);  stages.push(['pass INFO gates', v, t.skip_info?`−${t.skip_info} info/gates`:'' ]);
+  v -= (t.skip_dir||0);   stages.push(['direction known', v, t.skip_dir?`−${t.skip_dir} ambiguous`:'' ]);
+  stages.push(['ENTERED', t.entered||0, t.skip_edge?`−${t.skip_edge} edge≤fees`:'' ]);
+  el('funnel').innerHTML = stages.map(([label,n,loss],i)=>{
+    const w = Math.max(3, Math.sqrt(Math.max(n,0)/scanned)*100);
+    const last = i===stages.length-1;
+    return `<div style="margin:7px 0">
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--faint)">
+        <span>${label}</span><span>${loss?`<span style="color:var(--no);opacity:.8">${loss}</span> · `:''}<b style="color:${last?'var(--yes)':'var(--text)'}">${n.toLocaleString()}</b></span>
+      </div>
+      <div style="height:8px;border-radius:4px;background:rgba(29,32,48,.8);margin-top:3px">
+        <div style="height:8px;border-radius:4px;width:${w}%;background:${last?'var(--yes)':'var(--blue)'};opacity:${last?'.9':'.55'}"></div>
+      </div></div>`;
+  }).join('');
+}
+
+/* ── decay curve ── */
+function drawDecay(rows){
+  const cv = el('decay'), ctx = cv.getContext('2d');
+  const DPR = window.devicePixelRatio||1;
+  const W = cv.clientWidth, H = 170;
+  cv.width = W*DPR; cv.height = H*DPR; ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.clearRect(0,0,W,H);
+  ctx.font = '10px "IBM Plex Mono"';
+  const usable = rows.filter(r=>r.points.some(pt=>pt.n>0 && pt.d!=null));
+  if(!usable.length){
+    ctx.fillStyle='rgba(122,138,165,.6)'; ctx.textAlign='center';
+    ctx.fillText('no price-grid observations yet — fills in as follows age past +5m', W/2, H/2);
+    el('decayNote').style.display='none';
+    return;
+  }
+  el('decayNote').style.display='block';
+  const PAD = {l:46, r:64, t:12, b:20};
+  const H_LABELS = ['5m','15m','30m','1h','4h'];
+  const vals = usable.flatMap(r=>r.points.filter(pt=>pt.d!=null).map(pt=>pt.d*100));
+  let y1 = Math.max(1, ...vals.map(Math.abs));
+  const X = i => PAD.l + i/(H_LABELS.length-1)*(W-PAD.l-PAD.r);
+  const Y = c => PAD.t + (1-(c+y1)/(2*y1))*(H-PAD.t-PAD.b);
+  // axes
+  ctx.strokeStyle='rgba(122,138,165,.3)'; ctx.setLineDash([4,4]);
+  ctx.beginPath(); ctx.moveTo(PAD.l,Y(0)); ctx.lineTo(W-PAD.r,Y(0)); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle='rgba(110,140,180,.55)'; ctx.textAlign='right';
+  for(const c of [-y1,0,y1]) ctx.fillText(c.toFixed(1)+'¢', PAD.l-6, Y(c)+3);
+  ctx.textAlign='center';
+  H_LABELS.forEach((h,i)=>ctx.fillText('+'+h, X(i), H-4));
+  // lines per archetype, 'all' bold white
+  let ly = PAD.t;
+  for(const r of usable){
+    const isAll = r.archetype==='all';
+    const col = isAll ? '#e7eaf2' : (ARCH_COLOR[r.archetype]||'#8d93a8');
+    ctx.strokeStyle = col; ctx.lineWidth = isAll?2.2:1.3;
+    ctx.globalAlpha = isAll?1:.8;
+    ctx.beginPath();
+    let started=false;
+    r.points.forEach((pt,i)=>{
+      if(pt.d==null) return;
+      const x=X(i), y=Y(pt.d*100);
+      started ? ctx.lineTo(x,y) : ctx.moveTo(x,y); started=true;
+    });
+    ctx.stroke();
+    r.points.forEach((pt,i)=>{
+      if(pt.d==null) return;
+      const x=X(i), y=Y(pt.d*100);
+      ctx.beginPath(); ctx.arc(x,y,3,0,7);
+      if(pt.n>=30){ ctx.fillStyle=col; ctx.fill(); }
+      else { ctx.strokeStyle=col; ctx.lineWidth=1.2; ctx.stroke(); }
+    });
+    ctx.globalAlpha=1;
+    // legend
+    const nTot = Math.max(...r.points.map(pt=>pt.n||0));
+    ctx.fillStyle=col; ctx.textAlign='left';
+    ctx.fillText(`${r.archetype} (n≤${nTot})`, W-PAD.r+8, ly+8); ly+=14;
+  }
+}
+
+/* ── verdict matrix ── */
+function renderCells(cells){
+  const tb = el('cells').querySelector('tbody');
+  if(!cells.length){
+    tb.innerHTML = '<tr><td colspan="7" class="empty">no follows yet — cells fill as the strategy enters</td></tr>';
+    return;
+  }
+  const order = {hi:0, mid:1, lo:2};
+  cells.sort((a,b)=>a.archetype.localeCompare(b.archetype)||order[a.tercile]-order[b.tercile]);
+  tb.innerHTML = cells.map(c=>{
+    const pnl = c.pnl??0;
+    const pct = Math.min(100, (c.n/500)*100);
+    const ready = c.n>=500 ? ' class="verdict-ready"' : '';
+    const stage = c.n>=500?'verdict-ready':c.n>=150?'first-read':'accruing';
+    return `<tr${ready}>
+      <td><span class="tag arch" style="color:${ARCH_COLOR[c.archetype]||'#8d93a8'}">${esc(c.archetype)}</span></td>
+      <td><b>${esc(c.tercile)}</b></td>
+      <td><b>${c.n}</b></td>
+      <td>${c.closed||0}</td>
+      <td><b class="${pnl>0?'pos':pnl<0?'neg':''}">${money(pnl)}</b></td>
+      <td>${c.wr!=null?(c.wr*100).toFixed(0)+'%':'—'}</td>
+      <td><span class="bar" style="width:${Math.max(2,pct*0.9)}px"></span> <span class="prog">${stage}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+/* ── open + closed lists ── */
+function renderOpen(rows){
+  el('openN').textContent = rows.length ? `— ${rows.length}` : '';
+  if(!rows.length){
+    el('openList').innerHTML = '<div class="empty">no open follows — waiting for qualifying whales<br>(INFO ≥ 0.55, fresh, executable, real dollars)</div>';
+    return;
+  }
+  el('openList').innerHTML = rows.map(r=>`
+    <div class="trow">
+      <div class="l1">
+        <span class="dir ${r.direction>0?'yes':'no'}">${r.direction>0?'▲ YES':'▼ NO'}</span>
+        <span>@${(r.entry_px??0).toFixed(2)}</span>
+        <span class="tag arch">${esc(r.archetype)}</span>
+        <span>info ${(r.info_score??0).toFixed(2)}</span>
+        <span class="pnl" style="color:var(--faint);font-weight:400">${ago(r.ts_entry)} ago</span>
+      </div>
+      <div class="ttl">${esc(r.market)}</div>
+      <div class="meta">target ${(r.target_px??0).toFixed(2)} · stop ${(r.stop_px??0).toFixed(2)} · exit: ${esc(r.exit_policy)}</div>
+    </div>`).join('');
+}
+
+function renderClosed(rows){
+  el('closedN').textContent = rows.length ? `— last ${rows.length}` : '';
+  if(!rows.length){
+    el('closedList').innerHTML = '<div class="empty">no completed round-trips yet</div>';
+    return;
+  }
+  el('closedList').innerHTML = rows.map(r=>{
+    const pnl = r.pnl_net??0;
+    return `<div class="trow">
+      <div class="l1">
+        <span class="dir ${r.direction>0?'yes':'no'}">${r.direction>0?'▲ YES':'▼ NO'}</span>
+        <span>@${(r.entry_px??0).toFixed(2)} → ${r.exit_px!=null?r.exit_px.toFixed(2):'—'}</span>
+        <span class="tag exit">${esc(r.exit_reason||'')}</span>
+        <span class="pnl ${pnl>0?'pos':pnl<0?'neg':''}">${money(pnl)}</span>
+      </div>
+      <div class="ttl">${esc(r.market)}</div>
+      <div class="meta"><span class="tag arch">${esc(r.archetype)}</span> info ${(r.info_score??0).toFixed(2)} · held ${dur(r.ts_exit-r.ts_entry)} · closed ${ago(r.ts_exit)} ago</div>
+    </div>`;
+  }).join('');
+}
+
+load();
+setInterval(load, 60000);
+window.addEventListener('resize', load);
+</script>
+<script src="whale-nav.js" defer></script>
+</body>
+</html>

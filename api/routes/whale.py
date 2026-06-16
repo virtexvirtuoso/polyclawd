@@ -399,6 +399,14 @@ def whale_top(limit: int = Query(10, ge=1, le=50),
     """Top-ranked whale alerts by composite score. Auto-learns from resolutions."""
     conn = sqlite3.connect(str(META_DB), timeout=5)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"ATTACH DATABASE '{ALERTS_DB}' AS scanner")
+
+    title_map: dict[str, str] = {}
+    try:
+        for row in conn.execute("SELECT market, title FROM scanner.market_state WHERE title != ''"):
+            title_map[row["market"]] = row["title"]
+    except Exception:
+        pass
 
     base_where = "done = 0 AND flow_dollars > 0 AND severity IN ('CRITICAL','HIGH','LOW')"
     params = []
@@ -437,9 +445,11 @@ def whale_top(limit: int = Query(10, ge=1, le=50),
 
         entry = {
             "market": r["market"],
+            "title": title_map.get(r["market"], ""),
             "platform": r["platform"],
             "severity": r["severity"],
             "score": s,
+            "direction": r["direction"],  # +1=YES, -1=NO, None=ambiguous
             "price": r["price_at_alert"],
             "flow_dollars": r["flow_dollars"],
             "wallet": wallet_short,

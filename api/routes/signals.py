@@ -21,8 +21,9 @@ import pathlib
 import logging
 import sys
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -226,7 +227,7 @@ def scan_volume_spikes(spike_threshold: float = 2.0, use_zscore: bool = True) ->
                     "z_score": round(z_score, 2),
                     "spike_ratio": round(vol / mean_vol, 2) if mean_vol > 0 else 0,
                     "yes_price": yes_price,
-                    "url": f"https://polymarket.com/event/{m.get('slug', m.get('id'))}"
+                    "url": f"https://polymarket.com/market/{m.get('slug', m.get('id'))}"
                 })
         else:
             ratio = vol / mean_vol if mean_vol > 0 else 0
@@ -244,7 +245,7 @@ def scan_volume_spikes(spike_threshold: float = 2.0, use_zscore: bool = True) ->
                     "z_score": round((vol - mean_vol) / std_vol, 2) if std_vol > 0 else 0,
                     "spike_ratio": round(ratio, 2),
                     "yes_price": yes_price,
-                    "url": f"https://polymarket.com/event/{m.get('slug', m.get('id'))}"
+                    "url": f"https://polymarket.com/market/{m.get('slug', m.get('id'))}"
                 })
 
     spikes.sort(key=lambda x: x.get("z_score", 0), reverse=True)
@@ -304,7 +305,7 @@ def scan_resolution_timing(hours_until: int = 48) -> dict:
                     "volume_24h": m.get("volume24hr", 0),
                     "liquidity": m.get("liquidityNum", 0),
                     "uncertainty_score": round(uncertainty, 2),
-                    "url": f"https://polymarket.com/event/{m.get('slug', m.get('id'))}",
+                    "url": f"https://polymarket.com/market/{m.get('slug', m.get('id'))}",
                     "opportunity": "HIGH" if uncertainty > 0.7 and hours_left < 24 else "MEDIUM" if uncertainty > 0.5 else "LOW"
                 })
         except Exception:
@@ -1656,7 +1657,36 @@ async def get_portfolio_status():
         if signals_path not in sys.path:
             sys.path.insert(0, signals_path)
         from paper_portfolio import get_portfolio_status
-        return get_portfolio_status()
+        status = get_portfolio_status()
+
+        # Inject resolution risk sub-object
+        try:
+            from services.resolution_cluster import compute_resolution_clusters
+            import sqlite3
+            from pathlib import Path
+            db_path = Path(__file__).resolve().parent.parent / "storage" / "shadow_trades.db"
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM paper_positions WHERE status='open'"
+            ).fetchall()
+            conn.close()
+            positions = [dict(r) for r in rows]
+            cluster_data = compute_resolution_clusters(positions)
+            status["resolution_risk"] = {
+                "max_single_day_exposure": cluster_data["max_single_day_exposure"],
+                "concentrated_dates": [
+                    {"date": w["date"], "count": w["count"], "exposure": w["exposure"]}
+                    for w in cluster_data["concentrated_windows"]
+                ],
+            }
+        except Exception:
+            status["resolution_risk"] = {
+                "max_single_day_exposure": 0,
+                "concentrated_dates": [],
+            }
+
+        return status
     except Exception as e:
         logger.exception(f"Portfolio status failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3531,6 +3561,64 @@ async def get_clarity_widget_data():
         content=out,
     )
 
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# VPIN: Volume-Synchronized Probability of Informed Trading (CE-4)
+# ═══════════════════════════════════════════════════════════════════════
+
+@router.get("/signals/vpin/{slug}")
+async def get_vpin_for_slug(slug: str):
+    """Compute VPIN for a single market slug.
+
+    Returns VPIN score (0-1), buy_pct, n_trades, bar_size, vpin_class,
+    and current price.
+    """
+    signals_path = _get_signals_path()
+    if signals_path not in sys.path:
+        sys.path.insert(0, signals_path)
+    from vpin import vpin_for_slug
+    result = vpin_for_slug(slug)
+    if result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@router.get("/signals/vpin-scan")
+async def get_vpin_scan(
+    top_n: int = Query(20, ge=5, le=50, description="Number of markets to scan"),
+):
+    """Scan top-N liquid markets for VPIN, ranked by VPIN score.
+
+    Returns list of markets with VPIN, buy_pct, n_trades, vpin_class.
+    """
+    signals_path = _get_signals_path()
+    if signals_path not in sys.path:
+        sys.path.insert(0, signals_path)
+    from vpin import scan_top_markets_vpin
+    results = scan_top_markets_vpin(top_n=top_n)
+    return {
+        "results": results,
+        "count": len(results),
+        "scan_time": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.get("/signals/vpin-accuracy")
+async def get_vpin_accuracy():
+    """Get VPIN backtest accuracy stats (Andersen-Bondarenko validation gate).
+
+    Returns accuracy for high-VPIN (>0.7) and medium-VPIN (0.4-0.7) events,
+    plus a verdict: SIGNAL, INFORMATIONAL_ONLY, or INSUFFICIENT_DATA.
+    """
+    signals_path = _get_signals_path()
+    if signals_path not in sys.path:
+        sys.path.insert(0, signals_path)
+    from vpin import backtest_vpin_accuracy
+    return backtest_vpin_accuracy()
+
+
 _IVRV_TTL_S = 600  # IV/RV moves slowly; 10-min board freshness is plenty.
 
 
@@ -3675,3 +3763,332 @@ async def options_dashboard():
             return {"totals": totals, "by_ticker": by_ticker, "divergences": rows[:20], "rows": rows, "shadow": shadow, "accuracy": accuracy}
         finally: con.close()
     return await asyncio.get_event_loop().run_in_executor(None, _build)
+
+
+# ============================================================================
+# CE-6: Implied Correlation Matrix
+# ============================================================================
+
+@router.get("/signals/implied-correlation")
+async def get_implied_correlation(min_markets: int = Query(3, ge=2, le=50)):
+    """Return correlation matrices for all auto-detected clusters, with anomalies.
+
+    For each cluster, computes pairwise correlation between related markets
+    (crypto, political, economic, sports-league, etc.) using three methods:
+    - implied_corr: from explicit joint market price or price co-movement
+    - historical_corr: realized co-occurrence from resolved markets
+    - price_corr_7d: Pearson correlation on 7-day daily price changes
+
+    Anomalies are flagged when implied vs historical divergence exceeds 2σ.
+    """
+    import asyncio, sys, pathlib
+    def _build():
+        signals_path = str(pathlib.Path(__file__).parent.parent.parent / "signals")
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from signals.implied_correlation import get_all_matrices
+        return get_all_matrices(min_markets=min_markets)
+    return await asyncio.get_event_loop().run_in_executor(None, _build)
+
+
+@router.get("/signals/implied-correlation/{cluster}")
+async def get_implied_correlation_cluster(cluster: str):
+    """Return correlation matrix for one specific cluster."""
+    import asyncio, sys, pathlib
+    def _build():
+        signals_path = str(pathlib.Path(__file__).parent.parent.parent / "signals")
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from signals.implied_correlation import get_cluster_matrix
+        result = get_cluster_matrix(cluster)
+        if result is None:
+            from signals.implied_correlation import get_cluster_list
+            available = [c["name"] for c in get_cluster_list(min_markets=2)]
+            return {"error": f"Cluster '{cluster}' not found",
+                    "available_clusters": available}
+        return result
+    return await asyncio.get_event_loop().run_in_executor(None, _build)
+
+
+@router.get("/signals/implied-correlation/clusters/list")
+async def list_correlation_clusters(min_markets: int = Query(3, ge=2, le=50)):
+    """List all auto-detected clusters available for correlation analysis."""
+    import asyncio, sys, pathlib
+    def _build():
+        signals_path = str(pathlib.Path(__file__).parent.parent.parent / "signals")
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from signals.implied_correlation import get_cluster_list
+        return get_cluster_list(min_markets=min_markets)
+    return await asyncio.get_event_loop().run_in_executor(None, _build)
+
+
+@router.get("/signals/implied-correlation/snapshots")
+async def get_correlation_snapshots(cluster: Optional[str] = Query(None),
+                                      limit: int = Query(50, ge=1, le=500)):
+    """Get historical correlation snapshots from correlation_matrix.db."""
+    import asyncio, sys, pathlib
+    def _build():
+        signals_path = str(pathlib.Path(__file__).parent.parent.parent / "signals")
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from signals.implied_correlation import get_latest_snapshots
+        return get_latest_snapshots(cluster=cluster, limit=limit)
+    return await asyncio.get_event_loop().run_in_executor(None, _build)
+
+
+# ============================================================================
+# Endpoints: Category Momentum
+# ============================================================================
+
+# 30-min TTL cache for category momentum
+_category_momentum_cache = {"data": None, "timestamp": None}
+
+
+@router.get("/signals/category-momentum")
+async def get_category_momentum():
+    """Get category momentum scores — volume/volatility trends by archetype.
+
+    Returns ranked list of categories by momentum score:
+      - volume_7d: Total volume in last 7 days
+      - volume_prior_7d: Total volume in prior 7 days (14-7 days ago)
+      - volume_change_pct: % change between periods
+      - volatility_7d: Avg absolute price deviation from 0.5
+      - new_markets_7d: New market_ids appearing in 7d period
+      - momentum_score: Weighted composite (0-100)
+
+    Cached 30 minutes.
+    """
+    global _category_momentum_cache
+
+    # Check cache
+    now = datetime.now()
+    if _category_momentum_cache["timestamp"] is not None:
+        age = (now - _category_momentum_cache["timestamp"]).total_seconds()
+        if age < 1800 and _category_momentum_cache["data"] is not None:
+            logger.debug("Category momentum: serving from cache")
+            return _category_momentum_cache["data"]
+
+    try:
+        signals_path = _get_signals_path()
+        if signals_path not in sys.path:
+            sys.path.insert(0, signals_path)
+        from category_momentum import get_momentum_leaderboard
+
+        result = get_momentum_leaderboard(top_n=20)
+        _category_momentum_cache = {"data": result, "timestamp": now}
+        logger.info(f"Category momentum: {result.get('total_categories', 0)} categories ranked")
+        return result
+    except Exception as e:
+        logger.exception(f"Category momentum scan failed: {e}")
+        raise HTTPException(status_code=500, detail="Category momentum scan failed")
+
+
+# ============================================================================
+# Endpoints: Theta Decay Curves
+# ============================================================================
+
+# Daily cache for theta decay curves (refreshed once per day)
+_theta_decay_cache = {"data": None, "timestamp": None}
+
+
+@router.get("/signals/theta-decay")
+async def get_theta_decay_all():
+    """Get empirical theta decay curves for all archetypes.
+
+    Shows how pricing changes as resolution approaches, per archetype.
+    Key metric: last_pctile_discovery.discovery_share_pct — what % of
+    total price movement happens in the final 10% of market lifetime.
+    High values = sudden resolution (information events).
+    Low values = gradual decay (time-based markets).
+
+    Results cached daily; archetypes with <10 samples marked low_confidence.
+    """
+    global _theta_decay_cache
+
+    now = datetime.now()
+    if _theta_decay_cache["timestamp"] is not None:
+        age = (now - _theta_decay_cache["timestamp"]).total_seconds()
+        if age < 86400 and _theta_decay_cache["data"] is not None:
+            logger.debug("Theta decay: serving from daily cache")
+            return _theta_decay_cache["data"]
+
+    try:
+        from signals.theta_decay import get_all_decay_curves, find_largest_last_decile_discovery
+
+        curves = get_all_decay_curves()
+        top_late = find_largest_last_decile_discovery(curves)
+
+        result = {
+            "curves": curves,
+            "total_archetypes": len(curves),
+            "largest_last_decile_discovery": top_late,
+            "generated_at": now.isoformat(),
+            "note": "Archetypes with <10 resolved markets are low_confidence"
+        }
+        _theta_decay_cache = {"data": result, "timestamp": now}
+        logger.info(f"Theta decay: {result['total_archetypes']} archetypes")
+        return result
+    except Exception as e:
+        logger.exception(f"Theta decay scan failed: {e}")
+        raise HTTPException(status_code=500, detail="Theta decay scan failed")
+
+
+@router.get("/signals/theta-decay/{archetype}")
+async def get_theta_decay_single(archetype: str):
+    """Get theta decay curve for a single archetype.
+
+    Args:
+        archetype: Market archetype (e.g. 'price_above', 'sports_winner')
+
+    Returns per-bucket stats: avg_abs_price_change, cumulative_discovery_pct,
+    n_samples per bucket, and last_pctile_discovery summary.
+    """
+    try:
+        from signals.theta_decay import build_decay_curve
+
+        curve = build_decay_curve(archetype)
+        if curve.get("status") == "error":
+            raise HTTPException(status_code=500, detail=curve.get("error", "Unknown error"))
+
+        return curve
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Theta decay single failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CE-8: Prop Composite -> Implied Game Price
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/signals/prop-composite")
+async def prop_composite_scan():
+    """Scan all today's MLB games for prop-composite vs moneyline vs PM divergences.
+
+    Returns per-game results sorted by max_diff_pp descending.
+    Games with < 3 props are skipped (insufficient_data=True).
+    Cached 30 min.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+        from signals.prop_composite import scan_all_games_prop_composite
+
+        result = await scan_all_games_prop_composite(force=False)
+        return {
+            "source": "prop_composite",
+            "n_games": len(result),
+            "n_signals": sum(1 for r in result if r.get("signal", False)),
+            "results": result,
+        }
+    except Exception as e:
+        logger.error(f"prop-composite scan failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/signals/prop-composite/{event_id}")
+async def prop_composite_event(event_id: str):
+    """Get prop-composite analysis for a specific event.
+
+    Args:
+        event_id: The Odds API event ID (e.g. "9f79...")
+
+    Returns the full composite with MC simulation, moneyline comparison,
+    and Polymarket price if available.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+        from signals.prop_composite import implied_game_prob_from_props
+
+        result = await implied_game_prob_from_props(event_id)
+        if not result.get("sufficient_data", True):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient data: {result.get('note', 'unknown')}",
+            )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"prop-composite event {event_id} failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# CE-5: Sportsbook Consensus Disagreement Index
+# ============================================================================
+
+
+@router.get("/signals/consensus-disagreement")
+async def get_consensus_disagreement(
+    sports: str = Query(default="", description="Comma-separated sport keys. Default: all."),
+    min_signal: bool = Query(default=False, description="Filter to only signals (fee-adj >3pp)"),
+):
+    """Cross-sport consensus disagreement index (CE-5).
+
+    Compares sportsbook consensus true probability vs prediction market price
+    for all supported sports. Credit-budget aware, fee-adjusted.
+
+    Returns ranked list of events where fee-adjusted disagreement exceeds
+    a minimum threshold. Results sorted by fee_adjusted_disagreement_pp descending.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+        from fastapi.concurrency import run_in_threadpool
+        from signals.consensus_disagreement import (
+            scan_all_sports_disagreement,
+            get_credit_status,
+        )
+
+        sport_keys = [s.strip() for s in sports.split(",") if s.strip()] if sports else None
+        results = await run_in_threadpool(scan_all_sports_disagreement, sport_keys)
+        credit_status = get_credit_status()
+
+        if min_signal:
+            results = [r for r in results if r.get("signal", False)]
+
+        return {
+            "source": "ce5_consensus_disagreement",
+            "generated_at": datetime.now().isoformat(),
+            "total_signals": sum(1 for r in results if r.get("signal", False)),
+            "total_events": len(results),
+            "sports_scanned": list(set(r["odds_key"] for r in results)) if results else [],
+            "credits_consumed": credit_status["credits_consumed"],
+            "credits_remaining": credit_status["credits_remaining"],
+            "max_daily": credit_status["max_daily"],
+            "results": results[:100],  # Cap at 100 results
+        }
+    except ImportError as e:
+        logger.exception(f"CE-5 consensus_disagreement import failed: {e}")
+        raise HTTPException(status_code=503, detail="CE-5 module not available")
+    except Exception as e:
+        logger.exception(f"CE-5 consensus_disagreement scan failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/signals/consensus-disagreement/{sport_key}")
+async def get_consensus_disagreement_sport(
+    sport_key: str,
+):
+    """Per-sport consensus disagreement view (CE-5).
+
+    Args:
+        sport_key: e.g. baseball_mlb, basketball_nba, americanfootball_nfl,
+                   icehockey_nhl, soccer_epl, mma_mixed_martial_arts
+
+    Returns sport-specific disagreement scan results.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+        from fastapi.concurrency import run_in_threadpool
+        from signals.consensus_disagreement import scan_sport_disagreement
+
+        result = await run_in_threadpool(scan_sport_disagreement, sport_key)
+        return result
+    except ImportError as e:
+        logger.exception(f"CE-5 consensus_disagreement import failed: {e}")
+        raise HTTPException(status_code=503, detail="CE-5 module not available")
+    except Exception as e:
+        logger.exception(f"CE-5 consensus_disagreement/{sport_key} failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

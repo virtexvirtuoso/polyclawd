@@ -25,6 +25,8 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 
+from odds.edge_math import net_arb_edge
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -186,6 +188,18 @@ async def arb_scan(limit: int = Query(default=50, ge=1, le=100)):
                 continue
             total = yes_price + no_price
             if total < 0.99 or total > 1.01:
+                # For underpriced (total < 1.0): buy both YES+NO, collect $1
+                # Polymarket charges ~2% on net winnings
+                if total < 0.99:
+                    gross_return = (1.0 / total) - 1.0
+                    profit = 1.0 - total
+                    poly_fee = profit * 0.02
+                    slippage = 0.005
+                    net_return = gross_return - poly_fee - slippage
+                    net_edge_pp = round(net_return * 100, 2)
+                else:
+                    net_edge_pp = 0.0  # Can't short; no actionable adjustment
+                
                 opportunities.append({
                     "market_id": market["id"],
                     "question": market.get("question", "Unknown"),
@@ -193,13 +207,25 @@ async def arb_scan(limit: int = Query(default=50, ge=1, le=100)):
                     "no_price": no_price,
                     "total": total,
                     "spread": abs(1.0 - total),
+                    "net_edge_pp": net_edge_pp,
                     "type": "underpriced" if total < 0.99 else "overpriced",
                 })
 
-        opportunities.sort(key=lambda x: x["spread"], reverse=True)
+        # Sort by net edge (underpriced) then raw spread
+        opportunities.sort(key=lambda x: x["net_edge_pp"], reverse=True)
+        
+        # Fee assumption documentation
+        fee_info = {
+            "polymarket_fee_pct": 2.0,
+            "slippage_pct": 0.5,
+            "note": "Polymarket charges ~2%% on net winnings. Overpriced markets (>1.0) not actionable for retail (can't short)."
+        }
+        
         return {
             "count": len(opportunities),
             "opportunities": opportunities[:20],
+            "actionable_count": sum(1 for o in opportunities if o["net_edge_pp"] >= 2.0 and o["type"] == "underpriced"),
+            "fee_info": fee_info,
             "scanned_at": datetime.now().isoformat()
         }
     except Exception as e:

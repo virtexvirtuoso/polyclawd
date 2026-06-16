@@ -739,7 +739,7 @@ function marketUrl(p) {
   }
   // Polymarket: use slug if available, otherwise search by title
   const slug = p.market_slug || '';
-  if (slug) return `https://polymarket.com/event/${slug}`;
+  if (slug) return `https://polymarket.com/market/${slug}`;
   // Fallback: Polymarket search — strip "Will " prefix for tighter results
   if (title) {
     const q = title.replace(/^Will\s+/i, '').substring(0, 80);

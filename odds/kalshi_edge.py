@@ -301,10 +301,17 @@ def _is_entertainment_market(text: str) -> bool:
 
 def _extract_odds_from_market(market: dict) -> dict:
     """Extract yes/no prices and convert to odds format."""
-    yes_bid = market.get("yes_bid", 0) or 0
-    yes_ask = market.get("yes_ask", 0) or 0
-    no_bid = market.get("no_bid", 0) or 0
-    no_ask = market.get("no_ask", 0) or 0
+    def _cents(base):
+        # Fractional markets null legacy cents fields; *_dollars first
+        d = market.get(f"{base}_dollars")
+        if d not in (None, ""):
+            return float(d) * 100
+        return market.get(base, 0) or 0
+
+    yes_bid = _cents("yes_bid")
+    yes_ask = _cents("yes_ask")
+    no_bid = _cents("no_bid")
+    no_ask = _cents("no_ask")
     
     # Use midpoint for display, or ask price
     yes_price = (yes_bid + yes_ask) / 2 if yes_bid and yes_ask else yes_ask or yes_bid
@@ -312,7 +319,7 @@ def _extract_odds_from_market(market: dict) -> dict:
     
     # Also check last_price field
     if not yes_price:
-        yes_price = market.get("last_price", 0) or 0
+        yes_price = _cents("last_price")
     if not no_price and yes_price:
         no_price = 100 - yes_price
     
@@ -323,9 +330,9 @@ def _extract_odds_from_market(market: dict) -> dict:
         "yes_ask": yes_ask,
         "no_bid": no_bid,
         "no_ask": no_ask,
-        "volume": market.get("volume", 0) or 0,
-        "volume_24h": market.get("volume_24h", 0) or 0,
-        "open_interest": market.get("open_interest", 0) or 0,
+        "volume": float(market.get("volume_fp") or market.get("volume", 0) or 0),
+        "volume_24h": float(market.get("volume_24h_fp") or market.get("volume_24h", 0) or 0),
+        "open_interest": float(market.get("open_interest_fp") or market.get("open_interest", 0) or 0),
     }
 
 

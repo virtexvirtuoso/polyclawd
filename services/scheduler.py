@@ -572,6 +572,25 @@ def task_stale_line_scan():
         logger.debug("Stale line scan: no stale lines")
 
 
+def _send_whale_alert_tg():
+    """Send whale alerts to Telegram via the alert_tg helper script.
+    The script fetches enriched alerts from the API and handles dedup."""
+    import subprocess
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "scripts" / "whale_alert_tg.py")],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            logger.warning("whale_alert_tg stderr: %s", proc.stderr[:300])
+        else:
+            out = proc.stdout.strip()
+            if out:
+                logger.info("whale_alert_tg: %s", out[:200])
+    except Exception as e:
+        logger.warning("whale_alert_tg failed: %s", e)
+
+
 def task_whale_scanner():
     """Thin-market whale scanner: Kalshi weather + Polymarket props, 5-min tick."""
     from signals.whale_scanner import run_scan
@@ -603,6 +622,8 @@ def task_whale_scanner():
                 "Whale scanner alert [%s]: %s score=%d %s",
                 severity, market, score, a.get("reasons", ""),
             )
+        # Send Telegram alerts once per cycle (script fetches from API + dedup)
+        _send_whale_alert_tg()
     except Exception as e:
         logger.exception("Whale scanner failed: %s", e)
 
@@ -635,6 +656,14 @@ def task_whale_wallets():
             logger.info("Whale wallets: %s", stats)
     finally:
         conn.close()
+
+
+def task_whale_clob():
+    """Scan CLOB order books for large resting orders from known whales."""
+    from signals.whale_clob import run_scan
+    result = run_scan()
+    if result.get("alerts"):
+        logger.info("Whale CLOB: %s", result)
 
 
 def task_whale_wall_alerts():
@@ -1160,6 +1189,15 @@ async def tick_whale():
         await asyncio.sleep(max(60, 300 - (time.time() - t0)))
 
 
+async def tick_clob():
+    """CLOB order flow scanner: polls order books every 60s for large
+    resting orders from known whale wallets."""
+    while True:
+        t0 = time.time()
+        await run_in_thread(_run_safe, "whale_clob", task_whale_clob)
+        await asyncio.sleep(max(10, 60 - (time.time() - t0)))
+
+
 async def tick_30min():
     """Every 30 minutes: signal scans, options scan, edge alerts, source health."""
     while True:
@@ -1285,7 +1323,6 @@ async def tick_6h():
         await run_in_thread(_run_safe, "arena_snapshot", task_arena_snapshot)
         await run_in_thread(_run_safe, "state_cleanup", task_state_cleanup)
         await run_in_thread(_run_safe, "db_maintenance", task_db_maintenance)
-        await run_in_thread(_run_safe, "gdelt_refresh", task_gdelt_refresh)
         await run_in_thread(_run_safe, "ie_spending_refresh", task_ie_spending_refresh)
         await run_in_thread(_run_safe, "ufc_event_discovery", task_ufc_event_discovery)
         await asyncio.sleep(21600)
@@ -1334,6 +1371,7 @@ async def main():
         asyncio.create_task(_delayed_start(5, tick_5min)),
         asyncio.create_task(_delayed_start(15, tick_30min)),
         asyncio.create_task(_delayed_start(20, tick_whale)),
+        asyncio.create_task(_delayed_start(25, tick_clob)),
         asyncio.create_task(_delayed_start(120, tick_vpin)),
         asyncio.create_task(_delayed_start(60, tick_6h)),
         asyncio.create_task(_delayed_start(30, tick_scheduled)),

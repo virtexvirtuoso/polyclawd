@@ -51,6 +51,20 @@ GAMMA = "https://gamma-api.polymarket.com"
 DATA_API = "https://data-api.polymarket.com"
 UA = {"User-Agent": "polyclawd-pm-maker-shadow/1.0"}
 
+SYNOPTIC_BLACKOUT_MIN = 10  # blindspots 2026-06-10: named sniper bots (DSM Bot,
+# 6-Hour Bot, OMO) pick off stale resting orders at scheduled NWS releases. The
+# 6-hourly synoptic METAR times (00/06/12/18Z) fall INSIDE evening rest windows
+# for some timezones. Model the order as CANCELED +/-10min around each release
+# (conservative both ways: no sniper losses counted, no lucky fills either).
+
+
+def in_release_blackout(ts: float) -> bool:
+    """True if a unix timestamp falls within +/-SYNOPTIC_BLACKOUT_MIN minutes
+    of a 6-hourly synoptic time (00/06/12/18 UTC)."""
+    minutes_into_6h = (ts % 21600) / 60.0
+    return minutes_into_6h <= SYNOPTIC_BLACKOUT_MIN or minutes_into_6h >= 360 - SYNOPTIC_BLACKOUT_MIN
+
+
 LONGSHOT_MAX_YES = 0.15
 FAVORITE_MIN, FAVORITE_MAX = 0.50, 0.70
 BET_NO, BET_YES = 100.0, 50.0
@@ -204,6 +218,8 @@ def judge_fill(order: dict, trades: list) -> dict:
         ts = t.get("timestamp") or 0
         if not (t0 <= ts <= t1):
             continue
+        if in_release_blackout(ts):
+            continue  # order modeled as canceled around scheduled NWS releases
         n_window += 1
         price, size = _f(t.get("price")), _f(t.get("size")) or 0
         outc, tside = (t.get("outcome") or ""), (t.get("side") or "").upper()

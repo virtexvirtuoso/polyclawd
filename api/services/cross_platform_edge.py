@@ -192,7 +192,7 @@ class CrossPlatformEdgeScanner:
                             title=title,
                             probability=prob,
                             volume=market.get("volumeNum", 0),
-                            url=f"https://polymarket.com/event/{event.get('slug', '')}"
+                            url=f"https://polymarket.com/market/{event.get('slug', '')}"
                         ))
         except Exception as e:
             print(f"Polymarket fetch error: {e}")

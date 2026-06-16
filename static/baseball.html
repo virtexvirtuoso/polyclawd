@@ -1215,32 +1215,71 @@ function renderProps(data) {
 }
 
 // ---- Prop Scout: hit-rate vs book, sorted by edge ----
-// Inline mini-sparkline (SVG ~70x18) of last_n_vals with a baseline at prop_line.
-// Lets you SEE streak shape: consistent vs 1-2 spikes. Bars above the line = green hits.
-function sparkline(vals, line) {
-  if (!Array.isArray(vals) || !vals.length) return '<span style="color:var(--dim)">—</span>';
-  const W = 70, H = 18, n = vals.length;
+// Sparkline v3 — fixed-width right-aligned bars, recency fade, per-game tooltips.
+// Pip mode (0.5 lines): hit/miss is the only signal — tall green pip vs short red stub.
+// Bar mode (lines >= 1): magnitude bars on a fixed 0..max(line+2, max) scale so rows
+// compare; near-miss amber (within 0.5 of line), 3-game moving average, dashed prop line.
+// Newest game is always at the right edge at full opacity; older games fade.
+// Returns {svg, streak}; streak = longest consecutive hit run.
+function sparkline(vals, line, games) {
+  if (!Array.isArray(vals) || !vals.length) return { svg: '<span style="color:var(--dim)">—</span>', streak: 0 };
+  const W = 100, H = 28, n = vals.length;
   const nums = vals.map(v => (typeof v === 'number' && !isNaN(v)) ? v : 0);
-  const lo = Math.min(line != null ? line : Infinity, ...nums);
-  const hi = Math.max(line != null ? line : -Infinity, ...nums);
-  const span = (hi - lo) || 1;
-  const bw = W / n;
-  const yOf = (v) => H - ((v - lo) / span) * (H - 2) - 1;
-  let bars = '';
-  for (let i = 0; i < n; i++) {
-    const v = nums[i];
-    const hit = (line != null) && (v >= line);
-    const y = yOf(v);
-    const x = i * bw + 0.6;
-    const w = Math.max(1.4, bw - 1.2);
-    bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${(H - y - 1).toFixed(1)}" fill="${hit ? '#10b981' : 'rgba(148,163,184,0.55)'}" rx="0.8"/>`;
+  const step = Math.min(9.5, W / n);
+  const bw = Math.max(1.6, step - 2.5);
+  const x0 = W - step * n + (step - bw) / 2;  // right-aligned: newest game at right edge
+  const fadeOf = (i) => (0.45 + 0.55 * (n <= 1 ? 1 : i / (n - 1))).toFixed(2);
+  const meta = (Array.isArray(games) && games.length === n) ? games : null;
+  const tipOf = (i, v, isHit) => {
+    const g = meta ? meta[i] : null;
+    const who = (g && g.opp) ? ((g.home ? ' vs ' : ' @ ') + g.opp) : '';
+    const when = (g && g.d) ? ' · ' + g.d.slice(5) : '';
+    return `<title>${v}${who}${when} — ${isHit ? 'HIT' : 'miss'}${line != null ? ' (line ' + line + ')' : ''}</title>`;
+  };
+  const binary = (line != null) && line <= 0.5;
+  let bars = '', baseline = '', matrend = '';
+  let streak = 0, maxStreak = 0, hits = 0;
+  if (binary) {
+    for (let i = 0; i < n; i++) {
+      const v = nums[i];
+      const isHit = v > line;
+      if (isHit) { hits++; streak++; maxStreak = Math.max(maxStreak, streak); } else { streak = 0; }
+      const h = isHit ? H - 10 : 4;
+      const fill = isHit ? '#10b981' : 'rgba(239,68,68,0.55)';
+      const x = x0 + i * step;
+      bars += `<rect x="${x.toFixed(1)}" y="${(H - 1 - h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h}" fill="${fill}" opacity="${fadeOf(i)}" rx="1">${tipOf(i, v, isHit)}</rect>`;
+    }
+  } else {
+    const hi = Math.max(line != null ? line + 2 : 0, ...nums, 1);
+    const yOf = (v) => H - (v / hi) * (H - 3) - 1;
+    for (let i = 0; i < n; i++) {
+      const v = nums[i];
+      const isHit = (line != null) && v > line;
+      const nearMiss = (line != null) && !isHit && (v >= line - 0.5);
+      if (isHit) { hits++; streak++; maxStreak = Math.max(maxStreak, streak); } else { streak = 0; }
+      const color = isHit ? '#10b981' : (nearMiss ? '#f59e0b' : 'rgba(239,68,68,0.55)');
+      const barH = Math.max(1.5, H - yOf(v) - 1);  // zero-value games stay visible as stubs
+      const x = x0 + i * step;
+      bars += `<rect x="${x.toFixed(1)}" y="${(H - 1 - barH).toFixed(1)}" width="${bw.toFixed(1)}" height="${barH.toFixed(1)}" fill="${color}" opacity="${fadeOf(i)}" rx="1">${tipOf(i, v, isHit)}</rect>`;
+    }
+    if (line != null) {
+      const ly = yOf(line);
+      baseline = `<line x1="${Math.max(0, x0 - 1).toFixed(1)}" y1="${ly.toFixed(1)}" x2="${W}" y2="${ly.toFixed(1)}" stroke="rgba(245,158,11,0.7)" stroke-width="1" stroke-dasharray="2 2"/>`;
+    }
+    // 3-game moving average trendline
+    const mavals = [];
+    for (let i = 2; i < n; i++) {
+      const avg = (nums[i-2] + nums[i-1] + nums[i]) / 3;
+      mavals.push({ x: x0 + (i - 1) * step + bw / 2, y: yOf(avg) });
+    }
+    if (mavals.length >= 2) {
+      let pts = '';
+      for (const p of mavals) { pts += (pts ? ' ' : '') + p.x.toFixed(1) + ',' + p.y.toFixed(1); }
+      matrend = `<polyline points="${pts}" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>`;
+    }
   }
-  let baseline = '';
-  if (line != null) {
-    const ly = yOf(line);
-    baseline = `<line x1="0" y1="${ly.toFixed(1)}" x2="${W}" y2="${ly.toFixed(1)}" stroke="rgba(245,158,11,0.85)" stroke-width="1" stroke-dasharray="2 2"/>`;
-  }
-  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="vertical-align:middle" aria-label="recent values vs line">${bars}${baseline}</svg>`;
+  const svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="vertical-align:middle" aria-label="${hits} of ${n} games over the line">${bars}${baseline}${matrend}</svg>`;
+  return { svg, streak: maxStreak };
 }
 function scoutEdgeColor(e) {
   return e >= 15 ? 'var(--green)' : (e >= 5 ? 'var(--amber)' : 'var(--dim)');
@@ -1272,7 +1311,8 @@ function renderScout(data) {
     const prop = (r.stat_label || r.market || '?') + ' o' + (r.prop_line != null ? r.prop_line : '—');
     const matchup = (r.away_team || '?') + ' @ ' + (r.home_team || '?');
     const sign = e > 0 ? '+' : '';
-    const spark = sparkline(r.last_n_vals, r.prop_line);
+    const sp = sparkline(r.last_n_vals, r.prop_line, r.last_n_games);
+    const spark = sp.svg + (sp.streak >= 3 ? ' <span style="color:#10b981;font-size:0.7rem" title="' + sp.streak + '-game hit streak">\u{1F525}' + sp.streak + '</span>' : '');
     html += `<tr${alert ? ' style="background:rgba(16,185,129,0.08)"' : ''}>
       <td><strong>${r.player || '—'}</strong></td>
       <td>${prop}</td>

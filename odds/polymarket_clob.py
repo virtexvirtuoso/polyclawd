@@ -481,6 +481,65 @@ async def get_clob_summary(market_id: str = None) -> Dict:
     return result
 
 
+def get_recent_trades(token_id: str, limit: int = 500) -> list:
+    """
+    Fetch recent trades for a CLOB token from Polymarket /trades endpoint.
+
+    Requires API key auth via env vars:
+        POLYMARKET_CLOB_API_KEY
+        POLYMARKET_CLOB_SECRET
+
+    Args:
+        token_id: The CLOB token ID
+        limit: Max trades to return (default 500, max 2000 per CLOB spec)
+
+    Returns:
+        List of trade dicts: {"price", "size", "side", "timestamp", "maker_address"}
+        Returns empty list on auth failure or other errors.
+    """
+    import os as _os
+
+    api_key = _os.environ.get("POLYMARKET_CLOB_API_KEY")
+    api_secret = _os.environ.get("POLYMARKET_CLOB_SECRET")
+
+    if not api_key or not api_secret:
+        print("Warning: POLYMARKET_CLOB_API_KEY / SECRET not set — cannot fetch trades")
+        return []
+
+    try:
+        url = f"{CLOB_API}/trades?token_id={token_id}&limit={min(limit, 2000)}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Polyclawd/2.0",
+            "POLYMARKET_CLOB_API_KEY": api_key,
+            "POLYMARKET_CLOB_SECRET": api_secret,
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = json.loads(resp.read().decode())
+
+        # Polymarket /trades returns an array of trade objects.
+        # Normalize fields to our schema.
+        out = []
+        for t in raw if isinstance(raw, list) else raw.get("data", []):
+            out.append({
+                "price": float(t.get("price", 0)),
+                "size": float(t.get("size", 0)),
+                "side": str(t.get("side", "BUY")).upper(),
+                "timestamp": int(t.get("timestamp", 0)),
+                "maker_address": t.get("maker_address", "") or t.get("maker", ""),
+            })
+        return out
+
+    except urllib.error.HTTPError as e:
+        if e.code == 401 or e.code == 403:
+            print("Warning: Polymarket CLOB /trades auth failed (HTTP %d) — check API keys" % e.code)
+        else:
+            print(f"Warning: Polymarket CLOB /trades HTTP error: {e.code}")
+        return []
+    except Exception as e:
+        print(f"Warning: Polymarket CLOB /trades fetch error: {e}")
+        return []
+
+
 if __name__ == "__main__":
     import asyncio
     

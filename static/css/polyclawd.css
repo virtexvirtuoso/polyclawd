@@ -1,0 +1,279 @@
+/* ════════════════════════════════════════════════════════════════════════
+   POLYCLAWD DESIGN SYSTEM — "Probability Bureau"            v1 · 2026-06-12
+   ════════════════════════════════════════════════════════════════════════
+   THE canonical stylesheet for every Polyclawd page. New pages adopt it
+   with exactly two lines:
+
+     <link rel="stylesheet" href="css/polyclawd.css?v=1">
+     <script src="polyclawd-shell.js" defer></script>
+
+   Identity: a mid-century forecasting bureau rebuilt as a terminal.
+   The product is probabilities on real-world events; the visual language
+   is official chart paper + tote board. Concretely:
+
+     · warm carbon surfaces with an engineering chart-paper grid
+     · warm paper ink (#ece9df) — never pure white, never cool slate
+     · SQUARE corners, hairline borders. No border-radius, no box-shadow,
+       no glassmorphism, no gradients-as-decoration. Elevation = surface
+       steps (--pc-bg → --pc-panel → --pc-raised), not shadow.
+     · ONE accent: International Orange (--pc-accent), <20% of any view.
+       P&L/probability use the semantic green/red pair only.
+     · type: 'Unica One' for wordmarks + headline numerals (tote board),
+       'Spline Sans Mono' for EVERYTHING else. Inter is banned.
+     · states are rubber stamps (.pc-stamp), sections are indexed rules
+       (.pc-rule), cards carry bureau corner ticks (.pc-card--tick).
+
+   The LEGACY BRIDGE at the bottom retokenizes virtuoso.css pages: load
+   this file AFTER css/virtuoso.css and the old classes inherit the bureau
+   look without touching their JS.
+   ════════════════════════════════════════════════════════════════════════ */
+@import url('https://fonts.googleapis.com/css2?family=Unica+One&family=Spline+Sans+Mono:wght@400;500;600;700&display=swap');
+
+:root{
+  /* surfaces (warm carbon — deliberately not blue-black) */
+  --pc-bg:      #0d0d0b;
+  --pc-panel:   #131310;
+  --pc-raised:  #1a1a15;
+  --pc-line:    #26261f;
+  --pc-line-2:  #34342a;
+
+  /* ink (warm paper) */
+  --pc-ink:     #ece9df;
+  --pc-dim:     #9a968a;
+  --pc-faint:   #66635a;
+
+  /* the stamp — International Orange, used sparingly */
+  --pc-accent:        #ff5c1f;
+  --pc-accent-ink:    #ffb494;
+  --pc-accent-wash:   rgba(255,92,31,.09);
+
+  /* market semantics */
+  --pc-up:      #2fbf71;
+  --pc-down:    #e4484d;
+  --pc-warn:    #f0a050;
+  --pc-gold:    #d8b13c;
+
+  /* severity (alerts) */
+  --pc-crit:    #ff3b52;
+  --pc-high:    #f0a050;
+  --pc-low:     #7d8a78;
+
+  /* type */
+  --pc-disp:    'Unica One', 'Arial Narrow', sans-serif;
+  --pc-mono:    'Spline Sans Mono', ui-monospace, Menlo, monospace;
+
+  /* chart palette (canvas/JS reads these via getComputedStyle) */
+  --pc-chart-1: #ff5c1f; --pc-chart-2: #2fbf71; --pc-chart-3: #d8b13c;
+  --pc-chart-4: #7d9bb8; --pc-chart-5: #b07aa8; --pc-chart-6: #9a968a;
+
+  /* z-stack (documented, fixed) */
+  --pc-z-chrome: 30; --pc-z-overlay: 50; --pc-z-dock: 60;
+}
+
+/* ── base ──────────────────────────────────────────────────────────────── */
+*{margin:0;padding:0;box-sizing:border-box}
+html{background:var(--pc-bg)}
+body{
+  font-family:var(--pc-mono);
+  font-size:13px;
+  color:var(--pc-ink);
+  background:var(--pc-bg);
+  min-height:100vh;
+}
+/* engineering chart paper: fine grid + heavier rule each 5th line */
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:
+    repeating-linear-gradient(0deg,  rgba(236,233,223,.022) 0 1px, transparent 1px 24px),
+    repeating-linear-gradient(90deg, rgba(236,233,223,.022) 0 1px, transparent 1px 24px),
+    repeating-linear-gradient(0deg,  rgba(236,233,223,.030) 0 1px, transparent 1px 120px),
+    repeating-linear-gradient(90deg, rgba(236,233,223,.030) 0 1px, transparent 1px 120px);
+}
+::selection{background:var(--pc-accent);color:#0d0d0b}
+a{color:inherit}
+main, .pc-main{position:relative;z-index:1}
+*::-webkit-scrollbar{width:10px;height:10px}
+*::-webkit-scrollbar-thumb{background:var(--pc-line-2);border:2px solid var(--pc-bg)}
+*::-webkit-scrollbar-track{background:transparent}
+
+/* ── chrome (the shell injects this markup) ────────────────────────────── */
+.pc-chrome{
+  position:sticky;top:0;z-index:var(--pc-z-chrome);
+  display:flex;align-items:center;flex-wrap:wrap;gap:0 18px;
+  background:rgba(13,13,11,.96);backdrop-filter:blur(6px);
+  border-bottom:1px solid var(--pc-line);
+  padding:0 20px;
+}
+.pc-brand{
+  display:flex;align-items:baseline;gap:10px;text-decoration:none;
+  padding:13px 18px 12px 0;border-right:1px solid var(--pc-line);
+}
+.pc-brand b{
+  font-family:var(--pc-disp);font-size:23px;letter-spacing:.06em;
+  color:var(--pc-ink);font-weight:400;line-height:1;
+}
+.pc-brand b i{font-style:normal;color:var(--pc-accent)}
+.pc-brand .pc-sect{
+  font-size:10px;letter-spacing:.24em;text-transform:uppercase;
+  color:var(--pc-faint);
+}
+.pc-nav{display:flex;align-items:stretch;flex-wrap:wrap}
+.pc-nav a{
+  display:flex;align-items:center;text-decoration:none;
+  padding:0 13px;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--pc-dim);border-bottom:2px solid transparent;
+  transition:color .15s;
+}
+.pc-nav a:hover{color:var(--pc-ink)}
+.pc-nav a.on{color:var(--pc-ink);border-bottom-color:var(--pc-accent)}
+.pc-chrome .pc-right{margin-left:auto;display:flex;align-items:center;gap:10px;padding:10px 0}
+
+/* ── stamps (state chips: LIVE / PAPER / CRITICAL / …) ─────────────────── */
+.pc-stamp{
+  display:inline-block;padding:2px 9px;
+  font-family:var(--pc-mono);font-size:9.5px;font-weight:600;
+  letter-spacing:.18em;text-transform:uppercase;
+  border:1px solid currentColor;color:var(--pc-dim);
+  background:transparent;
+}
+.pc-stamp--accent{color:var(--pc-accent)}
+.pc-stamp--up{color:var(--pc-up)}
+.pc-stamp--down{color:var(--pc-down)}
+.pc-stamp--crit{color:var(--pc-crit)}
+.pc-stamp--high{color:var(--pc-high)}
+.pc-stamp--low{color:var(--pc-low)}
+.pc-stamp--gold{color:var(--pc-gold)}
+
+/* ── indexed section rule:  ── 01 / OPEN POSITIONS ────────────────────── */
+.pc-rule{
+  display:flex;align-items:baseline;gap:10px;
+  margin:26px 0 12px;padding-bottom:7px;
+  border-bottom:1px solid var(--pc-line);
+  font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--pc-dim);
+}
+.pc-rule .idx{color:var(--pc-accent);font-weight:600}
+.pc-rule small{margin-left:auto;letter-spacing:.06em;text-transform:none;color:var(--pc-faint);font-size:10px}
+
+/* ── cards & panels (square, hairline, optional bureau corner ticks) ──── */
+.pc-card{
+  background:var(--pc-panel);
+  border:1px solid var(--pc-line);
+  padding:16px 18px;
+  position:relative;
+}
+.pc-card--tick::before,.pc-card--tick::after{
+  content:"";position:absolute;width:7px;height:7px;pointer-events:none;
+}
+.pc-card--tick::before{top:-1px;left:-1px;border-top:2px solid var(--pc-accent);border-left:2px solid var(--pc-accent)}
+.pc-card--tick::after{bottom:-1px;right:-1px;border-bottom:2px solid var(--pc-accent);border-right:2px solid var(--pc-accent)}
+.pc-card h2,.pc-card .pc-card-h{
+  font-size:11px;letter-spacing:.2em;text-transform:uppercase;
+  color:var(--pc-dim);margin-bottom:12px;font-weight:600;
+}
+
+/* ── stat blocks (tote-board numerals) ─────────────────────────────────── */
+.pc-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:1px;background:var(--pc-line);border:1px solid var(--pc-line)}
+.pc-stat{background:var(--pc-panel);padding:14px 16px}
+.pc-stat .k{font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--pc-faint)}
+.pc-stat .v{font-family:var(--pc-disp);font-size:30px;line-height:1.05;margin-top:6px;color:var(--pc-ink)}
+.pc-stat .v.pos{color:var(--pc-up)} .pc-stat .v.neg{color:var(--pc-down)}
+.pc-stat .v.accent{color:var(--pc-accent)}
+.pc-stat .s{font-size:10px;color:var(--pc-dim);margin-top:4px}
+
+/* ── tables (ledger style: hairline rows, tabular numerals) ────────────── */
+.pc-table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+.pc-table th{
+  font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--pc-faint);
+  text-align:left;padding:7px 9px;border-bottom:1px solid var(--pc-line-2);font-weight:600;
+}
+.pc-table td{padding:8px 9px;border-bottom:1px solid var(--pc-line);color:var(--pc-dim)}
+.pc-table td b{color:var(--pc-ink);font-weight:600}
+.pc-table tr:hover td{background:var(--pc-raised)}
+.pc-table .r{text-align:right}
+
+/* ── buttons & chips ───────────────────────────────────────────────────── */
+.pc-btn{
+  display:inline-block;cursor:pointer;
+  font-family:var(--pc-mono);font-size:10.5px;font-weight:600;
+  letter-spacing:.16em;text-transform:uppercase;
+  color:var(--pc-ink);background:var(--pc-raised);
+  border:1px solid var(--pc-line-2);padding:8px 16px;
+  transition:border-color .15s,color .15s;
+}
+.pc-btn:hover{border-color:var(--pc-accent);color:var(--pc-accent-ink)}
+.pc-btn--primary{background:var(--pc-accent);border-color:var(--pc-accent);color:#0d0d0b}
+.pc-btn--primary:hover{background:#ff7140;color:#0d0d0b}
+.pc-chip{
+  display:inline-block;cursor:pointer;user-select:none;
+  font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  padding:5px 11px;border:1px solid var(--pc-line);color:var(--pc-dim);
+  transition:all .15s;background:transparent;
+}
+.pc-chip:hover{color:var(--pc-ink);border-color:var(--pc-line-2)}
+.pc-chip.on{color:var(--pc-accent);border-color:var(--pc-accent);background:var(--pc-accent-wash)}
+
+/* ── key-value strip / utilities ───────────────────────────────────────── */
+.pc-kv{display:flex;gap:16px;flex-wrap:wrap;font-size:11px;color:var(--pc-dim)}
+.pc-kv b{color:var(--pc-ink);font-weight:600}
+.pc-pos{color:var(--pc-up)} .pc-neg{color:var(--pc-down)}
+.pc-dim{color:var(--pc-dim)} .pc-faint{color:var(--pc-faint)}
+.pc-accent{color:var(--pc-accent)}
+.pc-num{font-family:var(--pc-disp);letter-spacing:.02em}
+
+/* ── empty / loading states (named, explained, actionable) ─────────────── */
+.pc-empty{
+  padding:28px 16px;text-align:center;
+  color:var(--pc-faint);font-size:11px;line-height:1.8;
+  border:1px dashed var(--pc-line-2);
+}
+.pc-note{
+  margin-top:14px;padding-top:10px;border-top:1px solid var(--pc-line);
+  font-size:10.5px;color:var(--pc-faint);line-height:1.7;
+}
+.pc-note b{color:var(--pc-dim)}
+
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important}
+}
+@media (max-width:760px){
+  .pc-brand{border-right:none}
+  .pc-nav a{padding:10px 10px}
+  .pc-stat .v{font-size:24px}
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   LEGACY BRIDGE — virtuoso.css pages
+   Load this file AFTER css/virtuoso.css and the legacy classes inherit the
+   bureau identity (tokens overridden, corners squared, glow shadows cut).
+   The shell hides the legacy nav when present (body.pc-shell-on).
+   Delete this section once the last virtuoso.css page is migrated.
+   ════════════════════════════════════════════════════════════════════════ */
+:root{
+  --primary: var(--pc-accent);
+  --primary-glow: rgba(255,92,31,.25);
+  --primary-subtle: var(--pc-accent-wash);
+  --bg-dark: var(--pc-bg);
+  --bg-card: var(--pc-panel);
+  --bg-elevated: var(--pc-raised);
+  --border: var(--pc-line);
+  --border-hover: var(--pc-line-2);
+  --text-primary: var(--pc-ink);
+  --text-secondary: var(--pc-dim);
+  --text-muted: var(--pc-faint);
+  --success: var(--pc-up);
+  --success-glow: rgba(47,191,113,.25);
+  --error: var(--pc-down);
+  --error-glow: rgba(228,72,77,.25);
+  --warning: var(--pc-warn);
+  --font-sans: var(--pc-mono);
+  --font-mono: var(--pc-mono);
+}
+.card,.btn,.badge,.section,.modal,.form-input,.stat-card,.table-container,
+.position-card,.toast,.progress{border-radius:0!important;box-shadow:none!important}
+.page-title,.card-value,.stat-value{font-family:var(--pc-disp)!important;font-weight:400!important;letter-spacing:.04em}
+.grid-overlay{display:none!important}     /* chart paper replaces it */
+body.pc-shell-on .nav,
+body.pc-shell-on .nav-mobile,
+body.pc-shell-on .bottom-nav,
+body.pc-shell-on .theme-toggle{display:none!important}
+body.pc-shell-on{padding-bottom:24px}

@@ -722,8 +722,13 @@ def scan_kalshi_signals() -> List[Dict]:
         if category_edge * 100 < MIN_EDGE_PCT:
             continue
 
-        volume = market.get("volume", 0)
-        price = market.get("last_price", market.get("yes_bid", 50))
+        # Fractional markets null legacy cents/volume; *_fp/_dollars first
+        volume = float(market.get("volume_fp") or market.get("volume", 0) or 0)
+        _lp_d = market.get("last_price_dollars") or market.get("yes_bid_dollars")
+        if _lp_d not in (None, ""):
+            price = float(_lp_d) * 100
+        else:
+            price = market.get("last_price") or market.get("yes_bid") or 50
         close_time_str = market.get("close_time", "")
 
         if volume < MIN_VOLUME_KALSHI:
