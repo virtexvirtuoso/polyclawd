@@ -126,7 +126,7 @@ def _portfolio_context() -> dict:
 
 def _market_url(slug: str = "", platform: str = "polymarket") -> str:
     if slug and platform == "polymarket":
-        return f"https://polymarket.com/market/{slug}"
+        return f"https://polymarket.com/event/{slug}"
     return ""
 
 
@@ -633,7 +633,7 @@ def alert_whale_scan(alert: dict) -> bool:
     if platform == "kalshi":
         url = f"https://kalshi.com/markets/{market.split('-')[0]}"
     else:
-        url = f"https://polymarket.com/market/{market}"
+        url = f"https://polymarket.com/event/{market}"
     description += f"\n[View Market]({url})"
     
     fields = []

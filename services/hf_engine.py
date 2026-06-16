@@ -16,12 +16,13 @@ Based on: [[Polymarket 134 to 200K Story]] and [[HF_MODULE_PLAN]]
 
 import asyncio
 import json
+from loguru import logger
 import logging
 import os
 import sqlite3
 import time
 from collections import deque
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from typing import Dict, Optional
 from pathlib import Path
@@ -37,7 +38,7 @@ from services.hf_velocity import (
 )
 from services.hf_triggers import evaluate_edge, build_edge_payload
 
-logger = logging.getLogger("hf_engine")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 
 # ============================================================================
@@ -46,8 +47,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 
 BINANCE_WS = "wss://stream.binance.com:9443/ws"
 POLYGON_RPC_LIST = [
-    os.getenv("POLYGON_RPC", "https://polygon.drpc.org"),
-    "https://polygon-bor-rpc.publicnode.com",
+    os.getenv("POLYGON_RPC", "https://polygon-bor-rpc.publicnode.com"),
+    "https://polygon.drpc.org",
 ]
 POLYGON_RPC = POLYGON_RPC_LIST[0]
 _rpc_index = 0  # current active RPC
@@ -160,7 +161,11 @@ async def poll_chainlink_oracle(asset: str) -> Optional[Dict]:
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
 
-            result = json.loads(stdout.decode())
+            output = stdout.decode().strip()
+            if not output:
+                logger.warning(f"Empty response from {rpc_url}, retrying...")
+                continue
+            result = json.loads(output)
 
             # Check for RPC error (quota exceeded, unauthorized, etc.)
             if result.get("error"):

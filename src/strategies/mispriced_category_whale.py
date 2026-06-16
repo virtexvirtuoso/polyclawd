@@ -34,6 +34,7 @@ import duckdb
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
@@ -135,7 +136,7 @@ class MispricedCategoryWhaleStrategy(Analysis):
     
     def run(self) -> AnalysisOutput:
         """Run full backtest simulation."""
-        from src.common.chart_theme import apply_theme
+        from src.common.chart_theme import apply_theme, COLORS
         apply_theme()
         
         data_dir = Path(__file__).resolve().parents[2] / 'data'

@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """NBA Game 3 - Best bet with Poisson guardrail."""
-
 import os, sys, json, urllib.request, math, re
-
 sys.path.insert(0, os.path.expanduser("~/Desktop/polyclawd"))
 
 try:
@@ -13,36 +11,24 @@ except ImportError:
 KEY = os.environ.get("ODDS_API_KEY", "")
 BASE = "https://api.the-odds-api.com/v4"
 
-
 def fetch(u):
-    r = urllib.request.urlopen(urllib.request.Request(u, headers={"User-Agent": "Polyclawd/2.0"}), timeout=15)
-    try:
-        from odds.the_odds_api import _track_credits_from_response
-
-        _track_credits_from_response(r)
-    except Exception:
-        pass
-    return json.loads(r.read())
-
+    return json.loads(urllib.request.urlopen(
+        urllib.request.Request(u, headers={"User-Agent": "Polyclawd/2.0"}), timeout=15).read())
 
 def devig(ov, un):
-    o = 100 / (ov + 100) if ov > 0 else abs(ov) / (abs(ov) + 100)
-    u = 100 / (un + 100) if un > 0 else abs(un) / (abs(un) + 100)
-    if o + u <= 1:
-        return o
+    o = 100/(ov+100) if ov>0 else abs(ov)/(abs(ov)+100)
+    u = 100/(un+100) if un>0 else abs(un)/(abs(un)+100)
+    if o+u <= 1: return o
     lo, hi = 1, 20
     for _ in range(80):
-        mid = (lo + hi) / 2
+        mid = (lo+hi)/2
         t = o**mid + u**mid
-        if abs(t - 1) < 1e-9:
-            break
+        if abs(t-1) < 1e-9: break
         lo, hi = (mid, hi) if t > 1 else (lo, mid)
-    return o ** ((lo + hi) / 2)
-
+    return o**((lo+hi)/2)
 
 def poisson(lam, k):
-    return 1 - sum(math.exp(-lam) * lam**i / math.factorial(i) for i in range(k + 1))
-
+    return 1 - sum(math.exp(-lam) * lam**i / math.factorial(i) for i in range(k+1))
 
 AVG = {
     "Jalen Brunson": {"ast": 6.8, "pts": 26.5, "reb": 3.0, "thr": 2.5, "blk": 0.3},
@@ -64,24 +50,14 @@ AVG = {
 }
 
 SMT2KEY = {
-    "basketball_player_points": "pts",
-    "basketball_player_rebounds": "reb",
-    "basketball_player_assists": "ast",
-    "basketball_player_threes": "thr",
+    "basketball_player_points": "pts", "basketball_player_rebounds": "reb",
+    "basketball_player_assists": "ast", "basketball_player_threes": "thr",
     "basketball_player_blocks": "blk",
 }
-
 
 def scan():
     if not KEY:
         print("No ODDS_API_KEY set")
-        return [], None
-
-    from odds.rate_limiter import can_make_call
-
-    _ok, _why = can_make_call("normal")
-    if not _ok:
-        print(f"best_nba: Odds API credit gate — {_why}")
         return [], None
 
     events = fetch(f"{BASE}/sports/basketball_nba/odds?apiKey={KEY}&bookmakers=pinnacle&markets=h2h")
@@ -90,9 +66,7 @@ def scan():
     book = {}
     for mk in ["player_points", "player_rebounds", "player_assists"]:
         short = mk.split("_")[1]
-        d = fetch(
-            f"{BASE}/sports/basketball_nba/events/{eid}/odds?apiKey={KEY}&markets={mk}&bookmakers=pinnacle&oddsFormat=american"
-        )
+        d = fetch(f"{BASE}/sports/basketball_nba/events/{eid}/odds?apiKey={KEY}&markets={mk}&bookmakers=pinnacle&oddsFormat=american")
         for bk in d.get("bookmakers", []):
             for m in bk.get("markets", []):
                 ov = un = None
@@ -153,26 +127,16 @@ def scan():
             if edge < 0:
                 continue
 
-            results.append(
-                {
-                    "p": player,
-                    "s": short,
-                    "t": thresh,
-                    "pm": pm,
-                    "ln": bk["line"],
-                    "fa": adj,
-                    "st": half_steps,
-                    "pf": pf,
-                    "eg": edge,
-                }
-            )
+            results.append({
+                "p": player, "s": short, "t": thresh,
+                "pm": pm, "ln": bk["line"], "fa": adj,
+                "st": half_steps, "pf": pf, "eg": edge
+            })
 
     results.sort(key=lambda x: x["eg"], reverse=True)
 
     best = None
-    print(
-        f"  {'Player':<18} {'Prop':<8} {'>=N':<4} {'PM%':>5} {'Ln':>4} {'Fair':>6} {'Steps':>5} {'Poisson':>8} {'Edge':>6}  {'Grade'}"
-    )
+    print(f"  {'Player':<18} {'Prop':<8} {'>=N':<4} {'PM%':>5} {'Ln':>4} {'Fair':>6} {'Steps':>5} {'Poisson':>8} {'Edge':>6}  {'Grade'}")
     print(f"  {'-' * 72}")
 
     for r in results:
@@ -191,21 +155,16 @@ def scan():
         else:
             continue
 
-        pfs = f"{r['pf'] * 100:.0f}%" if r["pf"] else "N/A"
-        print(
-            f"  {r['p']:<18} {r['s']:<8} >= {r['t']:<2} {r['pm'] * 100:>4.0f}% {r['ln']:>4.1f} {r['fa'] * 100:>5.1f}% {r['st']:>4.0f} {pfs:>7} +{r['eg'] * 100:>4.1f}pp  {gr}"
-        )
+        pfs = f"{r['pf']*100:.0f}%" if r["pf"] else "N/A"
+        print(f"  {r['p']:<18} {r['s']:<8} >= {r['t']:<2} {r['pm']*100:>4.0f}% {r['ln']:>4.1f} {r['fa']*100:>5.1f}% {r['st']:>4.0f} {pfs:>7} +{r['eg']*100:>4.1f}pp  {gr}")
         if gr == "A" and best is None:
             best = r
 
     return results, best
 
-
 if __name__ == "__main__":
     results, best = scan()
     if best:
-        print(
-            f"\n  🏆 BEST BET: {best['p']} >= {best['t']} {best['s']} YES @ {best['pm'] * 100:.0f}c  edge +{best['eg'] * 100:.0f}pp  ({best['st']:.0f} steps, Poisson {best['pf'] * 100:.0f}%)"
-        )
+        print(f"\n  🏆 BEST BET: {best['p']} >= {best['t']} {best['s']} YES @ {best['pm']*100:.0f}c  edge +{best['eg']*100:.0f}pp  ({best['st']:.0f} steps, Poisson {best['pf']*100:.0f}%)")
     else:
         print("\n  No Grade A bets found")

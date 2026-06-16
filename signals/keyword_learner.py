@@ -12,8 +12,10 @@ No external API needed - learns from your own trading data.
 import json
 import re
 from pathlib import Path
-from datetime import datetime
-from typing import Dict, List, Tuple, Optional
+from datetime import datetime, timedelta
+from typing import Dict, List, Set, Tuple, Optional
+from collections import Counter
+from loguru import logger
 
 # ============================================================================
 # Storage
@@ -382,9 +384,9 @@ def boost_confidence_by_keywords(base_confidence: float, keywords: List[str]) ->
 # ============================================================================
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("KEYWORD LEARNER TEST")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("KEYWORD LEARNER TEST")
+    logger.info("=" * 60)
     
     # Test entity extraction
     test_titles = [
@@ -395,19 +397,19 @@ if __name__ == "__main__":
         "Will the FDA approve Neuralink's brain chip?",
     ]
     
-    print("\n1. Entity Extraction:")
-    print("-" * 60)
+    logger.info("\n1. Entity Extraction:")
+    logger.info("-" * 60)
     for title in test_titles:
         entities = extract_entities(title)
         terms = extract_searchable_terms(title)
-        print(f"Title: {title[:50]}")
-        print(f"  Entities: {[e['entity'] for e in entities[:4]]}")
-        print(f"  Search terms: {terms}")
-        print()
+        logger.info(f"Title: {title[:50]}")
+        logger.info(f"  Entities: {[e['entity'] for e in entities[:4]]}")
+        logger.info(f"  Search terms: {terms}")
+        logger.info()
     
     # Test keyword weights
-    print("\n2. Simulating Keyword Learning:")
-    print("-" * 60)
+    logger.info("\n2. Simulating Keyword Learning:")
+    logger.info("-" * 60)
     
     # Simulate some trades
     record_keyword_usage(["bitcoin", "ETF"], "market1", "win")
@@ -416,22 +418,22 @@ if __name__ == "__main__":
     record_keyword_usage(["trump", "tariff"], "market4", "win")
     record_keyword_usage(["trump", "impeachment"], "market5", "loss")
     
-    print("Top keywords after simulated trades:")
+    logger.info("Top keywords after simulated trades:")
     for kw in get_top_keywords(10):
-        print(f"  {kw['keyword']:20} {kw['win_rate']:5.0%} ({kw['wins']}W/{kw['losses']}L)")
+        logger.info(f"  {kw['keyword']:20} {kw['win_rate']:5.0%} ({kw['wins']}W/{kw['losses']}L)")
     
     # Test smart keywords
-    print("\n3. Smart Keyword Selection:")
-    print("-" * 60)
+    logger.info("\n3. Smart Keyword Selection:")
+    logger.info("-" * 60)
     test_market = "Will Bitcoin hit $100,000 by end of 2026?"
     smart_kws = get_smart_keywords(test_market)
-    print(f"Market: {test_market}")
-    print(f"Smart keywords: {smart_kws}")
+    logger.info(f"Market: {test_market}")
+    logger.info(f"Smart keywords: {smart_kws}")
     
     # Test confidence boost
-    print("\n4. Confidence Boost:")
-    print("-" * 60)
+    logger.info("\n4. Confidence Boost:")
+    logger.info("-" * 60)
     base = 50
     boosted = boost_confidence_by_keywords(base, ["bitcoin", "ETF"])
-    print(f"Base confidence: {base}")
-    print(f"After keyword boost: {boosted:.1f}")
+    logger.info(f"Base confidence: {base}")
+    logger.info(f"After keyword boost: {boosted:.1f}")

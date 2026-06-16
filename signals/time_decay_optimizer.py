@@ -15,10 +15,10 @@ Key findings:
 Replaces the simple duration modifier in paper_portfolio.py.
 """
 
+from loguru import logger
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
-logger = logging.getLogger(__name__)
 
 # Becker-validated NO win rates by duration × volume
 # Format: (duration_key, volume_key) → NO WR from 259K market backtest

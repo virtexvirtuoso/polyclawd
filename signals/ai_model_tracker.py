@@ -16,15 +16,15 @@ Feeds into mispriced_category as a sub-signal for tech/AI markets.
 """
 
 import json
-import logging
 import re
+import time
 import urllib.request
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
+from loguru import logger
 
-logger = logging.getLogger(__name__)
 
 # ============================================================================
 # Configuration
@@ -684,29 +684,29 @@ def main():
 
     if cmd == "summary":
         summary = get_arena_summary()
-        print(json.dumps(summary, indent=2))
+        logger.info(json.dumps(summary, indent=2))
 
     elif cmd == "snapshot":
         models = fetch_arena_leaderboard()
         result = snapshot_leaderboard(models)
-        print(result)
+        logger.info(result)
 
     elif cmd == "trends":
         days = int(sys.argv[2]) if len(sys.argv) > 2 else 7
         trends = get_score_trends(days)
-        print(json.dumps(trends, indent=2))
+        logger.info(json.dumps(trends, indent=2))
 
     elif cmd == "signals":
         signals = generate_ai_model_signals()
-        print(json.dumps(signals, indent=2))
+        logger.info(json.dumps(signals, indent=2))
 
     elif cmd == "history":
         company = sys.argv[2] if len(sys.argv) > 2 else "Anthropic"
         history = get_score_history(company)
-        print(json.dumps(history, indent=2))
+        logger.info(json.dumps(history, indent=2))
 
     else:
-        print(f"Usage: {sys.argv[0]} [summary|snapshot|trends|signals|history <company>]")
+        logger.info(f"Usage: {sys.argv[0]} [summary|snapshot|trends|signals|history <company>]")
 
 
 if __name__ == "__main__":

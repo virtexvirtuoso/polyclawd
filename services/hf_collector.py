@@ -12,16 +12,15 @@ Runs as a background task inside the HF engine or standalone.
 """
 
 import json
-import logging
 import os
 import sqlite3
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Optional
+from loguru import logger
 
-logger = logging.getLogger("hf_collector")
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 DB_PATH = os.getenv("HF_DB_PATH",
@@ -367,6 +366,6 @@ def run_collection_cycle() -> Dict:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    print("Running HF data collection cycle...")
+    logger.info("Running HF data collection cycle...")
     result = run_collection_cycle()
-    print(json.dumps(result, indent=2))
+    logger.info(json.dumps(result, indent=2))

@@ -16,7 +16,9 @@ Also includes Monte Carlo drawdown analysis:
 import math
 import random
 import sqlite3
-from typing import Dict, Any, List, Tuple
+import time
+from typing import Dict, Any, Optional, List, Tuple
+from loguru import logger
 
 
 # Configuration
@@ -62,7 +64,7 @@ def get_historical_returns(db_path: str = "storage/shadow_trades.db") -> List[fl
         conn.close()
         return returns
     except Exception as e:
-        print(f"Error loading historical returns: {e}")
+        logger.error(f"Error loading historical returns: {e}")
         return []
 
 
@@ -238,8 +240,8 @@ def calculate_cv_kelly_haircut(
 
 # Quick test
 if __name__ == "__main__":
-    print("CV Kelly Haircut Test")
-    print("=" * 60)
+    logger.info("CV Kelly Haircut Test")
+    logger.info("=" * 60)
     
     # Test with synthetic data
     random.seed(42)
@@ -253,19 +255,19 @@ if __name__ == "__main__":
             fake_returns.append(-1.0)  # Lose entry price
     
     cv, mean_e, std_e = bootstrap_edge_cv(fake_returns)
-    print(f"CV: {cv:.4f}, Mean edge: {mean_e:.4f}, Std: {std_e:.4f}")
+    logger.info(f"CV: {cv:.4f}, Mean edge: {mean_e:.4f}, Std: {std_e:.4f}")
     
     raw_kelly = 0.20
     adjusted = raw_kelly * (1 - cv)
-    print(f"Kelly: {raw_kelly:.4f} → {adjusted:.4f} ({cv:.1%} haircut)")
+    logger.info(f"Kelly: {raw_kelly:.4f} → {adjusted:.4f} ({cv:.1%} haircut)")
     
     mc = monte_carlo_drawdown(fake_returns, adjusted)
-    print(f"MC Drawdown: p50={mc['p50_dd']:.1%}, p95={mc['p95_dd']:.1%}, p99={mc['p99_dd']:.1%}")
+    logger.info(f"MC Drawdown: p50={mc['p50_dd']:.1%}, p95={mc['p95_dd']:.1%}, p99={mc['p99_dd']:.1%}")
     
-    print("\n--- Live data test ---")
+    logger.info("\n--- Live data test ---")
     result = calculate_cv_kelly_haircut(0.20)
     for k, v in result.items():
         if k != "monte_carlo":
-            print(f"  {k}: {v}")
+            logger.info(f"  {k}: {v}")
     if result["monte_carlo"]:
-        print(f"  MC: {result['monte_carlo']}")
+        logger.info(f"  MC: {result['monte_carlo']}")

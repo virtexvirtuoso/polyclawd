@@ -17,7 +17,6 @@ sys.path.insert(0, os.path.expanduser("~/Desktop/polyclawd"))
 
 try:
     from polymarket_us import PolymarketUS
-
     PM_SDK = True
 except ImportError:
     PM_SDK = False
@@ -53,18 +52,10 @@ PM_SMT_LABELS = {
 
 # ─── helpers ───
 
-
 def fetch(url):
     req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
     with urllib.request.urlopen(req, timeout=15) as r:
-        try:
-            from odds.the_odds_api import _track_credits_from_response
-
-            _track_credits_from_response(r)
-        except Exception:
-            pass
         return json.loads(r.read())
-
 
 def devig(ov, un):
     """Power devig: returns true probability for Over."""
@@ -75,12 +66,11 @@ def devig(ov, un):
     lo, hi = 1.0, 20.0
     for _ in range(80):
         mid = (lo + hi) / 2
-        t = o**mid + u**mid
+        t = o ** mid + u ** mid
         if abs(t - 1) < 1e-9:
             break
         lo, hi = (mid, hi) if t > 1 else (lo, mid)
     return o ** ((lo + hi) / 2)
-
 
 def american_to_implied(price):
     """Single american price → implied probability."""
@@ -88,9 +78,7 @@ def american_to_implied(price):
         return 100 / (price + 100)
     return abs(price) / (abs(price) + 100)
 
-
 # ─── core scan ───
-
 
 def scan_nba_props(api_key=None, verbose=False):
     """Main scan: fetches Pinnacle NBA props + PM prices, returns edges."""
@@ -103,13 +91,6 @@ def scan_nba_props(api_key=None, verbose=False):
 
     if not PM_SDK:
         print("ERROR: polymarket-us SDK required.")
-        return []
-
-    from odds.rate_limiter import can_make_call
-
-    _ok, _why = can_make_call("normal")
-    if not _ok:
-        print(f"nba_props_scanner: Odds API credit gate — {_why}")
         return []
 
     client = PolymarketUS()
@@ -262,34 +243,30 @@ def scan_nba_props(api_key=None, verbose=False):
             if edge < 0 or edge > 0.20:
                 continue
 
-            edges.append(
-                {
-                    "player": player,
-                    "prop": short_label,
-                    "thresh": thresh,
-                    "pm_price": pm_price,
-                    "pm_cents": round(pm_price * 100),
-                    "book_line": bd["line"],
-                    "fair_value": adj_fair,
-                    "fair_pct": round(adj_fair * 100),
-                    "edge": edge,
-                    "edge_pp": round(edge * 100, 1),
-                    "slug": m.get("slug", ""),
-                    "game": f"{away} @ {home}",
-                    "game_time": start,
-                }
-            )
+            edges.append({
+                "player": player,
+                "prop": short_label,
+                "thresh": thresh,
+                "pm_price": pm_price,
+                "pm_cents": round(pm_price * 100),
+                "book_line": bd["line"],
+                "fair_value": adj_fair,
+                "fair_pct": round(adj_fair * 100),
+                "edge": edge,
+                "edge_pp": round(edge * 100, 1),
+                "slug": m.get("slug", ""),
+                "game": f"{away} @ {home}",
+                "game_time": start,
+            })
 
         edges.sort(key=lambda x: x["edge"], reverse=True)
-        game_data.append(
-            {
-                "game": f"{away} @ {home}",
-                "time": start,
-                "edges": edges,
-                "book_count": len(book_props),
-                "pm_count": len(unique_markets),
-            }
-        )
+        game_data.append({
+            "game": f"{away} @ {home}",
+            "time": start,
+            "edges": edges,
+            "book_count": len(book_props),
+            "pm_count": len(unique_markets),
+        })
 
     return game_data
 
@@ -315,23 +292,18 @@ def print_report(game_data, show_all=False):
 
         for e in edges:
             flag = "⚡" if e["edge_pp"] >= 5.0 else " "
-            print(
-                f"  {flag} {e['player']:<20} {e['prop']:<10} ≥{e['thresh']:<2}  {e['pm_cents']:>3}¢ {e['book_line']:>5.1f}  {e['fair_pct']:>3}%  +{e['edge_pp']:>4.1f}pp"
-            )
+            print(f"  {flag} {e['player']:<20} {e['prop']:<10} ≥{e['thresh']:<2}  {e['pm_cents']:>3}¢ {e['book_line']:>5.1f}  {e['fair_pct']:>3}%  +{e['edge_pp']:>4.1f}pp")
 
         # Summary
         strong = [e for e in edges if e["edge_pp"] >= 5.0]
         if strong:
             print(f"\n  ⚡ **STRONG SIGNALS ({len(strong)}):**")
             for e in strong[:5]:
-                print(
-                    f"    - {e['player']} ≥{e['thresh']} {e['prop']} YES @ {e['pm_cents']}¢ → fair ~{e['fair_pct']}% ({e['edge_pp']:+.1f}pp)"
-                )
+                print(f"    - {e['player']} ≥{e['thresh']} {e['prop']} YES @ {e['pm_cents']}¢ → fair ~{e['fair_pct']}% ({e['edge_pp']:+.1f}pp)")
 
 
 if __name__ == "__main__":
     import argparse
-
     parser = argparse.ArgumentParser(description="NBA Props Edge Scanner")
     parser.add_argument("--full", action="store_true", help="Verbose debug output")
     parser.add_argument("--game", type=str, help="Filter by game name substring")

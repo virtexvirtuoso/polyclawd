@@ -19,7 +19,7 @@ from collections import defaultdict
 from difflib import get_close_matches
 
 MLB_API  = "https://statsapi.mlb.com/api/v1"
-ODDS_KEY = os.environ.get("ODDS_API_KEY", "")
+ODDS_KEY = os.environ.get("ODDS_API_KEY", "51efafc2aaa8df23e01020214bb7e594")
 
 # Map CLI --prop aliases to Odds API market keys and stat keys
 PROP_MAP = {
@@ -208,19 +208,9 @@ def get_team_stats(team_id: int, season: int, group: str) -> dict:
 # ── Odds API helpers ───────────────────────────────────────────────────────────
 
 def get_live_prop_lines(player_name: str, market_key: str) -> list:
-    from odds.rate_limiter import can_make_call
-    _ok, _why = can_make_call("normal")
-    if not _ok:
-        print(f"player_profile: Odds API credit gate — {_why}")
-        return []
     last = player_name.split()[-1].lower()
     r = requests.get("https://api.the-odds-api.com/v4/sports/baseball_mlb/events",
                      params={"apiKey": ODDS_KEY, "dateFormat": "iso"})
-    try:
-        from odds.the_odds_api import _track_credits_from_response
-        _track_credits_from_response(r)
-    except Exception:
-        pass
     events = r.json() if isinstance(r.json(), list) else []
 
     for e in events:
@@ -234,11 +224,6 @@ def get_live_prop_lines(player_name: str, market_key: str) -> list:
                 "oddsFormat": "american",
             }
         )
-        try:
-            from odds.the_odds_api import _track_credits_from_response
-            _track_credits_from_response(pr)
-        except Exception:
-            pass
         results = []
         for b in pr.json().get("bookmakers", []):
             for mkt in b.get("markets", []):

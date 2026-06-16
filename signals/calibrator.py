@@ -12,11 +12,12 @@ Auto-updates as more trades resolve. No manual tuning needed.
 
 import sqlite3
 import time
-import logging
+import math
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+from loguru import logger
 
-logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
 
@@ -250,7 +251,7 @@ def compute_source_weights(db_path: str = None) -> dict:
         return {"status": "insufficient_data", "weights": {}}
 
     # Calculate IC for each source
-    from ic_tracker import calculate_ic
+    from signals.ic_tracker import calculate_ic
     source_ics = {}
     for row in sources:
         ic_data = calculate_ic(row["source"], 30, db_path)
@@ -336,7 +337,7 @@ def get_signal_decay(source: str, market_type: str = None, db_path: str = None) 
         else:
             buckets["7-30d"].append((conf, outcome))
 
-    from ic_tracker import _spearman_rank_correlation
+    from signals.ic_tracker import _spearman_rank_correlation
     
     decay = {}
     for bucket, pairs in buckets.items():
@@ -429,4 +430,4 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     report = full_calibration_report()
     import json
-    print(json.dumps(report, indent=2))
+    logger.info(json.dumps(report, indent=2))

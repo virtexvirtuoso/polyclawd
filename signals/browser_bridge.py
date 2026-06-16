@@ -14,11 +14,11 @@ Falls back gracefully when browser-use is unavailable.
 """
 
 import json
-import logging
 import urllib.request
-from typing import Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Dict, List, Any, Optional
+from loguru import logger
 
-logger = logging.getLogger(__name__)
 
 # Browser-use container endpoint (set by Docker compose)
 BROWSER_USE_URL = "http://127.0.0.1:8430"
@@ -134,7 +134,7 @@ def enrich_polymarket_metadata(slug: str) -> Optional[Dict]:
     end date, related markets.
     """
     data = _browser_request(
-        url=f"https://polymarket.com/market/{slug}",
+        url=f"https://polymarket.com/event/{slug}",
         selectors={
             "title": "h1",
             "description": "[data-testid='market-description']",
@@ -318,8 +318,8 @@ if __name__ == "__main__":
         ]
         for t in tests:
             parsed = _parse_market_title(t)
-            print(f"  {t[:50]}")
-            print(f"    → {parsed}")
-            print()
+            logger.info(f"  {t[:50]}")
+            logger.info(f"    → {parsed}")
+            logger.info()
     else:
         print(json.dumps(get_status(), indent=2))

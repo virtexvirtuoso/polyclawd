@@ -8,11 +8,10 @@ Data-driven. Self-improving. Honest.
 
 import sqlite3
 import re
-import logging
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
+from loguru import logger
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
 
@@ -27,17 +26,20 @@ _INTRADAY_RE = re.compile(
 
 # Import full archetype classifier (14 archetypes) from mispriced_category_signal
 try:
-    from mispriced_category_signal import classify_archetype
+    from signals.mispriced_category_signal import classify_archetype
 except ImportError:
-    # Fallback if import fails
-    def classify_archetype(title: str) -> str:
-        """Minimal fallback classifier."""
-        if not title: return "other"
-        t = title.lower()
-        if 'up or down' in t: return 'daily_updown'
-        if 'above' in t or 'below' in t: return 'price_above'
-        if 'between' in t or 'range' in t: return 'price_range'
-        return 'other'
+    try:
+        from mispriced_category_signal import classify_archetype
+    except ImportError:
+        # Fallback if both imports fail
+        def classify_archetype(title: str) -> str:
+            """Minimal fallback classifier."""
+            if not title: return "other"
+            t = title.lower()
+            if 'up or down' in t: return 'daily_updown'
+            if 'above' in t or 'below' in t: return 'price_above'
+            if 'between' in t or 'range' in t: return 'price_range'
+            return 'other'
 
 
 
@@ -125,6 +127,50 @@ def classify_duration(days_to_close: float) -> str:
     else:
         return 'long'
 
+# ─── Calibration Adjustment (per-archetype, from 48 paper + 33 shadow trades) ─
+# Blanket calibration was too aggressive — killed profitable weather 63-73% bin.
+# Per-archetype approach: cap overconfident bins, preserve what works.
+# Updated 2026-03-08. Revisit when sample > 200.
+
+# Archetype confidence caps — max confidence the system will assign.
+# Based on actual WR by archetype+confidence bin.
+# ── Archetype Confidence Caps (recalibrated Mar 16 from actual performance) ──
+# Becker priors were 50-60pp too optimistic vs our actual WR.
+# Caps now anchored to actual shadow+paper WR with conservative bias.
+# Only weather and social_count have proven profitable.
+ARCHETYPE_CONFIDENCE_CAPS = {
+    'weather':           0.70,  # Proven: 55.6% WR in sweet spot. Keep.
+    'social_count':      0.75,  # 50% WR (n=2), Becker 94.1%. Trust Becker partially.
+    'geopolitical':      0.30,  # 12.5% actual WR (n=8). Becker 68.6% is wildly wrong for us.
+    'election':          0.25,  # 0% actual WR (n=6). Near-kill.
+    'deadline_binary':   0.25,  # 9.1% actual WR (n=11). Becker 69.4% is fantasy.
+    'price_above':       0.30,  # 9.1% actual WR (n=11). Becker 59.3% broken.
+    'sports_winner':     0.25,  # 0% actual WR (n=8). Already blocked, but defense in depth.
+    'sports_single_game':0.45,  # 100% WR (n=1) — tiny sample. Conservative.
+    'entertainment':     0.30,  # 0% actual WR (n=2). Becker 71.1% not realized.
+    'ai_model':          0.30,  # 0% actual WR (n=1). Conservative.
+    'financial_price':   0.40,  # No data. Conservative.
+    'parlay':            0.30,  # Parlays are traps.
+    'other':             0.30,  # 0% actual WR (n=8). Was 50%, way too generous.
+}
+
+# High-confidence penalty: if raw conf > cap, apply diminishing returns
+# instead of hard clamp — preserves signal ordering
+def apply_calibration(raw_confidence: float, archetype: str = 'other') -> float:
+    """Apply per-archetype calibration cap with soft ceiling.
+    
+    Below cap: pass through (trusted range).
+    Above cap: soft diminishing returns — conf = cap + (excess * 0.15).
+    This prevents 87% confidence from being treated as 87% when WR is 11%,
+    while still letting stronger signals rank higher.
+    """
+    cap = ARCHETYPE_CONFIDENCE_CAPS.get(archetype, 0.60)
+    if raw_confidence <= cap:
+        return raw_confidence
+    excess = raw_confidence - cap
+    return cap + excess * 0.15  # Soft ceiling: 85% weather → 0.70 + 0.15*0.15 = 0.7225
+
+
 
 
 # ─── Kill Rules ──────────────────────────────────────────────────────
@@ -135,8 +181,8 @@ def check_kill_rules(title: str, entry_price: float, side: str, signal_archetype
     # entry_price here is always the YES market price (0-1)
     price_cents = int(entry_price * 100)
 
-    # K3: Anything below 30¢ — exempt weather (multi-outcome categorical, low prices are normal)
-    if price_cents < 30 and archetype != "weather":
+    # K3: Anything below 30¢ — exempt weather and social_count (multi-outcome categorical, low prices are normal)
+    if price_cents < 30 and archetype not in ("weather", "social_count"):
         return True, f"K3: entry {price_cents}¢ < 30¢ floor (20% WR historically)"
 
     # K1: Intraday up/down — any side (coin flip minus fees)
@@ -342,8 +388,12 @@ def calculate_empirical_confidence(
     
     confidence = smoothed * zone_mod * dur_mod
 
-    # Cap at 92% — nothing is certain
-    confidence = min(0.92, max(0.08, confidence))
+    # Apply per-archetype calibration cap (soft ceiling on overconfidence)
+    raw_confidence = confidence
+    confidence = apply_calibration(confidence, archetype=archetype)
+
+    # Cap at 85% — nothing is certain (tightened from 92% on Mar 16 audit)
+    confidence = min(0.85, max(0.08, confidence))
 
     # Calculate honest edge
     if side == "YES":
@@ -369,6 +419,8 @@ def calculate_empirical_confidence(
         "killed": False,
         "kill_reason": "",
         "breakdown": {
+            "raw_confidence": round(raw_confidence, 4),
+            "calibration_applied": round(raw_confidence - confidence, 4) if raw_confidence != confidence else 0,
             "archetype_wr": round(arch_wr, 4),
             "overall_wr": round(overall_wr, 4),
             "bucket_key": key,

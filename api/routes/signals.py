@@ -227,7 +227,7 @@ def scan_volume_spikes(spike_threshold: float = 2.0, use_zscore: bool = True) ->
                     "z_score": round(z_score, 2),
                     "spike_ratio": round(vol / mean_vol, 2) if mean_vol > 0 else 0,
                     "yes_price": yes_price,
-                    "url": f"https://polymarket.com/market/{m.get('slug', m.get('id'))}"
+                    "url": f"https://polymarket.com/event/{m.get('slug', m.get('id'))}"
                 })
         else:
             ratio = vol / mean_vol if mean_vol > 0 else 0
@@ -245,7 +245,7 @@ def scan_volume_spikes(spike_threshold: float = 2.0, use_zscore: bool = True) ->
                     "z_score": round((vol - mean_vol) / std_vol, 2) if std_vol > 0 else 0,
                     "spike_ratio": round(ratio, 2),
                     "yes_price": yes_price,
-                    "url": f"https://polymarket.com/market/{m.get('slug', m.get('id'))}"
+                    "url": f"https://polymarket.com/event/{m.get('slug', m.get('id'))}"
                 })
 
     spikes.sort(key=lambda x: x.get("z_score", 0), reverse=True)
@@ -305,7 +305,7 @@ def scan_resolution_timing(hours_until: int = 48) -> dict:
                     "volume_24h": m.get("volume24hr", 0),
                     "liquidity": m.get("liquidityNum", 0),
                     "uncertainty_score": round(uncertainty, 2),
-                    "url": f"https://polymarket.com/market/{m.get('slug', m.get('id'))}",
+                    "url": f"https://polymarket.com/event/{m.get('slug', m.get('id'))}",
                     "opportunity": "HIGH" if uncertainty > 0.7 and hours_left < 24 else "MEDIUM" if uncertainty > 0.5 else "LOW"
                 })
         except Exception:

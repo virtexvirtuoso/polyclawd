@@ -8,14 +8,14 @@ Feeds into paper portfolio as signal source + Discord alerts.
 """
 
 import json
+from loguru import logger
 import logging
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
@@ -42,7 +42,7 @@ def _fetch_json(url: str, timeout: int = 12) -> Optional[dict]:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
-        logger.debug("Fetch failed %s: %s", url[:60], e)
+        logger.debug("Fetch failed {}: {}", url[:60], e)
         return None
 
 
@@ -253,10 +253,22 @@ def scan_whale_walls(top_n: int = TOP_MARKETS) -> dict:
     _scan_cache["data"] = result
     _scan_cache["ts"] = time.time()
 
-    logger.info("Whale wall scan: %d markets, %d alerts (%.1fs)",
+    logger.info("Whale wall scan: {} markets, {} alerts ({}s)",
                 len(markets), len(alerts), result["scan_time"])
     return result
 
+
+
+def _whale_days_to_close(end_date_str: str) -> float:
+    """Parse endDate to days_to_close. Returns 999 if unparseable (will be caught by portfolio horizon gate)."""
+    if not end_date_str:
+        return 999.0
+    try:
+        from datetime import datetime, timezone
+        edt = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+        return max(0.1, round((edt - datetime.now(timezone.utc)).total_seconds() / 86400, 1))
+    except Exception:
+        return 999.0
 
 def get_whale_portfolio_signals(min_imbalance: float = 3.0, max_signals: int = 3) -> List[dict]:
     """
@@ -304,7 +316,7 @@ def get_whale_portfolio_signals(min_imbalance: float = 3.0, max_signals: int = 3
             "platform": "polymarket",
             "source": "whale_wall_scanner",
             "slug": m.get("slug", ""),
-            "days_to_close": 7,  # Default, could be refined from end_date
+            "days_to_close": _whale_days_to_close(m.get("endDate", "")),
             "volume": m.get("volume_24h", 0),
             "whale_detail": {
                 "imbalance_ratio": m.get("imbalance_ratio"),
@@ -319,6 +331,6 @@ def get_whale_portfolio_signals(min_imbalance: float = 3.0, max_signals: int = 3
             },
         })
 
-    logger.info("Whale wall signals: %d/%d pass min_imbalance=%.1f",
+    logger.info("Whale wall signals: {}/{} pass min_imbalance={}",
                 len(signals), len(alerts), min_imbalance)
     return signals

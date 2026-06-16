@@ -1205,7 +1205,7 @@ def open_position(signal: dict) -> dict:
     # Discord alert
     try:
         from signals.discord_alerts import alert_position_opened
-        mkt_url = f"https://polymarket.com/market/{slug}" if slug else ""
+        mkt_url = f"https://polymarket.com/event/{slug}" if slug else ""
         alert_position_opened(market_title, side, market_price, bet_size, strategy,
                               eval_result.get("edge", 0) * 100, market_url=mkt_url,
                               confidence=confidence, archetype=archetype,

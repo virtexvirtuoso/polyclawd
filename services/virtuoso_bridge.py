@@ -9,12 +9,11 @@ This is the brain that the $134→$200K bot never had.
 
 import json
 import subprocess
-import logging
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
+from loguru import logger
 
-logger = logging.getLogger(__name__)
 
 # Timeout for mcporter calls (seconds)
 MCP_TIMEOUT = 20
@@ -543,23 +542,23 @@ def _estimate_edge(signal: DirectionalSignal, market) -> float:
 # ============================================================================
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("Virtuoso Bridge — Phase 2")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("Virtuoso Bridge — Phase 2")
+    logger.info("=" * 60)
     
     for asset in ["BTC", "ETH"]:
-        print(f"\n📡 Getting {asset} directional signal...")
+        logger.info(f"\n📡 Getting {asset} directional signal...")
         sig = get_directional_signal(asset)
-        print(f"  Direction: {sig.direction} | Confidence: {sig.confidence}%")
-        print(f"  Fusion: {sig.fusion_direction} (score: {sig.fusion_score})")
-        print(f"  Regime: {sig.regime_bias} | Vol: {sig.regime_volatility}")
-        print(f"  Trade: {'✅ YES' if sig.should_trade else f'❌ NO ({sig.skip_reason})'}")
-        print(f"  Polymarket side: {sig.polymarket_side} | Kelly: {sig.suggested_kelly_fraction}")
+        logger.info(f"  Direction: {sig.direction} | Confidence: {sig.confidence}%")
+        logger.info(f"  Fusion: {sig.fusion_direction} (score: {sig.fusion_score})")
+        logger.info(f"  Regime: {sig.regime_bias} | Vol: {sig.regime_volatility}")
+        logger.info(f"  Trade: {'✅ YES' if sig.should_trade else f'❌ NO ({sig.skip_reason})'}")
+        logger.info(f"  Polymarket side: {sig.polymarket_side} | Kelly: {sig.suggested_kelly_fraction}")
     
-    print("\n📊 Matching signals to markets...")
+    logger.info("\n📊 Matching signals to markets...")
     result = match_signals_to_markets()
-    print(f"  Matched {result['total_matched']} of {result['total_markets']} markets")
+    logger.info(f"  Matched {result['total_matched']} of {result['total_markets']} markets")
     for opp in result["opportunities"][:5]:
-        print(f"  🎯 [{opp['market']['asset']}] {opp['market']['duration']} "
+        logger.info(f"  🎯 [{opp['market']['asset']}] {opp['market']['duration']} "
               f"→ Buy {opp['signal']['side_to_buy']} "
               f"({opp['signal']['conviction']}, edge: {opp['expected_edge']}%)")
