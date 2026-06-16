@@ -1,0 +1,2829 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CLARITY Act Tracker · Polyclawd</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+  :root {
+    --bg: #FAF8F5;
+    --surface: #FFFFFF;
+    --surface2: #F5F2EE;
+    --surface3: #EFEAE2;
+    --border: #E2DDD6;
+    --border-light: #EDE9E3;
+    --rule: #D8D2C8;
+    --ink: #1C1B17;
+    --text: #2D2D2D;
+    --text2: #6B6558;
+    --text3: #8A8275;
+    --text4: #A69F90;
+    --terracotta: #C75B39;
+    --terracotta-dark: #A84725;
+    --gold: #D4A843;
+    --gold-dark: #B8923E;
+    --rep-red: #B83A2E;
+    --rep-red-soft: #D97560;
+    --dem-blue: #2B6CB0;
+    --dem-blue-soft: #5B8FC9;
+    --pos-green: #4A8B5C;
+    --pos-green-soft: #7BA886;
+    --neg-red: #C25B4A;
+    --neutral: #8A8275;
+    --shadow-sm: 0 1px 2px rgba(28, 27, 23, 0.04);
+    --shadow: 0 1px 3px rgba(28, 27, 23, 0.06), 0 1px 2px rgba(28, 27, 23, 0.04);
+    --shadow-lg: 0 4px 12px rgba(28, 27, 23, 0.08), 0 1px 3px rgba(28, 27, 23, 0.06);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body { height: 100%; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    line-height: 1.5;
+  }
+
+  .mono { font-family: 'JetBrains Mono', monospace; }
+
+  .widget-container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 32px 24px 64px;
+  }
+
+  /* ── MASTHEAD ── */
+  .masthead {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 24px;
+    padding-bottom: 20px;
+    border-bottom: 2px solid var(--ink);
+    margin-bottom: 28px;
+  }
+  .masthead-brand {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--terracotta);
+    margin-bottom: 6px;
+  }
+  .masthead-title {
+    font-size: 26px;
+    font-weight: 800;
+    color: var(--ink);
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+  }
+  .masthead-deck {
+    font-size: 13px;
+    color: var(--text2);
+    margin-top: 6px;
+    max-width: 560px;
+    line-height: 1.4;
+  }
+  .masthead-meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text3);
+    text-align: right;
+    white-space: nowrap;
+    line-height: 1.6;
+  }
+  .masthead-meta .bill-id {
+    color: var(--ink);
+    font-weight: 600;
+  }
+
+  /* ── SECTION ── */
+  .section {
+    margin-bottom: 36px;
+  }
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 14px;
+  }
+  .section-kicker {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--terracotta);
+  }
+  .section-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--ink);
+    letter-spacing: -0.01em;
+    margin-top: 2px;
+  }
+  .section-deck {
+    font-size: 12px;
+    color: var(--text2);
+    margin-top: 4px;
+    max-width: 620px;
+  }
+  .section-aside {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text3);
+  }
+
+  /* ── HERO ── */
+  .hero {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .hero-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+    gap: 0;
+  }
+  .hero-number-col {
+    padding: 32px 32px 28px;
+    border-right: 1px solid var(--border-light);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    min-height: 260px;
+  }
+  .hero-kicker {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text3);
+  }
+  .hero-number {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 96px;
+    font-weight: 700;
+    line-height: 0.95;
+    letter-spacing: -0.04em;
+    margin: 14px 0 10px;
+    color: var(--ink);
+  }
+  .hero-number.high { color: var(--pos-green); }
+  .hero-number.med { color: var(--gold-dark); }
+  .hero-number.low { color: var(--neg-red); }
+  .hero-verdict {
+    font-size: 15px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink);
+  }
+  .hero-verdict.high { color: var(--pos-green); }
+  .hero-verdict.med { color: var(--gold-dark); }
+  .hero-verdict.low { color: var(--neg-red); }
+  .hero-source {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text3);
+    margin-top: 8px;
+    line-height: 1.5;
+  }
+
+  .hero-curve-col {
+    padding: 28px 32px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  /* ── RESOLUTION CARD: countdown + sparkline ── */
+  .res-stat {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+  }
+  .res-days {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 44px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1;
+    color: var(--ink);
+  }
+  .res-days-unit {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text3);
+  }
+  .res-meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text2);
+    line-height: 1.6;
+    letter-spacing: 0.2px;
+  }
+  .res-meta strong { color: var(--ink); font-weight: 700; }
+
+  .res-progress {
+    position: relative;
+    height: 4px;
+    background: var(--border-light);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .res-progress-fill {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    background: var(--gold-dark);
+    border-radius: 2px;
+    transition: width 0.6s ease;
+  }
+  .res-progress-labels {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8.5px;
+    color: var(--text3);
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+  }
+
+  .res-spark-block { display: flex; flex-direction: column; gap: 6px; }
+  .res-spark-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text3);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .res-spark-title { font-weight: 700; color: var(--text2); }
+  .res-spark-delta {
+    font-size: 11px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .res-spark-delta.up { color: var(--pos-green); }
+  .res-spark-delta.down { color: var(--neg-red); }
+  .res-spark-delta.flat { color: var(--text3); }
+
+  .res-spark-svg {
+    width: 100%;
+    height: 78px;
+    display: block;
+  }
+  .res-spark-empty {
+    height: 78px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text3);
+    border: 1px dashed var(--border-light);
+    border-radius: 4px;
+  }
+  .res-other-markets {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text3);
+    margin-top: 2px;
+    line-height: 1.5;
+  }
+
+  /* ── DIVERGENCE STRIP ── */
+  .divergence {
+    border-top: 1px solid var(--border-light);
+    padding: 20px 32px 24px;
+    background: var(--surface2);
+  }
+  .divergence-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 14px;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .divergence-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text3);
+  }
+  .divergence-spread {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--terracotta);
+  }
+  .divergence-spread.small { color: var(--text3); }
+  .divergence-bar {
+    position: relative;
+    height: 42px;
+    margin: 8px 0 6px;
+  }
+  .divergence-track {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    height: 4px;
+    background: linear-gradient(
+      to right,
+      var(--neg-red) 0%,
+      var(--gold-dark) 40%,
+      var(--gold-dark) 60%,
+      var(--pos-green) 100%
+    );
+    opacity: 0.25;
+    border-radius: 2px;
+  }
+  .divergence-tick {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--rule);
+  }
+  .divergence-tick-label {
+    position: absolute;
+    top: 100%;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    color: var(--text4);
+    transform: translateX(-50%);
+    margin-top: 2px;
+  }
+  .divergence-marker {
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    z-index: 2;
+  }
+  .divergence-dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 3px solid var(--surface);
+    box-shadow: 0 0 0 1.5px var(--ink);
+  }
+  .divergence-dot.kalshi { background: var(--ink); }
+  .divergence-dot.polymarket { background: var(--terracotta); box-shadow: 0 0 0 1.5px var(--terracotta-dark); }
+  .divergence-callout {
+    position: absolute;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+    transform: translateX(-50%);
+  }
+  .divergence-callout.top { bottom: 100%; margin-bottom: 6px; }
+  .divergence-callout.bottom { top: 100%; margin-top: 6px; }
+  .divergence-callout.kalshi { color: var(--ink); }
+  .divergence-callout.polymarket { color: var(--terracotta-dark); }
+  .divergence-gap {
+    position: absolute;
+    top: 50%;
+    height: 6px;
+    background: repeating-linear-gradient(
+      90deg,
+      var(--terracotta) 0 3px,
+      transparent 3px 6px
+    );
+    transform: translateY(-50%);
+    z-index: 1;
+    opacity: 0.7;
+  }
+  .divergence-note {
+    font-size: 11px;
+    color: var(--text2);
+    margin-top: 20px;
+    line-height: 1.45;
+  }
+  .divergence-note strong { color: var(--ink); }
+  .divergence-none {
+    text-align: center;
+    color: var(--text3);
+    font-size: 12px;
+    padding: 16px 0;
+  }
+
+  /* ── MONEY SECTION (FLAGSHIP) ── */
+  .money-hero {
+    background: var(--ink);
+    color: #F5F2EE;
+    border-radius: 4px;
+    overflow: hidden;
+    box-shadow: var(--shadow-lg);
+    margin-bottom: 16px;
+  }
+  .money-hero-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+  }
+  .money-tile {
+    padding: 24px 28px 22px;
+    position: relative;
+  }
+  .money-tile + .money-tile {
+    border-left: 1px solid rgba(245, 242, 238, 0.12);
+  }
+  .money-tile-kicker {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.8px;
+    text-transform: uppercase;
+    color: var(--gold);
+    margin-bottom: 8px;
+  }
+  .money-tile-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 40px;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: -0.02em;
+    color: #FAF8F5;
+  }
+  .money-tile-label {
+    font-size: 11px;
+    color: #C4BEB0;
+    margin-top: 8px;
+    line-height: 1.4;
+  }
+  .money-tile-split {
+    display: flex;
+    gap: 14px;
+    margin-top: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+  }
+  .money-tile-split .oppose { color: var(--rep-red-soft); }
+  .money-tile-split .support { color: var(--pos-green-soft); }
+
+  /* ── COMMITTEE BAR CHART ── */
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: var(--shadow-sm);
+    margin-bottom: 14px;
+  }
+  .chart-head {
+    padding: 18px 20px 12px;
+    border-bottom: 1px solid var(--border-light);
+  }
+  .chart-kicker {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.8px;
+    text-transform: uppercase;
+    color: var(--terracotta);
+    margin-bottom: 4px;
+  }
+  .chart-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--ink);
+  }
+  .chart-deck {
+    font-size: 11px;
+    color: var(--text2);
+    margin-top: 3px;
+  }
+  .chart-body {
+    padding: 16px 20px 18px;
+  }
+
+  .hbar-row {
+    display: grid;
+    grid-template-columns: 170px 1fr 80px;
+    gap: 12px;
+    align-items: center;
+    padding: 6px 0;
+    font-size: 12px;
+  }
+  .hbar-label {
+    font-weight: 500;
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hbar-label-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text3);
+    font-weight: 400;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .hbar-track {
+    position: relative;
+    height: 18px;
+    background: var(--surface2);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .hbar-support {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    background: var(--pos-green);
+  }
+  .hbar-oppose {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    background: var(--rep-red);
+  }
+  .hbar-support.funder-entity {
+    background: #6366f1; /* indigo — corporate entities */
+  }
+  .hbar-support.funder-individual {
+    background: #a78bfa; /* light purple — individual donors */
+  }
+  .hbar-divider {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--rule);
+  }
+  .hbar-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--ink);
+    text-align: right;
+  }
+  .hbar-axis {
+    grid-column: 2;
+    position: relative;
+    height: 14px;
+    margin-top: 4px;
+  }
+  .hbar-axis-tick {
+    position: absolute;
+    top: 0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    color: var(--text4);
+    transform: translateX(-50%);
+  }
+  .hbar-legend {
+    display: flex;
+    gap: 16px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text3);
+    margin-bottom: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+  }
+  .hbar-legend-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 1px;
+    margin-right: 5px;
+    vertical-align: middle;
+  }
+
+  /* ── CANDIDATE / LDA LISTS ── */
+  .cand-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 64px 200px 78px;
+    gap: 14px;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-light);
+    font-size: 12px;
+  }
+  .cand-row:last-child { border-bottom: none; }
+  .cand-axis {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 64px 200px 78px;
+    gap: 14px;
+    align-items: center;
+    padding: 4px 0 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text3);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid var(--border-light);
+  }
+  .cand-axis-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .cand-axis-bar > span:nth-child(2) {
+    color: var(--text3);
+    opacity: 0.6;
+  }
+  .cand-name {
+    font-weight: 600;
+    color: var(--ink);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .cand-name-inner {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cand-party {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 2px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  .cand-party.dem { background: rgba(43, 108, 176, 0.12); color: var(--dem-blue); }
+  .cand-party.rep { background: rgba(184, 58, 46, 0.12); color: var(--rep-red); }
+  .cand-party.ind { background: var(--surface2); color: var(--text2); }
+  .align-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    vertical-align: 1px;
+    white-space: nowrap;
+  }
+  .align-badge.pro   { background: rgba(46, 160, 67, 0.15); color: var(--pos-green); }
+  .align-badge.mixed { background: rgba(197, 136, 0, 0.15);  color: #b38600; }
+  .align-badge.anti  { background: rgba(184, 58, 46, 0.15); color: var(--rep-red); }
+  .align-badge.none  { background: var(--surface2); color: var(--text3); font-weight: 500; }
+  .cand-race {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text3);
+    text-transform: uppercase;
+  }
+  .cand-flow {
+    position: relative;
+    height: 14px;
+    width: 100%;
+  }
+  .cand-flow-axis {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--rule);
+  }
+  .cand-bar {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    border-radius: 1px;
+    min-width: 1px;
+  }
+  .cand-bar.support { background: var(--pos-green); }
+  .cand-bar.oppose { background: var(--rep-red); }
+  .cand-total {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--ink);
+    text-align: right;
+  }
+  .cand-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text3);
+  }
+
+  /* LDA client rows */
+  .lda-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) 1fr 80px;
+    gap: 14px;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-light);
+    font-size: 12px;
+  }
+  .lda-row:last-child { border-bottom: none; }
+  .lda-client {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .lda-client-name {
+    font-weight: 600;
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .lda-direct-pill {
+    flex-shrink: 0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 10px;
+    background: rgba(74, 139, 92, 0.12);
+    color: var(--pos-green);
+    white-space: nowrap;
+  }
+  .lda-direct-pill.soft {
+    background: var(--surface2);
+    color: var(--text3);
+  }
+  .lda-bar-wrap {
+    position: relative;
+    height: 14px;
+    background: var(--surface2);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .lda-bar {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    background: var(--gold-dark);
+    border-radius: 2px;
+  }
+  .lda-spend {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--ink);
+    text-align: right;
+  }
+
+  .caveat {
+    background: var(--surface2);
+    border-left: 3px solid var(--gold);
+    padding: 12px 16px;
+    font-size: 11px;
+    color: var(--text2);
+    line-height: 1.55;
+    margin: 14px 0 0;
+    border-radius: 0 2px 2px 0;
+  }
+  .caveat-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: var(--gold-dark);
+    display: block;
+    margin-bottom: 4px;
+  }
+
+  /* ── MARKETS TABLE ── */
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: var(--shadow-sm);
+    padding: 20px 22px;
+  }
+  .panel-head {
+    margin-bottom: 14px;
+  }
+  .panel-kicker {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.8px;
+    text-transform: uppercase;
+    color: var(--terracotta);
+    margin-bottom: 4px;
+  }
+  .panel-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--ink);
+  }
+  .panel-deck {
+    font-size: 11px;
+    color: var(--text2);
+    margin-top: 3px;
+  }
+  .markets-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .markets-table th {
+    text-align: left;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: var(--text3);
+    padding: 10px 8px 8px;
+    border-bottom: 1.5px solid var(--rule);
+  }
+  .markets-table th.num { text-align: right; }
+  .markets-table td {
+    padding: 11px 8px;
+    border-bottom: 1px solid var(--border-light);
+    vertical-align: middle;
+  }
+  .markets-table tr:last-child td { border-bottom: none; }
+  .markets-table tr:hover td { background: var(--surface2); }
+  .market-name {
+    font-weight: 500;
+    color: var(--ink);
+    max-width: 360px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .market-platform {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 2px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: inline-block;
+  }
+  .market-platform.kalshi { background: rgba(28,27,23,0.08); color: var(--ink); }
+  .market-platform.polymarket { background: rgba(199,91,57,0.12); color: var(--terracotta-dark); }
+  .market-prob {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    text-align: right;
+  }
+  .market-prob.high { color: var(--pos-green); }
+  .market-prob.med { color: var(--gold-dark); }
+  .market-prob.low { color: var(--neg-red); }
+  .market-volume {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text3);
+    text-align: right;
+  }
+
+  /* ── HORIZONTAL TIMELINE ── */
+  .htimeline-wrap {
+    padding: 8px 0 4px;
+  }
+  .htimeline-svg {
+    width: 100%;
+    height: 150px;
+    display: block;
+  }
+  .htimeline-legend {
+    display: flex;
+    gap: 18px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text3);
+    margin-top: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+  }
+  .htimeline-swatch {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    margin-right: 5px;
+    vertical-align: middle;
+  }
+
+  /* ── MASTHEAD EXPLAINER LINK ── */
+  .masthead-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 8px;
+    padding: 4px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--terracotta, #C75B39);
+    text-decoration: none;
+    border: 1px solid var(--terracotta, #C75B39);
+    border-radius: 2px;
+    transition: all 0.15s ease;
+  }
+  .masthead-link:hover {
+    background: var(--terracotta, #C75B39);
+    color: #FAF8F5;
+  }
+
+  /* ── HERO HORIZON CHIP ── */
+  .hero-horizon {
+    display: inline-block;
+    margin-top: 6px;
+    padding: 3px 9px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--text3);
+    background: var(--surface2, #F2EDE4);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+  }
+  .hero-horizon strong { color: var(--text1); font-weight: 600; }
+
+  /* ── PASSAGE LADDER ── */
+  .ladder-wrap { padding: 4px 0 0; }
+  .ladder-svg { width: 100%; height: 300px; display: block; }
+  .ladder-live {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-left: 10px;
+    padding: 2px 7px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--pos-green, #4A8B5C);
+    background: rgba(74, 139, 92, 0.08);
+    border: 1px solid rgba(74, 139, 92, 0.3);
+    border-radius: 10px;
+    vertical-align: middle;
+  }
+  .ladder-live::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--pos-green, #4A8B5C);
+    animation: ladder-pulse 2s ease-in-out infinite;
+  }
+  @keyframes ladder-pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+  }
+  .ladder-bar-link { cursor: pointer; transition: opacity 0.15s ease; }
+  .ladder-bar-link:hover { opacity: 0.7; }
+  .ladder-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px 24px;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-top: 10px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--border);
+  }
+  .ladder-stat { display: flex; flex-direction: column; gap: 2px; }
+  .ladder-stat-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text3);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+  }
+  .ladder-stat-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    color: var(--text1);
+    font-weight: 600;
+  }
+  .ladder-stat-value.ok { color: var(--pos-green, #4A8B5C); }
+  .ladder-stat-value.warn { color: var(--terracotta, #C75B39); }
+  .ladder-legend {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text3);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+  }
+
+  /* ── LANDSCAPE TRACKS ── */
+  .tracks {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+  .track {
+    display: grid;
+    grid-template-columns: 110px 1fr auto;
+    gap: 14px;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-light);
+  }
+  .track:last-child { border-bottom: none; }
+  .track-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .track-name-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text3);
+    font-weight: 400;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 1px;
+  }
+  .track-bar-wrap {
+    height: 8px;
+    background: var(--surface2);
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+  }
+  .track-bar {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .track-bar.legislative { background: var(--dem-blue); }
+  .track-bar.regulatory { background: var(--terracotta); }
+  .track-bar.legal { background: var(--rep-red); }
+  .track-status {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text2);
+    white-space: nowrap;
+  }
+
+  /* ── FOOTER ── */
+  .footer {
+    margin-top: 40px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text3);
+    line-height: 1.55;
+  }
+  .footer strong { color: var(--text2); }
+  .footer-sources {
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+
+  /* ── LOADING / ERROR ── */
+  .loading {
+    text-align: center;
+    padding: 80px 20px;
+  }
+  .spinner {
+    width: 28px;
+    height: 28px;
+    border: 2px solid var(--border);
+    border-top-color: var(--terracotta);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto 14px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-text {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text3);
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  .error-state {
+    text-align: center;
+    padding: 60px 20px;
+  }
+  .error-msg {
+    font-size: 13px;
+    color: var(--neg-red);
+    margin-bottom: 16px;
+  }
+  .retry-btn {
+    padding: 10px 22px;
+    background: var(--terracotta);
+    color: white;
+    border: none;
+    border-radius: 2px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-family: 'JetBrains Mono', monospace;
+    cursor: pointer;
+  }
+  .retry-btn:hover { background: var(--terracotta-dark); }
+
+  .empty-note {
+    text-align: center;
+    color: var(--text3);
+    font-size: 12px;
+    padding: 24px 12px;
+    font-style: italic;
+  }
+
+  .chart-footnote {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--border-light);
+    font-size: 10.5px;
+    line-height: 1.55;
+    color: var(--text3);
+    font-style: italic;
+  }
+
+  /* ── BILL STATUS CARDS ── */
+  .bill-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+  .bill-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: var(--shadow-sm);
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .bill-kicker {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.8px;
+    text-transform: uppercase;
+    color: var(--terracotta);
+  }
+  .bill-number {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--ink);
+    letter-spacing: -0.2px;
+  }
+  .bill-title {
+    font-size: 11px;
+    color: var(--text2);
+    line-height: 1.4;
+    margin-bottom: 4px;
+    min-height: 30px;
+  }
+  .bill-status-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: rgba(245, 242, 238, 0.04);
+    border: 1px solid var(--border-light);
+    border-radius: 3px;
+  }
+  .bill-status-pill {
+    display: inline-block;
+    padding: 3px 9px;
+    border-radius: 2px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .bill-status-pill.passed { background: var(--pos-green); color: #fff; }
+  .bill-status-pill.advanced { background: var(--gold); color: #1a1a1a; }
+  .bill-status-pill.introduced { background: rgba(245, 242, 238, 0.12); color: var(--text2); border: 1px solid var(--border); }
+  .bill-status-pill.stalled { background: var(--neg-red); color: #fff; }
+  .bill-status-pill.enacted { background: var(--pos-green); color: #fff; }
+  .bill-status-date {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text3);
+  }
+  .bill-meta {
+    display: grid;
+    grid-template-columns: 72px 1fr;
+    gap: 6px 12px;
+    font-size: 11px;
+    line-height: 1.45;
+  }
+  .bill-meta-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--text4);
+    padding-top: 1px;
+  }
+  .bill-meta-value {
+    color: var(--text2);
+  }
+  .bill-link {
+    font-size: 10.5px;
+    color: var(--terracotta);
+    text-decoration: none;
+    border-bottom: 1px dotted var(--terracotta);
+    align-self: flex-start;
+  }
+  .bill-link:hover { color: var(--ink); border-bottom-color: var(--ink); }
+  .bill-empty {
+    font-size: 11px;
+    color: var(--text3);
+    font-style: italic;
+  }
+
+  /* ── MOBILE ── */
+  @media (max-width: 780px) {
+    .widget-container { padding: 20px 16px 48px; }
+    .masthead { flex-direction: column; align-items: flex-start; gap: 10px; }
+    .masthead-title { font-size: 22px; }
+    .masthead-meta { text-align: left; }
+    .hero-body { grid-template-columns: 1fr; }
+    .hero-number-col { border-right: none; border-bottom: 1px solid var(--border-light); min-height: auto; padding: 24px 22px 22px; }
+    .hero-number { font-size: 76px; }
+    .hero-curve-col { padding: 18px 22px; }
+    .divergence { padding: 18px 22px 22px; }
+    .money-hero-grid { grid-template-columns: 1fr; }
+    .money-tile + .money-tile { border-left: none; border-top: 1px solid rgba(245, 242, 238, 0.12); }
+    .money-tile-value { font-size: 34px; }
+    .hbar-row { grid-template-columns: 120px 1fr 70px; gap: 8px; font-size: 11px; }
+    .hbar-label-sub { display: none; }
+    .cand-row { grid-template-columns: minmax(0, 1fr) 70px; gap: 8px; }
+    .cand-axis { display: none; }
+    .cand-row > .cand-race { display: none; }
+    .cand-row > .cand-flow { display: none; }
+    .lda-row { grid-template-columns: 1fr 70px; gap: 10px; }
+    .lda-bar-wrap { display: none; }
+    .bill-grid { grid-template-columns: 1fr; gap: 10px; }
+    .bill-card { padding: 16px 18px; }
+    .bill-title { min-height: auto; }
+    .markets-table { font-size: 11px; }
+    .markets-table th, .markets-table td { padding: 8px 4px; }
+    .market-name { max-width: 170px; }
+    .track { grid-template-columns: 100px 1fr; gap: 10px; }
+    .track-status { grid-column: 2; font-size: 9px; }
+    .htimeline-svg { height: 180px; }
+  }
+</style>
+</head>
+<body>
+<div class="widget-container">
+
+  <!-- MASTHEAD -->
+  <header class="masthead">
+    <div>
+      <div class="masthead-brand">Polyclawd · Policy Intel</div>
+      <h1 class="masthead-title">CLARITY Act Tracker</h1>
+      <p class="masthead-deck">Live passage odds, cross-platform divergence, and the crypto industry's political spend behind H.R. 3633 — the Digital Asset Market Clarity Act.</p>
+      <a href="/clarity/explained" class="masthead-link">New here? Read the explainer →</a>
+    </div>
+    <div class="masthead-meta">
+      <div class="bill-id">H.R. 3633 · 119th Congress</div>
+      <div id="lastUpdated">Loading...</div>
+    </div>
+  </header>
+
+  <!-- LOADING STATE -->
+  <div id="loading-state" class="loading">
+    <div class="spinner"></div>
+    <div class="loading-text">Fetching CLARITY Act data</div>
+  </div>
+
+  <!-- ERROR STATE -->
+  <div id="error-state" class="error-state" style="display:none">
+    <div class="error-msg" id="error-msg">Failed to load data</div>
+    <button class="retry-btn" onclick="fetchData()">Retry</button>
+  </div>
+
+  <!-- MAIN CONTENT -->
+  <main id="content" style="display:none">
+
+    <!-- HERO: PASSAGE PROBABILITY -->
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <div class="section-kicker">Market Consensus</div>
+          <h2 class="section-title">Will CLARITY become law?</h2>
+        </div>
+        <div class="section-aside" id="heroMarketCount">—</div>
+      </div>
+
+      <div class="hero">
+        <div class="hero-body">
+          <div class="hero-number-col">
+            <div class="hero-kicker">Passage Probability</div>
+            <div>
+              <div class="hero-number" id="consensusScore">--</div>
+              <div class="hero-verdict" id="consensusVerdict">Loading</div>
+              <div class="hero-horizon" id="heroHorizon" style="display:none"></div>
+            </div>
+            <div class="hero-source" id="consensusSource"></div>
+          </div>
+          <div class="hero-curve-col">
+            <div class="hero-kicker">Resolution Status</div>
+            <div class="res-stat">
+              <div class="res-days" id="resDays">—</div>
+              <div class="res-days-unit">days<br>remaining</div>
+            </div>
+            <div class="res-meta" id="resMeta">Loading resolution details…</div>
+            <div>
+              <div class="res-progress"><div class="res-progress-fill" id="resProgressFill" style="width:0%"></div></div>
+              <div class="res-progress-labels"><span id="resProgressStart">opened</span><span id="resProgressEnd">closes</span></div>
+            </div>
+            <div class="res-spark-block">
+              <div class="res-spark-head">
+                <span class="res-spark-title">YES price · <span id="resSparkRange">—</span></span>
+                <span class="res-spark-delta flat" id="resSparkDelta">—</span>
+              </div>
+              <svg class="res-spark-svg" id="resSpark" viewBox="0 0 520 78" preserveAspectRatio="none"></svg>
+              <div class="res-other-markets" id="resOtherMarkets"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- DIVERGENCE STRIP -->
+        <div class="divergence" id="divergenceStrip">
+          <!-- populated by JS -->
+        </div>
+      </div>
+    </section>
+
+    <!-- LEGISLATIVE STATUS (live from GovTrack) -->
+    <section class="section" id="billsSection">
+      <div class="section-head">
+        <div>
+          <div class="section-kicker">Legislative Status</div>
+          <h2 class="section-title">Bill Tracker</h2>
+          <p class="section-deck">Live status for the two bills that would define crypto market structure. Source: GovTrack.us (Congress.gov data).</p>
+        </div>
+      </div>
+      <div class="bill-grid" id="billGrid">
+        <!-- populated by JS -->
+      </div>
+    </section>
+
+    <!-- CRYPTO INDUSTRY MONEY -->
+    <section class="section" id="moneySection">
+      <div class="section-head">
+        <div>
+          <div class="section-kicker">Follow The Money</div>
+          <h2 class="section-title">Crypto Industry Political Spend</h2>
+          <p class="section-deck">Super PAC independent expenditures (FEC Schedule E) plus federal lobbying on H.R. 3633 (Senate LDA filings).</p>
+        </div>
+      </div>
+
+      <!-- Money headline tiles -->
+      <div class="money-hero">
+        <div class="money-hero-grid" id="moneyHeroTiles">
+          <!-- populated by JS -->
+        </div>
+      </div>
+
+      <!-- Committees bar chart -->
+      <div class="chart-card" id="committeesChart">
+        <!-- populated by JS -->
+      </div>
+
+      <!-- Fairshake funders -->
+      <div class="chart-card" id="fundersChart">
+        <!-- populated by JS -->
+      </div>
+
+      <!-- Candidates breakdown -->
+      <div class="chart-card" id="candidatesChart">
+        <!-- populated by JS -->
+      </div>
+
+      <!-- LDA lobbying -->
+      <div class="chart-card" id="ldaChart">
+        <!-- populated by JS -->
+      </div>
+    </section>
+
+    <!-- PASSAGE LADDER -->
+    <section class="section">
+      <div class="panel" id="passageLadderPanel" style="display:none">
+        <div class="panel-head">
+          <div class="panel-kicker">Kalshi Ladder · KXCRYPTOSTRUCTURE <span class="ladder-live">Live · 5m refresh</span></div>
+          <div class="panel-title">Market-Implied Passage Ladder</div>
+          <div class="panel-deck">Each rung is a Kalshi contract asking whether crypto market structure legislation is signed into law before the given deadline. By construction the ladder is monotone — each rung's YES price must be ≥ the previous rung's. The gap between rungs is the implied monthly hazard (the market's bet on passage <em>in that specific month</em>).</div>
+        </div>
+        <div class="ladder-wrap">
+          <svg class="ladder-svg" id="ladderSvg" viewBox="0 0 800 300" preserveAspectRatio="xMidYMid meet"></svg>
+        </div>
+        <div class="ladder-meta" id="ladderMeta"></div>
+      </div>
+    </section>
+
+    <!-- RELATED MARKETS -->
+    <section class="section">
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-kicker">Live Markets</div>
+          <div class="panel-title">Related Prediction Markets</div>
+          <div class="panel-deck">Adjacent markets on CFTC authority, event contracts, and crypto regulation. (Kalshi passage-ladder rungs are shown in the widget above.)</div>
+        </div>
+        <table class="markets-table">
+          <thead>
+            <tr>
+              <th>Market</th>
+              <th>Venue</th>
+              <th class="num">YES</th>
+              <th class="num">Volume</th>
+            </tr>
+          </thead>
+          <tbody id="marketsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- LEGISLATIVE TIMELINE -->
+    <section class="section">
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-kicker">Legislative Path</div>
+          <div class="panel-title">H.R. 3633 Milestones</div>
+          <div class="panel-deck">The Digital Asset Market Clarity Act expands CFTC jurisdiction over non-security digital assets.</div>
+        </div>
+        <div class="htimeline-wrap">
+          <svg class="htimeline-svg" id="hTimeline" viewBox="0 0 800 150" preserveAspectRatio="xMidYMid meet"></svg>
+          <div class="htimeline-legend">
+            <div><span class="htimeline-swatch" style="background:var(--pos-green)"></span>Passed</div>
+            <div><span class="htimeline-swatch" style="background:var(--gold)"></span>In Progress</div>
+            <div><span class="htimeline-swatch" style="background:var(--border);border:1.5px solid var(--text4)"></span>Pending</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- REGULATORY LANDSCAPE -->
+    <section class="section">
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-kicker">Regulatory Landscape</div>
+          <div class="panel-title">Three Parallel Tracks</div>
+          <div class="panel-deck">Legislation, CFTC rulemaking, and ongoing litigation all shape the regulatory outcome.</div>
+        </div>
+        <div class="tracks" id="tracks"></div>
+      </div>
+    </section>
+
+    <!-- FOOTER -->
+    <footer class="footer">
+      <strong>Methodology:</strong> Passage probability is term-matched — we pick the single Kalshi ladder rung whose close date is closest to the longest-dated live Polymarket passage market, then take a volume-weighted average across that matched set. Naive averaging across a 9-rung ladder would collapse different horizons into an uninterpretable number. Expired markets are excluded.
+      <br><br>
+      <strong>Gate-decomposition model:</strong> CLARITY passage is modeled as a sequence of <em>AND-gated</em> procedural gates — Senate Agriculture committee markup <em>and</em> Senate Banking committee markup (both jurisdictions required for a split SEC/CFTC bill), then Senate floor vote (60-vote cloture + majority passage), then House concurrence on amended text (or conference committee if Senate passes its own vehicle like S. 4064 / DCIA), then presidential signature. The Kalshi ladder above prices the joint probability of clearing every remaining gate before each rung's deadline. See <a href="https://www.congress.gov/bill/119th-congress/house-bill/3633" target="_blank" rel="noopener">H.R. 3633 on congress.gov</a> and <a href="/clarity/explained">the plain-English explainer</a> for the full framework.
+      <br><br>
+      FEC data from Schedule E independent expenditure filings for the 2026 cycle. Lobbying data from Senate LDA quarterly filings; spend figures represent quarterly totals across all issues in a filing (upper bound on CLARITY-specific spend).
+      <div class="footer-sources">
+        <span>Polymarket</span>
+        <span>Kalshi</span>
+        <span>FEC Schedule E</span>
+        <span>Senate LDA</span>
+        <span>congress.gov</span>
+      </div>
+    </footer>
+
+  </main>
+</div>
+
+<script>
+const API_BASE = '/polyclawd/api';
+
+async function fetchData() {
+  document.getElementById('loading-state').style.display = 'block';
+  document.getElementById('error-state').style.display = 'none';
+  document.getElementById('content').style.display = 'none';
+
+  try {
+    const res = await fetch(`${API_BASE}/signals/clarity`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    render(data);
+  } catch (e) {
+    document.getElementById('error-msg').textContent = 'Failed to load: ' + e.message;
+    document.getElementById('loading-state').style.display = 'none';
+    document.getElementById('error-state').style.display = 'block';
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// FILTERS (preserved verbatim from original — load-bearing)
+// ══════════════════════════════════════════════════════════
+function isPassageMarket(m) {
+  const q = (m.question || '').toLowerCase();
+  const ticker = (m.ticker || '').toUpperCase();
+  if (ticker.startsWith('KXCRYPTOSTRUCTURE') || ticker.startsWith('KXCLARITY')) return true;
+  return (q.includes('clarity act') ||
+          q.includes('crypto market structure') ||
+          q.includes('market structure law') ||
+          (q.includes('clarity') && (q.includes('pass') || q.includes('law') || q.includes('signed'))));
+}
+
+function isLive(m) {
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const ed = (m.end_date || '').slice(0, 10);
+  return !ed || ed >= todayISO;
+}
+
+// Extract YES price by explicit name matching.
+// Polymarket uses {name:"Yes"}; Kalshi ladder rungs use {name:"Before 2027"},
+// {name:"Yes"}, or similar — anything that isn't "No"/"N". If the indexer ever
+// reverses outcome order (Kalshi has historically been inconsistent), position
+// [0] can silently become the NO side. Match by name to stay correct.
+const _yesWarnSeen = new Set();
+function getYesPrice(m) {
+  let outs = m?.outcomes;
+  if (!outs) return _warnIfLiquid(m, 0, 'no-outcomes');
+  if (typeof outs === 'string') {
+    try { outs = JSON.parse(outs); } catch { return _warnIfLiquid(m, 0, 'bad-json'); }
+  }
+  if (!Array.isArray(outs) || outs.length === 0) return _warnIfLiquid(m, 0, 'empty-array');
+  // Find the outcome whose name is NOT "No"/"N" — that's YES.
+  const yesOutcome = outs.find(o => {
+    const n = String(o?.name || o?.outcome || '').trim().toLowerCase();
+    return n && n !== 'no' && n !== 'n';
+  });
+  if (yesOutcome) {
+    const p = yesOutcome.price ?? yesOutcome.probability ?? yesOutcome.last_price;
+    const v = Number(p) || 0;
+    if (v === 0) return _warnIfLiquid(m, 0, 'yes-outcome-zero');
+    return v;
+  }
+  // Fallback: first element's price (legacy behaviour)
+  const v = Number(outs[0]?.price) || 0;
+  if (v === 0) return _warnIfLiquid(m, 0, 'fallback-zero');
+  return v;
+}
+
+// Sanity check: if we return 0 YES on a liquid market (>$10k), something is
+// likely wrong with the outcome parsing — log once per ticker to flag regressions.
+function _warnIfLiquid(m, price, reason) {
+  const vol = Number(m?.volume) || 0;
+  if (vol > 10000) {
+    const key = (m?.ticker || m?.slug || m?.question || '').slice(0, 80);
+    if (!_yesWarnSeen.has(key)) {
+      _yesWarnSeen.add(key);
+      console.warn(
+        `[clarity.html] getYesPrice returned 0 on liquid market (vol=$${Math.round(vol).toLocaleString()}, reason=${reason}):`,
+        { ticker: m?.ticker, slug: m?.slug, platform: m?.platform, outcomes: m?.outcomes }
+      );
+    }
+  }
+  return price;
+}
+
+// Volume-weighted mean YES price across a market list
+function wavgYes(markets) {
+  if (!markets.length) return null;
+  let ws = 0, wt = 0, us = 0;
+  for (const m of markets) {
+    const p = getYesPrice(m);
+    const w = Math.max(m.volume || 0, 1);
+    ws += p * w; wt += w; us += p;
+  }
+  return wt > 0 ? ws / wt : us / markets.length;
+}
+
+// ══════════════════════════════════════════════════════════
+// UTILITIES
+// ══════════════════════════════════════════════════════════
+function fmtMoneyShort(n) {
+  const v = Number(n) || 0;
+  if (v >= 1e9) return '$' + (v / 1e9).toFixed(2) + 'B';
+  if (v >= 1e6) return '$' + (v / 1e6).toFixed(2) + 'M';
+  if (v >= 1e3) return '$' + (v / 1e3).toFixed(1) + 'K';
+  return '$' + v.toFixed(0);
+}
+function fmtPct(v, digits) {
+  if (v === null || v === undefined || isNaN(v)) return '—';
+  return (v * 100).toFixed(digits || 0) + '%';
+}
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function probClass(p) {
+  if (p === null || p === undefined) return '';
+  if (p >= 0.6) return 'high';
+  if (p >= 0.4) return 'med';
+  return 'low';
+}
+function probColor(p) {
+  if (p === null || p === undefined) return '#8A8275';
+  if (p >= 0.6) return '#4A8B5C';
+  if (p >= 0.4) return '#B8923E';
+  return '#C25B4A';
+}
+function formatMonth(isoDate) {
+  // "2027-01-01" → "Jan '27"
+  const d = new Date(isoDate);
+  if (isNaN(d)) return isoDate;
+  const mos = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${mos[d.getMonth()]} '${String(d.getFullYear()).slice(2)}`;
+}
+function shortenCommittee(name) {
+  if (!name) return '';
+  return name
+    .replace(/\bCOMMITTEE\b/gi, '')
+    .replace(/\bSUPER\s*PAC\b/gi, '')
+    .replace(/\bPAC\b/gi, 'PAC')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function shortenClient(name) {
+  if (!name) return '';
+  return name
+    .replace(/,?\s+(INC|LLC|LLP|LTD|CORP|CORPORATION|COMPANY|CO)\.?$/i, '')
+    .trim();
+}
+
+// ══════════════════════════════════════════════════════════
+// MAIN RENDER
+// ══════════════════════════════════════════════════════════
+function render(data) {
+  const allPolicyMarkets = data.clarity_markets || [];
+  const allPassage = allPolicyMarkets.filter(isPassageMarket);
+  const passageMarkets = allPassage.filter(isLive);
+  const expiredPassage = allPassage.filter(m => !isLive(m));
+  const kalshiPassageAll = passageMarkets.filter(m => m.platform === 'kalshi');
+  const polyPassage = passageMarkets.filter(m => m.platform === 'polymarket');
+
+  // Kalshi KXCRYPTOSTRUCTURE is a ladder — 9 rungs with deadlines from FEB1
+  // ($0.01 near-expiry) through -27 (2027 deadline, $0.64). Volume-weighting
+  // across the ladder collapses the number to whichever rung has the most
+  // volume, which is NOT comparable to a Polymarket market priced at a
+  // specific deadline. Term-match to longest-dated Polymarket passage market.
+  const polyMaxEnd = polyPassage.reduce((mx, m) => {
+    const t = new Date(m.end_date || 0).getTime();
+    return t > mx ? t : mx;
+  }, 0);
+  const targetMs = polyMaxEnd || (Date.now() + 365 * 86400 * 1000);
+  // Pick Kalshi rung(s) whose close_time is closest to the Polymarket target.
+  let kalshiPassage = kalshiPassageAll;
+  if (kalshiPassageAll.length > 1) {
+    const withDelta = kalshiPassageAll.map(m => ({
+      m, d: Math.abs(new Date(m.end_date || 0).getTime() - targetMs)
+    })).sort((a, b) => a.d - b.d);
+    kalshiPassage = [withDelta[0].m];
+  }
+
+  // Consensus uses the term-matched set so a 9-rung ladder doesn't swamp it
+  const consensusBasis = [...kalshiPassage, ...polyPassage];
+  const consensus = wavgYes(consensusBasis);
+
+  // ── Hero consensus ──
+  const scoreEl = document.getElementById('consensusScore');
+  const verdictEl = document.getElementById('consensusVerdict');
+  const sourceEl = document.getElementById('consensusSource');
+  const horizonEl = document.getElementById('heroHorizon');
+  const marketCountEl = document.getElementById('heroMarketCount');
+
+  if (consensus !== null) {
+    const pct = Math.round(consensus * 100);
+    scoreEl.textContent = pct + '%';
+    scoreEl.className = 'hero-number ' + probClass(consensus);
+    verdictEl.className = 'hero-verdict ' + probClass(consensus);
+    if (consensus >= 0.6) verdictEl.textContent = 'Favored to Pass';
+    else if (consensus >= 0.4) verdictEl.textContent = 'Toss-up';
+    else verdictEl.textContent = 'Unlikely to Pass';
+
+    // Horizon chip: show the deadline this score is pricing
+    if (horizonEl && consensusBasis.length > 0) {
+      const ends = consensusBasis
+        .map(m => new Date(m.end_date || 0).getTime())
+        .filter(t => t > 0);
+      if (ends.length > 0) {
+        const horizonMs = Math.max(...ends);
+        const horizonDate = new Date(horizonMs);
+        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        const label = `${months[horizonDate.getUTCMonth()]} ${horizonDate.getUTCFullYear()}`;
+        horizonEl.innerHTML = `Horizon · <strong>by ${label}</strong>`;
+        horizonEl.style.display = '';
+      } else {
+        horizonEl.style.display = 'none';
+      }
+    }
+
+    const platforms = [];
+    if (kalshiPassage.length) platforms.push(`${kalshiPassage.length} Kalshi`);
+    if (polyPassage.length) platforms.push(`${polyPassage.length} Polymarket`);
+    const ladderNote = (kalshiPassageAll.length > kalshiPassage.length)
+      ? ` · ${kalshiPassageAll.length - kalshiPassage.length} earlier Kalshi ladder rungs excluded`
+      : '';
+    sourceEl.textContent =
+      `Term-matched across ${consensusBasis.length} passage market${consensusBasis.length === 1 ? '' : 's'}` +
+      (platforms.length ? ' · ' + platforms.join(' + ') : '') +
+      ladderNote +
+      (expiredPassage.length ? ` · ${expiredPassage.length} expired excluded` : '') +
+      (consensusBasis.length < 2 ? ' · thin basis' : '');
+    marketCountEl.textContent = `${consensusBasis.length} live market${consensusBasis.length === 1 ? '' : 's'}`;
+  } else {
+    scoreEl.textContent = '—';
+    scoreEl.className = 'hero-number';
+    verdictEl.textContent = 'No passage markets';
+    verdictEl.className = 'hero-verdict';
+    if (horizonEl) horizonEl.style.display = 'none';
+    sourceEl.textContent = 'Cache may be warming — refresh in a few minutes';
+    marketCountEl.textContent = 'No data';
+  }
+
+  renderResolutionCard(passageMarkets);
+  renderDivergence(kalshiPassage, polyPassage, consensus);
+  renderBillStatus(data.clarity_bills || {});
+  renderPassageLadder(allPolicyMarkets);
+  renderMarketsTable(allPolicyMarkets);
+  renderCryptoMoney(data.crypto_money || {});
+  renderTimeline();
+  renderLandscape();
+
+  // Timestamp — backend returns ISO string OR unix seconds; handle both
+  let ts;
+  if (typeof data.timestamp === 'number') {
+    ts = new Date(data.timestamp * 1000);
+  } else if (typeof data.timestamp === 'string' && data.timestamp) {
+    ts = new Date(data.timestamp);
+  } else {
+    ts = new Date();
+  }
+  if (isNaN(ts.getTime())) ts = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const tsStr = `${ts.getFullYear()}-${pad(ts.getMonth()+1)}-${pad(ts.getDate())} ${pad(ts.getHours())}:${pad(ts.getMinutes())}`;
+  document.getElementById('lastUpdated').textContent = `Updated ${tsStr}` + (data.source ? ` · ${data.source.replace('_', ' ')}` : '');
+
+  document.getElementById('loading-state').style.display = 'none';
+  document.getElementById('content').style.display = 'block';
+}
+
+// ══════════════════════════════════════════════════════════
+// RESOLUTION CARD (countdown + YES-price sparkline)
+// ══════════════════════════════════════════════════════════
+function renderResolutionCard(liveMarkets) {
+  const resDays = document.getElementById('resDays');
+  const resMeta = document.getElementById('resMeta');
+  const resFill = document.getElementById('resProgressFill');
+  const resStartLbl = document.getElementById('resProgressStart');
+  const resEndLbl = document.getElementById('resProgressEnd');
+  const sparkHead = document.getElementById('resSparkRange');
+  const sparkDelta = document.getElementById('resSparkDelta');
+  const sparkSvg = document.getElementById('resSpark');
+  const otherEl = document.getElementById('resOtherMarkets');
+
+  // No live passage markets → empty state
+  if (!liveMarkets || liveMarkets.length === 0) {
+    resDays.textContent = '—';
+    resMeta.textContent = 'No live passage markets. Cache may be warming.';
+    resFill.style.width = '0%';
+    resStartLbl.textContent = '';
+    resEndLbl.textContent = '';
+    sparkHead.textContent = 'no data';
+    sparkDelta.textContent = '—';
+    sparkDelta.className = 'res-spark-delta flat';
+    sparkSvg.innerHTML = '';
+    otherEl.textContent = '';
+    return;
+  }
+
+  // Pick the highest-volume live passage market as the focal
+  const sorted = [...liveMarkets].sort((a, b) => (b.volume || 0) - (a.volume || 0));
+  const focal = sorted[0];
+  const others = sorted.slice(1);
+
+  // ─── Countdown ───
+  const now = Date.now();
+  const end = new Date(focal.end_date).getTime();
+  const daysLeft = Math.max(0, Math.ceil((end - now) / 86400000));
+  resDays.textContent = daysLeft.toLocaleString();
+
+  const endDateStr = new Date(focal.end_date).toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric'
+  });
+  const volStr = (focal.volume || 0) >= 1000
+    ? '$' + Math.round(focal.volume / 1000) + 'K vol'
+    : '$' + Math.round(focal.volume || 0) + ' vol';
+  const platformStr = focal.platform === 'polymarket' ? 'Polymarket' :
+                      focal.platform === 'kalshi' ? 'Kalshi' : focal.platform;
+  resMeta.innerHTML =
+    `<strong>Resolves ${endDateStr}</strong> · ${platformStr} · ${volStr}` +
+    `<br>${escHTML(focal.question || '')}`;
+
+  // ─── Market-lifetime progress bar ───
+  const history = focal.price_history || [];
+  if (history.length >= 2) {
+    const openTs = history[0].t * 1000;
+    const totalSpan = end - openTs;
+    const elapsed = now - openTs;
+    const pct = Math.max(0, Math.min(100, (elapsed / totalSpan) * 100));
+    resFill.style.width = pct.toFixed(1) + '%';
+    resStartLbl.textContent = 'opened ' + new Date(openTs).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    resEndLbl.textContent = 'closes ' + new Date(end).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  } else {
+    resFill.style.width = '0%';
+    resStartLbl.textContent = '';
+    resEndLbl.textContent = 'closes ' + endDateStr;
+  }
+
+  // ─── Sparkline ───
+  if (history.length < 2) {
+    sparkHead.textContent = 'price history unavailable';
+    sparkDelta.textContent = '—';
+    sparkDelta.className = 'res-spark-delta flat';
+    sparkSvg.innerHTML =
+      `<text x="260" y="42" text-anchor="middle" fill="#A69F90" font-size="11" font-family="JetBrains Mono, monospace">no price history</text>`;
+  } else {
+    const svgW = 520, svgH = 78, padL = 4, padR = 42, padT = 10, padB = 14;
+    const plotW = svgW - padL - padR, plotH = svgH - padT - padB;
+
+    const firstP = history[0].p;
+    const lastP = history[history.length - 1].p;
+    const minT = history[0].t;
+    const maxT = history[history.length - 1].t;
+    const tSpan = (maxT - minT) || 1;
+
+    // Y scale: pad ±5pp around the observed range, clamped to [0,1]
+    const observedMin = Math.min(...history.map(h => h.p));
+    const observedMax = Math.max(...history.map(h => h.p));
+    const yMin = Math.max(0, observedMin - 0.05);
+    const yMax = Math.min(1, observedMax + 0.05);
+    const yRange = (yMax - yMin) || 0.01;
+
+    const pts = history.map(h => {
+      const x = padL + ((h.t - minT) / tSpan) * plotW;
+      const y = padT + plotH - ((h.p - yMin) / yRange) * plotH;
+      return { x, y, p: h.p, t: h.t };
+    });
+
+    // Color tied to current level (not delta)
+    const color = probColor(lastP);
+
+    // Gridline at 50% (toss-up threshold) if visible in range
+    let grid = '';
+    if (yMin < 0.5 && yMax > 0.5) {
+      const gy = padT + plotH - ((0.5 - yMin) / yRange) * plotH;
+      grid += `<line x1="${padL}" y1="${gy}" x2="${svgW - padR}" y2="${gy}" stroke="#D8D2C8" stroke-width="0.75" stroke-dasharray="3,3"/>`;
+      grid += `<text x="${svgW - padR + 4}" y="${gy + 3}" font-size="8.5" fill="#A69F90" font-family="JetBrains Mono, monospace">50%</text>`;
+    }
+    // High + low range labels on the right edge
+    const yMaxPx = padT + plotH - ((observedMax - yMin) / yRange) * plotH;
+    const yMinPx = padT + plotH - ((observedMin - yMin) / yRange) * plotH;
+    grid += `<text x="${svgW - padR + 4}" y="${yMaxPx + 3}" font-size="8.5" fill="#8A8275" font-family="JetBrains Mono, monospace">${Math.round(observedMax * 100)}</text>`;
+    grid += `<text x="${svgW - padR + 4}" y="${yMinPx + 3}" font-size="8.5" fill="#8A8275" font-family="JetBrains Mono, monospace">${Math.round(observedMin * 100)}</text>`;
+
+    const areaPath =
+      `<path d="M${pts[0].x.toFixed(1)},${padT + plotH} ` +
+      pts.map(p => `L${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ') +
+      ` L${pts[pts.length - 1].x.toFixed(1)},${padT + plotH} Z" fill="${color}" opacity="0.1"/>`;
+
+    const linePath =
+      `<polyline points="${pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')}" ` +
+      `fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+
+    // Endpoint marker (current price)
+    const last = pts[pts.length - 1];
+    const endMarker =
+      `<circle cx="${last.x.toFixed(1)}" cy="${last.y.toFixed(1)}" r="3" fill="${color}" stroke="#FAF8F5" stroke-width="1.5"/>` +
+      `<text x="${last.x.toFixed(1)}" y="${(last.y - 8).toFixed(1)}" text-anchor="end" font-size="10" font-weight="700" fill="${color}" font-family="JetBrains Mono, monospace">${Math.round(lastP * 100)}%</text>`;
+
+    // Axis labels (first + last date)
+    const fmtDate = ts => {
+      const d = new Date(ts * 1000);
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    };
+    const xLabels =
+      `<text x="${padL}" y="${svgH - 3}" font-size="8.5" fill="#A69F90" font-family="JetBrains Mono, monospace">${fmtDate(minT)}</text>` +
+      `<text x="${(svgW - padR).toFixed(0)}" y="${svgH - 3}" text-anchor="end" font-size="8.5" fill="#A69F90" font-family="JetBrains Mono, monospace">${fmtDate(maxT)}</text>`;
+
+    sparkSvg.innerHTML = grid + areaPath + linePath + endMarker + xLabels;
+
+    // Sparkline head + delta
+    const daysCovered = Math.round((maxT - minT) / 86400);
+    sparkHead.textContent = `last ${daysCovered}d`;
+    const deltaPp = Math.round((lastP - firstP) * 100);
+    if (deltaPp > 0) {
+      sparkDelta.textContent = '+' + deltaPp + 'pp';
+      sparkDelta.className = 'res-spark-delta up';
+    } else if (deltaPp < 0) {
+      sparkDelta.textContent = deltaPp + 'pp';
+      sparkDelta.className = 'res-spark-delta down';
+    } else {
+      sparkDelta.textContent = 'flat';
+      sparkDelta.className = 'res-spark-delta flat';
+    }
+  }
+
+  // ─── Other live markets footer ───
+  if (others.length === 0) {
+    otherEl.textContent = '';
+  } else {
+    const parts = others.map(m => {
+      const yes = getYesPrice(m);
+      const plat = m.platform === 'polymarket' ? 'Polymarket' :
+                   m.platform === 'kalshi' ? 'Kalshi' : m.platform;
+      return `${plat} ${Math.round(yes * 100)}%`;
+    });
+    otherEl.textContent = 'also live: ' + parts.join(' · ');
+  }
+}
+
+function escHTML(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+// ══════════════════════════════════════════════════════════
+// BILL STATUS CARDS (GovTrack)
+// ══════════════════════════════════════════════════════════
+function renderBillStatus(billData) {
+  const host = document.getElementById('billGrid');
+  if (!host) return;
+
+  const bills = billData.bills || [];
+  if (!bills.length) {
+    host.innerHTML = `<div class="bill-card"><div class="bill-empty">Bill tracker data unavailable.</div></div>`;
+    return;
+  }
+
+  // Map govtrack status codes to pill classes + short labels
+  const statusToClass = (code) => {
+    if (!code) return 'introduced';
+    if (code === 'enacted_signed' || code === 'enacted_veto_override' || code === 'passed_bill') return 'enacted';
+    if (code.startsWith('pass_over') || code === 'reported') return 'advanced';
+    if (code === 'introduced' || code === 'referred') return 'introduced';
+    if (code.startsWith('fail') || code.startsWith('prov_kill') || code.startsWith('vetoed')) return 'stalled';
+    return 'introduced';
+  };
+
+  const fmtDate = (iso) => {
+    if (!iso) return '';
+    try {
+      // Force local midnight so YYYY-MM-DD doesn't shift by one day due to UTC
+      const d = new Date(iso.length === 10 ? iso + 'T00:00:00' : iso);
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    } catch(e) { return iso; }
+  };
+
+  let html = '';
+  for (const b of bills) {
+    if (!b.display_number) {
+      html += `<div class="bill-card">
+        <div class="bill-kicker">${escHtml(b.label || 'Bill')}</div>
+        <div class="bill-empty">No matching bill found in the ${billData.congress || ''}th Congress.</div>
+      </div>`;
+      continue;
+    }
+
+    const statusClass = statusToClass(b.current_status);
+    const titleClean = (b.title || '').replace(new RegExp('^' + (b.display_number || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ':?\\s*'), '').trim();
+
+    html += `
+      <div class="bill-card">
+        <div class="bill-kicker">${escHtml(b.label || '')}</div>
+        <div class="bill-number">${escHtml(b.display_number)}</div>
+        <div class="bill-title">${escHtml(titleClean)}</div>
+
+        <div class="bill-status-row">
+          <span class="bill-status-pill ${statusClass}">${escHtml(b.current_status_label || '—')}</span>
+          <span class="bill-status-date">${escHtml(fmtDate(b.current_status_date))}</span>
+        </div>
+
+        <div class="bill-meta">
+          <div class="bill-meta-label">Sponsor</div>
+          <div class="bill-meta-value">${escHtml(b.sponsor || '—')}</div>
+          <div class="bill-meta-label">Introduced</div>
+          <div class="bill-meta-value">${escHtml(fmtDate(b.introduced_date))}</div>
+        </div>
+
+        ${b.link ? `<a class="bill-link" href="${escHtml(b.link)}" target="_blank" rel="noopener">View on GovTrack →</a>` : ''}
+      </div>
+    `;
+  }
+
+  host.innerHTML = html;
+}
+
+// ══════════════════════════════════════════════════════════
+// DIVERGENCE STRIP (Kalshi vs Polymarket)
+// ══════════════════════════════════════════════════════════
+function renderDivergence(kalshiMarkets, polyMarkets, consensus) {
+  const host = document.getElementById('divergenceStrip');
+  const kalshiAvg = wavgYes(kalshiMarkets);
+  const polyAvg = wavgYes(polyMarkets);
+
+  // Empty state
+  if (kalshiAvg === null && polyAvg === null) {
+    host.innerHTML = `
+      <div class="divergence-head">
+        <div class="divergence-label">Cross-Platform Divergence</div>
+      </div>
+      <div class="divergence-none">No live passage markets on Kalshi or Polymarket.</div>`;
+    return;
+  }
+
+  const spread = (kalshiAvg !== null && polyAvg !== null)
+    ? Math.abs(kalshiAvg - polyAvg)
+    : null;
+  const spreadPp = spread !== null ? Math.round(spread * 100) : null;
+  const isBig = spread !== null && spread >= 0.05;
+
+  // Build the horizontal bar
+  const pctPos = v => (v * 100).toFixed(1) + '%';
+  const kalshiX = kalshiAvg !== null ? kalshiAvg : null;
+  const polyX = polyAvg !== null ? polyAvg : null;
+
+  const kalshiLabel = kalshiAvg !== null
+    ? `Kalshi ${Math.round(kalshiAvg * 100)}%`
+    : 'Kalshi —';
+  const polyLabel = polyAvg !== null
+    ? `Polymarket ${Math.round(polyAvg * 100)}%`
+    : 'Polymarket —';
+
+  // Tick labels
+  let ticks = '';
+  [0, 25, 50, 75, 100].forEach(v => {
+    ticks += `<div class="divergence-tick" style="left:${v}%"></div>`;
+    ticks += `<div class="divergence-tick-label" style="left:${v}%">${v}%</div>`;
+  });
+
+  // Gap ribbon between both markers
+  let gapEl = '';
+  if (kalshiX !== null && polyX !== null && isBig) {
+    const gapLeft = Math.min(kalshiX, polyX) * 100;
+    const gapWidth = Math.abs(kalshiX - polyX) * 100;
+    gapEl = `<div class="divergence-gap" style="left:${gapLeft}%;width:${gapWidth}%"></div>`;
+  }
+
+  // Which marker gets top vs bottom label? Lower number → top
+  const kalshiTop = kalshiX !== null && polyX !== null ? (kalshiX <= polyX) : true;
+
+  let markers = '';
+  if (kalshiX !== null) {
+    markers += `
+      <div class="divergence-marker" style="left:${pctPos(kalshiX)}">
+        <div class="divergence-dot kalshi"></div>
+      </div>
+      <div class="divergence-callout kalshi ${kalshiTop ? 'top' : 'bottom'}" style="left:${pctPos(kalshiX)}">${escHtml(kalshiLabel)}</div>`;
+  }
+  if (polyX !== null) {
+    markers += `
+      <div class="divergence-marker" style="left:${pctPos(polyX)}">
+        <div class="divergence-dot polymarket"></div>
+      </div>
+      <div class="divergence-callout polymarket ${kalshiTop ? 'bottom' : 'top'}" style="left:${pctPos(polyX)}">${escHtml(polyLabel)}</div>`;
+  }
+
+  let storyNote = '';
+  if (spread !== null && isBig) {
+    const higher = (kalshiX > polyX) ? 'Kalshi' : 'Polymarket';
+    const lower = (kalshiX > polyX) ? 'Polymarket' : 'Kalshi';
+    storyNote = `<div class="divergence-note"><strong>${spreadPp}-point divergence.</strong> ${higher} traders are pricing CLARITY passage ${spreadPp}pp higher than ${lower}. Cross-platform gaps this wide typically reflect different user bases (US-regulated Kalshi vs crypto-native Polymarket) or thin liquidity on one side.</div>`;
+  } else if (spread !== null) {
+    storyNote = `<div class="divergence-note">Platforms agree within <strong>${spreadPp} points</strong>. Consensus is aligned — no arbitrage signal.</div>`;
+  } else {
+    const solo = kalshiX !== null ? 'Kalshi' : 'Polymarket';
+    storyNote = `<div class="divergence-note">Only <strong>${solo}</strong> currently has a live passage market — no cross-platform comparison available.</div>`;
+  }
+
+  const spreadBadge = spread !== null
+    ? `<div class="divergence-spread${isBig ? '' : ' small'}">${spreadPp}pp spread</div>`
+    : '';
+
+  host.innerHTML = `
+    <div class="divergence-head">
+      <div class="divergence-label">Cross-Platform Divergence</div>
+      ${spreadBadge}
+    </div>
+    <div class="divergence-bar">
+      <div class="divergence-track"></div>
+      ${ticks}
+      ${gapEl}
+      ${markers}
+    </div>
+    ${storyNote}
+  `;
+}
+
+// ══════════════════════════════════════════════════════════
+// CRYPTO MONEY
+// ══════════════════════════════════════════════════════════
+function renderCryptoMoney(cm) {
+  const fec = cm.fec_pacs || {};
+  const lda = cm.lda_clarity || {};
+  const allCommittees = fec.committees || [];
+  const committees = allCommittees.filter(c => (c.total_spend || 0) > 0);
+  const inactiveCommittees = allCommittees.filter(c => !((c.total_spend || 0) > 0));
+  const lobbyClients = (lda.clients || []).slice(0, 10);
+
+  // ── Tiles ──
+  const fecTotal = fec.grand_total_spend || 0;
+  const fecSupport = fec.grand_support_spend || 0;
+  const fecOppose = fec.grand_oppose_spend || 0;
+  const ldaTotal = lda.total_spend || 0;
+  const ldaDirect = lda.direct_clarity_mentions || 0;
+  const ldaFilings = lda.matched_filing_count || 0;
+  const cycle = fec.cycle || 2026;
+  const ldaYears = (lda.years || []).join('–');
+
+  const tiles = document.getElementById('moneyHeroTiles');
+  tiles.innerHTML = `
+    <div class="money-tile">
+      <div class="money-tile-kicker">Super PAC Spend · ${escHtml(cycle)} Cycle</div>
+      <div class="money-tile-value">${fmtMoneyShort(fecTotal)}</div>
+      <div class="money-tile-label">FEC Schedule E independent expenditures by ${fec.committee_count || committees.length} crypto Super PACs</div>
+      <div class="money-tile-split">
+        <span class="support">▲ ${fmtMoneyShort(fecSupport)} support</span>
+        <span class="oppose">▼ ${fmtMoneyShort(fecOppose)} oppose</span>
+      </div>
+    </div>
+    <div class="money-tile">
+      <div class="money-tile-kicker">Federal Lobbying${ldaYears ? ' · ' + escHtml(ldaYears) : ''}</div>
+      <div class="money-tile-value">${fmtMoneyShort(ldaTotal)}</div>
+      <div class="money-tile-label">${ldaFilings} Senate LDA filings mentioning H.R. 3633 / crypto market structure</div>
+      <div class="money-tile-split">
+        <span class="support">${ldaDirect} direct H.R. 3633 mentions</span>
+      </div>
+    </div>
+  `;
+
+  // ── Committees bar chart ──
+  const committeesHost = document.getElementById('committeesChart');
+  if (committees.length === 0) {
+    committeesHost.innerHTML = `
+      <div class="chart-head">
+        <div class="chart-kicker">Super PACs</div>
+        <div class="chart-title">Crypto Super PAC Spending</div>
+      </div>
+      <div class="chart-body"><div class="empty-note">No committee spending data yet — cache warming.</div></div>
+    `;
+  } else {
+    const sorted = committees.slice().sort((a, b) => (b.total_spend || 0) - (a.total_spend || 0));
+    const maxTotal = Math.max(...sorted.map(c => c.total_spend || 0)) || 1;
+
+    const axisTicks = [0, 0.25, 0.5, 0.75, 1.0];
+    const axisHtml = axisTicks.map(t =>
+      `<div class="hbar-axis-tick" style="left:${(t * 100)}%">${fmtMoneyShort(t * maxTotal)}</div>`
+    ).join('');
+
+    let rowsHtml = '';
+    for (const c of sorted) {
+      const total = c.total_spend || 0;
+      const support = c.support_spend || 0;
+      const oppose = c.oppose_spend || 0;
+      const totalWidth = (total / maxTotal) * 100;
+      const supportRatio = total > 0 ? support / total : 0;
+      const opposeRatio = total > 0 ? oppose / total : 0;
+      const supportWidth = totalWidth * supportRatio;
+      const opposeWidth = totalWidth * opposeRatio;
+      const displayName = shortenCommittee(c.committee_name);
+      const groupLabel = (c.group || '').replace(/_/g, ' ');
+      rowsHtml += `
+        <div class="hbar-row" title="${escHtml(c.committee_name)} — ${fmtMoneyShort(total)} total (${c.filing_count || 0} filings)">
+          <div>
+            <div class="hbar-label">${escHtml(displayName)}</div>
+            <div class="hbar-label-sub">${escHtml(groupLabel)} · ${c.filing_count || 0} filings</div>
+          </div>
+          <div class="hbar-track">
+            <div class="hbar-support" style="width:${supportWidth}%"></div>
+            <div class="hbar-oppose" style="left:${supportWidth}%;width:${opposeWidth}%"></div>
+          </div>
+          <div class="hbar-value">${fmtMoneyShort(total)}</div>
+        </div>
+      `;
+    }
+
+    // Static per-PAC context for inactive committees (hand-curated from FEC committee detail).
+    const inactivePacContext = {
+      'C00804179': 'Coinbase Innovation PAC — corporate PAC, small monthly disbursements only',
+      'C00824896': 'Blockchain Association PAC — connected PAC, dormant since mid-2025',
+      'C00876631': 'Stand With Crypto Alliance PAC — connected PAC, frozen since 2024',
+      'C00942318': 'Crypto Council for Innovation PAC — registered 2026-03-06, first report due 2026-04-15',
+    };
+    const inactiveNote = inactiveCommittees.length > 0
+      ? `<div class="chart-footnote">${inactiveCommittees.length} of ${allCommittees.length} tracked crypto-aligned PACs report zero independent expenditures this cycle. ${inactiveCommittees.map(c => escHtml(inactivePacContext[c.committee_id] || shortenCommittee(c.committee_name))).join(' · ')}. The Fairshake network is where the IE money lives.</div>`
+      : '';
+
+    committeesHost.innerHTML = `
+      <div class="chart-head">
+        <div class="chart-kicker">Super PACs · ${escHtml(cycle)} Cycle</div>
+        <div class="chart-title">Independent Expenditures by Committee</div>
+        <div class="chart-deck">Ranked by total spend. Green = support, red = oppose.</div>
+      </div>
+      <div class="chart-body">
+        <div class="hbar-legend">
+          <span><span class="hbar-legend-swatch" style="background:var(--pos-green)"></span>Support</span>
+          <span><span class="hbar-legend-swatch" style="background:var(--rep-red)"></span>Oppose</span>
+        </div>
+        ${rowsHtml}
+        <div class="hbar-row">
+          <div></div>
+          <div class="hbar-axis">${axisHtml}</div>
+          <div></div>
+        </div>
+        ${inactiveNote}
+      </div>
+    `;
+  }
+
+  // ── Fairshake funders ("who funds the funders") ──
+  const fundersHost = document.getElementById('fundersChart');
+  const funders = cm.fairshake_funders || {};
+  const topFunders = funders.top_funders || [];
+  if (topFunders.length === 0) {
+    fundersHost.style.display = 'none';
+  } else {
+    fundersHost.style.display = '';
+    const fundersTotal = funders.top_funders_total || 0;
+    const fundersCycle = funders.cycle || cycle;
+    const maxFunder = Math.max(...topFunders.map(f => f.total || 0)) || 1;
+
+    let funderRows = '';
+    for (const f of topFunders) {
+      const total = f.total || 0;
+      const w = (total / maxFunder) * 100;
+      const count = f.count || 0;
+      const latest = f.latest_date || '';
+      const isEntity = /(a16z|Coinbase|Ripple|Jump|Kraken|Circle|Bank|Llc|Media|Inc|Fund|Corp|Capital|Dba|Universal|Rbc|Targeted|Amalgamated)/i.test(f.contributor);
+      const cls = isEntity ? 'entity' : 'individual';
+      funderRows += `
+        <div class="hbar-row" title="${escHtml(f.contributor)} — ${count} contribution${count === 1 ? '' : 's'}, latest ${escHtml(latest)}">
+          <div>
+            <div class="hbar-label">${escHtml(f.contributor)}</div>
+            <div class="hbar-label-sub">${count} contribution${count === 1 ? '' : 's'}${latest ? ' · latest ' + escHtml(latest) : ''}</div>
+          </div>
+          <div class="hbar-track">
+            <div class="hbar-support funder-${cls}" style="width:${w}%"></div>
+          </div>
+          <div class="hbar-value">${fmtMoneyShort(total)}</div>
+        </div>
+      `;
+    }
+
+    fundersHost.innerHTML = `
+      <div class="chart-head">
+        <div class="chart-kicker">Funders · ${escHtml(fundersCycle)} Cycle</div>
+        <div class="chart-title">Who Funds the Fairshake Network</div>
+        <div class="chart-deck">FEC Schedule A contributions to Fairshake, Defend American Jobs, and Protect Progress. Intra-network transfers removed. Top ${topFunders.length} funders sum to ${fmtMoneyShort(fundersTotal)}.</div>
+      </div>
+      <div class="chart-body">
+        ${funderRows}
+        <div class="chart-footnote">Entities and individuals canonicalized across FEC filing spellings (e.g. "AH CAPITAL MANAGEMENT" → Andreessen Horowitz). Dollar figures represent contributions received by the committees, not independent expenditures made by them.</div>
+      </div>
+    `;
+  }
+
+  // ── Candidates breakdown ──
+  const candidatesHost = document.getElementById('candidatesChart');
+  const recipMap = {};
+  for (const c of committees) {
+    for (const r of (c.top_recipients || [])) {
+      const key = (r.candidate || '').toUpperCase();
+      if (!key) continue;
+      if (!recipMap[key]) {
+        recipMap[key] = {
+          candidate: r.candidate,
+          state: r.state,
+          office: r.office,
+          party: r.party,
+          support: 0,
+          oppose: 0,
+          total: 0,
+          committees: [],
+          alignment: r.crypto_alignment || null,
+        };
+      }
+      recipMap[key].support += r.support || 0;
+      recipMap[key].oppose += r.oppose || 0;
+      recipMap[key].total += r.total || 0;
+      // Prefer any committee's alignment payload (they should all be identical)
+      if (!recipMap[key].alignment && r.crypto_alignment) {
+        recipMap[key].alignment = r.crypto_alignment;
+      }
+      if (!recipMap[key].committees.includes(c.committee_name)) {
+        recipMap[key].committees.push(c.committee_name);
+      }
+    }
+  }
+  const topRecipients = Object.values(recipMap)
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 10);
+
+  if (topRecipients.length === 0) {
+    candidatesHost.style.display = 'none';
+  } else {
+    candidatesHost.style.display = '';
+    // Shared scale: every bar is a fraction of the largest single-side spend across all rows.
+    // This makes spatial comparison meaningful (a $1M bar is ~7% the width of a $15M bar).
+    const maxCand = Math.max(...topRecipients.map(r => Math.max(r.support, r.oppose))) || 1;
+    let candRows = '';
+    for (const r of topRecipients) {
+      const partyCls = r.party === 'DEM' ? 'dem' : r.party === 'REP' ? 'rep' : 'ind';
+      const partyChar = (r.party || '?').slice(0, 1);
+      const raceLabel = [r.office, r.state].filter(Boolean).join('-') || '—';
+      // Each side gets up to 50% of the bar (centered axis). Tiny non-zero values
+      // get a 1px floor via CSS min-width so they remain visible.
+      const supportW = (r.support / maxCand) * 50;
+      const opposeW = (r.oppose / maxCand) * 50;
+      const committeesTitle = r.committees.join(', ');
+
+      // Build crypto alignment badge if we have roll-call votes for this member.
+      // r.alignment is merged in from cm.vote_alignment data (see below).
+      let alignmentBadge = '';
+      const a = r.alignment;
+      if (a && a.total > 0) {
+        const pct = a.pct;
+        const alignCls = pct >= 66 ? 'pro' : pct >= 34 ? 'mixed' : 'anti';
+        const castDetail = Object.entries(a.casts || {})
+          .map(([k, v]) => `${k}:${v}`).join(' · ');
+        alignmentBadge = `<span class="align-badge ${alignCls}" title="Crypto vote alignment — ${castDetail}">${pct}% pro-crypto · ${a.pro}/${a.total}</span>`;
+      } else if (a === null || a === undefined) {
+        // explicitly no match (new candidate, no 118th Cong votes)
+        alignmentBadge = '<span class="align-badge none" title="No 118th Congress vote record — likely a 2026 challenger">no vote record</span>';
+      }
+
+      candRows += `
+        <div class="cand-row" title="${escHtml(r.candidate)} — targeted by ${escHtml(committeesTitle)}">
+          <div class="cand-name">
+            <span class="cand-party ${partyCls}">${escHtml(partyChar)}</span>
+            <span class="cand-name-inner">${escHtml(r.candidate)}${alignmentBadge ? ' ' + alignmentBadge : ''}</span>
+          </div>
+          <div class="cand-race">${escHtml(raceLabel)}</div>
+          <div class="cand-flow">
+            <div class="cand-flow-axis"></div>
+            ${r.support > 0 ? `<div class="cand-bar support" style="right:50%;width:${supportW}%"></div>` : ''}
+            ${r.oppose > 0 ? `<div class="cand-bar oppose" style="left:50%;width:${opposeW}%"></div>` : ''}
+          </div>
+          <div class="cand-total">${fmtMoneyShort(r.total)}</div>
+        </div>
+      `;
+    }
+    // Pull vote_meta to show which roll calls we scored against in the deck.
+    const voteMeta = (cm.vote_alignment && cm.vote_alignment.vote_meta) || {};
+    const voteLabels = Object.values(voteMeta).map(v => `${v.bill} (${v.label})`).join(' · ');
+    const deckSuffix = voteLabels
+      ? ` Alignment badges score each incumbent across 118th Congress crypto roll calls: ${voteLabels}.`
+      : '';
+
+    candidatesHost.innerHTML = `
+      <div class="chart-head">
+        <div class="chart-kicker">Candidate Targets · Money vs. Votes</div>
+        <div class="chart-title">Top Candidates Receiving IE Spend</div>
+        <div class="chart-deck">Merged across all crypto Super PACs. Bars: support (left, green) vs oppose (right, red). Scaled to ${fmtMoneyShort(maxCand)} max.${deckSuffix}</div>
+      </div>
+      <div class="chart-body">
+        <div class="cand-axis">
+          <span>Candidate</span>
+          <span>Race</span>
+          <div class="cand-axis-bar"><span>Support ◀</span><span>0</span><span>▶ Oppose</span></div>
+          <span style="text-align:right">Total</span>
+        </div>
+        ${candRows}
+      </div>
+    `;
+  }
+
+  // ── LDA lobbying ──
+  const ldaHost = document.getElementById('ldaChart');
+  if (lobbyClients.length === 0) {
+    ldaHost.style.display = 'none';
+  } else {
+    ldaHost.style.display = '';
+    const sortedLda = lobbyClients.slice().sort((a, b) => (b.total_spend || 0) - (a.total_spend || 0));
+    const maxLda = Math.max(...sortedLda.map(c => c.total_spend || 0)) || 1;
+
+    let ldaRows = '';
+    for (const c of sortedLda) {
+      const total = c.total_spend || 0;
+      const w = (total / maxLda) * 100;
+      const direct = c.direct_clarity_filings || 0;
+      const soft = c.soft_match_filings || 0;
+      const pill = direct > 0
+        ? `<span class="lda-direct-pill">${direct} direct${soft > 0 ? ' · ' + soft + ' soft' : ''}</span>`
+        : `<span class="lda-direct-pill soft">${soft || 0} soft</span>`;
+      const quarters = (c.quarters_covered || []).length;
+      const filings = c.filing_count || 0;
+      const displayName = shortenClient(c.client);
+      ldaRows += `
+        <div class="lda-row" title="${escHtml(c.client)} — ${filings} filings over ${quarters} quarter${quarters === 1 ? '' : 's'}">
+          <div class="lda-client">
+            <div class="lda-client-name">${escHtml(displayName)}</div>
+            ${pill}
+          </div>
+          <div class="lda-bar-wrap">
+            <div class="lda-bar" style="width:${w}%"></div>
+          </div>
+          <div class="lda-spend">${fmtMoneyShort(total)}</div>
+        </div>
+      `;
+    }
+
+    ldaHost.innerHTML = `
+      <div class="chart-head">
+        <div class="chart-kicker">Senate LDA · ${escHtml(ldaYears || 'Recent')}</div>
+        <div class="chart-title">Top Lobbying Clients on CLARITY / Market Structure</div>
+        <div class="chart-deck">Quarterly filings referencing H.R. 3633 or crypto market structure. Spend is quarterly total across all issues (upper bound).</div>
+      </div>
+      <div class="chart-body">
+        ${ldaRows}
+        ${renderLdaCaveat(lda)}
+      </div>
+    `;
+  }
+}
+
+function renderLdaCaveat(lda) {
+  const notes = [];
+  const swc = lda.caveats && lda.caveats.stand_with_crypto_note;
+  const total = lda.caveats && lda.caveats.total_caveat;
+  if (total) notes.push(escHtml(total));
+  if (swc) notes.push(escHtml(swc));
+  if (notes.length === 0) return '';
+  return `
+    <div class="caveat">
+      <span class="caveat-label">Methodology Caveat</span>
+      ${notes.join(' ')}
+    </div>
+  `;
+}
+
+// ══════════════════════════════════════════════════════════
+// PASSAGE LADDER (KXCRYPTOSTRUCTURE)
+// ══════════════════════════════════════════════════════════
+function ladderColor(p) {
+  // p in 0..1 — map to grey → gold → terracotta
+  if (p < 0.10) return '#A69F90';
+  if (p < 0.25) return '#C9B88A';
+  if (p < 0.45) return '#D4A843';
+  if (p < 0.65) return '#D47F39';
+  return '#C75B39';
+}
+
+function shortDeadlineLabel(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return iso.slice(0, 7);
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const yr = String(d.getUTCFullYear()).slice(2);
+  return `${months[d.getUTCMonth()]} '${yr}`;
+}
+
+function renderPassageLadder(allMarkets) {
+  const panel = document.getElementById('passageLadderPanel');
+  const svg = document.getElementById('ladderSvg');
+  const meta = document.getElementById('ladderMeta');
+  if (!panel || !svg || !meta) return;
+
+  // Collect KXCRYPTOSTRUCTURE rungs, dedupe by ticker, sort chronologically
+  const seen = new Set();
+  const rungs = allMarkets
+    .filter(isLadderRung)
+    .filter(m => {
+      const t = (m.ticker || '').toUpperCase();
+      if (seen.has(t)) return false;
+      seen.add(t);
+      return !!m.end_date;
+    })
+    .map(m => ({
+      ticker: m.ticker,
+      end_date: m.end_date,
+      price: getYesPrice(m),
+      volume: (m.volume || 0),
+    }))
+    .sort((a, b) => (a.end_date || '').localeCompare(b.end_date || ''));
+
+  if (rungs.length < 2) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = '';
+
+  // Layout
+  const W = 800, H = 300;
+  const padL = 52, padR = 32, padT = 44, padB = 70;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const baseY = padT + plotH;
+  const n = rungs.length;
+  const slotW = plotW / n;
+  const barW = Math.min(Math.max(slotW * 0.55, 20), 60);
+
+  // Y-axis gridlines at 0, 25, 50, 75, 100
+  let grid = '';
+  let yLabels = '';
+  for (const pct of [0, 25, 50, 75, 100]) {
+    const y = baseY - (pct / 100) * plotH;
+    const stroke = pct === 50 ? '#D4A843' : '#E2DDD6';
+    const dash = pct === 50 ? ' stroke-dasharray="4,4"' : '';
+    grid += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${stroke}" stroke-width="${pct === 50 ? 1.5 : 1}"${dash}/>`;
+    yLabels += `<text x="${padL - 10}" y="${y + 4}" text-anchor="end" font-family="JetBrains Mono, monospace" font-size="10" fill="#78726A">${pct}%</text>`;
+  }
+  // Label the 50% line
+  yLabels += `<text x="${W - padR - 4}" y="${baseY - 0.5 * plotH - 6}" text-anchor="end" font-family="JetBrains Mono, monospace" font-size="9" fill="#C75B39" font-weight="600" letter-spacing="0.5">CONSENSUS · 50%</text>`;
+
+  // Bars, price labels, deadline labels
+  // On narrow viewports, rotate x-axis labels -30° to prevent collision.
+  const isNarrow = typeof window !== 'undefined' && window.innerWidth < 640;
+  const kalshiEventUrl = 'https://kalshi.com/markets/kxcryptostructure';
+  let bars = '';
+  let priceLabels = '';
+  let xLabels = '';
+  rungs.forEach((r, i) => {
+    const cx = padL + slotW * (i + 0.5);
+    const x = cx - barW / 2;
+    const h = Math.max(r.price * plotH, 1.5);
+    const y = baseY - h;
+    const color = ladderColor(r.price);
+    const dl = shortDeadlineLabel(r.end_date);
+    const pctTxt = `${(r.price * 100).toFixed(0)}%`;
+    // Tooltip via SVG <title> — shown on native hover
+    const tipText = `${r.ticker}\nDeadline: ${dl} (${(r.end_date || '').slice(0, 10)})\nYES: ${pctTxt}\nVolume: ${fmtMoneyShort(r.volume)}\nClick to open on Kalshi`;
+    // Wrap rect in anchor → click opens Kalshi event
+    bars += `<a class="ladder-bar-link" href="${kalshiEventUrl}" target="_blank" rel="noopener"><title>${escHtml(tipText)}</title><rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="2" fill="${color}" opacity="0.9"/></a>`;
+    // Price label above bar
+    priceLabels += `<text x="${cx}" y="${(y - 7).toFixed(1)}" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700" fill="#1C1B17">${pctTxt}</text>`;
+    // Deadline label below bar (rotated on mobile)
+    const labelY = baseY + 16;
+    if (isNarrow) {
+      xLabels += `<text x="${cx}" y="${labelY.toFixed(1)}" text-anchor="end" font-family="Inter, sans-serif" font-size="10" fill="#3A352D" font-weight="500" transform="rotate(-32 ${cx} ${labelY})">${escHtml(dl)}</text>`;
+    } else {
+      xLabels += `<text x="${cx}" y="${labelY.toFixed(1)}" text-anchor="middle" font-family="Inter, sans-serif" font-size="11" fill="#3A352D" font-weight="500">by ${escHtml(dl)}</text>`;
+    }
+  });
+
+  // Hazard deltas between adjacent rungs (the PDF of the CDF)
+  let hazards = '';
+  for (let i = 1; i < rungs.length; i++) {
+    const delta = rungs[i].price - rungs[i - 1].price;
+    if (delta < 0.01) continue;  // skip micro-moves
+    const cx = padL + slotW * i;                     // midpoint between bars
+    const midY = baseY - ((rungs[i].price + rungs[i - 1].price) / 2) * plotH;
+    const deltaPct = `+${(delta * 100).toFixed(0)}pp`;
+    hazards += `<text x="${cx}" y="${(midY - 12).toFixed(1)}" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="#78726A" font-weight="600">${deltaPct}</text>`;
+  }
+
+  // X-axis baseline
+  const axis = `<line x1="${padL}" y1="${baseY}" x2="${W - padR}" y2="${baseY}" stroke="#78726A" stroke-width="1.5"/>`;
+  // Subtitle below chart
+  const subtitle = `<text x="${W / 2}" y="${H - 18}" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="#A69F90" letter-spacing="0.8" text-transform="uppercase">DEADLINE · &quot;IS IT SIGNED INTO LAW BEFORE ___?&quot;</text>`;
+
+  // Headline above chart
+  const title = `<text x="${padL}" y="${padT - 16}" font-family="Inter, sans-serif" font-size="11" fill="#78726A" font-weight="600" letter-spacing="0.5" text-transform="uppercase">YES Price → Cumulative Probability of Passage</text>`;
+
+  svg.innerHTML = grid + yLabels + axis + bars + hazards + priceLabels + xLabels + title + subtitle;
+
+  // ── Meta row: monotonicity, crossover, steepest hazard, total volume
+  const monotoneViolations = [];
+  for (let i = 1; i < rungs.length; i++) {
+    if (rungs[i].price < rungs[i - 1].price - 0.005) {
+      monotoneViolations.push({ from: rungs[i - 1], to: rungs[i] });
+    }
+  }
+  // 50% crossover = first rung whose price ≥ 0.5
+  const crossIdx = rungs.findIndex(r => r.price >= 0.5);
+  const crossLabel = crossIdx >= 0 ? `Between ${shortDeadlineLabel(rungs[Math.max(crossIdx - 1, 0)].end_date)} and ${shortDeadlineLabel(rungs[crossIdx].end_date)}` : 'Not priced yet';
+  // Steepest hazard
+  let steepest = { delta: 0, from: null, to: null };
+  for (let i = 1; i < rungs.length; i++) {
+    const d = rungs[i].price - rungs[i - 1].price;
+    if (d > steepest.delta) steepest = { delta: d, from: rungs[i - 1], to: rungs[i] };
+  }
+  const steepestLabel = steepest.from
+    ? `+${(steepest.delta * 100).toFixed(0)}pp · ${shortDeadlineLabel(steepest.from.end_date)} → ${shortDeadlineLabel(steepest.to.end_date)}`
+    : '—';
+  const totalVol = rungs.reduce((s, r) => s + r.volume, 0);
+
+  const monoBadge = monotoneViolations.length === 0
+    ? `<div class="ladder-stat"><div class="ladder-stat-label">Monotonicity</div><div class="ladder-stat-value ok">✓ Valid · No arb</div></div>`
+    : `<div class="ladder-stat"><div class="ladder-stat-label">Monotonicity</div><div class="ladder-stat-value warn">⚠ ${monotoneViolations.length} violation${monotoneViolations.length > 1 ? 's' : ''} · possible arb</div></div>`;
+
+  meta.innerHTML =
+    monoBadge +
+    `<div class="ladder-stat"><div class="ladder-stat-label">50% Consensus Crossover</div><div class="ladder-stat-value">${escHtml(crossLabel)}</div></div>` +
+    `<div class="ladder-stat"><div class="ladder-stat-label">Steepest Monthly Hazard</div><div class="ladder-stat-value">${escHtml(steepestLabel)}</div></div>` +
+    `<div class="ladder-stat"><div class="ladder-stat-label">Ladder Volume</div><div class="ladder-stat-value">${fmtMoneyShort(totalVol)} · ${rungs.length} rungs</div></div>`;
+}
+
+// ══════════════════════════════════════════════════════════
+// MARKETS TABLE
+// ══════════════════════════════════════════════════════════
+// Strip the repeated event-title prefix from multi-outcome Kalshi markets.
+// Turns "Will crypto market structure legislation become law?: Will a crypto
+// market structure bill becomes law before May 1, 2026?" into a concise,
+// rung-distinguishing label.
+function shortMarketLabel(m) {
+  let q = (m.question || 'Unknown').trim();
+  // Split off the event-title prefix for multi-outcome Kalshi markets
+  const colonIdx = q.indexOf(': ');
+  if (colonIdx > 0 && colonIdx < q.length - 2) {
+    q = q.slice(colonIdx + 2).trim();
+  }
+  // Collapse boilerplate phrasings to highlight the distinguishing clause
+  q = q.replace(/^Will a crypto market structure bill becomes? law /i, 'Market structure law ');
+  q = q.replace(/^Will a crypto market structure bill become law /i, 'Market structure law ');
+  q = q.replace(/\bbecomes law\b/i, 'passes');
+  q = q.replace(/\bbecome law\b/i, 'passes');
+  // Normalize "before {Month} 1, YYYY?" → "by {Month} YYYY"
+  q = q.replace(/before ([A-Za-z]+) 1,\s*(\d{4})\??/i, 'by $1 $2');
+  return q;
+}
+
+function isLadderRung(m) {
+  // Kalshi KXCRYPTOSTRUCTURE ladder rungs are shown in the dedicated widget, not the table.
+  return (m.ticker || '').toUpperCase().startsWith('KXCRYPTOSTRUCTURE');
+}
+
+function renderMarketsTable(allMarkets) {
+  const tbody = document.getElementById('marketsBody');
+  // NOTE: dropped bare 'sec' — matched "section", "sector", "securities" too broadly.
+  // Use precise tokens instead.
+  const keywords = ['clarity', 'cftc', 'prediction market', 'event contract', 'crypto market structure', 'kalshi', 'securities exchange', 'sec rule', 'sec chair'];
+  let relevantMarkets = allMarkets.filter(m => {
+    if (isLadderRung(m)) return false;  // de-duplicated into passage ladder widget
+    const q = (m.question || '').toLowerCase();
+    return keywords.some(k => q.includes(k));
+  });
+
+  // Sort: group ladder rungs chronologically within each event, then by volume across events.
+  // Strategy: primary key = event_title (or question prefix) bucket, ordered by that bucket's
+  // max volume descending; secondary key = end_date ascending (so rungs read chronologically).
+  const bucketKey = m => (m.event_title || (m.question || '').split(': ')[0] || m.ticker || '');
+  const bucketMaxVol = new Map();
+  for (const m of relevantMarkets) {
+    const k = bucketKey(m);
+    const v = m.volume || 0;
+    if (!bucketMaxVol.has(k) || bucketMaxVol.get(k) < v) bucketMaxVol.set(k, v);
+  }
+  relevantMarkets.sort((a, b) => {
+    const bva = bucketMaxVol.get(bucketKey(a)) || 0;
+    const bvb = bucketMaxVol.get(bucketKey(b)) || 0;
+    if (bva !== bvb) return bvb - bva;                           // bucket by descending headline volume
+    const da = (a.end_date || '').slice(0, 10);
+    const db = (b.end_date || '').slice(0, 10);
+    if (da && db && da !== db) return da.localeCompare(db);      // chronological within bucket
+    return (b.volume || 0) - (a.volume || 0);
+  });
+  relevantMarkets = relevantMarkets.slice(0, 10);
+
+  if (relevantMarkets.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text3);padding:24px 8px">No relevant markets detected</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = relevantMarkets.map(m => {
+    const prob = getYesPrice(m);
+    const pcls = probClass(prob);
+    const platformClass = m.platform || 'kalshi';
+    const volume = (m.volume || 0);
+    const label = shortMarketLabel(m);
+    return `
+      <tr>
+        <td class="market-name" title="${escHtml(m.question || '')}">${escHtml(label)}</td>
+        <td><span class="market-platform ${platformClass}">${escHtml(m.platform || 'kalshi')}</span></td>
+        <td class="market-prob ${pcls}">${(prob * 100).toFixed(0)}%</td>
+        <td class="market-volume">${fmtMoneyShort(volume)}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+// ══════════════════════════════════════════════════════════
+// HORIZONTAL SVG TIMELINE
+// ══════════════════════════════════════════════════════════
+function renderTimeline() {
+  const svg = document.getElementById('hTimeline');
+  // Procedural gates for a split-jurisdiction (SEC + CFTC) bill. Senate Ag and
+  // Senate Banking are AND-gated — both committees must mark up before the
+  // floor. If Senate substitutes its own vehicle (e.g. DCIA S. 4064), the
+  // "House Concurrence" gate becomes a Conference Committee instead.
+  const milestones = [
+    { date: 'May 2025', event: 'House Filed',          status: 'passed',  detail: 'H.R. 3633 introduced' },
+    { date: 'Jul 2025', event: 'House Passed',         status: 'passed',  detail: '294–134' },
+    { date: '2026',     event: 'Senate Ag + Banking',  status: 'current', detail: 'AND-gated markup' },
+    { date: 'TBD',      event: 'Senate Floor',         status: 'pending', detail: '60-vote cloture' },
+    { date: 'TBD',      event: 'House Concurrence',    status: 'pending', detail: 'Or conference cmte' },
+    { date: 'TBD',      event: 'Presidential Sign',    status: 'pending', detail: 'Or veto override' },
+  ];
+
+  const W = 800, H = 150;
+  const padL = 40, padR = 40, padT = 40, padB = 36;
+  const plotW = W - padL - padR;
+  const y = padT + (H - padT - padB) / 2;
+  const step = plotW / (milestones.length - 1);
+
+  // Background rail
+  let rail = `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="#E2DDD6" stroke-width="3" stroke-linecap="round"/>`;
+  // Progress portion (passed milestones)
+  const passedIdx = milestones.map((m, i) => ({ m, i })).filter(x => x.m.status === 'passed').map(x => x.i);
+  if (passedIdx.length > 0) {
+    const lastPassed = Math.max(...passedIdx);
+    rail += `<line x1="${padL}" y1="${y}" x2="${padL + lastPassed * step}" y2="${y}" stroke="#4A8B5C" stroke-width="3" stroke-linecap="round"/>`;
+    // Extend dashed to current if present
+    const currentIdx = milestones.findIndex(m => m.status === 'current');
+    if (currentIdx > -1 && currentIdx > lastPassed) {
+      rail += `<line x1="${padL + lastPassed * step}" y1="${y}" x2="${padL + currentIdx * step}" y2="${y}" stroke="#D4A843" stroke-width="3" stroke-linecap="round" stroke-dasharray="3,4"/>`;
+    }
+  }
+
+  let dots = '';
+  let labels = '';
+  milestones.forEach((m, i) => {
+    const cx = padL + i * step;
+    let fill, stroke;
+    if (m.status === 'passed') { fill = '#4A8B5C'; stroke = '#4A8B5C'; }
+    else if (m.status === 'current') { fill = '#D4A843'; stroke = '#D4A843'; }
+    else { fill = '#FAF8F5'; stroke = '#A69F90'; }
+    dots += `<circle cx="${cx}" cy="${y}" r="8" fill="${fill}" stroke="${stroke}" stroke-width="2.5"/>`;
+    if (m.status === 'current') {
+      // Pulse ring
+      dots += `<circle cx="${cx}" cy="${y}" r="14" fill="none" stroke="#D4A843" stroke-width="1" opacity="0.4"/>`;
+    }
+    // Date above
+    labels += `<text x="${cx}" y="${y - 20}" text-anchor="middle" font-size="10" fill="#8A8275" font-family="JetBrains Mono, monospace" font-weight="600">${escHtml(m.date)}</text>`;
+    // Event below
+    labels += `<text x="${cx}" y="${y + 26}" text-anchor="middle" font-size="11" fill="#1C1B17" font-family="Inter, sans-serif" font-weight="600">${escHtml(m.event)}</text>`;
+    labels += `<text x="${cx}" y="${y + 40}" text-anchor="middle" font-size="9" fill="#8A8275" font-family="Inter, sans-serif">${escHtml(m.detail)}</text>`;
+  });
+
+  svg.innerHTML = rail + dots + labels;
+}
+
+// ══════════════════════════════════════════════════════════
+// REGULATORY LANDSCAPE
+// ══════════════════════════════════════════════════════════
+function renderLandscape() {
+  const host = document.getElementById('tracks');
+  const tracks = [
+    { name: 'CLARITY Act',       sub: 'Congress',     cls: 'legislative', pct: 45, status: 'House passed · Senate pending' },
+    { name: 'CFTC Rulemaking',   sub: 'Regulatory',   cls: 'regulatory',  pct: 60, status: 'Event contract rules · comment period closed' },
+    { name: 'Kalshi v. SEC',     sub: 'Litigation',   cls: 'legal',       pct: 30, status: 'Appeals pending' },
+  ];
+  host.innerHTML = tracks.map(t => `
+    <div class="track">
+      <div>
+        <div class="track-name">${escHtml(t.name)}</div>
+        <div class="track-name-sub">${escHtml(t.sub)}</div>
+      </div>
+      <div class="track-bar-wrap">
+        <div class="track-bar ${t.cls}" style="width:${t.pct}%"></div>
+      </div>
+      <div class="track-status">${escHtml(t.status)}</div>
+    </div>
+  `).join('');
+}
+
+// Init
+fetchData();
+setInterval(fetchData, 300000); // Refresh every 5 minutes
+</script>
+</body>
+</html>

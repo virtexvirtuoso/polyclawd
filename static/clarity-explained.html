@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CLARITY, Explained · Polyclawd</title>
+<meta name="description" content="The crypto market structure bill explained in plain English — what it does, where it is, and why it's stuck.">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Spectral:ital,wght@0,400;0,600;1,400&display=swap');
+
+  :root {
+    --bg: #FAF8F5;
+    --surface: #FFFFFF;
+    --surface2: #F5F2EE;
+    --surface3: #EFEAE2;
+    --border: #E2DDD6;
+    --border-light: #EDE9E3;
+    --rule: #D8D2C8;
+    --ink: #1C1B17;
+    --text: #2D2D2D;
+    --text2: #6B6558;
+    --text3: #8A8275;
+    --text4: #A69F90;
+    --terracotta: #C75B39;
+    --terracotta-dark: #A84725;
+    --gold: #D4A843;
+    --gold-dark: #B8923E;
+    --pos-green: #4A8B5C;
+    --neg-red: #C25B4A;
+    --shadow-sm: 0 1px 2px rgba(28, 27, 23, 0.04);
+    --shadow: 0 1px 3px rgba(28, 27, 23, 0.06), 0 1px 2px rgba(28, 27, 23, 0.04);
+    --shadow-lg: 0 4px 12px rgba(28, 27, 23, 0.08), 0 1px 3px rgba(28, 27, 23, 0.06);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    line-height: 1.6;
+  }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+  .serif { font-family: 'Spectral', Georgia, serif; }
+
+  .container {
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 40px 24px 80px;
+  }
+
+  /* ── MASTHEAD ── */
+  .masthead {
+    padding-bottom: 24px;
+    border-bottom: 2px solid var(--ink);
+    margin-bottom: 36px;
+  }
+  .masthead-brand {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--terracotta);
+    margin-bottom: 10px;
+  }
+  .masthead-title {
+    font-family: 'Spectral', Georgia, serif;
+    font-size: 48px;
+    font-weight: 600;
+    color: var(--ink);
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    margin-bottom: 12px;
+  }
+  .masthead-title em { font-style: italic; color: var(--terracotta); }
+  .masthead-deck {
+    font-family: 'Spectral', Georgia, serif;
+    font-size: 19px;
+    font-style: italic;
+    color: var(--text2);
+    line-height: 1.4;
+    max-width: 620px;
+    margin-bottom: 18px;
+  }
+  .masthead-meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text3);
+    letter-spacing: 0.05em;
+  }
+  .masthead-meta .dot { color: var(--text4); padding: 0 6px; }
+  .masthead-meta a { color: var(--terracotta); text-decoration: none; }
+  .masthead-meta a:hover { text-decoration: underline; }
+
+  /* ── SECTION ── */
+  .section {
+    margin-bottom: 44px;
+  }
+  .kicker {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--terracotta);
+    margin-bottom: 6px;
+  }
+  h2 {
+    font-family: 'Spectral', Georgia, serif;
+    font-size: 28px;
+    font-weight: 600;
+    color: var(--ink);
+    letter-spacing: -0.015em;
+    margin-bottom: 14px;
+    line-height: 1.2;
+  }
+  h3 {
+    font-family: 'Inter', sans-serif;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--ink);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-top: 22px;
+    margin-bottom: 8px;
+  }
+  p {
+    font-size: 16px;
+    color: var(--text);
+    margin-bottom: 14px;
+  }
+  p.lede::first-letter {
+    font-family: 'Spectral', Georgia, serif;
+    font-size: 56px;
+    font-weight: 600;
+    float: left;
+    line-height: 0.85;
+    padding: 6px 8px 0 0;
+    color: var(--terracotta);
+  }
+  em { font-style: italic; }
+  strong { color: var(--ink); font-weight: 700; }
+  a { color: var(--terracotta); text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 2px; }
+  a:hover { text-decoration-color: var(--terracotta); }
+
+  ul {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 18px 0;
+  }
+  ul li {
+    font-size: 15px;
+    color: var(--text);
+    padding: 6px 0 6px 20px;
+    position: relative;
+  }
+  ul li::before {
+    content: "·";
+    position: absolute;
+    left: 4px;
+    color: var(--terracotta);
+    font-weight: 700;
+    font-size: 20px;
+    line-height: 1;
+    top: 8px;
+  }
+
+  /* ── THREE-LEGGED STOOL DIAGRAM ── */
+  .stool {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 12px;
+    margin: 20px 0 8px;
+  }
+  .stool-leg {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 18px 14px;
+    box-shadow: var(--shadow);
+    position: relative;
+  }
+  .stool-leg.done { border-top: 3px solid var(--pos-green); }
+  .stool-leg.pending { border-top: 3px solid var(--gold-dark); }
+  .stool-leg.drafting { border-top: 3px solid var(--neg-red); }
+  .stool-leg-status {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .stool-leg.done .stool-leg-status { color: var(--pos-green); }
+  .stool-leg.pending .stool-leg-status { color: var(--gold-dark); }
+  .stool-leg.drafting .stool-leg-status { color: var(--neg-red); }
+  .stool-leg-name {
+    font-family: 'Inter', sans-serif;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--ink);
+    margin-bottom: 4px;
+  }
+  .stool-leg-covers {
+    font-size: 11px;
+    color: var(--text2);
+    line-height: 1.4;
+    margin-bottom: 8px;
+  }
+  .stool-leg-date {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text3);
+  }
+
+  /* ── PROCEDURAL GATES ── */
+  .gates {
+    margin: 18px 0;
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+  }
+  .gate {
+    display: grid;
+    grid-template-columns: 28px 1fr auto;
+    gap: 14px;
+    padding: 14px 0;
+    border-bottom: 1px dashed var(--border-light);
+    align-items: baseline;
+  }
+  .gate:last-child { border-bottom: none; }
+  .gate-icon {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 16px;
+    font-weight: 700;
+    text-align: center;
+  }
+  .gate.done .gate-icon { color: var(--pos-green); }
+  .gate.next .gate-icon { color: var(--gold-dark); }
+  .gate.pending .gate-icon { color: var(--text4); }
+  .gate-body { }
+  .gate-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 2px;
+  }
+  .gate-note {
+    font-size: 12px;
+    color: var(--text2);
+    font-style: italic;
+  }
+  .gate-when {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text3);
+    white-space: nowrap;
+  }
+  .gate.pending .gate-name { color: var(--text2); }
+
+  /* ── BILL COMPARE TABLE ── */
+  .compare {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin: 18px 0;
+  }
+  .compare-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--terracotta);
+    padding: 16px 18px;
+    border-radius: 2px;
+  }
+  .compare-card.senate { border-left-color: var(--gold-dark); }
+  .compare-head {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text3);
+    margin-bottom: 6px;
+  }
+  .compare-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--ink);
+    margin-bottom: 2px;
+  }
+  .compare-subtitle {
+    font-size: 12px;
+    color: var(--text2);
+    margin-bottom: 10px;
+    font-style: italic;
+  }
+  .compare-detail {
+    font-size: 12px;
+    color: var(--text2);
+    line-height: 1.5;
+  }
+
+  /* ── PULLQUOTE ── */
+  .pullquote {
+    font-family: 'Spectral', Georgia, serif;
+    font-style: italic;
+    font-size: 22px;
+    line-height: 1.35;
+    color: var(--ink);
+    border-left: 3px solid var(--terracotta);
+    padding: 8px 0 8px 22px;
+    margin: 28px 0;
+  }
+
+  /* ── MARKET BOX ── */
+  .market-box {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 22px 24px;
+    margin: 24px 0;
+  }
+  .market-box-head {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.8px;
+    text-transform: uppercase;
+    color: var(--terracotta);
+    margin-bottom: 10px;
+  }
+  .market-box-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--ink);
+    margin-bottom: 10px;
+  }
+  .ladder {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 6px;
+    margin: 12px 0 8px;
+  }
+  .rung {
+    text-align: center;
+    padding: 10px 4px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+  }
+  .rung-close {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text3);
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .rung-price {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--ink);
+    margin-top: 2px;
+  }
+  .ladder-note {
+    font-size: 11px;
+    color: var(--text3);
+    font-style: italic;
+    text-align: center;
+    margin-top: 6px;
+  }
+
+  /* ── FOOTER ── */
+  .footer {
+    margin-top: 60px;
+    padding-top: 24px;
+    border-top: 1px solid var(--rule);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text3);
+    letter-spacing: 0.05em;
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .footer a { color: var(--terracotta); text-decoration: none; }
+  .footer a:hover { text-decoration: underline; }
+
+  @media (max-width: 640px) {
+    .masthead-title { font-size: 34px; }
+    .masthead-deck { font-size: 16px; }
+    h2 { font-size: 22px; }
+    .stool { grid-template-columns: 1fr; }
+    .compare { grid-template-columns: 1fr; }
+    .ladder { grid-template-columns: repeat(5, 1fr); gap: 3px; }
+    .rung { padding: 8px 2px; }
+    .rung-price { font-size: 13px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- ── MASTHEAD ── -->
+  <header class="masthead">
+    <div class="masthead-brand">Polyclawd · Policy Brief</div>
+    <h1 class="masthead-title">CLARITY, <em>Explained</em></h1>
+    <p class="masthead-deck">The crypto market structure bill in plain English — what it does, where it is, and why it's stuck in the Senate.</p>
+    <div class="masthead-meta">
+      A POLYCLAWD EXPLAINER
+      <span class="dot">·</span>
+      <a href="/clarity">← Live Tracker</a>
+      <span class="dot">·</span>
+      <a href="/polyclawd/">Dashboard</a>
+    </div>
+  </header>
+
+  <!-- ── THE LEDE ── -->
+  <section class="section">
+    <div class="kicker">The Problem</div>
+    <h2>Why crypto needs a rulebook</h2>
+    <p class="lede">For a decade, US crypto firms have operated in a legal gray zone. The SEC claims authority over most tokens as unregistered securities. The CFTC claims authority over Bitcoin and Ether as commodities. Exchanges don't know which agency to register with, investors don't know which protections apply, and builders routinely flee to jurisdictions with clearer rules.</p>
+    <p>The CLARITY Act is Congress's attempt to end that gray zone by drawing explicit jurisdictional lines between the SEC and the CFTC — and giving crypto exchanges a federal registration regime for the first time.</p>
+  </section>
+
+  <!-- ── THREE-LEGGED STOOL ── -->
+  <section class="section">
+    <div class="kicker">The Framework</div>
+    <h2>A three-legged stool</h2>
+    <p>Congress is building the crypto rulebook in three separate pieces. Think of it as a stool with three legs — each law covers a different slice of the crypto market, and all three are needed to make the framework stand on its own.</p>
+
+    <div class="stool">
+      <div class="stool-leg done">
+        <div class="stool-leg-status">✓ Signed into law</div>
+        <div class="stool-leg-name">GENIUS Act</div>
+        <div class="stool-leg-covers">Stablecoins (USDC, USDT, PYUSD)</div>
+        <div class="stool-leg-date">Jul 18, 2025</div>
+      </div>
+      <div class="stool-leg pending">
+        <div class="stool-leg-status">◐ In the Senate</div>
+        <div class="stool-leg-name">CLARITY + DCIA</div>
+        <div class="stool-leg-covers">Spot exchanges, brokers, dealers, "digital commodities" (BTC, ETH)</div>
+        <div class="stool-leg-date">House passed Jul 2025</div>
+      </div>
+      <div class="stool-leg drafting">
+        <div class="stool-leg-status">○ Still drafting</div>
+        <div class="stool-leg-name">Senate Banking Bill</div>
+        <div class="stool-leg-covers">Crypto securities, ICO-style tokens, investment contracts</div>
+        <div class="stool-leg-date">No text yet</div>
+      </div>
+    </div>
+
+    <p style="font-size: 13px; color: var(--text2); font-style: italic; margin-top: 12px;">GENIUS handles the easy, bipartisan slice (dollar-backed stablecoins). CLARITY handles the middle (spot markets under CFTC authority). Senate Banking will eventually handle the contentious end (which tokens count as securities). All three must exist for US crypto to have a complete federal framework.</p>
+  </section>
+
+  <!-- ── WHAT CLARITY DOES ── -->
+  <section class="section">
+    <div class="kicker">The Bill</div>
+    <h2>What CLARITY actually does</h2>
+    <p>The Digital Asset Market Clarity Act (H.R. 3633) is roughly 200 pages of statute, but its core moves are simple. In plain English, it:</p>
+
+    <ul>
+      <li><strong>Defines "digital commodity"</strong> — gives the first clean legal definition separating commodities (BTC, ETH) from securities</li>
+      <li><strong>Assigns the CFTC primary jurisdiction</strong> over digital commodity spot markets, carving them out of SEC securities law</li>
+      <li><strong>Creates a federal registration regime</strong> for crypto exchanges, brokers, and dealers — the first time in US history</li>
+      <li><strong>Imposes "core principles"</strong> on registered exchanges: listing standards, market surveillance, financial resources, cybersecurity, conflict-of-interest walls</li>
+      <li><strong>Mandates consumer protections</strong> including customer fund segregation (the FTX problem), conflict-of-interest rules, and plain-language disclosures</li>
+      <li><strong>Bars the Federal Reserve</strong> from issuing a retail central bank digital currency (CBDC)</li>
+      <li><strong>Sets an 18-month rulemaking deadline</strong> — the CFTC and SEC must finish the actual rulebook within 18 months of enactment</li>
+    </ul>
+  </section>
+
+  <!-- ── THE PATH TO LAW ── -->
+  <section class="section">
+    <div class="kicker">The Path</div>
+    <h2>How a bill like this becomes law</h2>
+    <p>Every policy market on Kalshi is ultimately pricing a sequence of procedural gates. For CLARITY, here's the actual path — each gate has to clear before the next one begins.</p>
+
+    <div class="gates">
+      <div class="gate done">
+        <div class="gate-icon">✓</div>
+        <div class="gate-body">
+          <div class="gate-name">House passage</div>
+          <div class="gate-note">H.R. 3633 passed 294-134, bipartisan</div>
+        </div>
+        <div class="gate-when">Jul 17, 2025</div>
+      </div>
+      <div class="gate done">
+        <div class="gate-icon">✓</div>
+        <div class="gate-body">
+          <div class="gate-name">Senate Agriculture Committee markup</div>
+          <div class="gate-note">Reported the Senate companion (DCIA)</div>
+        </div>
+        <div class="gate-when">Jan 29, 2026</div>
+      </div>
+      <div class="gate next">
+        <div class="gate-icon">◐</div>
+        <div class="gate-body">
+          <div class="gate-name">Senate Banking Committee markup</div>
+          <div class="gate-note">Postponed in January after ~100 amendments filed; late-April 2026 target</div>
+        </div>
+        <div class="gate-when">Target: late Apr 2026</div>
+      </div>
+      <div class="gate pending">
+        <div class="gate-icon">○</div>
+        <div class="gate-body">
+          <div class="gate-name">Senate floor vote</div>
+          <div class="gate-note">Needs 60 votes for cloture, simple majority to pass</div>
+        </div>
+        <div class="gate-when">Target: mid-2026</div>
+      </div>
+      <div class="gate pending">
+        <div class="gate-icon">○</div>
+        <div class="gate-body">
+          <div class="gate-name">House concurrence <em>or</em> conference committee</div>
+          <div class="gate-note">House must agree to Senate version — or both chambers negotiate a compromise</div>
+        </div>
+        <div class="gate-when">Not scheduled</div>
+      </div>
+      <div class="gate pending">
+        <div class="gate-icon">○</div>
+        <div class="gate-body">
+          <div class="gate-name">Presidential signature</div>
+          <div class="gate-note">Trump has publicly supported crypto market structure legislation</div>
+        </div>
+        <div class="gate-when">Not possible yet</div>
+      </div>
+    </div>
+
+    <p style="font-size: 13px; color: var(--text2); font-style: italic;">Split-jurisdiction wrinkle: because crypto touches both the SEC and the CFTC, the Senate markup stage is <strong>AND-gated</strong> — <em>both</em> Agriculture (CFTC side) and Banking (SEC side) must report before the bill can reach the floor. One committee sitting on it stalls everything.</p>
+  </section>
+
+  <!-- ── PULLQUOTE ── -->
+  <div class="pullquote">
+    "If Banking doesn't clear markup by end of April, the bill likely slips past the October midterm recess — and 2026 passage becomes structurally implausible."
+  </div>
+
+  <!-- ── VEHICLE SUBSTITUTION ── -->
+  <section class="section">
+    <div class="kicker">The Complication</div>
+    <h2>Why there are actually two bills</h2>
+    <p>The House passed <strong>CLARITY</strong> (H.R. 3633) in July 2025 as a single bill covering both SEC and CFTC jurisdictions. But the Senate is writing its own version — and splitting it in two. This is the thing most people get wrong when they read news stories about "the crypto bill."</p>
+
+    <div class="compare">
+      <div class="compare-card">
+        <div class="compare-head">House · Single Bill</div>
+        <div class="compare-title">CLARITY Act</div>
+        <div class="compare-subtitle">H.R. 3633</div>
+        <div class="compare-detail">Covers <strong>both</strong> the CFTC side (spot markets, exchanges) <strong>and</strong> the SEC side (token classification). Passed July 2025, 294-134 bipartisan.</div>
+      </div>
+      <div class="compare-card senate">
+        <div class="compare-head">Senate · Split in Two</div>
+        <div class="compare-title">DCIA + Banking bill</div>
+        <div class="compare-subtitle">S. 4064 (Ag) + Banking draft (TBD)</div>
+        <div class="compare-detail">Senate Ag's <strong>Digital Commodity Intermediaries Act</strong> handles CFTC side only. Senate Banking writing a <strong>separate bill</strong> for the SEC side. Both must pass, then reconcile with the House.</div>
+      </div>
+    </div>
+
+    <p>This is the "vehicle substitution" trap. If the Senate uses its own bills instead of amending H.R. 3633, the House can't just "concur" — it either has to accept the Senate package as-is (unlikely) or send everything to a <strong>conference committee</strong> where a handful of senators and representatives negotiate a single compromise bill. Conference adds weeks to months of delay.</p>
+  </section>
+
+  <!-- ── KEY PLAYERS ── -->
+  <section class="section">
+    <div class="kicker">The Players</div>
+    <h2>Who's actually driving this</h2>
+
+    <h3>House (done their job)</h3>
+    <ul>
+      <li><strong>French Hill (R-AR)</strong> — Chair, House Financial Services Committee. Co-lead on CLARITY</li>
+      <li><strong>GT Thompson (R-PA)</strong> — Chair, House Agriculture Committee. Co-lead on CLARITY's CFTC provisions</li>
+    </ul>
+
+    <h3>Senate Agriculture (done their job)</h3>
+    <ul>
+      <li><strong>John Boozman (R-AR)</strong> — Chair, Senate Agriculture Committee. Sponsor of the DCIA (S. 4064)</li>
+      <li><strong>Amy Klobuchar (D-MN)</strong> — Ranking Member. Worked with Boozman to pass DCIA out of committee Jan 2026</li>
+    </ul>
+
+    <h3>Senate Banking (the bottleneck)</h3>
+    <ul>
+      <li><strong>Tim Scott (R-SC)</strong> — Chair, Senate Banking Committee. Responsible for scheduling the Banking markup (postponed January)</li>
+      <li><strong>Cynthia Lummis (R-WY)</strong> — Banking subcommittee chair. Leading drafter of the Senate SEC-side text</li>
+      <li><strong>Thom Tillis (R-NC)</strong> + <strong>Angela Alsobrooks (D-MD)</strong> — brokered the March 2026 stablecoin yield compromise</li>
+      <li><strong>Elizabeth Warren (D-MA)</strong> — Ranking Member. Leading Democratic opposition, pushing for "gryfto" amendments targeting Trump-family conflicts of interest</li>
+    </ul>
+  </section>
+
+  <!-- ── FOR PREDICTION MARKETS ── -->
+  <section class="section">
+    <div class="kicker">Why It Matters Here</div>
+    <h2>What the prediction markets are pricing</h2>
+    <p>Kalshi's <span class="mono">KXCRYPTOSTRUCTURE</span> market is a <strong>ladder</strong>: nine individual YES/NO contracts, each asking "will crypto market structure legislation become law by <em>this</em> date?" Because each rung's deadline gives the bill more time to clear every procedural gate, the YES prices rise monotonically as you walk out the calendar.</p>
+
+    <div class="market-box">
+      <div class="market-box-head">Kalshi · KXCRYPTOSTRUCTURE ladder</div>
+      <div class="market-box-title">Will crypto market structure legislation become law?</div>
+      <div class="ladder">
+        <div class="rung"><div class="rung-close">May</div><div class="rung-price">$0.02</div></div>
+        <div class="rung"><div class="rung-close">Jun</div><div class="rung-price">$0.13</div></div>
+        <div class="rung"><div class="rung-close">Jul</div><div class="rung-price">$0.26</div></div>
+        <div class="rung"><div class="rung-close">Aug</div><div class="rung-price">$0.40</div></div>
+        <div class="rung"><div class="rung-close">By '27</div><div class="rung-price">$0.64</div></div>
+      </div>
+      <div class="ladder-note">Snapshot · each rung = P(signed into law by close date) · see live tracker for current prices</div>
+    </div>
+
+    <p>Reading the ladder: the market thinks there's essentially <strong>zero</strong> chance of passage by May (Banking hasn't even marked up yet), a <strong>13%</strong> chance by June, climbing to <strong>40%</strong> by August, and <strong>64%</strong> by end of 2027. The gap between August and "by 2027" — about 24 points of probability spread over 17 months — is the market's implied answer to the key question: <em>if the bill doesn't pass before the October 2026 midterm recess, how likely is a post-election revival?</em></p>
+
+    <p>If you think the Banking markup will happen in April as scheduled, the June and July rungs look cheap. If you think Warren's gryfto amendments or the Senate/House vehicle split will force a conference committee, the 2027 rung looks cheap. The point of the live tracker is to update the procedural-gate probabilities as news comes in, so you can tell which rung is mispriced at any given moment.</p>
+  </section>
+
+  <!-- ── WHAT TO WATCH ── -->
+  <section class="section">
+    <div class="kicker">Next 30 Days</div>
+    <h2>What to watch</h2>
+    <ul>
+      <li><strong>Senate Banking Committee markup notice</strong> — scheduled targets around late April. Any firm date on the committee calendar is the single biggest signal</li>
+      <li><strong>Stablecoin yield amendment text</strong> — the Tillis/Alsobrooks compromise needs to survive committee amendment process</li>
+      <li><strong>Vehicle decision</strong> — does the Senate amend H.R. 3633, or pass standalone DCIA + Banking bill? This determines whether House concurrence or conference committee comes next</li>
+      <li><strong>Floor schedule</strong> — Senate Majority Leader's floor calendar is the tell for when markup → floor vote transition happens</li>
+      <li><strong>White House statement</strong> — Trump's public positioning shifts market pricing noticeably even without any procedural movement</li>
+    </ul>
+  </section>
+
+  <!-- ── FOOTER ── -->
+  <div class="footer">
+    <div>
+      POLYCLAWD <span class="dot" style="color: var(--text4);">·</span>
+      <a href="/clarity">Live Tracker</a> <span class="dot" style="color: var(--text4);">·</span>
+      <a href="/polyclawd/">Dashboard</a> <span class="dot" style="color: var(--text4);">·</span>
+      <a href="https://www.congress.gov/bill/119th-congress/house-bill/3633">H.R. 3633</a> <span class="dot" style="color: var(--text4);">·</span>
+      <a href="https://www.congress.gov/bill/119th-congress/senate-bill/4064">S. 4064</a>
+    </div>
+    <div>An explainer · not legal advice</div>
+  </div>
+
+</div>
+
+</body>
+</html>
