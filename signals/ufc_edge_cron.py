@@ -36,39 +36,10 @@ DRY_RUN = "--dry" in sys.argv
 
 # ── Telegram Alerting ──────────────────────────────────────────────
 
-def _send_telegram(message: str) -> bool:
-    """Send a Telegram alert via OpenClaw gateway or direct Bot API."""
-    import subprocess, urllib.request, urllib.parse
-
-    # Try OpenClaw CLI first
-    try:
-        target = "468298295"
-        cmd = ["openclaw", "message", "send", "--channel", "telegram",
-               "--target", target, "--message", message]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        if result.returncode == 0:
-            return True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
-    # Fallback: direct Bot API
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    if not token:
-        return False
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "468298295")
-    fields = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
-    payload = urllib.parse.urlencode(fields).encode()
-    try:
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{token}/sendMessage", data=payload)
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode()).get("ok", False)
-    except Exception:
-        return False
-
-
 def _send_ufc_alert(edge) -> bool:
     """Format and send a Telegram alert for an actionable UFC edge."""
+    from scripts.alert_formatter import format_alert, send_telegram
+
     if edge.edge_type == "pm_vs_pinnacle":
         parts = []
         if edge.polymarket:
@@ -78,34 +49,60 @@ def _send_ufc_alert(edge) -> bool:
         if edge.pinnacle:
             parts.append(f"PIN {edge.pinnacle.price:.1%}")
         prices = " | ".join(parts)
-        msg = (
-            f"⚡ UFC EDGE — {edge.fight}\n"
-            f"{edge.fighter}\n"
-            f"{prices}\n"
-            f"Edge: {edge.edge_pp:+.1f}pp → {edge.direction}"
+
+        direction = edge.direction.upper()
+        price_cents = int((edge.polymarket.price if edge.polymarket else edge.kalshi.price) * 100)
+
+        msg = format_alert(
+            alert_type="ufc",
+            rank=1,
+            emoji="🥊",
+            title=edge.fight,
+            direction=direction,
+            price_cents=price_cents,
+            action=f"{prices} · Edge {edge.edge_pp:+.1f}pp → {direction}",
+            signal_score=f"{abs(edge.edge_pp):.0f}pp edge",
+            close_info="",
+            data_line=f"Movement: {edge.movement.delta_15m:+.1f}pp (15m)" if edge.movement and edge.movement.delta_15m is not None else "",
         )
-        if edge.movement and edge.movement.delta_15m is not None:
-            msg += f"\nMovement: {edge.movement.delta_15m:+.1f}pp (15m)"
 
     elif edge.edge_type == "pm_vs_kalshi":
-        msg = (
-            f"⚡ PM-KALSHI ARB — {edge.fight}\n"
-            f"{edge.fighter}\n"
-            f"PM: {edge.polymarket.price:.1%} | KA: {edge.kalshi.price:.1%}\n"
-            f"Gap: {edge.edge_pp:.1f}pp → {edge.direction}"
+        direction = edge.direction.upper()
+        price_cents = int(edge.polymarket.price * 100)
+
+        msg = format_alert(
+            alert_type="arb",
+            rank=1,
+            emoji="🥊",
+            title=edge.fight,
+            direction=direction,
+            price_cents=price_cents,
+            action=f"PM {edge.polymarket.price:.1%} vs KA {edge.kalshi.price:.1%} · Gap {edge.edge_pp:.1f}pp",
+            signal_score=f"{abs(edge.edge_pp):.0f}pp gap",
+            close_info="",
+            data_line="",
         )
 
     elif edge.edge_type == "soft_vs_pinnacle":
-        msg = (
-            f"⚡ STALE LINE — {edge.fight}\n"
-            f"{edge.fighter}\n"
-            f"{edge.soft_book.platform}: {edge.soft_book.price:.1%} | PIN: {edge.pinnacle.price:.1%}\n"
-            f"Overpriced by {edge.edge_pp:.1f}pp → {edge.direction}"
+        direction = edge.direction.upper()
+        price_cents = int(edge.soft_book.price * 100)
+
+        msg = format_alert(
+            alert_type="stale",
+            rank=1,
+            emoji="🥊",
+            title=edge.fight,
+            direction=direction,
+            price_cents=price_cents,
+            action=f"{edge.soft_book.platform} {edge.soft_book.price:.1%} vs PIN {edge.pinnacle.price:.1%} · Overpriced {edge.edge_pp:.1f}pp",
+            signal_score=f"{abs(edge.edge_pp):.0f}pp overpriced",
+            close_info="",
+            data_line="",
         )
     else:
         return False
 
-    return _send_telegram(msg)
+    return send_telegram(msg)
 
 
 # ── Resolution Tracking ─────────────────────────────────────────────

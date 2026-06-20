@@ -78,6 +78,7 @@ def get_meta_db(path: Optional[Path] = None) -> sqlite3.Connection:
         ("flow_dollars",  "REAL"),
         ("wallet_win_rate", "REAL"),
         ("wallet_n",      "INTEGER"),  # closed_positions count at alert time
+        ("sub_title",     "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE whale_outcomes ADD COLUMN {col} {definition}")
@@ -225,11 +226,11 @@ def ingest_new_alerts(meta: sqlite3.Connection,
             "INSERT OR IGNORE INTO whale_outcomes"
             " (alert_id, ts, platform, market, severity, score, reasons,"
             "  condition_id, direction, price_at_alert, updated,"
-            "  top_wallet, flow_dollars, wallet_win_rate, wallet_n)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "  top_wallet, flow_dollars, wallet_win_rate, wallet_n, sub_title)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (r["id"], r["ts"], r["platform"], r["market"], r["severity"],
              r["score"], r["reasons"], p.get("condition_id"), direction, p0, time.time(),
-             top_wallet, flow_dollars, wallet_win_rate, wallet_n))
+             top_wallet, flow_dollars, wallet_win_rate, wallet_n, p.get("sub_title", "")))
         n += 1
     meta.commit()
     return n

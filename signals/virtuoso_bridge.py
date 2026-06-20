@@ -73,6 +73,14 @@ def call_tool(tool_name: str, arguments: dict = None) -> dict:
     if cached:
         return cached
 
+    # Circuit breaker: skip if MCP server is known-down
+    try:
+        from api.services.source_health import is_circuit_open, trip_circuit, reset_circuit
+        if is_circuit_open("polyclawd_mcp"):
+            return {"error": "circuit_open", "detail": "MCP server circuit breaker is open"}
+    except Exception:
+        pass
+
     try:
         # Step 1: Initialize
         init_resp, sid = _mcp_request({
@@ -100,12 +108,27 @@ def call_tool(tool_name: str, arguments: dict = None) -> dict:
             text = content[0].get("text", "")
             result = {"raw_text": text}
             _cache_set(ck, result)
+            try:
+                reset_circuit("polyclawd_mcp")
+            except Exception:
+                pass
             return result
 
         _cache_set(ck, tool_resp)
+        try:
+            reset_circuit("polyclawd_mcp")
+        except Exception:
+            pass
         return tool_resp
 
     except Exception as e:
+        # Trip circuit breaker on connection failures (MCP server down)
+        try:
+            from api.services.source_health import trip_circuit
+            if "Connection refused" in str(e) or "timed out" in str(e):
+                trip_circuit("polyclawd_mcp", initial_backoff_s=300, max_backoff_s=1800)
+        except Exception:
+            pass
         return {"error": str(e)}
 
 

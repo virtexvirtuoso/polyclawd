@@ -30,8 +30,8 @@ DB_PATH = STORAGE_DIR / "shadow_trades.db"
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 
-# Rate limiting: 1 call per 5 seconds
-RATE_DELAY = 5.0
+# Rate limiting: 0.5s between CLOB calls (public endpoint, no auth required)
+RATE_DELAY = 0.5
 
 
 # ─── DB Init ─────────────────────────────────────────────────────────

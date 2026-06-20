@@ -852,26 +852,55 @@ def evaluate_weather_market(title: str, market_price: float) -> Optional[dict]:
 
 
 def scan_kalshi_weather() -> List[dict]:
-    """Scan Kalshi weather markets for edges."""
+    """Scan Kalshi weather markets for edges.
+
+    Kalshi migrated from generic series (KXTEMPD, KXRAIND) to per-city series
+    (KXHIGHTATL, KXLOWTNYC, KXRAINNY, etc.) in mid-2026. This fetches all
+    per-city weather series that match our tracked cities.
+    """
     signals = []
-    
-    weather_cats = ["KXTEMPD", "KXTEMPW", "KXRAIND", "KXWIND", "KXSNOW", "KXHUMID"]
-    
-    for cat in weather_cats:
-        url = f"{KALSHI_API}/events?series_ticker={cat}&status=open&limit=50"
+
+    # Per-city series tickers — high temp, low temp, rain (monthly variants too)
+    weather_series = [
+        # High temperature (daily)
+        "KXHIGHTATL", "KXHIGHTBOS", "KXHIGHTDAL", "KXHIGHTDC",
+        "KXHIGHTEMPDEN", "KXHIGHTHOU", "KXHIGHTLV", "KXHIGHTMIN",
+        "KXHIGHTNOLA", "KXHIGHTOKC", "KXHIGHTPHX", "KXHIGHTSATX",
+        "KXHIGHTSEA", "KXHIGHTSFO",
+        # Low temperature (daily)
+        "KXLOWTATL", "KXLOWTAUS", "KXLOWTBOS", "KXLOWTCHI",
+        "KXLOWTDAL", "KXLOWTDC", "KXLOWTDEN", "KXLOWTHOU",
+        "KXLOWTLAX", "KXLOWTLV", "KXLOWTMIA", "KXLOWTMIN",
+        "KXLOWTNOLA", "KXLOWTNYC", "KXLOWTOKC", "KXLOWTPHIL",
+        "KXLOWTPHX", "KXLOWTSATX", "KXLOWTSEA", "KXLOWTSFO",
+        # Rain (daily/monthly)
+        "KXRAINNY", "KXRAINNYC", "KXRAINMIA", "KXRAINHOU",
+        "KXRAINSEA", "KXRAINDALM", "KXRAINLAXM", "KXRAINSFOM",
+        "KXRAINCHIM", "KXRAINDENM", "KXRAINAUSM", "KXRAINHOUM",
+        "KXRAINMIAM", "KXRAINSEAM", "KXRAINNYCM",
+        # Snow (monthly)
+        "KXNYCSNOWM", "KXBOSSNOWM", "KXCHISNOWM", "KXDCSNOWM",
+        "KXDENSNOWM", "KXDALSNOWM", "KXASPSNOWM",
+        # Hourly directional temp
+        "KXTEMPBOSH", "KXTEMPCHIH", "KXTEMPDCH",
+        "KXTEMPLAXH", "KXTEMPMIAH",
+    ]
+
+    for series in weather_series:
+        url = f"{KALSHI_API}/events?series_ticker={series}&status=open&limit=20"
         data = _fetch_json(url)
         if not data:
             continue
-        
+
         for event in data.get("events", []):
             for market in event.get("markets", []):
                 title = market.get("title", "")
                 yes_price = market.get("yes_price", 50) / 100.0  # Kalshi cents → decimal
                 volume = market.get("volume", 0)
-                
+
                 if volume < 100:
                     continue
-                
+
                 result = evaluate_weather_market(title, yes_price)
                 if result:
                     result["platform"] = "kalshi"
@@ -879,7 +908,7 @@ def scan_kalshi_weather() -> List[dict]:
                     result["market"] = title
                     result["volume"] = volume
                     signals.append(result)
-    
+
     return signals
 
 

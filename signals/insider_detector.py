@@ -516,70 +516,48 @@ def _store_insider_trade(result: Dict):
 
 def send_alerts(results: List[Dict]):
     """Send alerts for detected insider activity."""
-    for r in results:
+    from scripts.alert_formatter import format_alert, send_telegram
+
+    for i, r in enumerate(results, 1):
         score = r["scores"]["insider_score"]
-        
-        if score >= 60:
-            _alert_discord(r)
-        if score >= 80:
-            _alert_telegram(r)
+        # Only alert on high conviction (80+). Log 60-79 for calibration.
+        if score < 80:
+            continue
 
+        s = r["scores"]
+        wallet = r["wallet"]
+        age_str = f"{s['wallet_age_hours']:.0f}h" if s.get("wallet_age_hours") is not None else "unknown"
+        wallet_short = wallet[:8] + "..." + wallet[-4:] if len(wallet) > 16 else wallet
 
-def _format_alert(r: Dict) -> str:
-    """Format insider alert message."""
-    s = r["scores"]
-    wallet = r["wallet"]
-    age_str = f"{s['wallet_age_hours']:.0f}h" if s.get("wallet_age_hours") is not None else "unknown"
-    
-    level = "🚨 CRITICAL" if s["insider_score"] >= 80 else "⚠️ HIGH" if s["insider_score"] >= 60 else "📊 MODERATE"
-    
-    slug = r.get("event_slug", "")
-    url = f"https://polymarket.com/event/{slug}" if slug else ""
-    
-    lines = [
-        f"{level} INSIDER DETECTED — Score: {s['insider_score']:.0f}/100",
-        f"",
-        f"💰 ${r['size_usd']:,.0f} {r['side']} '{r['outcome']}' @ {r['price']:.2f}",
-        f"📋 {r['title'][:80]}",
-        f"",
-        f"🔑 Wallet: {wallet[:8]}...{wallet[-6:]}",
-        f"⏰ Wallet age: {age_str}",
-        f"",
-        f"Score breakdown:",
-        f"  Wallet age:    {s['wallet_age_score']:>5.0f}/100 (weight 30%)",
-        f"  Bet size:      {s['bet_size_score']:>5.0f}/100 (weight 25%)",
-        f"  Specificity:   {s['event_specificity_score']:>5.0f}/100 (weight 20%)",
-        f"  Concentration: {s['concentration_score']:>5.0f}/100 (weight 15%)",
-        f"  Timing:        {s['timing_score']:>5.0f}/100 (weight 10%)",
-    ]
-    if url:
-        lines.append(f"\n🔗 {url}")
-    
-    return "\n".join(lines)
+        slug = r.get("event_slug", "")
+        url = f"https://polymarket.com/event/{slug}" if slug else ""
 
+        # Skip decided markets (price at 0¢ or 100¢ = already resolved)
+        price_raw = r.get("price", 0)
+        if price_raw <= 0.02 or price_raw >= 0.98:
+            logger.info("SKIP decided market: '{}' price={:.2f}", r["title"][:50], price_raw)
+            continue
 
-def _alert_discord(r: Dict):
-    """Send Discord webhook alert."""
-    try:
-        webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
-        if not webhook_url:
-            return
-        msg = _format_alert(r)
-        _client().post(webhook_url, json={"content": msg}, timeout=10)
-    except Exception as e:
-        logger.debug("Discord insider alert failed: {}", e)
+        # Map exchange terminology to prediction market language
+        side = "YES" if r["side"] == "BUY" else "NO" if r["side"] == "SELL" else r["side"]
+        price = int(price_raw * 100)
+        size = r["size_usd"]
 
+        msg = format_alert(
+            alert_type="insider",
+            rank=i,
+            emoji="🚨",
+            title=r["title"][:80],
+            direction=side,
+            price_cents=price,
+            action=f"🐋 New wallet bought ${size:,.0f} {side} · Wallet {age_str} old",
+            signal_score=f"Suspicion {score:.0f}/100 · Wallet {wallet_short}",
+            close_info="",
+            data_line=f"Wallet {age_str} old · ${size:,.0f} bet · {s['event_specificity_score']:.0f}% specific · {s['concentration_score']:.0f}% concentrated · {s['timing_score']:.0f} timing",
+            links=[f"<a href='{url}'>Polymarket</a>"] if url else None,
+        )
 
-def _alert_telegram(r: Dict):
-    """Send CRITICAL insider alert via Discord with @everyone ping."""
-    try:
-        webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
-        if not webhook_url:
-            return
-        msg = "🚨 @everyone\n\n" + _format_alert(r)
-        _client().post(webhook_url, json={"content": msg}, timeout=10)
-    except Exception as e:
-        logger.debug("Critical insider alert failed: {}", e)
+        send_telegram(msg)
 
 
 # ── Resolution Tracking ────────────────────────────────────────────
@@ -714,7 +692,8 @@ if __name__ == "__main__":
         results = scan_for_insiders()
         if results:
             for r in results:
-                print(_format_alert(r))
+                s = r["scores"]
+                print(f"[{s['insider_score']:.0f}] ${r['size_usd']:,.0f} {r['side']} @ {int(r['price']*100)}¢ — {r['title'][:60]}")
                 print("---")
             send_alerts(results)
         else:

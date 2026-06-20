@@ -5,11 +5,12 @@ Updated: 2026-03-20
 from fastapi import APIRouter, HTTPException
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Dict, Optional
 
 router = APIRouter(prefix="/social", tags=["social"])
 
-DB_PATH = "/var/www/virtuosocrypto.com/polyclawd/storage/shadow_trades.db"
+DB_PATH = Path(__file__).parent.parent.parent / "storage" / "shadow_trades.db"
 
 
 def get_db():

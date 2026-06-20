@@ -13,10 +13,19 @@ NON-CIRCULAR CLV metric (does the soft line you'd bet move toward you by kickoff
 aggregated to the MATCH level — the independent unit, since props within a match
 are correlated.
 
-The decision is SEQUENTIAL, not a fixed N: CONFIRM when the Wilson 95% lower bound
-of the match-level beat-rate clears 0.55; KILL when the upper bound falls below it;
-else keep accumulating. A large effect (the 10-match pilot showed ~84%) resolves in
-~15-25 matches.
+The decision is SEQUENTIAL and NOW CONTROL-CORRECTED (2026-06-18). The old gate
+compared the selected match-level beat-rate to a 50% coin flip and CONFIRMed when
+the Wilson lower bound cleared 0.55. That null was wrong: soft goalscorer lines
+drift up before kickoff for ~63% of ALL props (picked or not), so selected props
+beat 50% mechanically with zero skill. A matched-control re-analysis showed the
+within-match difference (selected vs same-match unpicked props) is a coin flip
+(12/24, p=1.0) — no edge. See scripts/scorer_clv_control.py.
+
+The corrected gate tests the WITHIN-MATCH PAIRED delta: in each match, does the
+mean move of selected props exceed the mean move of that match's control (never-
+flagged) props? CONFIRM when the Wilson 95% lower bound of the delta>0 rate clears
+0.50; KILL when its upper bound falls below 0.50; else accumulate. The old
+selected-vs-50% beat-rate is still printed for continuity but no longer decides.
 
 MODES
 -----
@@ -49,6 +58,9 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import phase0_prop_falsification as P  # noqa: E402  (consensus anchor, parsing, fetch helpers)
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.alert_formatter import send_telegram  # noqa: E402
+
 SCORER_MARKET = "player_goal_scorer_anytime"
 
 # [OQ2 / spec §3.2] De-bias the Betfair-weighted consensus YES with a flat haircut.
@@ -57,22 +69,6 @@ SCORER_MARKET = "player_goal_scorer_anytime"
 # two-way), so a flat factor de-vigs as well as Shin without a NO side. PROVISIONAL —
 # refit on resolution data. Applies to the fair-value anchor ONLY; soft price stays raw.
 GOALSCORER_YES_HAIRCUT = 0.958
-
-
-def send_telegram(text: str):
-    """Direct Bot API send (no LLM). Reads TELEGRAM_BOT_TOKEN/CHAT_ID from env
-    (sourced from ~/.config/polyclawd/alerts.env in cron). Plain text — no
-    parse_mode, to dodge the Markdown-400 trap."""
-    tok, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
-    if not tok or not chat:
-        print("[send] TELEGRAM_BOT_TOKEN/CHAT_ID not set — skipping")
-        return
-    data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
-    try:
-        urllib.request.urlopen(f"https://api.telegram.org/bot{tok}/sendMessage", data=data, timeout=20)
-        print("[send] alert sent")
-    except Exception as e:
-        print(f"[send] failed: {e}")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -247,62 +243,102 @@ def report(con, min_edge, send=False):
         by_prop[(eid, player)].append((snap, soft, edge, mins))
         titles[eid] = title
 
-    prop_clv = []  # (eid, player, soft_move_pp)
+    sel_live = []  # (eid, mv)   selected, LIVE anchor (entry=first flag) — headline continuity
+    sel_unif = defaultdict(list)  # eid -> [mv]  selected, uniform anchor (entry=earliest)
+    ctl_unif = defaultdict(list)  # eid -> [mv]  control (never flagged), uniform anchor
     for (eid, player), snaps in by_prop.items():
         snaps.sort(key=lambda x: x[0])  # by snapshot_at
-        flagged = [s for s in snaps if s[2] is not None and s[2] >= min_edge]
-        if not flagged:
-            continue  # never a survivor edge
-        entry = flagged[0]  # first time it flagged
+        if len(snaps) < 2:
+            continue
         pre = [s for s in snaps if s[3] is not None and s[3] >= 0]  # pre-kickoff snaps
-        close = max(pre, key=lambda x: x[0]) if pre else snaps[-1]  # closest to kickoff
-        if close[0] <= entry[0]:
-            continue  # need a later close snapshot
-        prop_clv.append((eid, player, (close[1] - entry[1]) * 100.0))
+        ever = any(s[2] is not None and s[2] >= min_edge for s in snaps)
 
+        # uniform anchor (entry = earliest snapshot) — applies to EVERY prop, matched windows
+        e, c = snaps[0], (max(pre, key=lambda x: x[0]) if pre else snaps[-1])
+        if c[0] > e[0] and e[1] is not None and c[1] is not None:
+            (sel_unif if ever else ctl_unif)[eid].append((c[1] - e[1]) * 100.0)
+
+        # live anchor (entry = first flagged snapshot) — reproduces the old selected metric
+        if ever:
+            flagged = [s for s in snaps if s[2] is not None and s[2] >= min_edge]
+            en, cl = flagged[0], (max(pre, key=lambda x: x[0]) if pre else snaps[-1])
+            if cl[0] > en[0] and en[1] is not None and cl[1] is not None:
+                sel_live.append((eid, (cl[1] - en[1]) * 100.0))
+
+    # headline (uncorrected) selected vs 50% — kept for continuity only
     by_match = defaultdict(list)
-    for eid, player, mv in prop_clv:
+    for eid, mv in sel_live:
         by_match[eid].append(mv)
-    match_mean = {eid: sum(mvs) / len(mvs) for eid, mvs in by_match.items()}
+    match_mean = {eid: sum(v) / len(v) for eid, v in by_match.items()}
     n_matches = len(match_mean)
     beats = sum(1 for m in match_mean.values() if m > 0)
-    pool_n = len(prop_clv)
-    pool_beat = sum(1 for _, _, mv in prop_clv if mv > 0)
+    pool_n = len(sel_live)
+    pool_beat = sum(1 for _, mv in sel_live if mv > 0)
     lo, hi = wilson(beats, n_matches)
 
-    print("\n" + "═" * 74)
-    print("  SCORER PAPER LOGGER — CLV REPORT (match-level, non-circular)")
-    print("═" * 74)
-    print(f"  matches with gradable flagged props: {n_matches}")
-    print(
-        f"  match-level beat-rate (mean soft-move > 0): {beats}/{n_matches}"
-        f"{(' = %.0f%%' % (100 * beats / n_matches)) if n_matches else ''}"
-    )
-    print(f"  Wilson 95% CI: [{lo:.2f}, {hi:.2f}]")
-    print(f"  (pooled prop-level: {pool_beat}/{pool_n} props moved toward you)")
-    if by_match:
-        print("\n  Per match (mean soft-move pp):")
-        for eid, m in sorted(match_mean.items(), key=lambda x: x[1], reverse=True):
-            print(f"    {('+' if m > 0 else '')}{m:5.1f}pp  {titles.get(eid, '?')[:40]} (n={len(by_match[eid])})")
+    # honest baseline: ALL props, uniform anchor (the real null, not 50%)
+    all_unif = [mv for v in sel_unif.values() for mv in v] + [mv for v in ctl_unif.values() for mv in v]
+    base_pos = sum(1 for mv in all_unif if mv > 0)
+    base_n = len(all_unif)
+
+    # DECISIVE: within-match paired delta = mean(selected) - mean(control).
+    # Sign-test convention — DROP ties (delta≈0), else a perfect tie miscounts as a
+    # loss and fires a spurious KILL (caught by /qa 2026-06-18).
+    EPS = 1e-9
+    sel_mean = {eid: sum(v) / len(v) for eid, v in sel_unif.items()}
+    ctl_mean = {eid: sum(v) / len(v) for eid, v in ctl_unif.items()}
+    all_deltas = [sel_mean[eid] - ctl_mean[eid] for eid in sel_mean if eid in ctl_mean]
+    paired = [d for d in all_deltas if abs(d) > EPS]
+    n_pair = len(paired)
+    pair_pos = sum(1 for d in paired if d > 0)
+    plo, phi = wilson(pair_pos, n_pair)
+    mean_delta = (sum(paired) / n_pair) if n_pair else 0.0
 
     print("\n" + "═" * 74)
-    if n_matches < 12:
-        v = f"CONTINUE — only {n_matches} matches (need ~12+ for the sequential gate)."
-    elif lo > 0.55:
-        v = f"CONFIRM — match-level beat-rate CI lower bound {lo:.2f} > 0.55. Real CLV; go to spec §6 Step 4."
-    elif hi < 0.55:
-        v = f"KILL — CI upper bound {hi:.2f} < 0.55. No edge; stop."
+    print("  SCORER PAPER LOGGER — CLV REPORT (control-corrected gate)")
+    print("═" * 74)
+    print(
+        f"  [headline, NOT decisive] selected vs 50%: {beats}/{n_matches} matches"
+        f"{(' = %.0f%%' % (100 * beats / n_matches)) if n_matches else ''}, "
+        f"Wilson [{lo:.2f}, {hi:.2f}]  (pooled props {pool_beat}/{pool_n})"
+    )
+    if base_n:
+        print(
+            f"  [honest baseline]  ALL props rose: {base_pos}/{base_n} = "
+            f"{100 * base_pos / base_n:.0f}%  <- the real null, not 50%"
+        )
+    print(f"\n  [DECISIVE] within-match  delta = mean(selected) - mean(control):")
+    print(f"    matches with both groups: {n_pair}")
+    if n_pair:
+        print(
+            f"    selected beat control: {pair_pos}/{n_pair} = {100 * pair_pos / n_pair:.0f}%"
+            f"   Wilson95 [{plo:.2f}, {phi:.2f}]   mean delta {mean_delta:+.2f}pp"
+        )
+
+    print("\n" + "═" * 74)
+    if n_pair < 12:
+        v = f"CONTINUE — only {n_pair} matches have both selected & control props (need ~12+)."
+    elif plo > 0.50:
+        v = (
+            f"CONFIRM — selected beat same-match control {pair_pos}/{n_pair}, "
+            f"CI lower bound {plo:.2f} > 0.50. Real edge net of drift; go to spec §6 Step 4."
+        )
+    elif phi < 0.50:
+        v = f"KILL — selected do NOT beat control (CI upper {phi:.2f} < 0.50). Edge is drift/reversion."
     else:
-        v = f"CONTINUE — CI [{lo:.2f},{hi:.2f}] straddles 0.55; accumulate more matches."
+        v = f"CONTINUE — paired CI [{plo:.2f},{phi:.2f}] straddles 0.50; accumulate more matches."
     print(f"  VERDICT: {v}")
     print("═" * 74 + "\n")
 
     if send:
-        pct = f"{100 * beats / n_matches:.0f}%" if n_matches else "n/a"
+        bpct = f"{100 * base_pos / base_n:.0f}%" if base_n else "n/a"
+        ppct = f"{100 * pair_pos / n_pair:.0f}%" if n_pair else "n/a"
         msg = (
-            f"⚽ Scorer CLV paper logger\n"
-            f"matches: {n_matches}  beat-rate: {beats}/{n_matches} ({pct})\n"
-            f"Wilson 95% CI: [{lo:.2f}, {hi:.2f}]  pooled props: {pool_beat}/{pool_n}\n"
+            f"⚽ Scorer CLV paper logger (control-corrected)\n"
+            f"headline (vs 50%): {beats}/{n_matches} matches — NOT decisive\n"
+            f"honest baseline: all props rose {bpct}\n"
+            f"DECISIVE within-match: selected beat control {pair_pos}/{n_pair} ({ppct}), "
+            f"CI [{plo:.2f}, {phi:.2f}], delta {mean_delta:+.2f}pp\n"
             f"VERDICT: {v}"
         )
         send_telegram(msg)

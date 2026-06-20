@@ -84,6 +84,27 @@ _cache: Dict[str, dict] = {}
 _cache_ts: Dict[str, float] = {}
 CACHE_TTL = 1800  # 30 min — balances freshness vs API rate limits (Open-Meteo 429s at 15min)
 
+# Memory leak fix: per-source caches grew unboundedly (no eviction).
+# Max entries per source cache. When exceeded, oldest entries are evicted.
+_MAX_SOURCE_CACHE_SIZE = 500
+
+
+def _evict_cache(cache: dict, ts_cache: dict = None, max_size: int = _MAX_SOURCE_CACHE_SIZE):
+    """Evict oldest entries from a cache dict when it exceeds max_size.
+    If ts_cache is provided (maps same keys → timestamps), evicts by oldest ts.
+    Otherwise evicts by insertion order (dict preserves order in Python 3.7+)."""
+    if len(cache) <= max_size:
+        return
+    to_remove = len(cache) - max_size
+    if ts_cache:
+        oldest = sorted(ts_cache, key=ts_cache.get)[:to_remove]
+    else:
+        oldest = list(cache.keys())[:to_remove]
+    for k in oldest:
+        cache.pop(k, None)
+        if ts_cache:
+            ts_cache.pop(k, None)
+
 # Rate limit tracking per source
 _rate_limits = {
     "pirate_weather": {"calls": 0, "reset_ts": 0, "max_per_hour": 15, "max_per_month": 10000},
@@ -126,6 +147,7 @@ def _cache_set(city: str, date: str, data: dict):
     key = _cache_key(city, date)
     _cache[key] = data
     _cache_ts[key] = time.time()
+    _evict_cache(_cache, _cache_ts)
 
 
 # ── HTTP helper ──────────────────────────────────────────────────────────
@@ -169,10 +191,6 @@ def _c_to_f(c: float) -> float:
 
 # ── Source 1: Open-Meteo Ensemble (PRIMARY — no key needed) ─────────────
 
-# Circuit breaker: skip Open-Meteo if rate limited (exponential backoff)
-_open_meteo_blocked = False
-_open_meteo_blocked_ts = 0.0
-_open_meteo_backoff = 600  # starts at 10min, doubles each trip, max 1h
 _open_meteo_cache = {}      # per-source cache: {(lat,lon,date): (result, ts)}
 _OPEN_METEO_SOURCE_TTL = 7200  # 2h per-source cache — forecasts don't change fast
 
@@ -181,11 +199,9 @@ def _fetch_open_meteo_ensemble(lat: float, lon: float, date: str) -> Optional[di
     Fetch ensemble forecasts from multiple independent models.
     Returns dict with high temps from each ensemble member.
     """
-    global _open_meteo_blocked, _open_meteo_blocked_ts, _open_meteo_backoff
-    if _open_meteo_blocked and (time.time() - _open_meteo_blocked_ts) < _open_meteo_backoff:
+    from api.services.source_health import is_circuit_open, trip_circuit, reset_circuit
+    if is_circuit_open("open_meteo"):
         return None
-    if _open_meteo_blocked:
-        _open_meteo_blocked = False  # Reset after backoff period
     # Per-source 2h cache — much longer than top-level 30min cache
     _om_key = (round(lat, 2), round(lon, 2), date)
     if _om_key in _open_meteo_cache:
@@ -209,15 +225,10 @@ def _fetch_open_meteo_ensemble(lat: float, lon: float, date: str) -> Optional[di
     _record_weather_fetch("open_meteo", data is not None, (time.time() - _t0) * 1000.0,
                           error="open-meteo /v1/forecast returned None")
     if not data:
-        # Only trip circuit breaker — the 429 detection is inside _fetch_json
-        # which returns None. But avoid doubling backoff on non-429 failures.
-        if not _open_meteo_blocked:
-            _open_meteo_blocked = True
-            _open_meteo_blocked_ts = time.time()
-            # Don't double if already at max
-            logger.info("Open-Meteo circuit breaker tripped (backoff={}s)", _open_meteo_backoff)
+        trip_circuit("open_meteo", initial_backoff_s=600, max_backoff_s=3600)
         return None
 
+    reset_circuit("open_meteo")
     highs_c = []
     lows_c = []
     models_used = []
@@ -273,7 +284,7 @@ def _fetch_open_meteo_ensemble(lat: float, lon: float, date: str) -> Optional[di
         "raw_highs_f": [round(h, 1) for h in highs_f],
     }
     _open_meteo_cache[_om_key] = (_result, time.time())
-    _open_meteo_backoff = 600  # Reset backoff on success
+    _evict_cache(_open_meteo_cache, max_size=_MAX_SOURCE_CACHE_SIZE)
     return _result
 
 
@@ -370,6 +381,7 @@ def _fetch_pirate_weather(lat: float, lon: float, date: str) -> Optional[dict]:
         }
     _pirate_cache[loc_key] = city_days
     _pirate_cache_ts[loc_key] = time.time()
+    _evict_cache(_pirate_cache, _pirate_cache_ts)
     return city_days.get(date)
 
 
@@ -379,14 +391,8 @@ def _fetch_pirate_weather(lat: float, lon: float, date: str) -> Optional[dict]:
 _tomorrow_cache: Dict[str, dict] = {}
 _tomorrow_cache_ts: Dict[str, float] = {}
 
-# Circuit breaker: trip on persistent 429s so we don't burn quota retrying.
-# Mirrors _open_meteo_blocked / _vc_blocked. Exponential backoff capped at 1h.
-_tomorrow_blocked = False
-_tomorrow_blocked_ts = 0.0
-_tomorrow_backoff = 1800  # 30min, doubles each trip, max 1h
-
 def _fetch_tomorrow_io(lat: float, lon: float, date: str) -> Optional[dict]:
-    global _tomorrow_blocked, _tomorrow_blocked_ts, _tomorrow_backoff
+    from api.services.source_health import is_circuit_open, trip_circuit, reset_circuit
     if not TOMORROW_API_KEY:
         return None
 
@@ -394,11 +400,8 @@ def _fetch_tomorrow_io(lat: float, lon: float, date: str) -> Optional[dict]:
     if loc_key in _tomorrow_cache and (time.time() - _tomorrow_cache_ts.get(loc_key, 0)) < CACHE_TTL:
         return _tomorrow_cache[loc_key].get(date)
 
-    # Circuit breaker check — skip entirely if recently rate-limited.
-    if _tomorrow_blocked and (time.time() - _tomorrow_blocked_ts) < _tomorrow_backoff:
+    if is_circuit_open("tomorrow_io"):
         return None
-    if _tomorrow_blocked:
-        _tomorrow_blocked = False  # backoff window elapsed, try once
 
     if not _rate_check("tomorrow_io"):
         logger.debug("Tomorrow.io rate limited, skipping")
@@ -419,14 +422,9 @@ def _fetch_tomorrow_io(lat: float, lon: float, date: str) -> Optional[dict]:
     _record_weather_fetch("tomorrow_io", data is not None, (time.time() - _t0) * 1000.0,
                           error="tomorrow_io returned None (likely 429)")
     if not data:
-        if not _tomorrow_blocked:
-            _tomorrow_blocked = True
-            _tomorrow_blocked_ts = time.time()
-            _tomorrow_backoff = min(_tomorrow_backoff * 2, 3600)  # max 1h
-            logger.info("Tomorrow.io circuit breaker tripped (backoff={}s)", _tomorrow_backoff)
+        trip_circuit("tomorrow_io", initial_backoff_s=1800, max_backoff_s=3600)
         return None
-    # Success — reset backoff so the next failure starts at 10min again
-    _tomorrow_backoff = 1800
+    reset_circuit("tomorrow_io")
 
     # Cache ALL days from response
     timelines = data.get("timelines", {})
@@ -450,6 +448,7 @@ def _fetch_tomorrow_io(lat: float, lon: float, date: str) -> Optional[dict]:
     
     _tomorrow_cache[loc_key] = city_days
     _tomorrow_cache_ts[loc_key] = time.time()
+    _evict_cache(_tomorrow_cache, _tomorrow_cache_ts)
     return city_days.get(date)
 
 
@@ -501,6 +500,7 @@ def _fetch_weatherapi(lat: float, lon: float, date: str) -> Optional[dict]:
         }
     _weatherapi_cache[loc_key] = city_days
     _weatherapi_cache_ts[loc_key] = time.time()
+    _evict_cache(_weatherapi_cache, _weatherapi_cache_ts)
     return city_days.get(date)
 
 
@@ -624,6 +624,7 @@ def _fetch_twc_actuals(city: str, date: str) -> Optional[dict]:
         }
 
         _actuals_cache[cache_key] = result
+        _evict_cache(_actuals_cache, _actuals_cache_ts)
         _actuals_cache_ts[cache_key] = time.time()
         logger.info("TWC actuals {}/{}: high={}°F low={}°F ({} obs)",
                      icao, date, actual_high, actual_low, len(temps))
@@ -725,6 +726,7 @@ def _fetch_weather_com(lat: float, lon: float, date: str, city: str = "") -> Opt
 
     _twc_cache[cache_key] = city_days
     _twc_cache_ts[cache_key] = time.time()
+    _evict_cache(_twc_cache, _twc_cache_ts)
     logger.debug("Weather.com {}: {} days fetched", icao, len(city_days))
     return city_days.get(date)
 
@@ -746,25 +748,20 @@ def _resolve_city(city: str) -> Optional[Tuple[float, float, str]]:
 # ── Source 6: Visual Crossing (free, 1K calls/day) ───────────────────────
 VISUAL_CROSSING_KEY = os.environ.get("VISUAL_CROSSING_KEY", "")
 _vc_cache = {}  # per-source 4h cache
-_vc_blocked = False
-_vc_blocked_ts = 0.0
-_vc_backoff = 600  # 10min start, max 1h
 _VC_SOURCE_TTL = 14400  # 4h — conservative for 1000 calls/day free tier
 
 def _fetch_visual_crossing(lat: float, lon: float, date: str, city: str = "") -> Optional[dict]:
     """Fetch from Visual Crossing Weather API (free tier: 1000 calls/day)."""
-    global _vc_blocked, _vc_blocked_ts, _vc_backoff
+    from api.services.source_health import is_circuit_open, trip_circuit, reset_circuit
     if not VISUAL_CROSSING_KEY:
         return None
     
     # Rate limiter
     if not _rate_check("visual_crossing"):
         return None
-    # Circuit breaker
-    if _vc_blocked and (time.time() - _vc_blocked_ts) < _vc_backoff:
+    # Circuit breaker (DB-backed, shared across workers)
+    if is_circuit_open("visual_crossing"):
         return None
-    if _vc_blocked:
-        _vc_blocked = False
     
     _vc_key = (round(lat, 2), round(lon, 2), date)
     if _vc_key in _vc_cache and (time.time() - _vc_cache[_vc_key][1]) < _VC_SOURCE_TTL:
@@ -782,13 +779,9 @@ def _fetch_visual_crossing(lat: float, lon: float, date: str, city: str = "") ->
     _record_weather_fetch("visual_crossing", data is not None, (time.time() - _t0) * 1000.0,
                           error="visual_crossing returned None")
     if not data:
-        if not _vc_blocked:
-            _vc_blocked = True
-            _vc_blocked_ts = time.time()
-            _vc_backoff = min(_vc_backoff * 2, 3600)  # max 1h
-            logger.info("Visual Crossing circuit breaker tripped (backoff={}s)", _vc_backoff)
+        trip_circuit("visual_crossing", initial_backoff_s=600, max_backoff_s=3600)
         return None
-    _vc_backoff = 600  # reset on success
+    reset_circuit("visual_crossing")
     _rate_track("visual_crossing")
     
     try:
@@ -805,6 +798,7 @@ def _fetch_visual_crossing(lat: float, lon: float, date: str, city: str = "") ->
             "model": "visual_crossing",
         }
         _vc_cache[_vc_key] = (result, time.time())
+        _evict_cache(_vc_cache, max_size=_MAX_SOURCE_CACHE_SIZE)
         return result
     except Exception as e:
         logger.debug("Visual Crossing parse failed: {}", e)
@@ -886,6 +880,7 @@ def _fetch_nws(lat: float, lon: float, date: str, city: str = "") -> Optional[di
                         "model": f"NWS_{office}",
                     }
                     _nws_cache[_nws_key] = (result, time.time())
+                    _evict_cache(_nws_cache, max_size=_MAX_SOURCE_CACHE_SIZE)
                     return result
     except Exception as e:
         logger.debug("NWS parse failed: {}", e)

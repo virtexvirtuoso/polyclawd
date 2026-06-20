@@ -122,11 +122,6 @@ def _get_market_prices(market: dict) -> tuple:
         return 0.0, 0.0
 
 
-def _get_odds_modules_path() -> str:
-    """Get path to odds modules directory."""
-    return str(Path(__file__).parent.parent.parent / "odds")
-
-
 def _scan_new_markets() -> dict:
     """Scan for newly created markets."""
     try:
@@ -703,9 +698,6 @@ async def get_soccer_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
     """
     async def _get_soccer():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from the_odds_api import get_soccer_edge_summary
         return await get_soccer_edge_summary()
 
@@ -719,9 +711,6 @@ async def get_soccer_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
 async def _get_league_edges(league: str, min_edge: float = 0.01):
     """Helper to get edges for a specific soccer league."""
     import sys
-    odds_path = _get_odds_modules_path()
-    if odds_path not in sys.path:
-        sys.path.insert(0, odds_path)
     from the_odds_api import find_soccer_edges
 
     all_edges = await find_soccer_edges(min_edge)
@@ -812,9 +801,6 @@ async def get_baseball_edge(min_edge: float = Query(default=0.05, ge=0, le=1)):
     """
     async def _get_baseball():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from baseball_edge import get_baseball_edge_summary
         return await get_baseball_edge_summary(min_edge)
 
@@ -1090,9 +1076,6 @@ async def get_nfl_futures():
     """
     async def _get_nfl():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from vegas_scraper import get_nfl_odds_with_fallback
         
         data = await get_nfl_odds_with_fallback()
@@ -1149,9 +1132,6 @@ async def get_superbowl_odds():
     """
     async def _get_sb():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from vegas_scraper import get_nfl_odds_with_fallback
         
         data = await get_nfl_odds_with_fallback()
@@ -1187,9 +1167,6 @@ async def get_espn_odds():
     """
     try:
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from espn_odds import get_espn_summary
         return get_espn_summary()
     except ImportError as e:
@@ -1209,9 +1186,6 @@ async def get_espn_edge(min_edge: float = Query(default=5.0, ge=0, le=100)):
     """
     async def _get_espn_edges():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from espn_odds import get_espn_edges as espn_edge_fn
         return await espn_edge_fn(min_edge)
 
@@ -1248,9 +1222,6 @@ def _format_espn_games(games, sport: str):
 async def _get_sport_odds(sport: str):
     """Helper to get odds for a specific sport."""
     import sys
-    odds_path = _get_odds_modules_path()
-    if odds_path not in sys.path:
-        sys.path.insert(0, odds_path)
     from espn_odds import fetch_odds
 
     games = fetch_odds(sport)
@@ -1333,9 +1304,6 @@ async def get_espn_moneyline(sport: str):
     """
     async def _get_ml():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from espn_odds import get_moneyline
         
         games = get_moneyline(sport)
@@ -1359,9 +1327,6 @@ async def get_all_espn_moneylines():
     """
     async def _get_all_ml():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from espn_odds import get_all_moneylines
         
         all_ml = get_all_moneylines()
@@ -1396,9 +1361,6 @@ async def get_betfair_edge():
     """
     async def _get_betfair():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from betfair_edge import get_betfair_edge_summary
         return await get_betfair_edge_summary()
 
@@ -1771,9 +1733,6 @@ async def get_kalshi_markets():
     """
     async def _get_kalshi():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from kalshi_edge import get_kalshi_polymarket_comparison
         return await get_kalshi_polymarket_comparison()
 
@@ -1794,9 +1753,6 @@ async def get_kalshi_entertainment():
     """
     async def _get_entertainment():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from kalshi_edge import get_kalshi_entertainment_props
         return await get_kalshi_entertainment_props()
 
@@ -1815,9 +1771,6 @@ async def get_all_kalshi_markets():
     """
     async def _get_all():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from kalshi_edge import get_kalshi_all_markets
         return await get_kalshi_all_markets()
 
@@ -1833,9 +1786,6 @@ async def get_manifold_edge(min_edge: float = Query(default=5.0, ge=0, le=100)):
     """Get Manifold vs Polymarket edges."""
     async def _get_manifold():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from manifold import get_manifold_edges
         return await get_manifold_edges(min_edge)
 
@@ -1847,9 +1797,6 @@ async def get_manifold_markets():
     """Get Manifold market summary."""
     try:
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from manifold import get_manifold_summary
         return get_manifold_summary()
     except ImportError as e:
@@ -1869,9 +1816,6 @@ async def get_predictit_edge(min_edge: float = Query(default=5.0, ge=0, le=100))
     """Get PredictIt vs Polymarket edges."""
     async def _get_predictit():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from predictit import get_predictit_edges
         return await get_predictit_edges(min_edge)
 
@@ -1883,9 +1827,6 @@ async def get_predictit_markets():
     """Get PredictIt market summary."""
     try:
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from predictit import get_predictit_summary
         return get_predictit_summary()
     except ImportError as e:
@@ -1909,9 +1850,6 @@ async def get_polyrouter_markets(
     """Get markets from PolyRouter (7 platforms unified)."""
     async def _get_markets():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from polyrouter import get_markets
         return await get_markets(platform=platform, limit=limit, query=query)
 
@@ -1926,9 +1864,6 @@ async def search_polyrouter(
     """Search across all 7 platforms."""
     async def _search():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from polyrouter import search_markets
         return await search_markets(query, limit)
 
@@ -1940,9 +1875,6 @@ async def get_polyrouter_edge(min_edge: float = Query(default=3.0, ge=0, le=100)
     """Find cross-platform arbitrage via PolyRouter."""
     async def _get_edges():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from polyrouter import find_cross_platform_edges
         edges = await find_cross_platform_edges(min_edge)
         return {"edges": edges, "count": len(edges), "min_edge_pct": min_edge}
@@ -1958,9 +1890,6 @@ async def get_polyrouter_sports(
     """Get sports games/odds from PolyRouter (nfl, nba, mlb, nhl, epl, etc.)."""
     async def _get_games():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from polyrouter import list_games
         return await list_games(league, limit)
 
@@ -1972,9 +1901,6 @@ async def get_polyrouter_futures(league: str):
     """Get championship futures (Super Bowl, World Series, etc.)."""
     async def _get_futures():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from polyrouter import list_futures
         return await list_futures(league)
 
@@ -1986,9 +1912,6 @@ async def get_polyrouter_platforms():
     """List all 7 supported platforms."""
     try:
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from polyrouter import list_platforms
         return {"platforms": list_platforms()}
     except ImportError as e:
@@ -2011,9 +1934,6 @@ async def get_metaculus_questions(
     """Fetch Metaculus forecasts - free crowd predictions for politics, economics, etc."""
     try:
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from metaculus import fetch_questions
         questions = fetch_questions(limit=limit)
         # Filter by minimum forecasters
@@ -2034,9 +1954,6 @@ async def get_metaculus_edge(
     """Find edge between Metaculus forecasts and Polymarket prices."""
     try:
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from metaculus import find_edges
         edges = find_edges(min_edge_pct=min_edge * 100)
         return {"edges": edges, "count": len(edges), "min_edge_pct": min_edge * 100}

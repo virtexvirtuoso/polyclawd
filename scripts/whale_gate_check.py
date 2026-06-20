@@ -14,6 +14,7 @@ import sys
 import requests
 import logging
 from datetime import datetime, timezone
+from scripts.alert_formatter import send_telegram
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("whale_gate_check")
@@ -47,10 +48,6 @@ GATES = [
     },
 ]
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "468298295")
-
-
 def get_stats(db_path: str):
     if not os.path.exists(db_path):
         logger.error("DB not found: %s", db_path)
@@ -81,23 +78,6 @@ def load_state() -> dict:
 def save_state(state: dict):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
-
-
-def send_telegram(text: str) -> bool:
-    if not TELEGRAM_BOT_TOKEN:
-        logger.warning("TELEGRAM_BOT_TOKEN not set — printing alert instead")
-        print(text)
-        return True
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    resp = requests.post(url, json={
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown",
-    }, timeout=10)
-    if not resp.ok:
-        logger.error("TG send failed: %s %s", resp.status_code, resp.text)
-        return False
-    return True
 
 
 def main():

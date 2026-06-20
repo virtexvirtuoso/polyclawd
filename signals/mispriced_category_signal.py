@@ -755,6 +755,11 @@ def scan_kalshi_signals() -> List[Dict]:
             logger.info(f"Kill rule: {kill_reason} — {market_title[:80]}")
             continue
 
+        # K13: MAX_ENTRY_PRICE=70c — NO win rate 16.7% at YES>70c (n=24), vs 29.2% at ≤70c
+        if price > 70:
+            logger.info(f"K13: YES@{price:.0f}c > 70c gate (NO WR=16.7%) — {market_title[:80]}")
+            continue
+
         conf = calculate_signal_confidence(
             category_edge=category_edge,
             volume=volume,
@@ -901,6 +906,11 @@ def scan_polymarket_signals() -> List[Dict]:
         should_kill, kill_reason, archetype = _check_kill_rules(market_question, price_cents)
         if should_kill:
             logger.info(f"Kill rule: {kill_reason} — {market_question[:80]}")
+            continue
+
+        # K13: MAX_ENTRY_PRICE=70c — NO win rate 16.7% at YES>70c (n=24), vs 29.2% at ≤70c
+        if price_cents > 70:
+            logger.info(f"K13: YES@{price_cents}c > 70c gate (NO WR=16.7%) — {market_question[:80]}")
             continue
 
         conf = calculate_signal_confidence(

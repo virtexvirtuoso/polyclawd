@@ -1553,6 +1553,13 @@ window.lucide = { createIcons: function(opts) {
     .overlay-loading { display: none !important; }
   }
 </style>
+<style id="mobile-ux-fixes">
+/* Mobile UX fixes (audit 2026-06-16): lift sub-legible 8-9px mono labels to 10px on phones. */
+@media (max-width:480px){
+  .dim-label,.metric-label,.control-label,.tt-branch-name{ font-size:10px; }
+  .surge-action,.tipping-bar-label,.tt-divergence-badge,.section-nav-pill{ font-size:10px; }
+}
+</style>
 </head>
 <body>
 <div class="container">
@@ -2173,7 +2180,7 @@ function escHtml(s) {
 }
 
 function marketUrl(m) {
-  if (m.platform === 'polymarket' && m.slug) return 'https://polymarket.com/market/' + encodeURIComponent(m.slug);
+  if (m.platform === 'polymarket' && m.slug) return 'https://polymarket.com/event/' + encodeURIComponent(m.slug);
   if (m.platform === 'kalshi' && m.id) return 'https://kalshi.com/markets/' + encodeURIComponent(m.id);
   return '';
 }
@@ -3026,15 +3033,33 @@ function _buildControlChart(canvas, emptyMsg, ch) {
   try {
     if (controlChart) controlChart.destroy();
     const ctx = canvas.getContext('2d');
+    const senateR = ch.map(c => +(c.senate_r * 100).toFixed(1));
+    const senateD = ch.map(c => +(c.senate_d * 100).toFixed(1));
+    const presR   = ch.map(c => +(c.pres_r   * 100).toFixed(1));
+    const presD   = ch.map(c => +(c.pres_d   * 100).toFixed(1));
+    // Data-driven y-range: snap to nearest 5pp outside min/max, clamp [0,100], minimum 20pp window
+    const allVals = [...senateR, ...senateD, ...presR, ...presD].filter(v => Number.isFinite(v));
+    let yMin = 0, yMax = 100;
+    if (allVals.length) {
+      const dataMin = Math.min(...allVals);
+      const dataMax = Math.max(...allVals);
+      yMin = Math.max(0,   Math.floor((dataMin - 5) / 5) * 5);
+      yMax = Math.min(100, Math.ceil((dataMax + 5) / 5) * 5);
+      if (yMax - yMin < 20) { // keep a readable window when data is very tight
+        const mid = (yMax + yMin) / 2;
+        yMin = Math.max(0,   Math.floor((mid - 10) / 5) * 5);
+        yMax = Math.min(100, Math.ceil((mid + 10) / 5) * 5);
+      }
+    }
     controlChart = new Chart(ctx, {
       type: 'line',
       data: {
         labels: ch.map(c => c.date.slice(5)),
         datasets: [
-          { label: 'Senate R', data: ch.map(c => (c.senate_r * 100).toFixed(1)), borderColor: 'var(--rep-red)', backgroundColor: 'rgba(184,58,46,0.08)', borderWidth: 2, pointRadius: 3, tension: 0.3 },
-          { label: 'Senate D', data: ch.map(c => (c.senate_d * 100).toFixed(1)), borderColor: 'var(--dem-blue)', backgroundColor: 'rgba(43,108,176,0.08)', borderWidth: 2, pointRadius: 3, tension: 0.3 },
-          { label: 'Pres R', data: ch.map(c => (c.pres_r * 100).toFixed(1)), borderColor: '#E8564A', borderDash: [5,3], borderWidth: 1.5, pointRadius: 2, pointStyle: 'rect', tension: 0.3 },
-          { label: 'Pres D', data: ch.map(c => (c.pres_d * 100).toFixed(1)), borderColor: '#4A90D9', borderDash: [5,3], borderWidth: 1.5, pointRadius: 2, pointStyle: 'rect', tension: 0.3 },
+          { label: 'Senate R', data: senateR, borderColor: 'var(--rep-red)', backgroundColor: 'rgba(184,58,46,0.08)', borderWidth: 2, pointRadius: 3, tension: 0.3 },
+          { label: 'Senate D', data: senateD, borderColor: 'var(--dem-blue)', backgroundColor: 'rgba(43,108,176,0.08)', borderWidth: 2, pointRadius: 3, tension: 0.3 },
+          { label: 'Pres R',   data: presR,   borderColor: '#E8564A', borderDash: [5,3], borderWidth: 1.5, pointRadius: 2, pointStyle: 'rect', tension: 0.3 },
+          { label: 'Pres D',   data: presD,   borderColor: '#4A90D9', borderDash: [5,3], borderWidth: 1.5, pointRadius: 2, pointStyle: 'rect', tension: 0.3 },
         ],
       },
       options: {
@@ -3045,7 +3070,7 @@ function _buildControlChart(canvas, emptyMsg, ch) {
           tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y + '%' } },
         },
         scales: {
-          y: { min: 0, max: 100, ticks: { callback: v => v + '%', font: { size: 10 } }, grid: { color: '#EDE9E3' } },
+          y: { min: yMin, max: yMax, ticks: { callback: v => v + '%', font: { size: 10 } }, grid: { color: '#EDE9E3' } },
           x: { ticks: { font: { size: 10 } }, grid: { display: false } },
         },
       },
@@ -3852,7 +3877,7 @@ function renderSmartMoney() {
     const whalePct = m.whale_pct || 0;
     const whaleWarn = whalePct > 0.3 ? ' <span style="color:var(--terracotta);font-size:9px;font-weight:700">WHALE</span>' : '';
     const yesPricePct = m.yes_price ? (m.yes_price * 100).toFixed(0) + '¢' : '—';
-    const url = m.slug ? 'https://polymarket.com/market/' + encodeURIComponent(m.slug) : '';
+    const url = m.slug ? 'https://polymarket.com/event/' + encodeURIComponent(m.slug) : '';
     const qText = escHtml((m.question || '').substring(0, 50));
     const qLink = url ? `<a href="${url}" target="_blank" rel="noopener" class="market-link">${qText}</a>` : qText;
     html += `<tr>
@@ -4092,7 +4117,7 @@ function renderPolicyPulse() {
         // Build link if possible
         let nameHtml = qText;
         if (platform === 'polymarket' && m.slug) {
-          nameHtml = '<a href="https://polymarket.com/market/' + escHtml(m.slug) + '" target="_blank" rel="noopener" class="market-link">' + qText + '</a>';
+          nameHtml = '<a href="https://polymarket.com/event/' + escHtml(m.slug) + '" target="_blank" rel="noopener" class="market-link">' + qText + '</a>';
         } else if (platform === 'kalshi' && m.ticker) {
           nameHtml = '<a href="https://kalshi.com/markets/' + escHtml(m.ticker) + '" target="_blank" rel="noopener" class="market-link">' + qText + '</a>';
         }
@@ -4612,7 +4637,7 @@ function renderClarityAct() {
           const qText = escHtml((m.question || '').substring(0, 90));
           let nameHtml = qText;
           if (platform === 'polymarket' && m.slug) {
-            nameHtml = '<a href="https://polymarket.com/market/' + escHtml(m.slug) + '" target="_blank" rel="noopener" class="market-link">' + qText + '</a>';
+            nameHtml = '<a href="https://polymarket.com/event/' + escHtml(m.slug) + '" target="_blank" rel="noopener" class="market-link">' + qText + '</a>';
           } else if (platform === 'kalshi' && m.ticker) {
             nameHtml = '<a href="https://kalshi.com/markets/' + escHtml(m.ticker) + '" target="_blank" rel="noopener" class="market-link">' + qText + '</a>';
           }

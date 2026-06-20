@@ -64,7 +64,99 @@ KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 GAMMA_API = "https://gamma-api.polymarket.com"
 PM_DATA_API = "https://data-api.polymarket.com"
 
+# ── Per-category thresholds from whale_threshold_study.py ───────────────────
+# Loaded at init from research/results/whale_thresholds.json if available,
+# otherwise falls back to flat defaults below.
+
+_DEFAULT_THRESHOLDS = {
+    "whale_alert": 3000,
+    "mega_whale": 40000,
+    "noise_floor": 300,
+}
+
+_THRESHOLDS_PATH = BASE_DIR / "research" / "results" / "whale_thresholds.json"
+
+# Category classification for Polymarket (slug prefix → category)
+_PM_SLUG_TO_CAT = {
+    "mlb": "mlb", "baseball": "mlb",
+    "soccer": "soccer", "epl": "soccer", "ucl": "soccer", "laliga": "soccer",
+    "seriea": "soccer", "bundesliga": "soccer", "fifwc": "soccer",
+    "nba": "nba", "basketball": "nba", "wnba": "nba",
+    "nfl": "nfl", "football": "nfl", "cfb": "nfl",
+    "ufc": "ufc", "mma": "ufc",
+    "crypto": "crypto", "btc": "crypto", "eth": "crypto", "sol": "crypto",
+    "politics": "politics", "elections": "politics",
+    "policy": "policy", "tariffs": "policy", "congress": "policy",
+    "science": "science", "technology": "science",
+}
+
+# Category classification for Kalshi (series prefix → category)
+_KX_PREFIX_TO_CAT = {
+    "KXMLB": "mlb",
+    "KXNBA": "nba", "KXWNBA": "nba", "KXNCAA": "nba",
+    "KXNFL": "nfl",
+    "KXITF": "soccer", "KXATP": "soccer", "KXWTA": "soccer",
+    "KXEPL": "soccer", "KXCL": "soccer", "KXSOCCER": "soccer", "KXWC": "soccer",
+    "KXUFC": "ufc", "KXMMA": "ufc",
+    "KXBTC": "crypto", "KXETH": "crypto", "KXCRYPTO": "crypto", "KXSOL": "crypto",
+    "KXPRES": "politics", "SENATE": "politics", "KXHOUSE": "politics",
+    "KXMAY": "politics", "KXGOV": "politics", "POWER": "politics",
+    "KXINFL": "macro", "KXFED": "macro", "KXGDP": "macro",
+    "KXUNEMP": "macro", "KXCPI": "macro", "KXJOBS": "macro",
+    "KXRAIN": "weather", "KXTEMP": "weather", "KXSNOW": "weather",
+    "KXHURR": "weather", "KXSTORM": "weather", "KXHEAT": "weather",
+}
+
+# Loaded thresholds: {platform: {category: {whale_alert, mega_whale, noise_floor}}}
+_CAT_THRESHOLDS: dict = {}
+
+
+def _load_thresholds():
+    """Load per-category thresholds from whale_threshold_study output."""
+    global _CAT_THRESHOLDS
+    try:
+        with open(_THRESHOLDS_PATH) as f:
+            data = json.load(f)
+        _CAT_THRESHOLDS = data.get("config", {})
+        logger.info("Loaded per-category whale thresholds from %s (%d PM cats, %d KX cats)",
+                     _THRESHOLDS_PATH,
+                     len(_CAT_THRESHOLDS.get("polymarket", {})),
+                     len(_CAT_THRESHOLDS.get("kalshi", {})))
+    except Exception as e:
+        logger.warning("Could not load whale thresholds from %s: %s — using defaults",
+                       _THRESHOLDS_PATH, e)
+        _CAT_THRESHOLDS = {}
+
+
+def classify_market_category(platform: str, market: str) -> str:
+    """Map a market identifier to a threshold category."""
+    if platform == "kalshi":
+        series = market.split("-")[0]
+        for prefix, cat in _KX_PREFIX_TO_CAT.items():
+            if series.startswith(prefix):
+                return cat
+        return "other"
+    # Polymarket: slug prefix
+    slug = market.split("-")[0].lower()
+    return _PM_SLUG_TO_CAT.get(slug, "other")
+
+
+def get_category_thresholds(platform: str, category: str) -> dict:
+    """Get whale_alert / mega_whale / noise_floor for a platform+category."""
+    plat_key = "polymarket" if platform != "kalshi" else "kalshi"
+    cat_config = _CAT_THRESHOLDS.get(plat_key, {})
+    return cat_config.get(category, _DEFAULT_THRESHOLDS)
+
+
+def get_market_thresholds(platform: str, market: str) -> dict:
+    """Convenience: classify then look up thresholds for a specific market."""
+    cat = classify_market_category(platform, market)
+    return get_category_thresholds(platform, cat)
+
+
 # ── Sweep thresholds (executed flow; relative AND absolute) ─────────────────
+# These flat constants are FALLBACKS only — used when no category threshold
+# is available. Category-aware code should call get_market_thresholds().
 VOL_SPIKE_ABS    = 500    # contracts ($ on PM) traded since last sweep
 VOL_SPIKE_REL    = 0.30   # ... and >= 30% of prior lifetime volume
 VOL_MOVE_ABS     = 250
@@ -93,7 +185,7 @@ ALERT_MIN_SCORE  = 3
 TRADES_PAGE_CAP    = 30     # 1000 trades/page since last cycle
 TRADES_MAX_LOOKBACK = 3600  # don't replay more than 1h after downtime
 PM_SWEEP_PAGES     = 15     # x100 markets, ordered by volume24hr desc
-PM_TRADES_PAGE_CAP = 12     # x500 taker trades from data-api (desc by ts)
+PM_TRADES_PAGE_CAP = 20     # x500 taker trades from data-api (desc by ts)
 FLAG_BOOK_CAP      = 80     # immediate books for sweep-flagged markets
 ROTATE_BOOK_CAP    = 250    # rotation books per cycle (book fetches are small/fast)
 BOOK_DEADLINE_S    = 180    # wall-clock budget for the BOOK phase (starts after sweep)
@@ -321,9 +413,26 @@ def alert_gate(platform: str, market: str, det: Optional[dict],
     if first_sight:
         return "first_sight"
     det = det or {}
-    flow_usd = det.get("flow_dollars")
+    flow_usd = det.get("flow_dollars") or 0
+    max_single = det.get("max_single_trade_usd") or 0
+    effective_flow = max(flow_usd, max_single)
+
     if not smart and flow_usd is not None and flow_usd < MIN_ALERT_FLOW_USD:
         return "usd_floor"
+
+    # Whale-sized flow pierces near_settled gate — a $662K bet at 95% is
+    # still meaningful signal regardless of market state. Uses category-aware
+    # thresholds: soccer mega_whale=$207K, MLB=$90K, politics=$40K, etc.
+    if _CAT_THRESHOLDS and effective_flow > 0:
+        cat_t = get_market_thresholds(platform, market)
+        whale_pierce = cat_t.get("mega_whale", CRITICAL_FLOW_USD)
+        if effective_flow >= whale_pierce:
+            return None  # whale pierces all gates
+
+    # Fallback: any flow >= CRITICAL_FLOW_USD pierces near_settled
+    if effective_flow >= CRITICAL_FLOW_USD:
+        return None
+
     bid = (cur or {}).get("best_bid")
     ask = (cur or {}).get("best_ask")
     last = det.get("last_yes_price")
@@ -376,7 +485,7 @@ def get_db(path: Optional[Path] = None) -> sqlite3.Connection:
             platform TEXT NOT NULL,
             market TEXT NOT NULL,
             ts REAL NOT NULL,
-            oi REAL, volume REAL, title TEXT,
+            oi REAL, volume REAL, title TEXT, sub_title TEXT,
             PRIMARY KEY (platform, market)
         )""")
     conn.execute("""
@@ -426,6 +535,22 @@ def load_prev_snapshot(conn, market: str) -> Optional[dict]:
     }
 
 
+def _fire_alert_live(alert: dict):
+    """Fire a single CRITICAL alert to Telegram immediately via subprocess."""
+    import subprocess
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(Path(__file__).parent.parent / "scripts" / "whale_alert_tg.py"), "--single"],
+            input=json.dumps(alert), capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode == 0 and "Sent: True" in proc.stdout:
+            logger.info("Live fire: %s", alert.get("market", "?")[:40])
+        elif proc.returncode != 0:
+            logger.debug("Live fire skipped (dedup/gate): %s", proc.stdout[:100])
+    except Exception as e:
+        logger.debug("Live fire error: %s", e)
+
+
 def log_alert(conn, alert: dict):
     conn.execute(
         "INSERT INTO whale_alerts (ts, platform, market, severity, score,"
@@ -433,6 +558,9 @@ def log_alert(conn, alert: dict):
         (time.time(), alert["platform"], alert["market"], alert["severity"],
          alert["score"], alert.get("reasons", ""), json.dumps(alert),
          alert.get("raw_score", alert["score"])))
+    # Live fire: send CRITICAL alerts to Telegram immediately
+    if alert.get("severity") == "CRITICAL":
+        _fire_alert_live(alert)
 
 
 def recently_alerted(conn, window_s: int = ALERT_DEDUP_S) -> set:
@@ -510,31 +638,48 @@ def book_summary(bids: list, asks: list, oi: Optional[float] = None,
 # ── Scoring: sweep (executed flow) ──────────────────────────────────────────
 
 def sweep_score(prev: Optional[dict], cur: dict,
-                vol_label: str = "vol", oi_label: str = "oi") -> tuple:
+                vol_label: str = "vol", oi_label: str = "oi",
+                platform: str = "", market: str = "") -> tuple:
     """Score volume/OI deltas between sweeps. prev=None -> unseen market:
     deltas measured from zero (a market trading 500 contracts out of nowhere
-    IS the signal), but caller must suppress on platform bootstrap."""
+    IS the signal), but caller must suppress on platform bootstrap.
+
+    When platform+market are provided, uses per-category thresholds from the
+    whale threshold study (noise_floor as vol/oi spike abs minimum)."""
     p_vol = (prev or {}).get("volume") or 0.0
     p_oi = (prev or {}).get("oi") or 0.0
     c_vol = cur.get("volume") or 0.0
     c_oi = cur.get("oi") or 0.0
 
+    # Category-aware thresholds: use noise_floor as the absolute minimum
+    # for what counts as a meaningful volume/OI move in this category.
+    if platform and market and _CAT_THRESHOLDS:
+        cat_t = get_market_thresholds(platform, market)
+        nf = cat_t.get("noise_floor", VOL_SPIKE_ABS)
+        vol_spike_abs = max(nf, VOL_SPIKE_ABS)
+        vol_move_abs = max(nf // 2, VOL_MOVE_ABS)
+        oi_spike_abs = max(nf, OI_SPIKE_ABS)
+    else:
+        vol_spike_abs = VOL_SPIKE_ABS
+        vol_move_abs = VOL_MOVE_ABS
+        oi_spike_abs = OI_SPIKE_ABS
+
     score = 0
     reasons = []
 
     d_vol = c_vol - p_vol
-    if d_vol >= VOL_SPIKE_ABS and d_vol >= VOL_SPIKE_REL * p_vol:
+    if d_vol >= vol_spike_abs and d_vol >= VOL_SPIKE_REL * p_vol:
         score += 3
         reasons.append(f"{vol_label}_spike_{d_vol:.0f}")
-    elif d_vol >= VOL_MOVE_ABS and d_vol >= VOL_MOVE_REL * p_vol:
+    elif d_vol >= vol_move_abs and d_vol >= VOL_MOVE_REL * p_vol:
         score += 1
         reasons.append(f"{vol_label}_move_{d_vol:.0f}")
 
     d_oi = c_oi - p_oi
-    if d_oi >= OI_SPIKE_ABS and d_oi >= OI_SPIKE_REL * p_oi:
+    if d_oi >= oi_spike_abs and d_oi >= OI_SPIKE_REL * p_oi:
         score += 3
         reasons.append(f"{oi_label}_spike_{d_oi:.0f}")
-    elif d_oi >= OI_SPIKE_ABS / 2 and d_oi >= OI_SPIKE_REL / 2 * p_oi:
+    elif d_oi >= oi_spike_abs / 2 and d_oi >= OI_SPIKE_REL / 2 * p_oi:
         score += 1
         reasons.append(f"{oi_label}_move_{d_oi:.0f}")
 
@@ -559,12 +704,31 @@ def _spread(summary: dict) -> Optional[float]:
     return None
 
 
-def score_change(prev: Optional[dict], cur: dict) -> tuple:
+def score_change(prev: Optional[dict], cur: dict,
+                 platform: str = "", market: str = "") -> tuple:
     """Score the book diff between snapshots. prev=None means first sight:
     establish baseline, never alert. OI/volume deltas are NOT scored here —
-    the sweep layer owns executed flow (no double counting)."""
+    the sweep layer owns executed flow (no double counting).
+
+    When platform+market are provided, uses per-category thresholds from the
+    whale threshold study for level jump detection."""
     if prev is None:
         return 0, ["baseline"]
+
+    # Category-aware book thresholds
+    if platform and market and _CAT_THRESHOLDS:
+        cat_t = get_market_thresholds(platform, market)
+        whale_alert = cat_t.get("whale_alert", LEVEL_WHALE)
+        # LEVEL_BIG = halfway between noise_floor and whale_alert
+        nf = cat_t.get("noise_floor", LEVEL_BASELINE)
+        level_big = max(nf, LEVEL_BIG)
+        level_baseline = max(nf // 2, LEVEL_BASELINE)
+        depth_surge_min = max(nf, DEPTH_SURGE_MIN)
+    else:
+        whale_alert = LEVEL_WHALE
+        level_big = LEVEL_BIG
+        level_baseline = LEVEL_BASELINE
+        depth_surge_min = DEPTH_SURGE_MIN
 
     score = 0
     reasons = []
@@ -573,20 +737,20 @@ def score_change(prev: Optional[dict], cur: dict) -> tuple:
     best_jump, jump_side = 0.0, ""
     for key, qty in cur["levels"].items():
         prev_qty = prev["levels"].get(key, 0.0)
-        if prev_qty < LEVEL_BASELINE and qty >= LEVEL_BIG and qty > best_jump:
+        if prev_qty < level_baseline and qty >= level_big and qty > best_jump:
             best_jump = qty
             jump_side = "bid" if key.startswith("B:") else "ask"
-    if best_jump >= LEVEL_WHALE:
+    if best_jump >= whale_alert:
         score += 4
         reasons.append(f"level_jump_{jump_side}_{best_jump:.0f}")
-    elif best_jump >= LEVEL_BIG:
+    elif best_jump >= level_big:
         score += 3
         reasons.append(f"level_jump_{jump_side}_{best_jump:.0f}")
 
     # 2. Depth surge on either side.
     for side in ("bid_depth", "ask_depth"):
         p, c = prev[side] or 0.0, cur[side] or 0.0
-        if c >= p * DEPTH_SURGE_MULT and (c - p) >= DEPTH_SURGE_MIN:
+        if c >= p * DEPTH_SURGE_MULT and (c - p) >= depth_surge_min:
             score += 2
             reasons.append(f"depth_surge_{side[0].upper()}_{c - p:.0f}")
             break
@@ -733,14 +897,14 @@ def load_state(conn, platform: str) -> dict:
 
 
 def upsert_state(conn, platform: str, items: list, ts: Optional[float] = None):
-    """items: [(market, oi, volume, title)]"""
+    """items: [(market, oi, volume, title, sub_title)]"""
     now = ts or time.time()
     conn.executemany(
-        "INSERT INTO market_state (platform, market, ts, oi, volume, title)"
-        " VALUES (?,?,?,?,?,?)"
+        "INSERT INTO market_state (platform, market, ts, oi, volume, title, sub_title)"
+        " VALUES (?,?,?,?,?,?,?)"
         " ON CONFLICT(platform, market) DO UPDATE SET"
-        "  ts=excluded.ts, oi=excluded.oi, volume=excluded.volume, title=excluded.title",
-        [(platform, m, now, oi, vol, title) for m, oi, vol, title in items])
+        "  ts=excluded.ts, oi=excluded.oi, volume=excluded.volume, title=excluded.title, sub_title=excluded.sub_title",
+        [(platform, m, now, oi, vol, title, sub) for m, oi, vol, title, sub in items])
 
 
 def get_weather_series_set() -> set:
@@ -774,7 +938,8 @@ def fetch_trades_since(min_ts: int) -> list:
 
 
 def aggregate_trades(trades: list) -> dict:
-    """ticker -> {vol, yes_vol, no_vol, dollars, last_yes_price}."""
+    """ticker -> {vol, yes_vol, no_vol, dollars, last_yes_price,
+    max_single_trade_usd}."""
     agg = {}
     for t in trades:
         ticker = t.get("ticker")
@@ -782,15 +947,20 @@ def aggregate_trades(trades: list) -> dict:
         if not ticker or count <= 0:
             continue
         a = agg.setdefault(ticker, {"vol": 0.0, "yes_vol": 0.0, "no_vol": 0.0,
-                                    "dollars": 0.0, "last_yes_price": None})
+                                    "dollars": 0.0, "last_yes_price": None,
+                                    "max_single_trade_usd": 0.0})
         a["vol"] += count
         yes_px = _fp_float(t.get("yes_price_dollars")) or 0.0
         if t.get("taker_side") == "yes":
             a["yes_vol"] += count
-            a["dollars"] += count * yes_px
+            trade_usd = count * yes_px
+            a["dollars"] += trade_usd
         else:
             a["no_vol"] += count
-            a["dollars"] += count * (_fp_float(t.get("no_price_dollars")) or 0.0)
+            trade_usd = count * (_fp_float(t.get("no_price_dollars")) or 0.0)
+            a["dollars"] += trade_usd
+        if trade_usd > a["max_single_trade_usd"]:
+            a["max_single_trade_usd"] = trade_usd
         a["last_yes_price"] = yes_px
     return agg
 
@@ -866,22 +1036,34 @@ def kalshi_sweep(conn) -> tuple:
         det = details.get(ticker)
         if not det:
             continue
+        max_single = flow.get("max_single_trade_usd") or 0
         det.update({"flow_yes": flow["yes_vol"], "flow_no": flow["no_vol"],
                     "flow_dollars": flow["dollars"],
+                    "max_single_trade_usd": max_single,
                     "last_yes_price": flow["last_yes_price"]})
         prev_oi = (prev_state.get(ticker) or {}).get("oi")
         prev = {"volume": max(det["volume"] - flow["vol"], 0.0),
                 "oi": prev_oi if prev_oi is not None else det["oi"]}
-        score, reasons = sweep_score(prev, {"volume": det["volume"], "oi": det["oi"]})
+        score, reasons = sweep_score(prev, {"volume": det["volume"], "oi": det["oi"]},
+                                     platform="kalshi", market=ticker)
         side, pct = flow_direction(flow)
         if side:
             reasons.append(f"taker_{side}_{pct}%")
+        # Mega single-trade boost (Kalshi)
+        if max_single > 0 and _CAT_THRESHOLDS:
+            cat_t = get_market_thresholds("kalshi", ticker)
+            if max_single >= cat_t.get("mega_whale", CRITICAL_FLOW_USD):
+                score = max(score, 8)
+                reasons.append(f"mega_single_trade_${max_single:,.0f}")
+            elif max_single >= cat_t.get("whale_alert", CRITICAL_FLOW_USD):
+                score = max(score, 5)
+                reasons.append(f"whale_single_trade_${max_single:,.0f}")
         if ticker not in prev_state:
             # Sweep-layer twin of the book rule (first sight = baseline):
             # a market we've never tracked trivially passes the relative
             # gates. Tag it; scan_kalshi demotes and skips its book fetch.
             reasons.append("first_sight")
-        to_store.append((ticker, det["oi"], det["volume"], det["title"]))
+        to_store.append((ticker, det["oi"], det["volume"], det["title"], det.get("sub_title", "")))
         if score >= ALERT_MIN_SCORE:
             flagged.append((score, reasons, ticker))
 
@@ -907,7 +1089,7 @@ def inspect_kalshi_book(conn, ticker: str, meta: dict) -> tuple:
     bids, asks = parse_kalshi_book(fp)
     cur = book_summary(bids, asks, oi=meta.get("oi"), volume=meta.get("volume"))
     prev = load_prev_snapshot(conn, ticker)
-    score, reasons = score_change(prev, cur)
+    score, reasons = score_change(prev, cur, platform="kalshi", market=ticker)
     save_snapshot(conn, "kalshi", ticker, cur)
     return score, reasons, cur
 
@@ -938,7 +1120,8 @@ def inspect_pm_book(conn, condition_id: str, token_id: str, meta: dict) -> tuple
     # Use condition_id as snapshot key (stable across scans)
     snap_key = f"pm:{condition_id[:16]}"
     prev = load_prev_snapshot(conn, snap_key)
-    score, reasons = score_change(prev, cur)
+    slug = meta.get("slug", condition_id)
+    score, reasons = score_change(prev, cur, platform="polymarket", market=slug)
     save_snapshot(conn, "polymarket", snap_key, cur)
     return score, reasons, cur
 
@@ -1119,8 +1302,12 @@ def fetch_pm_trades_since(since_ts: int) -> list:
 
 def aggregate_pm_trades(trades: list) -> dict:
     """conditionId -> {dollars, shares, slug, title, flows: {(side,outcome): $},
-    last_price}. PM is multi-outcome, so direction is the dominant
-    (side, outcome) pair by dollars."""
+    last_price, max_single_trade_usd}. PM is multi-outcome, so direction is
+    the dominant (side, outcome) pair by dollars.
+
+    max_single_trade_usd tracks the largest individual fill — critical for
+    detecting whale bets that get absorbed between sweep cycles (the net
+    volume delta may be small but a $662K single trade is always signal)."""
     agg = {}
     for t in trades:
         cid = t.get("conditionId")
@@ -1132,10 +1319,13 @@ def aggregate_pm_trades(trades: list) -> dict:
                                  "slug": t.get("slug") or "",
                                  "title": (t.get("title") or "")[:80],
                                  "flows": {}, "last_price": price,
-                                 "wallets": {}, "wallet_names": {}})
+                                 "wallets": {}, "wallet_names": {},
+                                 "max_single_trade_usd": 0.0})
         usd = size * price
         a["dollars"] += usd
         a["shares"] += size
+        if usd > a["max_single_trade_usd"]:
+            a["max_single_trade_usd"] = usd
         key = (t.get("side") or "?", (t.get("outcome") or "?")[:20])
         a["flows"][key] = a["flows"].get(key, 0.0) + usd
         a["last_price"] = price
@@ -1229,7 +1419,8 @@ def scan_polymarket_flow(conn) -> list:
         prev = {"volume": max(vol - flow["dollars"], 0.0),
                 "oi": prev_liq if prev_liq is not None else liq}
         score, reasons = sweep_score(prev, {"volume": vol, "oi": liq},
-                                     vol_label="vol$", oi_label="liq$")
+                                     vol_label="vol$", oi_label="liq$",
+                                     platform="polymarket", market=slug)
         tag, desc = pm_flow_desc(flow)
         if tag:
             reasons.append(tag)
@@ -1247,10 +1438,23 @@ def scan_polymarket_flow(conn) -> list:
                 f"smart_wallet_{(sw['name'] or top_wallet[:8]).replace(' ', '_')}"
                 f"_{sw['win_rate']:.0%}wr")
 
+        # Mega single-trade boost: a single fill above the category's whale_alert
+        # threshold is inherently significant — boost score so it passes ALERT_MIN_SCORE
+        max_single = flow.get("max_single_trade_usd") or 0
+        if max_single > 0 and _CAT_THRESHOLDS:
+            cat_t = get_market_thresholds("polymarket", slug)
+            if max_single >= cat_t.get("mega_whale", CRITICAL_FLOW_USD):
+                score = max(score, 8)
+                reasons.append(f"mega_single_trade_${max_single:,.0f}")
+            elif max_single >= cat_t.get("whale_alert", CRITICAL_FLOW_USD):
+                score = max(score, 5)
+                reasons.append(f"whale_single_trade_${max_single:,.0f}")
+
         if score >= ALERT_MIN_SCORE and slug not in dedup:
             is_smart = bool(sw and top_usd >= SMART_WALLET_MIN_USD)
             gate = alert_gate("polymarket", slug,
                               {"flow_dollars": flow["dollars"],
+                               "max_single_trade_usd": max_single,
                                "last_yes_price": flow["last_price"]},
                               None, smart=is_smart)
             if gate:
@@ -1264,6 +1468,7 @@ def scan_polymarket_flow(conn) -> list:
                           "title": (g.get("question") or flow["title"])[:80],
                           "close_time": g.get("endDate") or "",
                           "flow_dollars": flow["dollars"],
+                          "max_single_trade_usd": max_single,
                           "top_wallet_usd": top_usd if top_wallet else 0,
                           "flow_yes": _buy_usd,
                           "flow_no": _sell_usd}
@@ -1345,13 +1550,14 @@ def scan_polymarket(conn) -> list:
         vol = m.get("volumeNum") or 0.0
         liq = m.get("liquidityNum") or 0.0
         title = (m.get("question") or slug)[:80]
-        to_store.append((slug, liq, vol, title))
+        to_store.append((slug, liq, vol, title, ""))
         if bootstrap or slug not in prev_state:
             continue  # entering the volume24hr window is not a delta
 
         score, reasons = sweep_score(
             {**prev_state[slug], "volume": vol}, {"oi": liq, "volume": vol},
-            vol_label="vol$", oi_label="liq$")  # liq deltas only; flow sweep owns volume
+            vol_label="vol$", oi_label="liq$",
+            platform="polymarket", market=slug)  # liq deltas only; flow sweep owns volume
         if score >= ALERT_MIN_SCORE and slug not in dedup:
             alert = _mk_alert("polymarket", slug, score, reasons, None,
                               {"oi": liq, "volume": vol, "title": title})
@@ -1375,6 +1581,7 @@ def run_scan(platform: str = "all") -> list:
 
     Called by services/scheduler.py task_whale_scanner() on its own loop.
     """
+    _load_thresholds()
     conn = get_db()
     alerts = []
     try:

@@ -71,6 +71,8 @@ def _init_table(conn: sqlite3.Connection):
         conn.execute(
             "UPDATE source_health SET last_touched = last_success WHERE last_touched IS NULL AND last_success IS NOT NULL"
         )
+    if "circuit_backoff_s" not in cols:
+        conn.execute("ALTER TABLE source_health ADD COLUMN circuit_backoff_s INTEGER DEFAULT 0")
     conn.commit()
 
 
@@ -95,7 +97,7 @@ def record_success(source: str, latency_ms: float):
             UPDATE source_health SET
                 last_success=?, last_touched=?, consecutive_failures=0,
                 total_successes=?, avg_latency_ms=?, last_latency_ms=?,
-                circuit_open_until=NULL
+                circuit_open_until=NULL, circuit_backoff_s=0
             WHERE source=?
         """,
             (now, now, total, round(new_avg, 1), round(latency_ms, 1), source),
@@ -183,9 +185,63 @@ def set_circuit_open(source: str, until_iso: str):
     conn.close()
 
 
+def trip_circuit(source: str, initial_backoff_s: int = 600, max_backoff_s: int = 3600):
+    """Trip the circuit breaker with exponential backoff (DB-persisted).
+
+    On first trip: uses initial_backoff_s. On subsequent trips (before a
+    success resets it): doubles the previous backoff up to max_backoff_s.
+    Replaces per-process _X_blocked globals — state survives restarts and
+    is shared across workers.
+    """
+    try:
+        conn = _get_db()
+    except Exception as e:
+        logger.debug("source_health: %s trip_circuit skipped (db busy): %s", source, e)
+        return
+    now = datetime.now(timezone.utc)
+    row = conn.execute("SELECT circuit_backoff_s FROM source_health WHERE source=?",
+                       (source,)).fetchone()
+    if row:
+        prev = row["circuit_backoff_s"] or 0
+        backoff = min(max(prev * 2, initial_backoff_s), max_backoff_s)
+    else:
+        backoff = initial_backoff_s
+    from datetime import timedelta
+    until = now + timedelta(seconds=backoff)
+    until_iso = until.isoformat()
+    conn.execute(
+        "UPDATE source_health SET circuit_open_until=?, circuit_backoff_s=? WHERE source=?",
+        (until_iso, backoff, source))
+    if conn.total_changes == 0:
+        conn.execute(
+            "INSERT INTO source_health (source, circuit_open_until, circuit_backoff_s,"
+            " consecutive_failures, total_successes, total_failures) VALUES (?,?,?,0,0,0)",
+            (source, until_iso, backoff))
+    conn.commit()
+    conn.close()
+    logger.warning("source_health: %s CIRCUIT TRIPPED backoff=%ds until %s",
+                   source, backoff, until_iso)
+
+
+def reset_circuit(source: str):
+    """Clear circuit breaker and reset backoff to 0 (call on success)."""
+    try:
+        conn = _get_db()
+    except Exception:
+        return
+    conn.execute(
+        "UPDATE source_health SET circuit_open_until=NULL, circuit_backoff_s=0 WHERE source=?",
+        (source,))
+    conn.commit()
+    conn.close()
+
+
 def is_circuit_open(source: str) -> bool:
     """Check if circuit breaker is currently open for a source."""
-    conn = _get_db()
+    try:
+        conn = _get_db()
+    except Exception:
+        return False
     row = conn.execute("SELECT circuit_open_until FROM source_health WHERE source=?", (source,)).fetchone()
     conn.close()
 

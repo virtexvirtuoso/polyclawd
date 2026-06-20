@@ -72,7 +72,6 @@ _engine_thread: Optional[threading.Thread] = None
 
 # Phase scaling - try to import
 try:
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "config"))
     from scaling_phases import (
         get_phase, get_phase_config, calculate_position_size,
         check_daily_limits, Phase, PHASES

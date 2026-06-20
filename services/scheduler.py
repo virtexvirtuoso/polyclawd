@@ -57,6 +57,7 @@ _state = {
     "milestone_sent": {},          # strategy → bool
     "election_report_sent": None,  # year+week string
     "election_snapshot_sent": None, # date string
+    "recalibrate_sent": None,      # year+week string
 }
 
 
@@ -210,6 +211,20 @@ def task_book_logger():
     future orderbook-aware stop logic. See services/book_logger.py."""
     from services.book_logger import log_position_books
     log_position_books()
+
+
+def task_poly_delta():
+    """Snapshot PM mid price at +60s/+300s post-fill to measure adverse selection.
+    See services/poly_delta_tracker.py."""
+    from services.poly_delta_tracker import run_once
+    run_once()
+
+
+def task_clv_snapshot():
+    """Snapshot CLV at T-10min before resolution for open PM positions.
+    See services/clv_snapshot.py."""
+    from services.clv_snapshot import run_once
+    run_once()
 
 
 def task_weather_fast_scan():
@@ -522,6 +537,34 @@ def task_options_scan():
         logger.exception("Options paper trade failed: %s", e)
 
 
+def task_soccer_whale_trades():
+    """Live whale taker-flow alert for active WC soccer games. Every 60s."""
+    from scripts.soccer_whale_trades import run as _run
+    _run()
+
+
+def task_soccer_live_monitor():
+    """Soccer live game monitor — all leagues (WC, MLS, EPL, UCL, LaLiga).
+    Fires run/drift/whale/edge-inversion alerts for active games."""
+    from scripts.soccer_live_monitor import main as _main
+    _main()
+
+
+def task_mlb_live_monitor():
+    """MLB live game monitor — run trigger, line drift, edge inversion.
+    Alert-only: does NOT overlap with ingame_monitor.py (stop-loss stays there)."""
+    from scripts.mlb_live_monitor import main as _main
+    _main()
+
+
+def task_cross_sport_drift():
+    """Cross-sport Pinnacle line drift scanner — MLB, WC Soccer, MLS, UFC.
+    Fires drift alert + PM gap when Vegas moves > threshold since last snapshot.
+    Credits: ~768/day (bookmakers=pinnacle, 1 credit per sport per tick)."""
+    from scripts.cross_sport_drift import run as _run
+    _run()
+
+
 def task_ufc_edge_scan():
     """UFC edge scan: compares Polymarket + Kalshi vs Pinnacle.
     Self-gating: skips if no events within 6h window (0 credits)."""
@@ -556,6 +599,41 @@ def task_ufc_prop_scan():
                      result["edges_found"], result["alerts_sent"], result.get("suppressed", 0))
     else:
         logger.debug("UFC prop scan: no prop edges")
+
+
+def task_insider_scan():
+    """Scan for insider trading activity on Polymarket.
+    Runs every 5min — insider trades decay fast."""
+    try:
+        from signals.insider_detector import scan_for_insiders, send_alerts
+        results = scan_for_insiders()
+        if results:
+            send_alerts(results)
+            logger.info("Insider scan: %d alerts sent", len(results))
+        else:
+            logger.debug("Insider scan: no new activity")
+    except Exception as e:
+        logger.exception("Insider scan failed: %s", e)
+
+
+def task_arb_scan():
+    """Cross-platform arbitrage scan: Kalshi vs Polymarket.
+    Runs every 30min — arb opportunities persist longer."""
+    try:
+        import subprocess, sys
+        from pathlib import Path
+        proc = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "scripts" / "arb_alert.py")],
+            capture_output=True, text=True, timeout=60,
+        )
+        if proc.returncode != 0:
+            logger.warning("arb_alert stderr: %s", proc.stderr[:300])
+        else:
+            out = proc.stdout.strip()
+            if out:
+                logger.info("arb_alert: %s", out[:200])
+    except Exception as e:
+        logger.warning("arb_alert failed: %s", e)
 
 
 def task_stale_line_scan():
@@ -622,8 +700,6 @@ def task_whale_scanner():
                 "Whale scanner alert [%s]: %s score=%d %s",
                 severity, market, score, a.get("reasons", ""),
             )
-        # Send Telegram alerts once per cycle (script fetches from API + dedup)
-        _send_whale_alert_tg()
     except Exception as e:
         logger.exception("Whale scanner failed: %s", e)
 
@@ -937,6 +1013,14 @@ def task_soccer_resolve():
     scan_resolved_soccer_trades()
 
 
+def task_baseball_resolve():
+    """Resolve closed Polymarket baseball game shadows (moneyline/spread/total)
+    via CLOB per-market lookup."""
+    from signals.baseball_resolver import scan_resolved_baseball_games
+
+    scan_resolved_baseball_games()
+
+
 def task_arena_snapshot():
     """AI arena leaderboard snapshot."""
     venv = str(PROJECT_ROOT / "venv" / "bin" / "python3")
@@ -1043,7 +1127,10 @@ def task_gdelt_refresh():
         from signals.gdelt_client import build_gdelt_overlay
         result = build_gdelt_overlay()
         cache_path = PROJECT_ROOT / "storage" / "gdelt_cache.json"
-        cache_path.write_text(_json.dumps(result))
+        # Only overwrite the cache when the fetch actually returned data —
+        # a rate-limited (429) empty result must never blank a good cache.
+        if result.get("candidate_sentiment") or result.get("state_sentiment"):
+            cache_path.write_text(_json.dumps(result))
         n_candidates = len(result.get("candidate_sentiment", []))
         n_states = len(result.get("state_sentiment", []))
         logger.info("GDELT overlay cached: %d candidates, %d states", n_candidates, n_states)
@@ -1145,9 +1232,10 @@ async def tick_30s():
 
 
 async def tick_1min():
-    """Every 60 seconds: urgent stop-loss for positions resolving within 6 hours."""
+    """Every 60 seconds: urgent stop-loss + soccer whale trade alerts."""
     while True:
         await run_in_thread(_run_safe, "stop_evaluator_urgent", task_stop_evaluator_urgent)
+        await run_in_thread(_run_safe, "soccer_whale_trades", task_soccer_whale_trades)
         await asyncio.sleep(60)
 
 
@@ -1169,6 +1257,12 @@ async def tick_5min():
         await run_in_thread(_run_safe, "weather_shift_alerts", task_weather_shift_alerts)
         await run_in_thread(_run_safe, "tweet_pace_alerts", task_tweet_pace_alerts)
         await run_in_thread(_run_safe, "calibration_check", task_calibration_check)
+        await run_in_thread(_run_safe, "insider_scan", task_insider_scan)
+        await run_in_thread(_run_safe, "poly_delta", task_poly_delta)
+        await run_in_thread(_run_safe, "clv_snapshot", task_clv_snapshot)
+        await run_in_thread(_run_safe, "cross_sport_drift", task_cross_sport_drift)
+        await run_in_thread(_run_safe, "soccer_live_monitor", task_soccer_live_monitor)
+        await run_in_thread(_run_safe, "mlb_live_monitor", task_mlb_live_monitor)
         # UFC edge scan: runs every 15min (every 3rd tick), self-gating
         _state["ufc_scan_n"] = _state.get("ufc_scan_n", 0) + 1
         if _state["ufc_scan_n"] % 3 == 0:
@@ -1215,9 +1309,11 @@ async def tick_30min():
         await run_in_thread(_run_safe, "edge_alerts", task_edge_alerts)
         await run_in_thread(_run_safe, "mlb_props_alert", task_mlb_props_alert)
         await run_in_thread(_run_safe, "mlb_props_resolve", task_mlb_props_resolve)
+        await run_in_thread(_run_safe, "baseball_resolve", task_baseball_resolve)
         await run_in_thread(_run_safe, "kalshi_fade_scan", task_kalshi_fade_scan)
         await run_in_thread(_run_safe, "pm_maker_shadow", task_pm_maker_shadow)
         await run_in_thread(_run_safe, "ensemble_recorder", task_ensemble_recorder)
+        await run_in_thread(_run_safe, "arb_scan", task_arb_scan)
         # Soccer/WC: scan match edges + resolve closed shadows every 2h (4 ticks).
         _state["soccer_scan_n"] = _state.get("soccer_scan_n", 0) + 1
         if _state["soccer_scan_n"] % 4 == 0:
@@ -1324,8 +1420,32 @@ async def tick_6h():
         await run_in_thread(_run_safe, "state_cleanup", task_state_cleanup)
         await run_in_thread(_run_safe, "db_maintenance", task_db_maintenance)
         await run_in_thread(_run_safe, "ie_spending_refresh", task_ie_spending_refresh)
+        # GDELT election sentiment: single-process refresh so API workers never
+        # fetch live (live dual-worker fetching caused 429 storms). Runs ~60s after
+        # every boot, then every 6h.
+        await run_in_thread(_run_safe, "gdelt_refresh", task_gdelt_refresh)
         await run_in_thread(_run_safe, "ufc_event_discovery", task_ufc_event_discovery)
         await asyncio.sleep(21600)
+
+
+def task_weekly_recalibrate():
+    """Weekly champion/challenger calibration bake-off (Sunday 21:xx UTC). Alerts on
+    failure so the self-improvement loop can never die silently (design §9C)."""
+    year_week = datetime.now(timezone.utc).strftime("%Y%W")
+    if _state["recalibrate_sent"] == year_week:
+        return
+    import io, contextlib
+    from scripts.recalibrate import main as _recalibrate
+    from signals.calibration_champion import _alert
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            _recalibrate()
+        logger.info("Weekly recalibrate: %s", buf.getvalue().strip() or "(no output)")
+    except Exception as e:
+        logger.exception("Weekly recalibrate FAILED")
+        _alert(f"weekly recalibrate crashed: {e}")
+    _state["recalibrate_sent"] = year_week
 
 
 async def tick_scheduled():
@@ -1349,6 +1469,10 @@ async def tick_scheduled():
         # Weekly election PDF report: Monday 6:xx UTC
         if now.weekday() == 0 and now.hour == 6:
             await run_in_thread(_run_safe, "election_report", task_election_weekly_report)
+
+        # Weekly calibration refit: Sunday 21:xx UTC (ahead of the 23:00 recap)
+        if now.weekday() == 6 and now.hour == 21:
+            await run_in_thread(_run_safe, "weekly_recalibrate", task_weekly_recalibrate)
 
         # Weekly recap: Sunday 23:xx UTC
         if now.weekday() == 6 and now.hour == 23:

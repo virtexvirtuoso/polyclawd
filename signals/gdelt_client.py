@@ -13,8 +13,11 @@ from loguru import logger
 GDELT_API = "https://api.gdeltproject.org/api/v2/doc/doc"
 CACHE_DIR = Path(__file__).parent.parent / "storage" / "gdelt_cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-CACHE_TTL = 7200  # 2 hours — GDELT 7-day spans don't need sub-hour freshness;
-                  # shorter TTL causes both uvicorn workers to race on expiry → 429s
+CACHE_TTL = 25200  # 7 hours — must exceed the scheduler's 6h refresh interval so a
+# successful per-query fetch survives as a fallback across the next
+# refresh. On a 429, _gdelt_get reuses this cache instead of returning
+# empty, so a single transient rate-limit never re-blanks the dashboard.
+# (GDELT 7-day spans don't need sub-hour freshness.)
 
 # Key candidates/topics to track sentiment for
 # Keep query count low to respect GDELT rate limits (~12 req/min max)
@@ -36,8 +39,7 @@ SWING_STATE_QUERIES = {
 }
 
 
-def _gdelt_get(query: str, mode: str = "timelinetone", timespan: str = "7d",
-               timeout: int = 20) -> dict | list | None:
+def _gdelt_get(query: str, mode: str = "timelinetone", timespan: str = "7d", timeout: int = 20) -> dict | list | None:
     """GET request to GDELT DOC 2.0 API with file-based caching."""
     params = {
         "query": query,
@@ -151,15 +153,17 @@ def fetch_candidate_sentiment(timespan: str = "7d") -> list[dict]:
         trend = _tone_trend(tone_series)
         total_articles = sum(pt.get("value", 0) for pt in vol_series)
 
-        results.append({
-            "label": label,
-            "query": query,
-            "avg_tone": round(avg, 3),
-            "tone_trend": round(trend, 3),
-            "total_articles": int(total_articles),
-            "data_points": len(tone_series),
-            "timespan": timespan,
-        })
+        results.append(
+            {
+                "label": label,
+                "query": query,
+                "avg_tone": round(avg, 3),
+                "tone_trend": round(trend, 3),
+                "total_articles": int(total_articles),
+                "data_points": len(tone_series),
+                "timespan": timespan,
+            }
+        )
 
         # Rate limit: 2 requests per query (tone + volume), ~12 req/min max
         # 10s sleep (was 8s) gives headroom when both uvicorn workers run simultaneously
@@ -191,23 +195,24 @@ def fetch_state_sentiment(states: list[str] | None = None, timespan: str = "7d")
         trend = _tone_trend(tone_series)
         total_articles = sum(pt.get("value", 0) for pt in vol_series)
 
-        results.append({
-            "state": state,
-            "query": query,
-            "avg_tone": round(avg, 3),
-            "tone_trend": round(trend, 3),
-            "total_articles": int(total_articles),
-            "data_points": len(tone_series),
-            "timespan": timespan,
-        })
+        results.append(
+            {
+                "state": state,
+                "query": query,
+                "avg_tone": round(avg, 3),
+                "tone_trend": round(trend, 3),
+                "total_articles": int(total_articles),
+                "data_points": len(tone_series),
+                "timespan": timespan,
+            }
+        )
 
         time.sleep(6)  # was 0.5 — state queries also need inter-query pacing
 
     return results
 
 
-def compute_narrative_shifts(candidate_sentiment: list[dict],
-                              state_sentiment: list[dict]) -> list[dict]:
+def compute_narrative_shifts(candidate_sentiment: list[dict], state_sentiment: list[dict]) -> list[dict]:
     """Detect significant narrative shifts that could move prediction markets.
 
     Returns list of shift alerts sorted by significance.
@@ -220,19 +225,21 @@ def compute_narrative_shifts(candidate_sentiment: list[dict],
         if abs(trend) < 0.8:
             continue
         direction = "improving" if trend > 0 else "deteriorating"
-        shifts.append({
-            "type": "candidate_narrative",
-            "label": s["label"],
-            "direction": direction,
-            "magnitude": abs(trend),
-            "avg_tone": s["avg_tone"],
-            "articles": s["total_articles"],
-            "detail": (
-                f"News sentiment for '{s['label']}' is {direction} "
-                f"(trend: {trend:+.2f}, avg tone: {s['avg_tone']:.2f}, "
-                f"{s['total_articles']} articles)"
-            ),
-        })
+        shifts.append(
+            {
+                "type": "candidate_narrative",
+                "label": s["label"],
+                "direction": direction,
+                "magnitude": abs(trend),
+                "avg_tone": s["avg_tone"],
+                "articles": s["total_articles"],
+                "detail": (
+                    f"News sentiment for '{s['label']}' is {direction} "
+                    f"(trend: {trend:+.2f}, avg tone: {s['avg_tone']:.2f}, "
+                    f"{s['total_articles']} articles)"
+                ),
+            }
+        )
 
     # State-level shifts: compare tone trends across states
     for s in state_sentiment:
@@ -240,18 +247,20 @@ def compute_narrative_shifts(candidate_sentiment: list[dict],
         if abs(trend) < 1.0:
             continue
         direction = "positive" if trend > 0 else "negative"
-        shifts.append({
-            "type": "state_narrative",
-            "state": s["state"],
-            "direction": direction,
-            "magnitude": abs(trend),
-            "avg_tone": s["avg_tone"],
-            "articles": s["total_articles"],
-            "detail": (
-                f"{s['state']} senate race sentiment shifting {direction} "
-                f"(trend: {trend:+.2f}, {s['total_articles']} articles)"
-            ),
-        })
+        shifts.append(
+            {
+                "type": "state_narrative",
+                "state": s["state"],
+                "direction": direction,
+                "magnitude": abs(trend),
+                "avg_tone": s["avg_tone"],
+                "articles": s["total_articles"],
+                "detail": (
+                    f"{s['state']} senate race sentiment shifting {direction} "
+                    f"(trend: {trend:+.2f}, {s['total_articles']} articles)"
+                ),
+            }
+        )
 
     # Sort by magnitude (biggest shifts first)
     shifts.sort(key=lambda x: x["magnitude"], reverse=True)
@@ -267,8 +276,9 @@ def build_gdelt_overlay() -> dict:
         candidate = fetch_candidate_sentiment(timespan="7d")
         states = fetch_state_sentiment(timespan="7d")
         shifts = compute_narrative_shifts(candidate, states)
-        logger.info("GDELT overlay: {} candidate topics, {} states, {} shifts",
-                     len(candidate), len(states), len(shifts))
+        logger.info(
+            "GDELT overlay: {} candidate topics, {} states, {} shifts", len(candidate), len(states), len(shifts)
+        )
         return {
             "candidate_sentiment": candidate,
             "state_sentiment": states,

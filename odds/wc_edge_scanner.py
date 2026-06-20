@@ -220,7 +220,62 @@ def _worst_sell(vegas: float | None, pm: float | None, kalshi: float | None) -> 
     return max(prices, key=lambda k: prices[k])
 
 
-async def main(sport: str = "all", dry: bool = False):
+def _send_edge_alerts(results: dict, three_way: list) -> None:
+    """Send Telegram for any edge >= ALERT_EDGE found this scan."""
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    try:
+        from scripts.alert_formatter import send_telegram
+    except Exception:
+        return
+
+    lines = ["⚡ <b>EDGE ALERT</b> — Cross-platform scan\n"]
+    count = 0
+
+    for sport_name, edges in results.items():
+        hot = [e for e in edges if abs(e.edge_pct) >= ALERT_EDGE]
+        if not hot:
+            continue
+        for e in sorted(hot, key=lambda x: abs(x.edge_pct), reverse=True):
+            participant = getattr(e, "participant", None) or getattr(e, "bet_team", "?")
+            book_prob   = getattr(e, "book_prob", None) or getattr(e, "true_prob", 0)
+            poly_price  = getattr(e, "poly_price", None) or getattr(e, "polymarket_price", 0)
+            title       = getattr(e, "event_title", None) or getattr(e, "game_title", "")
+            ct          = getattr(e, "commence_time", None) or getattr(e, "game_date", "")
+            dir_str     = "BUY" if e.direction == "BUY" else "SELL"
+            lines.append(
+                f"{'↑' if e.direction == 'BUY' else '↓'} <b>{participant}</b>  "
+                f"Vegas {book_prob:.1%}  Poly {poly_price:.1%}  "
+                f"edge <b>{e.edge_pct:+.1%}</b>  [{dir_str}]"
+            )
+            if title:
+                lines.append(f"   {title[:55]}")
+            if ct:
+                lines.append(f"   Kickoff: {ct[:16]}")
+            lines.append("")
+            count += 1
+
+    for r in three_way:
+        if r["max_gap_pp"] >= ALERT_EDGE * 100:
+            v  = f"Vegas {r['vegas_fair']:.1f}%" if r["vegas_fair"] else ""
+            pm = f"PM {r['pm_price']:.1f}%"    if r["pm_price"]   else ""
+            kl = f"Kalshi {r['kalshi_mid']:.1f}%" if r["kalshi_mid"] else ""
+            lines.append(
+                f"↔ <b>{r['team']}</b>  {v}  {pm}  {kl}  "
+                f"gap <b>{r['max_gap_pp']:.1f}pp</b>  "
+                f"[Buy {r['best_buy']} / Sell {r['worst_sell']}]"
+            )
+            lines.append(f"   {r['game'][:55]}")
+            lines.append("")
+            count += 1
+
+    if count == 0:
+        return
+
+    send_telegram("\n".join(lines).strip())
+
+
+async def main(sport: str = "all", dry: bool = False, alert: bool = False):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     print(f"\n{'='*60}")
     print(f"  WC + MLB EDGE SCANNER  —  {ts}")
@@ -244,6 +299,7 @@ async def main(sport: str = "all", dry: bool = False):
 
     total = 0
     actionable = 0
+    tw: list = []
     for name, edges in results.items():
         print(f"\n── {name} ({len(edges)} edges) ──")
         if not edges:
@@ -262,7 +318,7 @@ async def main(sport: str = "all", dry: bool = False):
     if sport in ("all", "mlb", "threeway"):
         print(f"\n── Three-Way: Vegas vs Polymarket vs Kalshi ──")
         try:
-            tw = scan_three_way()
+            tw = scan_three_way()  # noqa: F841  (also captured in outer tw)
         except Exception as ex:
             logger.error(f"Three-way scan error: {ex}")
             tw = []
@@ -293,12 +349,20 @@ async def main(sport: str = "all", dry: bool = False):
         print("  Shadow trades logged for tradeable edges")
     print(f"{'='*60}\n")
 
+    # ── Telegram delivery ─────────────────────────────────────────────────
+    if alert and actionable > 0:
+        try:
+            _send_edge_alerts(results, tw if sport in ("all", "mlb", "threeway") else [])
+        except Exception as ex:
+            logger.warning(f"Telegram alert failed: {ex}")
+
     return total, actionable
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="WC + MLB edge scanner")
     parser.add_argument("--dry", action="store_true", help="Scan only, no shadow logging")
+    parser.add_argument("--alert", action="store_true", help="Send Telegram for actionable edges")
     parser.add_argument("--sport", choices=["all", "wc", "mlb", "threeway"], default="all")
     args = parser.parse_args()
-    asyncio.run(main(sport=args.sport, dry=args.dry))
+    asyncio.run(main(sport=args.sport, dry=args.dry, alert=args.alert))

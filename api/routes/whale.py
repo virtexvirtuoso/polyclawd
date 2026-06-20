@@ -25,8 +25,9 @@ META_DB = BASE_DIR / "storage" / "whale_meta.db"
 
 
 def _ro(path: Path):
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=10000")
     return conn
 
 
@@ -384,7 +385,11 @@ def _score_alert(row):
     components["urgency"] = round(us, 2)
 
     arch_bonus = {"weather": 1.0, "election": 0.5, "deadline_binary": 0.5, "other": 0.5, "index": 0.3, "sports": 0.15}
-    ab = arch_bonus.get(row["market_archetype"] or "", 0.3)
+    try:
+        arch = row["market_archetype"] or ""
+    except (KeyError, AttributeError):
+        arch = ""
+    ab = arch_bonus.get(arch, 0.3)
     score += ab * _WEIGHTS["archetype_bonus"]
     components["archetype"] = round(ab, 2)
 
@@ -397,14 +402,17 @@ def whale_top(limit: int = Query(10, ge=1, le=50),
               severity: Optional[str] = Query(None),
               platform: Optional[str] = Query(None)):
     """Top-ranked whale alerts by composite score. Auto-learns from resolutions."""
-    conn = sqlite3.connect(str(META_DB), timeout=5)
+    conn = sqlite3.connect(str(META_DB), timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=10000")
     conn.execute(f"ATTACH DATABASE '{ALERTS_DB}' AS scanner")
 
     title_map: dict[str, str] = {}
+    sub_map: dict[str, str] = {}
     try:
-        for row in conn.execute("SELECT market, title FROM scanner.market_state WHERE title != ''"):
+        for row in conn.execute("SELECT market, title, sub_title FROM scanner.market_state WHERE title != ''"):
             title_map[row["market"]] = row["title"]
+            sub_map[row["market"]] = row["sub_title"] or ""
     except Exception:
         pass
 
@@ -446,6 +454,7 @@ def whale_top(limit: int = Query(10, ge=1, le=50),
         entry = {
             "market": r["market"],
             "title": title_map.get(r["market"], ""),
+            "sub_title": sub_map.get(r["market"], "") or r["sub_title"] or "",
             "platform": r["platform"],
             "severity": r["severity"],
             "score": s,
@@ -475,16 +484,20 @@ def whale_top(limit: int = Query(10, ge=1, le=50),
 @router.get("/whale/precision")
 def whale_precision():
     """Precision by severity, platform, archetype, and flow size."""
-    conn = sqlite3.connect(str(META_DB), timeout=5)
+    conn = sqlite3.connect(str(META_DB), timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=10000")
     results = {}
 
+    valid_cols = {"severity", "platform", "market_archetype"}
     for label, col in [("by_severity", "severity"), ("by_platform", "platform"), ("by_archetype", "market_archetype")]:
+        if col not in valid_cols:
+            continue
         rows = conn.execute(
-            "SELECT %s, COUNT(*) as total, SUM(CASE WHEN correct_res IS NOT NULL THEN 1 ELSE 0 END) as resolved, "
-            "ROUND(AVG(CASE WHEN correct_res IS NOT NULL THEN correct_res END), 3) as precision "
-            "FROM whale_outcomes WHERE direction IS NOT NULL AND %s IS NOT NULL "
-            "GROUP BY %s ORDER BY COUNT(*) DESC" % (col, col, col)
+            f"SELECT \"{col}\" as grp, COUNT(*) as total, SUM(CASE WHEN correct_res IS NOT NULL THEN 1 ELSE 0 END) as resolved, "
+            f"ROUND(AVG(CASE WHEN correct_res IS NOT NULL THEN correct_res END), 3) as precision "
+            f"FROM whale_outcomes WHERE direction IS NOT NULL AND \"{col}\" IS NOT NULL "
+            f"GROUP BY \"{col}\" ORDER BY COUNT(*) DESC"
         ).fetchall()
         results[label] = [dict(r) for r in rows]
 

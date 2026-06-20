@@ -14,18 +14,13 @@ import sqlite3
 import sys
 import os
 import json
-import urllib.request
-import urllib.error
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Any
+from scripts.alert_formatter import send_telegram
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DB_PATH = PROJECT_ROOT / "storage" / "shadow_trades.db"
-OPENCLAW_TARGET = "468298295"  # Mr. V's Telegram ID
-OPENCLAW_GATEWAY = "http://localhost:18789"  # OpenClaw Gateway
-
-
 def _db():
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
@@ -197,31 +192,6 @@ def format_report(data: Dict[str, Any]) -> str:
     lines.append(f"**Net (24h): {'+' if net_24h >= 0 else ''}${net_24h:,.2f}**")
     
     return "\n".join(lines)
-
-
-def send_telegram(message: str) -> bool:
-    """Send via OpenClaw Gateway HTTP API."""
-    try:
-        payload = json.dumps({
-            "action": "send",
-            "channel": "telegram",
-            "target": OPENCLAW_TARGET,
-            "message": message,
-        }).encode()
-        req = urllib.request.Request(
-            f"{OPENCLAW_GATEWAY}/api/message",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        response = urllib.request.urlopen(req, timeout=10)
-        return response.status == 200
-    except urllib.error.URLError as e:
-        print(f"Gateway unreachable: {e}")
-        return False
-    except Exception as e:
-        print(f"Telegram send failed: {e}")
-        return False
 
 
 def main():

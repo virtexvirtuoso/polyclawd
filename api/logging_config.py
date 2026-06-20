@@ -71,7 +71,7 @@ def setup_logging(log_level: str = "INFO"):
     )
     
     # Add file output with rotation
-    log_path = Path("/var/www/virtuosocrypto.com/polyclawd/logs/polyclawd.log")
+    log_path = Path(__file__).parent.parent / "logs" / "polyclawd.log"
     logger.add(
         log_path,
         format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name} | {message}",

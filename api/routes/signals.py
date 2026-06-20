@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -57,11 +57,6 @@ def _save_json(path: Path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
-
-
-def _get_signals_path() -> str:
-    """Get path to signals modules directory."""
-    return str(Path(__file__).parent.parent.parent / "signals")
 
 
 # Predictor stats file
@@ -780,9 +775,6 @@ def aggregate_all_signals() -> dict:
 
     # 5. News Signals (Google News + Reddit)
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from news_signal import scan_all_markets_for_news, get_trending_reddit_signals
 
         # Get active Polymarket markets for news scanning
@@ -809,9 +801,6 @@ def aggregate_all_signals() -> dict:
 
     # 6. Edge Signals (from cache)
     try:
-        api_path = str(Path(__file__).parent.parent)
-        if api_path not in sys.path:
-            sys.path.insert(0, api_path)
         from edge_cache import get_edge_signals
         edge_signals = get_edge_signals()
         all_signals.extend(edge_signals)
@@ -820,9 +809,6 @@ def aggregate_all_signals() -> dict:
 
     # 7. Mispriced Category + Whale Confirmation (backtested: 75% WR, 1.25 Sharpe)
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from mispriced_category_signal import get_mispriced_category_signals
         mcw_data = get_mispriced_category_signals()
         for sig in mcw_data.get("signals", [])[:10]:
@@ -860,9 +846,6 @@ def aggregate_all_signals() -> dict:
 
     # Record predictions for IC (Information Coefficient) tracking
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from ic_tracker import record_signal_prediction
         from calibrator import calibrate_confidence
         for sig in all_signals:
@@ -932,9 +915,6 @@ async def get_mispriced_category_strategy_signals():
     spikes and whale activity as confirmation.
     """
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from mispriced_category_signal import get_mispriced_category_signals
         return get_mispriced_category_signals()
     except Exception as e:
@@ -946,9 +926,6 @@ async def get_mispriced_category_strategy_signals():
 async def get_news_signals():
     """Get signals specifically from news sources (Google News + Reddit)."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from news_signal import (
             fetch_google_news, get_trending_reddit_signals, analyze_sentiment
         )
@@ -959,8 +936,13 @@ async def get_news_signals():
             "signals": [],
         }
 
+        # Configurable news topics from env, with sensible defaults
+        import os as _os
+        topics_str = _os.environ.get("NEWS_TOPICS", "bitcoin,trump,election,fed,china")
+        topics = [t.strip() for t in topics_str.split(",") if t.strip()]
+
         # Fetch news for key topics
-        for topic in ["bitcoin", "trump", "super bowl"]:
+        for topic in topics:
             articles = fetch_google_news(topic, max_results=5)
             results["google_news"][topic] = [
                 {
@@ -991,15 +973,18 @@ async def auto_trade_on_signals(
     max_trades: int = Query(5, ge=1, le=10, description="Max trades to execute"),
     max_per_trade: float = Query(100, ge=10, le=500, description="Max $ per trade"),
     min_confidence: float = Query(10, ge=0, le=100, description="Minimum confidence score"),
-    api_key: str = Query(None, description="API key for authentication")
+    authorization: str = Header(None, description="API key for authentication (Bearer <key>)")
 ):
     """Automatically paper trade based on all aggregated signals.
 
     Requires authentication for actual trading execution.
     """
     # Basic auth check
+    api_key = None
+    if authorization and authorization.startswith("Bearer "):
+        api_key = authorization[7:]
     if not api_key:
-        raise HTTPException(status_code=401, detail="API key required for auto-trading")
+        raise HTTPException(status_code=401, detail="API key required for auto-trading (Authorization: Bearer <key>)")
 
     try:
         signals = aggregate_all_signals()
@@ -1569,9 +1554,6 @@ async def get_rotation_candidates():
 async def get_shadow_performance():
     """Get shadow trading performance stats and daily summaries."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from shadow_tracker import get_trade_stats, get_performance_history, get_open_trades
         stats = get_trade_stats()
         history = get_performance_history(30)
@@ -1601,9 +1583,6 @@ async def get_shadow_performance():
 async def trigger_shadow_resolution():
     """Manually trigger shadow trade resolution."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from shadow_tracker import resolve_trades, generate_daily_summary
         resolve_result = resolve_trades(batch_size=20, delay=0.3)
         summary = generate_daily_summary()
@@ -1621,9 +1600,6 @@ async def trigger_shadow_resolution():
 async def get_ai_model_tracker():
     """Get Arena leaderboard rankings and AI model market signals."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from ai_model_tracker import get_arena_summary
         return get_arena_summary()
     except Exception as e:
@@ -1635,9 +1611,6 @@ async def get_ai_model_tracker():
 async def get_ai_model_trends(days: int = Query(default=7, ge=1, le=90)):
     """Get Arena score trends over recent days."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from ai_model_tracker import get_score_trends
         return get_score_trends(days=days)
     except Exception as e:
@@ -1653,9 +1626,6 @@ async def get_ai_model_trends(days: int = Query(default=7, ge=1, le=90)):
 async def get_portfolio_status():
     """Get current paper portfolio status — bankroll, positions, P&L."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from paper_portfolio import get_portfolio_status
         status = get_portfolio_status()
 
@@ -1695,9 +1665,6 @@ async def get_portfolio_status():
 async def get_portfolio_positions(status: str = Query(default="all")):
     """Get paper positions. Filter by status: all, open, closed."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from paper_portfolio import get_positions
         return get_positions(status=status)
     except Exception as e:
@@ -1708,9 +1675,6 @@ async def get_portfolio_positions(status: str = Query(default="all")):
 async def get_portfolio_history(limit: int = Query(default=50)):
     """Get closed position history with P&L."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from paper_portfolio import get_position_history
         return get_position_history(limit=limit)
     except Exception as e:
@@ -1721,9 +1685,6 @@ async def get_portfolio_history(limit: int = Query(default=50)):
 async def process_portfolio_signals():
     """Run signal pipeline and auto-open paper positions for qualifying signals."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from paper_portfolio import process_signals
         from mispriced_category_signal import get_mispriced_category_signals
         result = get_mispriced_category_signals(); signals = result.get("signals", [])
@@ -1737,9 +1698,6 @@ async def process_portfolio_signals():
 async def resolve_portfolio_positions():
     """Auto-resolve stale open positions using Polymarket CLOB / Kalshi APIs."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from paper_portfolio import resolve_open_positions
         return resolve_open_positions()
     except Exception as e:
@@ -1751,9 +1709,6 @@ async def resolve_portfolio_positions():
 async def get_portfolio_positions_live():
     """Get open positions with live market prices and unrealized P&L."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from paper_portfolio import get_live_positions
         return get_live_positions()
     except Exception as e:
@@ -1765,9 +1720,6 @@ async def get_portfolio_positions_live():
 async def get_portfolio_archetype_breakdown():
     """Get win rate and P&L breakdown by market archetype."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from paper_portfolio import get_archetype_breakdown
         return get_archetype_breakdown()
     except Exception as e:
@@ -1779,9 +1731,6 @@ async def get_portfolio_archetype_breakdown():
 async def get_archetype_pnl_series():
     """Get per-archetype cumulative P&L series for sparklines."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from paper_portfolio import get_archetype_cumulative_pnl
         return get_archetype_cumulative_pnl()
     except Exception as e:
@@ -1793,9 +1742,6 @@ async def get_archetype_pnl_series():
 async def manually_close_position(position_id: int, outcome: str = Query(..., pattern="^(won|lost)$")):
     """Manually close an open position as won or lost."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from paper_portfolio import close_position_by_id
         return close_position_by_id(position_id, outcome)
     except Exception as e:
@@ -1807,9 +1753,6 @@ async def manually_close_position(position_id: int, outcome: str = Query(..., pa
 async def get_resolve_log(limit: int = Query(default=20)):
     """Get the last N resolved positions with timestamps and close reasons."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from paper_portfolio import get_resolve_log
         return get_resolve_log(limit=limit)
     except Exception as e:
@@ -1830,9 +1773,6 @@ async def get_portfolio_equity_series(hours: int = Query(default=0, ge=0, le=876
     for all snapshots, or hours=N to limit to the last N hours.
     """
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from paper_portfolio import get_equity_series, backfill_equity_snapshots
         # Auto-backfill on first call — idempotent
         backfill_equity_snapshots()
@@ -1846,9 +1786,6 @@ async def get_portfolio_equity_series(hours: int = Query(default=0, ge=0, le=876
 async def post_portfolio_equity_snapshot():
     """Force-capture a single equity snapshot now. Used by scheduler/debug."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from paper_portfolio import snapshot_equity
         return snapshot_equity()
     except Exception as e:
@@ -1860,12 +1797,8 @@ async def post_portfolio_equity_snapshot():
 async def get_portfolio_equity_curve():
     """Get equity curve data points from paper_portfolio_state table."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         import sqlite3
-        from pathlib import Path
-        db_path = Path(signals_path).parent / "storage" / "shadow_trades.db"
+        db_path = STORAGE_DIR / "shadow_trades.db"
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
@@ -1890,9 +1823,6 @@ async def get_portfolio_equity_curve():
 async def get_copy_trade_data():
     """Get whale copy-trade signals and overlaps."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from copy_trade_watcher import get_copy_trade_signals
         return get_copy_trade_signals()
     except Exception as e:
@@ -1904,9 +1834,6 @@ async def get_copy_trade_data():
 async def get_cross_platform_arb():
     """Scan for cross-platform arbitrage between Kalshi and Polymarket."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from cross_platform_arb import scan_cross_platform_arb
         return scan_cross_platform_arb()
     except Exception as e:
@@ -1922,9 +1849,6 @@ async def get_cross_platform_arb():
 async def get_resolution_certainty():
     """Scan open markets for near-certain outcomes using real-time data."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from resolution_scanner import get_resolution_summary
         return get_resolution_summary()
     except Exception as e:
@@ -1940,9 +1864,6 @@ async def get_ic_report(window_days: int = Query(30, ge=1, le=365)):
     IC < 0.03 = KILL (noise), IC < 0.05 = WARN (marginal), IC >= 0.05 = OK (alpha).
     """
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from ic_tracker import ic_report
         return ic_report(window_days=window_days)
     except Exception as e:
@@ -1954,9 +1875,6 @@ async def get_ic_report(window_days: int = Query(30, ge=1, le=365)):
 async def get_ic_for_source(source: str, window_days: int = Query(30, ge=1, le=365)):
     """IC measurement for a specific signal source."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from ic_tracker import calculate_ic
         return calculate_ic(source=source, window_days=window_days)
     except Exception as e:
@@ -1972,9 +1890,6 @@ async def get_ic_for_source(source: str, window_days: int = Query(30, ge=1, le=3
 async def run_alpha_snapshot():
     """Run and return a fresh alpha score + BTC/ETH price snapshot."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from alpha_score_tracker import run_snapshot
         return run_snapshot()
     except Exception as e:
@@ -1986,9 +1901,6 @@ async def run_alpha_snapshot():
 async def get_alpha_history(symbol: str, hours: int = Query(default=24)):
     """Get confluence score history for a symbol."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from alpha_score_tracker import get_score_history, get_score_delta
         return {
             "symbol": symbol,
@@ -2007,9 +1919,6 @@ async def get_alpha_history(symbol: str, hours: int = Query(default=24)):
 async def get_btc_tracker(hours: int = Query(default=24)):
     """Get BTC/ETH price snapshot history with deltas."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from alpha_score_tracker import get_price_history, get_btc_price_delta
         return {
             "btc": {
@@ -2035,9 +1944,6 @@ async def get_btc_tracker(hours: int = Query(default=24)):
 async def get_calibration_report():
     """Full calibration report — per-source curves, ECE, source weights."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from calibrator import full_calibration_report
         return full_calibration_report()
     except Exception as e:
@@ -2049,9 +1955,6 @@ async def get_calibration_report():
 async def get_source_calibration(source: str):
     """Calibration curve for a specific signal source."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from calibrator import build_calibration_curve, get_signal_decay
         return {
             "calibration": build_calibration_curve(source),
@@ -2066,9 +1969,6 @@ async def get_source_calibration(source: str):
 async def get_source_weights():
     """Optimal source weights based on IC-squared."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from calibrator import compute_source_weights
         return compute_source_weights()
     except Exception as e:
@@ -2090,9 +1990,6 @@ async def weather_ensemble_status():
     """
     import asyncio
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from weather_ensemble import get_ensemble_status
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, get_ensemble_status)
@@ -2122,9 +2019,6 @@ async def weather_dashboard():
     from datetime import datetime, timezone
     from collections import defaultdict
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from paper_portfolio import DB_PATH as _DB_PATH  # type: ignore
 
         def _classify_market(title: str) -> str:
@@ -2367,9 +2261,6 @@ async def kalshi_fade_dashboard():
     from collections import defaultdict
     from datetime import datetime, timezone
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from paper_portfolio import DB_PATH as _DB_PATH  # type: ignore
         from kalshi_weather_fade import (  # type: ignore
             ARCHETYPE as _KF_ARCH, DATE_EXPOSURE_CAP as _KF_CAP,
@@ -2499,9 +2390,6 @@ async def scan_weather():
     """Scan weather markets on Kalshi + Polymarket against Open-Meteo forecasts."""
     import asyncio
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from weather_scanner import scan_all_weather
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, scan_all_weather)
@@ -2514,9 +2402,6 @@ async def scan_weather():
 async def scan_tweet_counts():
     """Scan tweet count bracket markets using Monte Carlo vs xtracker data."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from tweet_count_scanner import scan_all_tweet_markets
         return scan_all_tweet_markets()
     except Exception as e:
@@ -2528,9 +2413,6 @@ async def scan_tweet_counts():
 async def get_strategy_scorecard(strategy: str):
     """Get calibration scorecard for a learning strategy (tweet_count_mc, weather_ensemble)."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from resolution_logger import get_scorecard, load_resolutions
         card = get_scorecard(strategy)
         n = len(load_resolutions(strategy))
@@ -2548,9 +2430,6 @@ async def get_strategy_scorecard(strategy: str):
 async def classify_market_archetype(title: str = Query(...)):
     """Classify a market title into an archetype."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from mispriced_category_signal import classify_archetype
         archetype = classify_archetype(title)
         return {"title": title, "archetype": archetype}
@@ -2562,9 +2441,6 @@ async def classify_market_archetype(title: str = Query(...)):
 async def check_kill_rules(title: str = Query(...), price_cents: int = Query(...)):
     """Check if a market would be killed by archetype kill rules."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from mispriced_category_signal import _check_kill_rules
         should_kill, reason, archetype = _check_kill_rules(title, price_cents)
         return {
@@ -2583,13 +2459,9 @@ async def get_wr_buckets():
     """Get empirical win rates by archetype, side, and price zone from resolved trades."""
     try:
         import sqlite3
-        db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '..', 'storage', 'shadow_trades.db')
-        db = sqlite3.connect(db_path)
+        db = sqlite3.connect(str(STORAGE_DIR / "shadow_trades.db"))
         db.row_factory = sqlite3.Row
 
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from mispriced_category_signal import classify_archetype
 
         # Shadow trades
@@ -2655,9 +2527,6 @@ async def get_wr_buckets():
 async def get_kill_stats():
     """Get stats on how many current signals would be killed by rules."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from mispriced_category_signal import get_mispriced_category_signals
         result = get_mispriced_category_signals()
         signals = result.get('signals', [])
@@ -2686,9 +2555,6 @@ async def get_kill_stats():
 async def get_calibration_audit():
     """Run calibration audit — check if predicted confidence matches actual WR."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from empirical_confidence import calibration_audit
         return calibration_audit()
     except Exception as e:
@@ -2700,9 +2566,6 @@ async def get_calibration_audit():
 async def evaluate_with_empirical(title: str = Query(...), side: str = Query(...), price: float = Query(...)):
     """Evaluate a market using empirical confidence engine."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from empirical_confidence import calculate_empirical_confidence
         return calculate_empirical_confidence(title, side, price)
     except Exception as e:
@@ -2759,9 +2622,6 @@ async def copy_trade_positions():
 async def get_risk_guards():
     """Get status of all risk guard features — Kelly, correlation cap, time decay windows."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from paper_portfolio import get_kelly_status, get_correlation_status
         from time_decay_optimizer import get_optimal_entry_windows
         # CV Kelly haircut
@@ -2788,9 +2648,6 @@ async def get_risk_guards():
 async def strike_scanner():
     """Scan crypto strike markets for volatility-based mispricing signals."""
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from strike_probability import get_calculator
         calc = get_calculator()
         results = calc.scan_all_strikes()
@@ -3575,9 +3432,6 @@ async def get_vpin_for_slug(slug: str):
     Returns VPIN score (0-1), buy_pct, n_trades, bar_size, vpin_class,
     and current price.
     """
-    signals_path = _get_signals_path()
-    if signals_path not in sys.path:
-        sys.path.insert(0, signals_path)
     from vpin import vpin_for_slug
     result = vpin_for_slug(slug)
     if result.get("error"):
@@ -3593,9 +3447,6 @@ async def get_vpin_scan(
 
     Returns list of markets with VPIN, buy_pct, n_trades, vpin_class.
     """
-    signals_path = _get_signals_path()
-    if signals_path not in sys.path:
-        sys.path.insert(0, signals_path)
     from vpin import scan_top_markets_vpin
     results = scan_top_markets_vpin(top_n=top_n)
     return {
@@ -3612,9 +3463,6 @@ async def get_vpin_accuracy():
     Returns accuracy for high-VPIN (>0.7) and medium-VPIN (0.4-0.7) events,
     plus a verdict: SIGNAL, INFORMATIONAL_ONLY, or INSUFFICIENT_DATA.
     """
-    signals_path = _get_signals_path()
-    if signals_path not in sys.path:
-        sys.path.insert(0, signals_path)
     from vpin import backtest_vpin_accuracy
     return backtest_vpin_accuracy()
 
@@ -3781,11 +3629,8 @@ async def get_implied_correlation(min_markets: int = Query(3, ge=2, le=50)):
 
     Anomalies are flagged when implied vs historical divergence exceeds 2σ.
     """
-    import asyncio, sys, pathlib
+    import asyncio
     def _build():
-        signals_path = str(pathlib.Path(__file__).parent.parent.parent / "signals")
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from signals.implied_correlation import get_all_matrices
         return get_all_matrices(min_markets=min_markets)
     return await asyncio.get_event_loop().run_in_executor(None, _build)
@@ -3794,11 +3639,8 @@ async def get_implied_correlation(min_markets: int = Query(3, ge=2, le=50)):
 @router.get("/signals/implied-correlation/{cluster}")
 async def get_implied_correlation_cluster(cluster: str):
     """Return correlation matrix for one specific cluster."""
-    import asyncio, sys, pathlib
+    import asyncio
     def _build():
-        signals_path = str(pathlib.Path(__file__).parent.parent.parent / "signals")
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from signals.implied_correlation import get_cluster_matrix
         result = get_cluster_matrix(cluster)
         if result is None:
@@ -3813,11 +3655,8 @@ async def get_implied_correlation_cluster(cluster: str):
 @router.get("/signals/implied-correlation/clusters/list")
 async def list_correlation_clusters(min_markets: int = Query(3, ge=2, le=50)):
     """List all auto-detected clusters available for correlation analysis."""
-    import asyncio, sys, pathlib
+    import asyncio
     def _build():
-        signals_path = str(pathlib.Path(__file__).parent.parent.parent / "signals")
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from signals.implied_correlation import get_cluster_list
         return get_cluster_list(min_markets=min_markets)
     return await asyncio.get_event_loop().run_in_executor(None, _build)
@@ -3827,11 +3666,8 @@ async def list_correlation_clusters(min_markets: int = Query(3, ge=2, le=50)):
 async def get_correlation_snapshots(cluster: Optional[str] = Query(None),
                                       limit: int = Query(50, ge=1, le=500)):
     """Get historical correlation snapshots from correlation_matrix.db."""
-    import asyncio, sys, pathlib
+    import asyncio
     def _build():
-        signals_path = str(pathlib.Path(__file__).parent.parent.parent / "signals")
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from signals.implied_correlation import get_latest_snapshots
         return get_latest_snapshots(cluster=cluster, limit=limit)
     return await asyncio.get_event_loop().run_in_executor(None, _build)
@@ -3870,9 +3706,6 @@ async def get_category_momentum():
             return _category_momentum_cache["data"]
 
     try:
-        signals_path = _get_signals_path()
-        if signals_path not in sys.path:
-            sys.path.insert(0, signals_path)
         from category_momentum import get_momentum_leaderboard
 
         result = get_momentum_leaderboard(top_n=20)
@@ -3972,7 +3805,6 @@ async def prop_composite_scan():
     Cached 30 min.
     """
     try:
-        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
         from signals.prop_composite import scan_all_games_prop_composite
 
         result = await scan_all_games_prop_composite(force=False)
@@ -3998,7 +3830,6 @@ async def prop_composite_event(event_id: str):
     and Polymarket price if available.
     """
     try:
-        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
         from signals.prop_composite import implied_game_prob_from_props
 
         result = await implied_game_prob_from_props(event_id)
@@ -4034,7 +3865,6 @@ async def get_consensus_disagreement(
     a minimum threshold. Results sorted by fee_adjusted_disagreement_pp descending.
     """
     try:
-        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
         from fastapi.concurrency import run_in_threadpool
         from signals.consensus_disagreement import (
             scan_all_sports_disagreement,
@@ -4080,7 +3910,6 @@ async def get_consensus_disagreement_sport(
     Returns sport-specific disagreement scan results.
     """
     try:
-        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
         from fastapi.concurrency import run_in_threadpool
         from signals.consensus_disagreement import scan_sport_disagreement
 

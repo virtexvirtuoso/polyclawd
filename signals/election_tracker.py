@@ -1496,13 +1496,20 @@ def _fetch_ie_spending_overlay():
 
 
 def _fetch_gdelt_overlay():
-    """Fetch GDELT news sentiment data (runs in thread pool)."""
+    """Read the precomputed GDELT overlay from disk.
+
+    The scheduler (task_gdelt_refresh) refreshes storage/gdelt_cache.json every 6h
+    from a single process. The request path NEVER fetches GDELT live — live fetching
+    from both uvicorn workers simultaneously caused 429 rate-limit storms.
+    """
     try:
-        from signals.gdelt_client import build_gdelt_overlay
-        return build_gdelt_overlay()
+        gdelt_cache = Path(__file__).parent.parent / "storage" / "gdelt_cache.json"
+        if gdelt_cache.exists():
+            import json as _json
+            return _json.loads(gdelt_cache.read_text())
     except Exception as e:
-        logger.warning("GDELT overlay failed (non-fatal): {}", e)
-        return {"candidate_sentiment": [], "state_sentiment": [], "narrative_shifts": []}
+        logger.warning("GDELT cache read failed (non-fatal): {}", e)
+    return {"candidate_sentiment": [], "state_sentiment": [], "narrative_shifts": []}
 
 
 def _fetch_rcp_overlay(markets):
@@ -2601,7 +2608,9 @@ def generate_report(core_only: bool = False) -> dict:
     insights["narrative_shifts"] = gdelt_result.get("narrative_shifts", [])
     try:
         gdelt_cache = Path(__file__).parent.parent / "storage" / "gdelt_cache.json"
-        gdelt_cache.write_text(json.dumps(gdelt_result))
+        # Never blank a good cache with an empty (rate-limited) result.
+        if gdelt_result.get("candidate_sentiment") or gdelt_result.get("state_sentiment"):
+            gdelt_cache.write_text(json.dumps(gdelt_result))
     except Exception:
         pass
 

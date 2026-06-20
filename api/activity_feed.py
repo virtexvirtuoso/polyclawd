@@ -18,7 +18,7 @@ _activity_buffer = deque(maxlen=500)
 _buffer_lock = threading.Lock()
 
 # Database path
-DB_PATH = Path("/var/www/virtuosocrypto.com/polyclawd/storage/shadow_trades.db")
+DB_PATH = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
 
 
 def _init_db():

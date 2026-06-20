@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Shadow Trade Tracker — persistent paper trade tracking with SQLite.
+Shadow Trade Tracker - persistent paper trade tracking with SQLite.
 
 Features:
 - SQLite storage (no more JSON cap / pruning)
@@ -272,7 +272,7 @@ def save_signal_snapshot(signals: List[Dict], source: str = "all"):
 
 def log_shadow_trade(signal: Dict) -> bool:
     """Log a signal as a shadow trade in SQLite.
-    
+
     Dedup: only one open (unresolved) trade per market_id (regardless of side).
     If an open trade exists for this market, update it (including side if changed).
     This prevents conflicting YES/NO trades on the same market.
@@ -294,14 +294,17 @@ def log_shadow_trade(signal: Dict) -> bool:
             market_title = signal.get("market", "")
             norm_title = _normalize_market_title(market_title)
             if norm_title and len(norm_title) > 10:
+                # Use LIKE query with normalized key instead of full iteration
                 cross = conn.execute(
-                    "SELECT id, side, platform, market FROM shadow_trades WHERE resolved = 0"
+                    "SELECT id, side, platform, market FROM shadow_trades "
+                    "WHERE resolved = 0 AND market LIKE ?",
+                    (f"%{norm_title[:30]}%",)
                 ).fetchall()
                 for c in cross:
                     if _markets_match(market_title, c["market"]):
                         logger.warning(
                             f"Cross-platform dedup: '{market_title[:50]}' already tracked "
-                            f"on {c['platform']} as {c['side']} — skipping {signal.get('platform','?')}"
+                            f"on {c['platform']} as {c['side']} - skipping {signal.get('platform','?')}"
                         )
                         conn.close()
                         return False
@@ -309,10 +312,10 @@ def log_shadow_trade(signal: Dict) -> bool:
         if existing:
             existing_side = existing[1]
             if existing_side != side:
-                # Side flipped — this means the signal is unstable, skip
+                # Side flipped - this means the signal is unstable, skip
                 logger.warning(
                     f"Shadow trade side conflict: {market_id} was {existing_side}, "
-                    f"now {side} — keeping original, skipping new signal"
+                    f"now {side} - keeping original, skipping new signal"
                 )
                 conn.close()
                 return False
@@ -390,7 +393,7 @@ def _fetch_json(url: str, timeout: int = 8) -> Any:
 
 def _normalize_market_title(title: str) -> str:
     """Normalize market title for cross-platform dedup matching.
-    
+
     Strips platform-specific phrasing differences so the same market
     on Kalshi vs Polymarket produces the same normalized key.
     """
@@ -402,7 +405,7 @@ def _normalize_market_title(title: str) -> str:
     t = re.sub(r'^will\s+', '', t)
     # Normalize "the price of bitcoin" → "bitcoin"
     t = re.sub(r'the price of\s+', '', t)
-    # Strip "be above" → "above" 
+    # Strip "be above" → "above"
     t = re.sub(r'\bbe above\b', 'above', t)
     # Strip date suffixes that differ ("on February 18?" vs "in February?")
     # Keep month but normalize preposition
@@ -413,27 +416,27 @@ def _normalize_market_title(title: str) -> str:
     t = re.sub(r'(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b', r'\1', t)
     # Strip "at the end of"
     t = re.sub(r'at the end of\s+', '', t)
-    # Normalize "reach $75,000" and "above $75,000" 
+    # Normalize "reach $75,000" and "above $75,000"
     t = re.sub(r'\breach\b', 'above', t)
     return t
 
 
 def _markets_match(title_a: str, title_b: str) -> bool:
     """Structured cross-platform market matching.
-    
+
     Uses parsed market attributes (asset, direction, timeframe, threshold)
     instead of raw string comparison for more robust matching.
     """
     # Fast path: exact normalized match
     if _normalize_market_title(title_a) == _normalize_market_title(title_b):
         return True
-    
+
     # Structured matching via browser_bridge parser
     try:
         from browser_bridge import _parse_market_title
         a = _parse_market_title(title_a)
         b = _parse_market_title(title_b)
-        
+
         # Must match on: market_type + asset + direction + timeframe
         if a["market_type"] == "unknown" or b["market_type"] == "unknown":
             return False
@@ -448,7 +451,7 @@ def _markets_match(title_a: str, title_b: str) -> bool:
         # If threshold exists, must match
         if a["threshold"] and b["threshold"] and a["threshold"] != b["threshold"]:
             return False
-        
+
         return True
     except ImportError:
         return False
@@ -464,26 +467,26 @@ def _check_polymarket_resolution(condition_id: str) -> str:
         if data.get("closed") or data.get("resolved"):
             tokens = data.get("tokens", [])
             # Check for explicit winner flag
-            for token in tokens:
+            for i, token in enumerate(tokens):
                 if token.get("winner") is True:
                     outcome = (token.get("outcome") or "").upper()
                     if outcome in ("YES", "NO"):
                         return outcome
-                    # Named outcomes: first token winning = YES
-                    return "YES" if token == tokens[0] else "NO"
+                    # First token = YES, second = NO (Polymarket convention)
+                    return "YES" if i == 0 else "NO"
             # Fallback: price-based
             for token in tokens:
                 if token.get("outcome") == "Yes" and float(token.get("price", 0)) > 0.9:
                     return "YES"
                 elif token.get("outcome") == "No" and float(token.get("price", 0)) > 0.9:
                     return "NO"
-    
+
     return None
 
 
 def resolve_trades(batch_size: int = 15, delay: float = 0.3) -> Dict[str, Any]:
     """Resolve unresolved shadow trades against Kalshi + Polymarket APIs.
-    
+
     Handles both platforms:
     - Kalshi: market_id is a ticker
     - Polymarket: market_id starts with 0x (condition_id)
@@ -541,8 +544,10 @@ def resolve_trades(batch_size: int = 15, delay: float = 0.3) -> Dict[str, Any]:
         # P&L calculation (binary: win = 1.00, lose = 0.00)
         if result == "YES":
             pnl = (1.0 - entry_price) if side == "YES" else -entry_price
+            exit_price = 1.0
         elif result == "NO":
             pnl = -entry_price if side == "YES" else entry_price
+            exit_price = 0.0
         else:
             continue
 
@@ -554,7 +559,7 @@ def resolve_trades(batch_size: int = 15, delay: float = 0.3) -> Dict[str, Any]:
             datetime.now(timezone.utc).isoformat(),
             result,
             round(pnl, 4),
-            1.0 if result == side else 0.0,
+            exit_price,
             row["id"],
         ))
 
@@ -611,7 +616,7 @@ def generate_daily_summary(target_date: Optional[str] = None) -> Dict[str, Any]:
         SELECT * FROM shadow_trades WHERE snapshot_date = ?
     """, (today,)).fetchall()
 
-    # Trades RESOLVED today (regardless of when logged) — this is the real daily P&L
+    # Trades RESOLVED today (regardless of when logged) - this is the real daily P&L
     day_resolved = conn.execute("""
         SELECT * FROM shadow_trades WHERE resolved = 1
         AND substr(resolved_at, 1, 10) = ?
@@ -669,6 +674,30 @@ def generate_daily_summary(target_date: Optional[str] = None) -> Dict[str, Any]:
         if day_trades else 0
     )
 
+    # Track actual sources from today's trades
+    source_counts = {}
+    for t in day_trades:
+        src = t.get("strategy") or t.get("source") or "unknown"
+        source_counts[src] = source_counts.get(src, 0) + 1
+
+    # Poly delta: avg adverse selection by signal source (last 7 days)
+    poly_delta_rows = conn.execute("""
+        SELECT strategy, poly_delta_60, poly_delta_300
+        FROM shadow_trades
+        WHERE platform = 'polymarket'
+          AND poly_delta_60 IS NOT NULL
+          AND snapshot_date >= date(?, '-7 days')
+    """, (today,)).fetchall()
+    delta_by_source: dict = {}
+    for row in poly_delta_rows:
+        src = row["strategy"] or "unknown"
+        delta_by_source.setdefault(src, [])
+        delta_by_source[src].append(row["poly_delta_60"])
+    avg_poly_delta = {
+        src: round(sum(v) / len(v) * 100, 2)  # in pp
+        for src, v in delta_by_source.items() if v
+    }
+
     summary = {
         "date": today,
         "total_signals": day_signals,
@@ -687,6 +716,8 @@ def generate_daily_summary(target_date: Optional[str] = None) -> Dict[str, Any]:
         "avg_confidence": round(avg_conf, 1),
         "best_trade": f"{best['market'][:40]} +{best['pnl']:.4f}" if best else None,
         "worst_trade": f"{worst['market'][:40]} {worst['pnl']:.4f}" if worst else None,
+        "sources": source_counts,
+        "avg_poly_delta_pp": avg_poly_delta,
     }
 
     # Save to SQLite
@@ -703,7 +734,7 @@ def generate_daily_summary(target_date: Optional[str] = None) -> Dict[str, Any]:
         round(avg_conf, 1), 0,
         round(max_dd, 4), round(sharpe, 2),
         summary["best_trade"], summary["worst_trade"],
-        json.dumps({"mispriced_category": len(day_trades)}),
+        json.dumps(source_counts),
         datetime.now(timezone.utc).isoformat(),
     ))
     conn.commit()
@@ -761,11 +792,22 @@ def get_open_trades() -> List[Dict]:
     return [dict(r) for r in rows]
 
 
-def get_trade_stats() -> Dict[str, Any]:
-    """Get overall shadow trading statistics."""
+def get_trade_stats(exclude_categories: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Get overall shadow trading statistics.
+
+    Args:
+        exclude_categories: List of categories to exclude (e.g. ["WNBA"])
+    """
     conn = get_db()
 
-    stats = conn.execute("""
+    exclude_clause = ""
+    exclude_params = []
+    if exclude_categories:
+        placeholders = ",".join("?" for _ in exclude_categories)
+        exclude_clause = f" AND (category IS NULL OR category NOT IN ({placeholders}))"
+        exclude_params = exclude_categories
+
+    stats = conn.execute(f"""
         SELECT
             COUNT(*) as total,
             SUM(CASE WHEN resolved = 1 THEN 1 ELSE 0 END) as resolved,
@@ -780,19 +822,20 @@ def get_trade_stats() -> Dict[str, Any]:
             COUNT(DISTINCT snapshot_date) as active_days,
             COUNT(DISTINCT category) as categories_traded
         FROM shadow_trades
-    """).fetchone()
+        WHERE 1=1{exclude_clause}
+    """, exclude_params).fetchone()
 
     # Category breakdown
-    cats = conn.execute("""
+    cats = conn.execute(f"""
         SELECT category,
             COUNT(*) as trades,
             SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
             SUM(COALESCE(pnl, 0)) as pnl
         FROM shadow_trades
-        WHERE resolved = 1
+        WHERE resolved = 1{exclude_clause}
         GROUP BY category
         ORDER BY pnl DESC
-    """).fetchall()
+    """, exclude_params).fetchall()
 
     conn.close()
 
