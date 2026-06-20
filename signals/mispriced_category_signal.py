@@ -131,7 +131,11 @@ def classify_archetype(title: str) -> str:
     if re.search(r'(by|before|end of|on)\s+(january|february|march|april|may|june|july|august|september|october|november|december|\d{4})', t):
         return 'deadline_binary'
 
-    # Sports winner / championship
+    # Sports tournament advancement (distinct from per-game winner)
+    if re.search(r'(advance|qualify|knockout|group stage|round of 16|quarterfinal|semifinal|make the)', t):
+        return 'sports_tournament'
+
+    # Sports winner / championship (per-game or outright winner)
     if re.search(r'(win|winner|champion|cup|league|playoffs|finals|medal)', t):
         return 'sports_winner'
 
@@ -150,9 +154,11 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     """
     archetype = classify_archetype(title)
 
-    # K3: Any trade below 30c (hard kill — 20% WR, n=10)
-    if price_cents < 30:
-        return True, f"K3: entry {price_cents}c < 30c floor (20% WR)", archetype
+    # K3: Any trade below 15c (hard kill — extremely low-prob markets)
+    # Was 30c but killed legitimate 15-29c markets (WC advancement, futures)
+    # 15c still filters true longshots while allowing mid-range value bets
+    if price_cents < 15:
+        return True, f"K3: entry {price_cents}c < 15c floor", archetype
 
     # K1: Intraday up/down — coin flip (50% NO WR, n=15,570)
     if archetype == 'intraday_updown':
@@ -275,7 +281,7 @@ POLYMARKET_EFFICIENT_TAGS = {
 
 # Thresholds
 MIN_VOLUME_KALSHI = 5000        # Contracts
-MIN_VOLUME_POLYMARKET = 50000   # Dollars — Becker: $50K+ vol = 67% NO WR (vs 59% at $25K)
+MIN_VOLUME_POLYMARKET = 25000   # Dollars — lowered from $50K. Becker: $25K = 59% NO WR, still profitable
 WHALE_VOLUME_KALSHI = 10000     # Contracts
 WHALE_VOLUME_POLYMARKET = 100000 # Dollars
 CONTESTED_LOW = 10              # Cents/pct — lowered from 15 to allow cheap NOs
@@ -623,6 +629,7 @@ def _is_mispriced_polymarket(market: Dict) -> tuple:
         "parlay":             (0.25, "dynamic"),    # Multi-leg — high NO WR expected
         "financial_price":    (0.15, "tech"),        # Non-crypto price thresholds
         "game_total":         (0.12, "sports"),      # Over/under totals
+        "sports_tournament":  (0.15, "sports"),      # Tournament advancement/knockout — less efficient than per-game
     }
     if archetype in ARCHETYPE_EDGES:
         edge, tier = ARCHETYPE_EDGES[archetype]
