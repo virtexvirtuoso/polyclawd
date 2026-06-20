@@ -157,7 +157,8 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     # K3: Any trade below 15c (hard kill — extremely low-prob markets)
     # Was 30c but killed legitimate 15-29c markets (WC advancement, futures)
     # 15c still filters true longshots while allowing mid-range value bets
-    if price_cents < 15:
+    # Exempt: weather (extreme temp bands), social_count (multi-outcome), sports_tournament
+    if price_cents < 15 and archetype not in ("weather", "social_count", "sports_tournament"):
         return True, f"K3: entry {price_cents}c < 15c floor", archetype
 
     # K1: Intraday up/down — coin flip (50% NO WR, n=15,570)
