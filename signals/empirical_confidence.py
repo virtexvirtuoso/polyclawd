@@ -153,6 +153,7 @@ ARCHETYPE_CONFIDENCE_CAPS = {
     "price_above": 0.30,  # 9.1% actual WR (n=11). Becker 59.3% broken.
     "sports_winner": 0.25,  # 0% actual WR (n=8). Already blocked, but defense in depth.
     "sports_single_game": 0.45,  # 100% WR (n=1) — tiny sample. Conservative.
+    "sports_tournament": 0.50,  # New archetype (2026-06-20). No shadow data. Moderate cap — 30d shadow eval.
     "entertainment": 0.30,  # 0% actual WR (n=2). Becker 71.1% not realized.
     "ai_model": 0.30,  # 0% actual WR (n=1). Conservative.
     "financial_price": 0.40,  # No data. Conservative.

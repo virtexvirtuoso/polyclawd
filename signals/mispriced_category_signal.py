@@ -185,9 +185,13 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     if archetype == 'game_total':
         return True, "K7: game_total (52% NO WR population, n=10,999 — no edge after fees)", archetype
 
-    # K8: sports_winner — 0/4 shadow wins at 88.1% avg conf, Brier 0.776 (2026-04-10 baseline)
-    if archetype == 'sports_winner':
-        return True, "K8: sports_winner (0/4 shadow, Brier 0.776)", archetype
+    # K8: sports_winner — downgraded from hard kill to soft gate (2026-06-20)
+    # Was: 0/4 shadow wins, Brier 0.776. But n=4 is too small for a hard kill
+    # (95% CI: [0%, 60%]). Let through to shadow trading, penalize confidence.
+    # The confidence penalty is applied downstream in calculate_signal_confidence.
+    # if archetype == 'sports_winner':
+    #     return True, "K8: sports_winner (0/4 shadow, Brier 0.776)", archetype
+    pass  # K8 soft-gated: sports_winner passes through with 30% confidence penalty
 
     # K9: election — 0/15 shadow wins, 0% WR. All NO bets on markets that resolved YES.
     if archetype == 'election':
@@ -534,6 +538,10 @@ def calculate_signal_confidence(
 
     confidence = min(95, confidence)
 
+    # K8 soft gate: penalize sports_winner by 30% (was hard kill, n=4 too small)
+    if category and classify_archetype(category) == "sports_winner":
+        confidence *= 0.70
+
     return {
         "confidence": round(confidence, 1),
         "edge_score": round(edge_score, 1),
@@ -723,7 +731,20 @@ def scan_kalshi_signals() -> List[Dict]:
         )
 
         if not cat_info and not is_dynamic_mispriced:
-            continue
+            # Archetype fallback: if market doesn't match MISPRICED_CATEGORIES
+            # or dynamic keywords, try archetype classification (mirrors PM scanner)
+            market_title = market.get("title", ticker)
+            archetype_fb = classify_archetype(market_title)
+            ARCHETYPE_EDGES_KX = {
+                "daily_updown": 0.15, "price_above": 0.12, "price_range": 0.25,
+                "ai_model": 0.20, "entertainment": 0.20, "social_count": 0.12,
+                "weather": 0.15, "sports_tournament": 0.15, "parlay": 0.25,
+                "financial_price": 0.15, "deadline_binary": 0.12,
+            }
+            if archetype_fb in ARCHETYPE_EDGES_KX:
+                cat_info = {"error": ARCHETYPE_EDGES_KX[archetype_fb], "tier": "archetype"}
+            else:
+                continue
 
         category_edge = cat_info["error"] if cat_info else 0.15
         if category_edge * 100 < MIN_EDGE_PCT:
