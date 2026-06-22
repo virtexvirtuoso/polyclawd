@@ -1,6 +1,10 @@
 import json
 import os
+import subprocess
 import sys
+import urllib.request
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
 import server  # noqa: E402
@@ -130,3 +134,52 @@ def test_discover_falls_back_to_cache_on_fetch_failure(tmp_path, monkeypatch):
     # dead host -> fetch fails -> cache served
     tools = server.discover_tools(base_url="https://127.0.0.1:0")
     assert [t["name"] for t in tools] == ["polyclawd_signals"]
+
+
+SERVER = os.path.join(os.path.dirname(__file__), "server.py")
+
+
+def _api_up():
+    try:
+        urllib.request.urlopen("https://virtuosocrypto.com/polyclawd/api/openapi.json", timeout=8)
+        return True
+    except Exception:
+        return False
+
+
+def _rpc(proc, obj):
+    proc.stdin.write(json.dumps(obj) + "\n")
+    proc.stdin.flush()
+    return json.loads(proc.stdout.readline())
+
+
+@pytest.mark.skipif(not _api_up(), reason="public Polyclawd API unreachable")
+def test_stdio_server_lists_25_and_calls_signals():
+    proc = subprocess.Popen(
+        [sys.executable, SERVER], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1
+    )
+    try:
+        _rpc(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        listed = _rpc(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        tools = listed["result"]["tools"]
+        assert len(tools) == 25
+        assert all(t["name"].startswith("polyclawd_") for t in tools)
+        # curated descriptions match TOOL_META exactly
+        names_to_desc = {t["name"]: t["description"] for t in tools}
+        for path, (name, desc) in server.TOOL_META.items():
+            assert names_to_desc[name] == desc
+        # call one tool, assert envelope + real data
+        called = _rpc(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "polyclawd_signals", "arguments": {}},
+            },
+        )
+        payload = json.loads(called["result"]["content"][0]["text"])
+        assert "untrusted_data" in payload and "_note" in payload
+        assert payload["untrusted_data"] != {"error": "Unknown tool: polyclawd_signals"}
+    finally:
+        proc.terminate()
