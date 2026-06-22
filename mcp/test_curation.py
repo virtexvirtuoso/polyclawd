@@ -77,3 +77,21 @@ def test_cap_response_no_list_payload():
     huge_scalar = {"blob": "z" * 40000}
     capped = server._cap_response(huge_scalar)
     assert capped["_truncated"] is True
+
+
+def test_wrap_envelope_shape():
+    w = server._wrap({"x": 1})
+    assert w["untrusted_data"] == {"x": 1}
+    assert "external" in w["_note"].lower()
+
+
+def test_handle_tool_call_unknown_tool_is_wrapped_error(monkeypatch):
+    # force tool registry so name is unknown but registry is non-empty
+    monkeypatch.setattr(
+        server,
+        "TOOLS",
+        [{"name": "x", "_path": "/api/x", "_method": "get", "description": "", "inputSchema": {"properties": {}}}],
+    )
+    monkeypatch.setattr(server, "_TOOL_MAP", {"x": server.TOOLS[0]})
+    out = server.handle_tool_call("does_not_exist", {})
+    assert out["untrusted_data"] == {"error": "Unknown tool: does_not_exist"}
