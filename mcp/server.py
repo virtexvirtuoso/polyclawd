@@ -25,31 +25,6 @@ BASE_URL = "https://virtuosocrypto.com/polyclawd"
 PROTOCOL_VERSION = "2024-11-05"
 CACHE_PATH = Path(__file__).parent / ".tool_cache.json"
 
-# Endpoints to skip
-SKIP_PATHS = {
-    "/health",
-    "/ready",
-    "/metrics",
-    "/api/visitor-log",
-    "/",
-    "/manifest.json",
-    "/sw.js",
-}
-SKIP_PREFIXES = (
-    "/docs",
-    "/openapi",
-    "/redoc",
-    "/static",
-)
-
-# Skip POST endpoints that are mutators (only expose read-only tools)
-# Allow specific safe POSTs
-SAFE_POST_PATHS = {
-    "/api/edge-scanner/calculate",
-    "/api/phase/simulate",
-    "/api/kelly/simulate",
-}
-
 # ── curated allowlist (read-only, GET-only) ──────────────────────────────
 # path: (curated_tool_name, curated_description)
 TOOL_META = {
@@ -182,64 +157,12 @@ def _wrap(result):
     }
 
 
-# Skip endpoints that are duplicates or internal
-SKIP_PATTERNS = {
-    "polyclawd_",  # bare root
-}
-
-# Friendly category prefixes for tool naming
-CATEGORY_ORDER = [
-    "signals",
-    "portfolio",
-    "archetype",
-    "markets",
-    "vegas",
-    "espn",
-    "kalshi",
-    "manifold",
-    "metaculus",
-    "predictit",
-    "betfair",
-    "polyrouter",
-    "basket-arb",
-    "copy-trade",
-    "engine",
-    "phase",
-    "kelly",
-    "alerts",
-    "llm",
-    "paper",
-    "simmer",
-    "trading",
-    "scan",
-    "topics",
-    "calculate",
-    "rewards",
-]
-
-
 # ── helpers ──────────────────────────────────────────────────────────────
 
 
 def api_get(path: str, timeout: int = 60) -> dict:
     url = f"{BASE_URL}{path}"
     req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd-MCP/2.1"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def api_post(path: str, params: dict = None, timeout: int = 30) -> dict:
-    url = f"{BASE_URL}{path}"
-    body = json.dumps(params or {}).encode()
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={"User-Agent": "Polyclawd-MCP/2.1", "Content-Type": "application/json"},
-    )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())

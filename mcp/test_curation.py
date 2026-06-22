@@ -183,3 +183,12 @@ def test_stdio_server_lists_25_and_calls_signals():
         assert payload["untrusted_data"] != {"error": "Unknown tool: polyclawd_signals"}
     finally:
         proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+        for stream in (proc.stdin, proc.stdout):
+            try:
+                stream.close()
+            except Exception:
+                pass
