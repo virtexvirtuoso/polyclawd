@@ -24,12 +24,18 @@ PROTOCOL_VERSION = "2024-11-05"
 
 # Endpoints to skip
 SKIP_PATHS = {
-    "/health", "/ready", "/metrics",
+    "/health",
+    "/ready",
+    "/metrics",
     "/api/visitor-log",
-    "/", "/manifest.json", "/sw.js",
+    "/",
+    "/manifest.json",
+    "/sw.js",
 }
 SKIP_PREFIXES = (
-    "/docs", "/openapi", "/redoc",
+    "/docs",
+    "/openapi",
+    "/redoc",
     "/static",
 )
 
@@ -41,6 +47,46 @@ SAFE_POST_PATHS = {
     "/api/kelly/simulate",
 }
 
+# ── curated allowlist (read-only, GET-only) ──────────────────────────────
+# path: (curated_tool_name, curated_description)
+TOOL_META = {
+    "/api/signals": (
+        "polyclawd_signals",
+        "Aggregated trade signals across all 15 sources (whales, news, volume, elections, edge). Slow (~30s).",
+    ),
+    "/api/signals/news": ("polyclawd_news_signals", "Google-News/Reddit-derived market-impact signals."),
+    "/api/signals/elections": ("polyclawd_election_signals", "Current election-market signals (Kalshi/Polymarket)."),
+    "/api/signals/mispriced-category": (
+        "polyclawd_mispriced_category",
+        "Category-mispricing + whale-confirmation signals.",
+    ),
+    "/api/edge/scan": ("polyclawd_edge_scan", "Cross-platform arbitrage/edge scan (Shin devig)."),
+    "/api/edge/topics": ("polyclawd_edge_topics", "Topics currently surfacing cross-platform edge."),
+    "/api/arb-scan": ("polyclawd_arb_scan", "Polymarket-vs-Kalshi arbitrage spread scan."),
+    "/api/rewards": ("polyclawd_rewards", "Liquidity-reward (LP incentive) opportunities."),
+    "/api/markets/search": ("polyclawd_markets_search", "Search prediction markets by keyword."),
+    "/api/markets/trending": ("polyclawd_markets_trending", "Trending markets by volume/activity."),
+    "/api/markets/new": ("polyclawd_markets_new", "Recently-listed markets."),
+    "/api/markets/opportunities": ("polyclawd_opportunities", "Open positions + highest-edge opportunities widget."),
+    "/api/vegas/odds": ("polyclawd_vegas_odds", "Sportsbook (Vegas) consensus odds."),
+    "/api/vegas/edge": ("polyclawd_vegas_edge", "Sharp-odds edge vs market price."),
+    "/api/espn/edge": ("polyclawd_espn_edge", "ESPN/DraftKings-derived edge."),
+    "/api/whale/alerts": ("polyclawd_whale_alerts", "Recent whale-wallet alerts."),
+    "/api/whale/stats": ("polyclawd_whale_stats", "Whale-tracker summary stats."),
+    "/api/whale/top": ("polyclawd_whale_top", "Top whale wallets by activity/score."),
+    "/api/whale/outcomes": ("polyclawd_whale_outcomes", "Whale-alert precision (hit-rate) by severity."),
+    "/api/weather/ensemble-accuracy": ("polyclawd_weather_skill", "Forecast-source skill (RMSE/MAE) by source+city."),
+    "/api/signals/elections/control-history": (
+        "polyclawd_election_control_history",
+        "Daily party-control probability series.",
+    ),
+    "/api/signals/elections/race-prices": ("polyclawd_election_race_prices", "Per-market election odds time-series."),
+    "/api/engine/status": ("polyclawd_engine_status", "Trading-engine status (read-only)."),
+    "/api/phase/current": ("polyclawd_phase_current", "Current scaling-phase + limits (read-only)."),
+    "/api/source-health": ("polyclawd_source_health", "Per-source API health/uptime metrics."),
+}
+ALLOWLIST = set(TOOL_META)
+
 # Skip endpoints that are duplicates or internal
 SKIP_PATTERNS = {
     "polyclawd_",  # bare root
@@ -48,15 +94,37 @@ SKIP_PATTERNS = {
 
 # Friendly category prefixes for tool naming
 CATEGORY_ORDER = [
-    "signals", "portfolio", "archetype", "markets", "vegas", "espn",
-    "kalshi", "manifold", "metaculus", "predictit", "betfair",
-    "polyrouter", "basket-arb", "copy-trade", "engine", "phase",
-    "kelly", "alerts", "llm", "paper", "simmer", "trading",
-    "scan", "topics", "calculate", "rewards",
+    "signals",
+    "portfolio",
+    "archetype",
+    "markets",
+    "vegas",
+    "espn",
+    "kalshi",
+    "manifold",
+    "metaculus",
+    "predictit",
+    "betfair",
+    "polyrouter",
+    "basket-arb",
+    "copy-trade",
+    "engine",
+    "phase",
+    "kelly",
+    "alerts",
+    "llm",
+    "paper",
+    "simmer",
+    "trading",
+    "scan",
+    "topics",
+    "calculate",
+    "rewards",
 ]
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
+
 
 def api_get(path: str, timeout: int = 60) -> dict:
     url = f"{BASE_URL}{path}"
@@ -72,7 +140,9 @@ def api_post(path: str, params: dict = None, timeout: int = 30) -> dict:
     url = f"{BASE_URL}{path}"
     body = json.dumps(params or {}).encode()
     req = urllib.request.Request(
-        url, data=body, method="POST",
+        url,
+        data=body,
+        method="POST",
         headers={"User-Agent": "Polyclawd-MCP/2.1", "Content-Type": "application/json"},
     )
     try:
@@ -138,8 +208,56 @@ def _extract_params(schema: dict, openapi_spec: dict) -> dict:
 
 # ── auto-discovery ───────────────────────────────────────────────────────
 
+
+def build_tools(spec: dict) -> List[dict]:
+    """Filter the OpenAPI spec to the curated ALLOWLIST and emit MCP tool defs.
+
+    Guard order: ALLOWLIST first -> curated name -> dedup on final name.
+    """
+    tools: List[dict] = []
+    seen_names: set = set()
+    paths = spec.get("paths", {})
+    for path in sorted(paths):
+        if path not in ALLOWLIST:  # 1. cheapest filter first
+            continue
+        endpoint = paths[path].get("get")  # allowlist is GET-only
+        if not endpoint:
+            continue
+        if endpoint.get("security"):  # skip any API-key endpoint
+            continue
+        meta = TOOL_META.get(path)  # 2. curated name override
+        tool_name = meta[0] if meta else _path_to_tool_name(path)
+        if tool_name in seen_names:  # 3. dedup keyed on FINAL name
+            continue
+        seen_names.add(tool_name)
+        description = (
+            meta[1]
+            if meta
+            else _path_to_description(path, "get", endpoint.get("summary", ""), endpoint.get("description", ""))
+        )
+        input_schema = _extract_params(endpoint.get("parameters", []), spec)
+        tools.append(
+            {
+                "name": tool_name,
+                "description": description,
+                "inputSchema": input_schema,
+                "_path": path,
+                "_method": "get",
+            }
+        )
+    return tools
+
+
+def _save_cached_tools(tools):  # replaced in Task 5
+    return None
+
+
+def _load_cached_tools():  # replaced in Task 5
+    return []
+
+
 def discover_tools(base_url: str = None) -> List[dict]:
-    """Fetch OpenAPI spec and convert GET endpoints to MCP tool definitions."""
+    """Fetch OpenAPI spec and build curated tools; fall back to cache on failure."""
     url = (base_url or BASE_URL).rstrip("/") + "/api/openapi.json"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd-MCP/2.1"})
@@ -147,65 +265,10 @@ def discover_tools(base_url: str = None) -> List[dict]:
             spec = json.loads(resp.read().decode())
     except Exception as e:
         logger.error("Failed to fetch OpenAPI spec from %s: %s", url, e)
-        return []
-
-    tools = []
-    seen_names = set()
-    paths = spec.get("paths", {})
-
-    for path, methods in sorted(paths.items()):
-        # Skip excluded paths
-        if path in SKIP_PATHS:
-            continue
-        if any(path.startswith(p) for p in SKIP_PREFIXES):
-            continue
-
-        for method in ("get", "post"):
-            if method not in methods:
-                continue
-
-            # POST endpoints: only allow explicitly safe ones
-            if method == "post" and path not in SAFE_POST_PATHS:
-                continue
-
-            endpoint = methods[method]
-
-            # Skip if requires API key (mutating endpoints)
-            security = endpoint.get("security", [])
-            if security:
-                continue
-
-            tool_name = _path_to_tool_name(path)
-            # Deduplicate (GET wins over POST)
-            if tool_name in seen_names:
-                continue
-            seen_names.add(tool_name)
-
-            summary = endpoint.get("summary", "")
-            description = _path_to_description(
-                path, method, summary, endpoint.get("description", "")
-            )
-
-            # Build input schema from query/path parameters
-            params = endpoint.get("parameters", [])
-            input_schema = _extract_params(params, spec)
-
-            # Skip junk tool names
-            if tool_name in SKIP_PATTERNS or len(tool_name) <= len("polyclawd_"):
-                continue
-            # Skip static file extensions
-            if any(tool_name.endswith(ext) for ext in (".js", ".json", ".html", ".css", ".png")):
-                continue
-
-            tools.append({
-                "name": tool_name,
-                "description": description,
-                "inputSchema": input_schema,
-                "_path": path,
-                "_method": method,
-            })
-
-    logger.info("Auto-discovered %d MCP tools from OpenAPI spec", len(tools))
+        return _load_cached_tools()
+    tools = build_tools(spec)
+    _save_cached_tools(tools)
+    logger.info("Discovered %d curated MCP tools", len(tools))
     return tools
 
 
@@ -227,13 +290,11 @@ def _ensure_tools():
 def get_tools() -> List[dict]:
     """Return tool definitions (without internal fields)."""
     _ensure_tools()
-    return [
-        {k: v for k, v in t.items() if not k.startswith("_")}
-        for t in TOOLS
-    ]
+    return [{k: v for k, v in t.items() if not k.startswith("_")} for t in TOOLS]
 
 
 # ── tool execution ───────────────────────────────────────────────────────
+
 
 def handle_tool_call(name: str, arguments: dict) -> Any:
     """Execute a tool by routing to the corresponding API endpoint."""
@@ -252,10 +313,7 @@ def handle_tool_call(name: str, arguments: dict) -> Any:
             path = path.replace(placeholder, str(val))
 
     # Remaining arguments become query params for GET
-    query_params = {
-        k: v for k, v in arguments.items()
-        if "{" + k + "}" not in tool["_path"]
-    }
+    query_params = {k: v for k, v in arguments.items() if "{" + k + "}" not in tool["_path"]}
 
     if method == "get":
         if query_params:
@@ -267,6 +325,7 @@ def handle_tool_call(name: str, arguments: dict) -> Any:
 
 
 # ── stdio MCP transport ─────────────────────────────────────────────────
+
 
 def send_response(id, result):
     msg = json.dumps({"jsonrpc": "2.0", "id": id, "result": result})
@@ -299,11 +358,14 @@ def main():
         params = request.get("params", {})
 
         if method == "initialize":
-            send_response(id, {
-                "protocolVersion": PROTOCOL_VERSION,
-                "serverInfo": {"name": "polyclawd", "version": "2.1.0"},
-                "capabilities": {"tools": {}},
-            })
+            send_response(
+                id,
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "serverInfo": {"name": "polyclawd", "version": "2.1.0"},
+                    "capabilities": {"tools": {}},
+                },
+            )
 
         elif method == "notifications/initialized":
             pass
@@ -315,11 +377,7 @@ def main():
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
             result = handle_tool_call(tool_name, arguments)
-            send_response(id, {
-                "content": [
-                    {"type": "text", "text": json.dumps(result, indent=2)}
-                ]
-            })
+            send_response(id, {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]})
 
         else:
             send_error(id, -32601, f"Method not found: {method}")
