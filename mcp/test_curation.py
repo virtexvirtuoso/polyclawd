@@ -95,3 +95,38 @@ def test_handle_tool_call_unknown_tool_is_wrapped_error(monkeypatch):
     monkeypatch.setattr(server, "_TOOL_MAP", {"x": server.TOOLS[0]})
     out = server.handle_tool_call("does_not_exist", {})
     assert out["untrusted_data"] == {"error": "Unknown tool: does_not_exist"}
+
+
+def test_cache_roundtrip_and_fallback(tmp_path, monkeypatch):
+    cache = tmp_path / ".tool_cache.json"
+    monkeypatch.setattr(server, "CACHE_PATH", cache)
+    sample = [
+        {
+            "name": "polyclawd_signals",
+            "description": "d",
+            "inputSchema": {"properties": {}},
+            "_path": "/api/signals",
+            "_method": "get",
+        }
+    ]
+    server._save_cached_tools(sample)
+    assert cache.exists()
+    assert server._load_cached_tools() == sample
+
+
+def test_discover_falls_back_to_cache_on_fetch_failure(tmp_path, monkeypatch):
+    cache = tmp_path / ".tool_cache.json"
+    monkeypatch.setattr(server, "CACHE_PATH", cache)
+    sample = [
+        {
+            "name": "polyclawd_signals",
+            "_path": "/api/signals",
+            "_method": "get",
+            "description": "d",
+            "inputSchema": {"properties": {}},
+        }
+    ]
+    server._save_cached_tools(sample)
+    # dead host -> fetch fails -> cache served
+    tools = server.discover_tools(base_url="https://127.0.0.1:0")
+    assert [t["name"] for t in tools] == ["polyclawd_signals"]

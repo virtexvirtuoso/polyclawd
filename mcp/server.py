@@ -11,9 +11,11 @@ HTTP transport:   imported by http_server.py (FastMCP wrapper)
 
 import json
 import logging
+import os
 import re
 import sys
 import urllib.request
+from pathlib import Path
 from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,7 @@ logger = logging.getLogger(__name__)
 # ── config ───────────────────────────────────────────────────────────────
 BASE_URL = "https://virtuosocrypto.com/polyclawd"
 PROTOCOL_VERSION = "2024-11-05"
+CACHE_PATH = Path(__file__).parent / ".tool_cache.json"
 
 # Endpoints to skip
 SKIP_PATHS = {
@@ -340,12 +343,27 @@ def build_tools(spec: dict) -> List[dict]:
     return tools
 
 
-def _save_cached_tools(tools):  # replaced in Task 5
-    return None
+def _save_cached_tools(tools: List[dict]) -> None:
+    """Atomically persist the discovered manifest (tmp + os.replace; iCloud-safe)."""
+    try:
+        tmp = str(CACHE_PATH) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(tools, f)
+        os.replace(tmp, CACHE_PATH)
+    except Exception as e:
+        logger.warning("tool cache write failed: %s", e)
 
 
-def _load_cached_tools():  # replaced in Task 5
-    return []
+def _load_cached_tools() -> List[dict]:
+    """Serve cached manifest when OpenAPI fetch fails; never silently expose zero tools."""
+    try:
+        with open(CACHE_PATH) as f:
+            tools = json.load(f)
+        logger.warning("OpenAPI fetch failed — serving cached manifest (%d tools)", len(tools))
+        return tools
+    except Exception:
+        logger.error("OpenAPI fetch failed and no tool cache present — 0 tools")
+        return []
 
 
 def discover_tools(base_url: str = None) -> List[dict]:

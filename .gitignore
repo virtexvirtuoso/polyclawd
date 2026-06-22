@@ -53,3 +53,6 @@ docs/screenshots/
 .idea/
 *.swp
 *.swo
+
+# MCP tool-discovery cache (machine state, not source)
+mcp/.tool_cache.json
