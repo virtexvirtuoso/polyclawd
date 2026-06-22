@@ -112,6 +112,57 @@ def _inject_default_limit(tool: dict, query_params: dict) -> dict:
     return query_params
 
 
+MAX_RESULT_BYTES = 16384  # raised from 6K so flagship tools aren't truncated by default
+
+
+def _find_largest_list(obj, _path=()):
+    """Return (path_tuple, list) of the largest list found anywhere in obj, or (None, None)."""
+    best = (None, None)
+    best_len = 0
+    if isinstance(obj, list):
+        best, best_len = (_path, obj), len(obj)
+        for i, v in enumerate(obj):
+            p, lst = _find_largest_list(v, _path + (i,))
+            if lst is not None and len(lst) > best_len:
+                best, best_len = (p, lst), len(lst)
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            p, lst = _find_largest_list(v, _path + (k,))
+            if lst is not None and len(lst) > best_len:
+                best, best_len = (p, lst), len(lst)
+    return best
+
+
+def _set_at(obj, path, value):
+    ref = obj
+    for key in path[:-1]:
+        ref = ref[key]
+    ref[path[-1]] = value
+
+
+def _cap_response(result):
+    """If the serialized result exceeds MAX_RESULT_BYTES, truncate the largest list."""
+    try:
+        if len(json.dumps(result).encode()) <= MAX_RESULT_BYTES:
+            return result
+    except (TypeError, ValueError):
+        return result
+    path, lst = _find_largest_list(result)
+    if lst is not None and path:
+        keep = max(5, len(lst) // 5)
+        _set_at(result, path, lst[:keep])
+    if isinstance(result, dict):
+        result["_truncated"] = True
+        result["_hint"] = "pass a smaller limit or more specific filter"
+        return result
+    # top-level list or scalar
+    return {
+        "_truncated": True,
+        "_hint": "result too large; pass a smaller limit",
+        "data": (lst[: max(5, len(lst) // 5)] if lst is not None else None),
+    }
+
+
 # Skip endpoints that are duplicates or internal
 SKIP_PATTERNS = {
     "polyclawd_",  # bare root

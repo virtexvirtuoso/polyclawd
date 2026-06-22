@@ -54,3 +54,24 @@ def test_inject_default_limit_only_when_param_supported():
     # path not in DEFAULT_LIMITS -> untouched
     tool_other = {"_path": "/api/engine/status", "inputSchema": {"properties": {}}}
     assert server._inject_default_limit(tool_other, {}) == {}
+
+
+def test_cap_response_small_passthrough():
+    small = {"a": 1, "items": [1, 2, 3]}
+    assert server._cap_response(small) == small  # under cap, unchanged
+
+
+def test_cap_response_truncates_nested_largest_list():
+    # nested big list (mimics /api/signals' nested structure)
+    big = {"meta": {"k": "v"}, "sources": {"whales": [{"x": "y" * 50} for _ in range(2000)]}}
+    capped = server._cap_response(big)
+    assert capped["_truncated"] is True
+    assert "_hint" in capped
+    # the nested list was shortened
+    assert len(capped["sources"]["whales"]) < 2000
+
+
+def test_cap_response_no_list_payload():
+    huge_scalar = {"blob": "z" * 40000}
+    capped = server._cap_response(huge_scalar)
+    assert capped["_truncated"] is True
