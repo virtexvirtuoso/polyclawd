@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -69,6 +70,7 @@ def test_cap_response_truncates_nested_largest_list():
     assert "_hint" in capped
     # the nested list was shortened
     assert len(capped["sources"]["whales"]) < 2000
+    assert len(json.dumps(capped).encode()) <= server.MAX_RESULT_BYTES
 
 
 def test_cap_response_no_list_payload():

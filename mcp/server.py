@@ -134,33 +134,40 @@ def _find_largest_list(obj, _path=()):
 
 
 def _set_at(obj, path, value):
+    """Mutate obj at the given path tuple (walk to parent, set final key)."""
     ref = obj
     for key in path[:-1]:
         ref = ref[key]
     ref[path[-1]] = value
 
 
+_TRUNC_HINT = "result too large; pass a smaller limit or more specific filter"
+
+
 def _cap_response(result):
-    """If the serialized result exceeds MAX_RESULT_BYTES, truncate the largest list."""
+    """Shrink the largest list until the serialized result fits MAX_RESULT_BYTES."""
     try:
-        if len(json.dumps(result).encode()) <= MAX_RESULT_BYTES:
-            return result
+        size = len(json.dumps(result).encode())
     except (TypeError, ValueError):
         return result
+    if size <= MAX_RESULT_BYTES:
+        return result
+
     path, lst = _find_largest_list(result)
     if lst is not None and path:
-        keep = max(5, len(lst) // 5)
-        _set_at(result, path, lst[:keep])
+        keep = len(lst)
+        while keep > 5:
+            keep = max(5, keep // 2)
+            _set_at(result, path, lst[:keep])
+            if len(json.dumps(result).encode()) <= MAX_RESULT_BYTES:
+                break
+
     if isinstance(result, dict):
         result["_truncated"] = True
-        result["_hint"] = "pass a smaller limit or more specific filter"
+        result["_hint"] = _TRUNC_HINT
         return result
-    # top-level list or scalar
-    return {
-        "_truncated": True,
-        "_hint": "result too large; pass a smaller limit",
-        "data": (lst[: max(5, len(lst) // 5)] if lst is not None else None),
-    }
+    # top-level list / scalar (no mutable dict to stamp)
+    return {"_truncated": True, "_hint": _TRUNC_HINT, "data": lst[: max(5, len(lst) // 5)] if lst is not None else None}
 
 
 # Skip endpoints that are duplicates or internal
