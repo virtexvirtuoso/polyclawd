@@ -87,6 +87,31 @@ TOOL_META = {
 }
 ALLOWLIST = set(TOOL_META)
 
+# Per-path default `limit` for list-y endpoints (only injected when the
+# endpoint's schema actually declares the param, to avoid a FastAPI 422).
+DEFAULT_LIMITS = {
+    "/api/signals/elections/race-prices": 100,
+    "/api/signals/elections/control-history": 180,
+    "/api/markets/search": 25,
+    "/api/markets/trending": 25,
+    "/api/whale/alerts": 25,
+    "/api/whale/top": 25,
+}
+
+
+def _inject_default_limit(tool: dict, query_params: dict) -> dict:
+    """Add a default limit ONLY when the tool's schema accepts it and the caller omitted it."""
+    default = DEFAULT_LIMITS.get(tool["_path"])
+    if default is None:
+        return query_params
+    props = tool.get("inputSchema", {}).get("properties", {})
+    for key in ("limit", "n", "top"):
+        if key in props and key not in query_params:
+            query_params[key] = default
+            break
+    return query_params
+
+
 # Skip endpoints that are duplicates or internal
 SKIP_PATTERNS = {
     "polyclawd_",  # bare root

@@ -11,9 +11,7 @@ FAKE_SPEC = {
         "/api/whale/outcomes": {
             "get": {
                 "summary": "x",
-                "parameters": [
-                    {"name": "days", "in": "query", "schema": {"type": "integer", "default": 30}}
-                ],
+                "parameters": [{"name": "days", "in": "query", "schema": {"type": "integer", "default": 30}}],
             }
         },
         "/api/not/allowed": {"get": {"summary": "nope", "parameters": []}},
@@ -39,3 +37,20 @@ def test_build_tools_filters_to_allowlist_and_curates():
 def test_allowlist_and_tool_meta_cover_same_25_paths():
     assert len(server.ALLOWLIST) == 25
     assert set(server.TOOL_META) == server.ALLOWLIST  # every allowlisted path has curated meta
+
+
+def test_inject_default_limit_only_when_param_supported():
+    # tool that accepts `limit`
+    tool_with = {"_path": "/api/markets/search", "inputSchema": {"properties": {"q": {}, "limit": {}}}}
+    qp = server._inject_default_limit(tool_with, {"q": "btc"})
+    assert qp["limit"] == 25
+    # caller-provided limit is preserved
+    qp2 = server._inject_default_limit(tool_with, {"q": "btc", "limit": 5})
+    assert qp2["limit"] == 5
+    # tool with no limit param in schema -> never inject (would 422)
+    tool_without = {"_path": "/api/markets/search", "inputSchema": {"properties": {"q": {}}}}
+    qp3 = server._inject_default_limit(tool_without, {"q": "btc"})
+    assert "limit" not in qp3
+    # path not in DEFAULT_LIMITS -> untouched
+    tool_other = {"_path": "/api/engine/status", "inputSchema": {"properties": {}}}
+    assert server._inject_default_limit(tool_other, {}) == {}
