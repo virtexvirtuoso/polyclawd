@@ -678,7 +678,6 @@ def main():
     """CLI for testing the AI model tracker."""
     import sys
 
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     cmd = sys.argv[1] if len(sys.argv) > 1 else "summary"
 

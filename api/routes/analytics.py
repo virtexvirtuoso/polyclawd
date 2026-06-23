@@ -6,6 +6,7 @@ Each handler reads a SQLite table written by a background job and returns a
 compact, capped, JSON-friendly view. Errors are returned as graceful payloads
 (not 500s) so a dashboard widget degrades cleanly.
 """
+
 import sqlite3
 import time
 from pathlib import Path
@@ -157,3 +158,30 @@ async def whale_outcomes(
     except Exception as e:
         logger.exception("whale_outcomes failed: {}", e)
         return {"error": str(e), "by_severity": []}
+
+
+@router.get("/api/signals/ai-models/history")
+async def ai_models_history(
+    company: Optional[str] = None,
+    days: int = Query(30, ge=1, le=365),
+):
+    """LMArena leaderboard history — rank/score over time for a company.
+
+    Backs onto arena_snapshots (signals/ai_model_tracker.py, refreshed every 6h).
+    With no `company`, returns the available companies (count + latest snapshot)
+    so the caller can pick a valid value.
+    """
+    try:
+        if not company:
+            rows = _query(
+                "ai_model_tracker.db",
+                "SELECT company, COUNT(*) AS snapshots, MAX(timestamp) AS latest "
+                "FROM arena_snapshots GROUP BY company ORDER BY snapshots DESC",
+            )
+            return {"companies": rows, "hint": "pass ?company=<name> for its rank/score history"}
+        from ai_model_tracker import get_score_history
+
+        return {"company": company, "days": days, "history": get_score_history(company, days)}
+    except Exception as e:
+        logger.exception("ai_models_history failed: {}", e)
+        return {"error": str(e), "history": []}
