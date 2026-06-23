@@ -192,6 +192,17 @@ BOOK_DEADLINE_S    = 180    # wall-clock budget for the BOOK phase (starts after
 WATCH_OI_MIN       = 100    # thin-active band for the rotation watchlist
 WATCH_OI_MAX       = 20000
 ALERT_DEDUP_S      = 1800   # don't re-alert the same market within 30 min
+
+# ── Wallet accumulation thresholds ──────────────────────────────────────────
+ACCUM_WINDOW_S       = 3600     # 60-min rolling window
+ACCUM_MEGA_USD       = 200_000  # CRITICAL: wallet accumulated $200K+ in window
+ACCUM_WHALE_USD      = 50_000   # HIGH: wallet accumulated $50K+ in window
+ACCUM_NOTABLE_USD    = 10_000   # DB-only: wallet accumulated $10K+ in window
+ACCUM_DEDUP_S        = 4 * 3600 # 4h cooldown per wallet+market
+ACCUM_RETENTION_S    = 2 * 3600 # prune fills older than 2h
+ACCUM_KALSHI_MEGA    = 50_000   # Kalshi per-market (anonymous): CRITICAL
+ACCUM_KALSHI_WHALE   = 20_000   # Kalshi per-market: HIGH
+ACCUM_TG_RATE_LIMIT  = 10       # max accumulation alerts per hour
 EXCLUDE_SERIES_PREFIXES = ("KXMVE", "KXBTC15M", "KXBTCD", "KXETH15M", "KXETHD",
                            "KXHIGHNYD")  # parlay builders + short-cycle series that mint fresh tickers
 # Live-game/live-event market classes: during play, flow bursts + book churn
@@ -478,6 +489,7 @@ def get_db(path: Optional[Path] = None) -> sqlite3.Connection:
             severity TEXT NOT NULL,
             score INTEGER NOT NULL,
             reasons TEXT,
+            raw_score REAL,
             payload TEXT
         )""")
     conn.execute("""
@@ -493,6 +505,37 @@ def get_db(path: Optional[Path] = None) -> sqlite3.Connection:
             key TEXT PRIMARY KEY,
             value TEXT
         )""")
+    # ── Wallet accumulation tables ──────────────────────────────────────
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS wallet_accumulations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            platform TEXT NOT NULL,
+            wallet TEXT NOT NULL,
+            wallet_name TEXT,
+            market TEXT NOT NULL,
+            slug TEXT,
+            title TEXT,
+            side TEXT,
+            fill_usd REAL NOT NULL,
+            fill_count INTEGER DEFAULT 1
+        )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_wa_wallet_market"
+                 " ON wallet_accumulations(wallet, market, ts)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS accumulation_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            platform TEXT NOT NULL,
+            wallet TEXT NOT NULL,
+            market TEXT NOT NULL,
+            rolling_usd REAL,
+            level TEXT,
+            fill_count INTEGER,
+            title TEXT
+        )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_aa_dedup"
+                 " ON accumulation_alerts(wallet, market, ts)")
     conn.commit()
     return conn
 
@@ -558,8 +601,9 @@ def log_alert(conn, alert: dict):
         (time.time(), alert["platform"], alert["market"], alert["severity"],
          alert["score"], alert.get("reasons", ""), json.dumps(alert),
          alert.get("raw_score", alert["score"])))
-    # Live fire: send CRITICAL alerts to Telegram immediately
-    if alert.get("severity") == "CRITICAL":
+    # Live fire: CRITICAL always; HIGH for accumulation alerts only
+    is_accum = alert.get("type") == "accumulation"
+    if alert.get("severity") == "CRITICAL" or (is_accum and alert.get("severity") == "HIGH"):
         _fire_alert_live(alert)
 
 
@@ -574,6 +618,9 @@ def prune_snapshots(conn, max_age_hours: int = SNAPSHOT_RETENTION_HOURS):
     conn.execute("DELETE FROM whale_snapshots WHERE ts < ?", (cutoff,))
     conn.execute("DELETE FROM market_state WHERE ts < ?",
                  (time.time() - STATE_RETENTION_HOURS * 3600,))
+    # Prune wallet accumulation fills older than retention window
+    conn.execute("DELETE FROM wallet_accumulations WHERE ts < ?",
+                 (time.time() - ACCUM_RETENTION_S,))
     conn.commit()
 
 
@@ -1219,6 +1266,14 @@ def scan_kalshi(conn) -> list:
     flagged, details = kalshi_sweep(conn)
     deadline = time.time() + BOOK_DEADLINE_S   # budget the BOOK phase only
 
+    # ── Per-market accumulation check (Kalshi is anonymous, no wallet IDs) ──
+    # details contains the aggregated trade data from kalshi_sweep
+    if details:
+        accum_alerts = check_kalshi_market_accumulations(conn, details)
+        if accum_alerts:
+            logger.info("Kalshi market accumulation: %d alerts fired", len(accum_alerts))
+            alerts.extend(accum_alerts)
+
     # 1. Flagged markets: book now, alert on sweep + book combined score.
     gated_n = 0
     for i, (sw_score, sw_reasons, ticker) in enumerate(flagged[:FLAG_BOOK_CAP]):
@@ -1505,6 +1560,25 @@ def scan_polymarket_flow(conn) -> list:
             dedup.add(slug)
 
     conn.commit()
+
+    # ── Wallet accumulation check (piggybacking on already-fetched trades) ──
+    if trades:
+        accum_alerts = check_wallet_accumulations(conn, trades)
+        if accum_alerts:
+            logger.info("Wallet accumulation: %d alerts fired", len(accum_alerts))
+            alerts.extend(accum_alerts)
+
+    # Smart-wallet entry/exit alert (shadow-first) — fires independently of the
+    # anonymous-flow gates above when a GRADUATED wallet accumulates >=$500 in a
+    # 4h window. Distinct from check_wallet_accumulations (anonymous $50K+ flow).
+    # Never raises into the scan. See scripts/smart_wallet_alert.py.
+    if meta is not None and smart:
+        try:
+            from scripts.smart_wallet_alert import scanner_hook
+            scanner_hook(meta, trades, gamma, smart)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("smart_wallet_alert hook failed: %s", e)
+
     if meta is not None:
         meta.commit()
         meta.close()
@@ -1576,6 +1650,253 @@ def scan_polymarket(conn) -> list:
 
 # ── Entry points ────────────────────────────────────────────────────────────
 
+# ── Wallet accumulation tracking ─────────────────────────────────────────────
+
+def _accum_recently_alerted(conn, wallet: str, market: str) -> bool:
+    """Check if this wallet+market combo was alerted within the cooldown."""
+    cutoff = time.time() - ACCUM_DEDUP_S
+    row = conn.execute(
+        "SELECT 1 FROM accumulation_alerts WHERE wallet=? AND market=? AND ts>?",
+        (wallet, market, cutoff)).fetchone()
+    return row is not None
+
+
+def _accum_hour_count(conn) -> int:
+    """Count accumulation alerts in the last hour (rate limiting)."""
+    cutoff = time.time() - 3600
+    row = conn.execute(
+        "SELECT COUNT(*) FROM accumulation_alerts WHERE ts>?", (cutoff,)).fetchone()
+    return row[0] if row else 0
+
+
+def check_wallet_accumulations(conn, trades: list) -> list:
+    """Per-wallet-per-market accumulation over rolling window.
+    Called after aggregate_pm_trades() with the raw trades list.
+    Returns list of alerts for wallets crossing thresholds."""
+    now = time.time()
+    alerts = []
+
+    # 1. Group current trades by (wallet, conditionId) and insert fills
+    wallet_fills = {}  # (wallet, cid) -> {usd, count, side, slug, title, name}
+    for t in trades:
+        wallet = t.get("proxyWallet")
+        cid = t.get("conditionId")
+        size = t.get("size") or 0
+        price = t.get("price") or 0
+        if not wallet or not cid or size <= 0:
+            continue
+        usd = size * price
+        key = (wallet, cid)
+        if key not in wallet_fills:
+            wallet_fills[key] = {
+                "usd": 0, "count": 0,
+                "side": t.get("side", "?"),
+                "slug": t.get("slug", ""),
+                "title": (t.get("title") or "")[:80],
+                "name": t.get("name") or t.get("pseudonym") or "",
+            }
+        wallet_fills[key]["usd"] += usd
+        wallet_fills[key]["count"] += 1
+
+    if not wallet_fills:
+        return alerts
+
+    # 2. Batch insert fills
+    rows = []
+    for (wallet, cid), info in wallet_fills.items():
+        rows.append((now, "polymarket", wallet, info["name"], cid,
+                      info["slug"], info["title"], info["side"],
+                      info["usd"], info["count"]))
+    conn.executemany(
+        "INSERT INTO wallet_accumulations"
+        " (ts, platform, wallet, wallet_name, market, slug, title, side,"
+        "  fill_usd, fill_count) VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+    conn.commit()
+
+    # 3. For each wallet that traded this cycle, sum the rolling window
+    wallets_seen = set(w for (w, _) in wallet_fills)
+    cutoff = now - ACCUM_WINDOW_S
+
+    for wallet in wallets_seen:
+        # Sum all fills for this wallet across ALL markets in the window
+        wallet_markets = conn.execute(
+            "SELECT market, slug, title, wallet_name,"
+            " SUM(fill_usd) as total_usd, SUM(fill_count) as total_fills,"
+            " MIN(ts) as first_ts, MAX(ts) as last_ts"
+            " FROM wallet_accumulations"
+            " WHERE wallet=? AND ts>?"
+            " GROUP BY market",
+            (wallet, cutoff)).fetchall()
+
+        for row in wallet_markets:
+            total_usd = row["total_usd"]
+            market = row["market"]
+            fills = row["total_fills"]
+            title = row["title"] or ""
+            slug = row["slug"] or ""
+            name = row["wallet_name"] or wallet[:12]
+            duration_min = (row["last_ts"] - row["first_ts"]) / 60
+
+            # Determine level
+            if total_usd >= ACCUM_MEGA_USD:
+                level = "mega"
+                severity = "CRITICAL"
+            elif total_usd >= ACCUM_WHALE_USD:
+                level = "whale"
+                severity = "HIGH"
+            elif total_usd >= ACCUM_NOTABLE_USD:
+                level = "notable"
+                severity = None  # DB only, no TG
+            else:
+                continue
+
+            # Dedup check
+            if _accum_recently_alerted(conn, wallet, market):
+                continue
+
+            # Rate limit check
+            if severity and _accum_hour_count(conn) >= ACCUM_TG_RATE_LIMIT:
+                severity = None  # demote to DB only
+
+            # Log to DB
+            conn.execute(
+                "INSERT INTO accumulation_alerts"
+                " (ts, platform, wallet, market, rolling_usd, level,"
+                "  fill_count, title)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (now, "polymarket", wallet, market, total_usd, level,
+                 fills, title))
+
+            if severity:
+                # Determine dominant side from recent fills
+                side_rows = conn.execute(
+                    "SELECT side, SUM(fill_usd) as s FROM wallet_accumulations"
+                    " WHERE wallet=? AND market=? AND ts>? GROUP BY side"
+                    " ORDER BY s DESC LIMIT 1",
+                    (wallet, market, cutoff)).fetchone()
+                dom_side = side_rows["side"] if side_rows else "?"
+
+                alert = {
+                    "type": "accumulation",
+                    "platform": "polymarket",
+                    "market": slug or market,
+                    "title": title,
+                    "severity": severity,
+                    "score": 9 if level == "mega" else 6,
+                    "reasons": f"wallet_accum_{level},${total_usd:,.0f}_in_{duration_min:.0f}min,{fills}_fills",
+                    "flow_dollars": total_usd,
+                    "flow_yes": total_usd if dom_side == "BUY" else 0,
+                    "flow_no": total_usd if dom_side == "SELL" else 0,
+                    "top_wallet": wallet,
+                    "top_wallet_name": name,
+                    "top_wallet_usd": total_usd,
+                    "accum_fills": fills,
+                    "accum_duration_min": round(duration_min, 1),
+                    "accum_level": level,
+                    "scan_time": datetime.now(timezone.utc).isoformat(),
+                }
+                log_alert(conn, alert)
+
+
+                alerts.append(alert)
+
+    conn.commit()
+    return alerts
+
+
+def check_kalshi_market_accumulations(conn, trade_agg: dict) -> list:
+    """Per-market accumulation for Kalshi (anonymous trades — no wallet IDs).
+    If a single market receives heavy flow within the rolling window, alert.
+    Called after aggregate_trades() with the aggregated dict."""
+    now = time.time()
+    alerts = []
+
+    # Insert per-market fills (wallet='_anonymous_' since Kalshi is anonymous)
+    rows = []
+    for ticker, agg in trade_agg.items():
+        flow_usd = agg.get("flow_dollars") or agg.get("dollars") or 0
+        if flow_usd < 100:  # skip noise
+            continue
+        flow_yes = agg.get("flow_yes") or agg.get("yes_vol", 0)
+        flow_no = agg.get("flow_no") or agg.get("no_vol", 0)
+        # Estimate fill count from total contracts (each trade = ~1-100 contracts)
+        est_fills = max(1, int((flow_yes + flow_no) / 50)) if (flow_yes + flow_no) > 0 else 1
+        rows.append((now, "kalshi", "_anonymous_", "", ticker,
+                      ticker, (agg.get("title") or ticker)[:80],
+                      "YES" if flow_yes > flow_no else "NO",
+                      flow_usd, est_fills))
+    if rows:
+        conn.executemany(
+            "INSERT INTO wallet_accumulations"
+            " (ts, platform, wallet, wallet_name, market, slug, title, side,"
+            "  fill_usd, fill_count) VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+        conn.commit()
+
+    # Check rolling window per market
+    cutoff = now - ACCUM_WINDOW_S
+    # Only check markets that had flow this cycle
+    for ticker in trade_agg:
+        row = conn.execute(
+            "SELECT SUM(fill_usd) as total_usd, SUM(fill_count) as total_fills,"
+            " MIN(ts) as first_ts, MAX(ts) as last_ts"
+            " FROM wallet_accumulations"
+            " WHERE platform='kalshi' AND market=? AND ts>?",
+            (ticker, cutoff)).fetchone()
+
+        if not row or not row["total_usd"]:
+            continue
+        total_usd = row["total_usd"]
+        fills = row["total_fills"]
+        duration_min = (row["last_ts"] - row["first_ts"]) / 60
+
+        if total_usd >= ACCUM_KALSHI_MEGA:
+            level = "mega"
+            severity = "CRITICAL"
+        elif total_usd >= ACCUM_KALSHI_WHALE:
+            level = "whale"
+            severity = "HIGH"
+        else:
+            continue
+
+        if _accum_recently_alerted(conn, "_anonymous_", ticker):
+            continue
+        if _accum_hour_count(conn) >= ACCUM_TG_RATE_LIMIT:
+            severity = None
+
+        title_str = trade_agg[ticker].get("title", ticker)[:80]
+        conn.execute(
+            "INSERT INTO accumulation_alerts"
+            " (ts, platform, wallet, market, rolling_usd, level,"
+            "  fill_count, title)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (now, "kalshi", "_anonymous_", ticker, total_usd, level,
+             fills, title_str))
+
+        if severity:
+            agg = trade_agg.get(ticker, {})
+            alert = {
+                "type": "accumulation",
+                "platform": "kalshi",
+                "market": ticker,
+                "title": title_str,
+                "severity": severity,
+                "score": 9 if level == "mega" else 6,
+                "reasons": f"market_accum_{level},${total_usd:,.0f}_in_{duration_min:.0f}min,{fills}_fills",
+                "flow_dollars": total_usd,
+                "flow_yes": agg.get("flow_yes") or agg.get("yes_vol", 0),
+                "flow_no": agg.get("flow_no") or agg.get("no_vol", 0),
+                "accum_fills": fills,
+                "accum_duration_min": round(duration_min, 1),
+                "accum_level": level,
+                "scan_time": datetime.now(timezone.utc).isoformat(),
+            }
+            log_alert(conn, alert)
+            alerts.append(alert)
+
+    conn.commit()
+    return alerts
+
+
 def run_scan(platform: str = "all") -> list:
     """Full scan. Persists state/snapshots/alerts; returns alerts by score.
 
@@ -1585,7 +1906,7 @@ def run_scan(platform: str = "all") -> list:
     conn = get_db()
     alerts = []
     try:
-        prune_snapshots(conn)
+        prune_snapshots(conn)  # also prunes wallet_accumulations
         refresh_class_thresholds(conn)
         if platform in ("all", "polymarket"):
             alerts.extend(scan_polymarket_flow(conn))

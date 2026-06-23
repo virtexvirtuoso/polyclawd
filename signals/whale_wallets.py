@@ -43,8 +43,8 @@ PM_DATA_API = "https://data-api.polymarket.com"
 # market entries are uninformative (they enter everything), without excluding
 # big-net traders over a rounding-error percentage (RN1: 59.3% / +$1.04M net).
 SMART_MIN_CLOSED   = 20
-SMART_MIN_WIN_RATE = 0.50
-SMART_MIN_NET      = 1000.0  # $ net profit (realized + unrealized; see compute_stats)
+SMART_MIN_WIN_RATE = 0.55
+SMART_MIN_NET      = 100000.0  # $ net profit — elite only for TG alerts (2026-06-20)
 REFRESH_TTL_S      = 24 * 3600
 QUEUE_MIN_USD      = 100.0   # don't bother tracking wallets below this burst size
 
@@ -219,7 +219,7 @@ def fetch_wallet_stats(wallet: str) -> Optional[dict]:
 def demote_stale_wallets(conn) -> dict:
     """Demote smart wallets that have gone stale or underperforming."""
     now = time.time()
-    smart = conn.execute("SELECT wallet, name, last_seen FROM pm_wallets WHERE smart=1").fetchall()
+    smart = conn.execute("SELECT wallet, name, last_seen, refreshed FROM pm_wallets WHERE smart=1").fetchall()
     demoted = 0
     reasons = []
 
@@ -227,11 +227,19 @@ def demote_stale_wallets(conn) -> dict:
         wallet = row["wallet"]
         name = row["name"] or wallet[:10]
 
-        # Check staleness
-        if now - (row["last_seen"] or 0) > WALLET_STALE_HOURS * 3600:
+        # Check staleness — use refreshed timestamp (when we last verified stats)
+        # not last_seen (when we last saw them in flow). Wallets seeded from
+        # leaderboard or bulk-promoted won't have organic flow detections.
+        # sqlite3.Row doesn't have .get() — use try/except for optional columns
+        try:
+            refreshed = row["refreshed"] or 0
+        except (IndexError, KeyError):
+            refreshed = 0
+        last_check = max(row["last_seen"] or 0, refreshed)
+        if now - last_check > WALLET_STALE_HOURS * 3600:
             conn.execute("UPDATE pm_wallets SET smart=0 WHERE wallet=?", (wallet,))
             demoted += 1
-            reasons.append(f"{name}: stale ({int((now - row['last_seen'])/3600)}h no activity)")
+            reasons.append(f"{name}: stale ({int((now - last_check)/3600)}h no activity)")
             continue
 
         # Fetch recent trades for sliding WR check
@@ -248,16 +256,21 @@ def demote_stale_wallets(conn) -> dict:
                 reasons.append(f"{name}: WR {wr:.1%} below {WALLET_SLIDING_WR:.0%} (last {stats['closed']} trades)")
                 continue
 
-        # Check 30-day trade volume
-        thirty_days_ago = now - 30 * 86400
-        recent = conn.execute(
-            "SELECT COUNT(*) FROM pm_wallet_seen WHERE wallet=? AND last_seen > ?",
-            (wallet, thirty_days_ago)
-        ).fetchone()[0]
-        if recent < WALLET_MIN_TRADES_30D:
+        # Flow-activity recency. NOTE: pm_wallet_seen holds ONE accumulating row
+        # per wallet (PK=wallet), so COUNT(*) is always 0 or 1 — the previous
+        # `COUNT(*) < WALLET_MIN_TRADES_30D(=5)` test was UNSATISFIABLE and
+        # demoted every smart wallet the instant refresh_wallets promoted it,
+        # leaving the roster permanently empty (diagnosed 2026-06-23). Demote
+        # only when the last flow sighting is genuinely stale (>30d). Absence of
+        # a row is NOT evidence of inactivity — refresh prunes just-processed
+        # wallets from pm_wallet_seen.
+        seen = conn.execute(
+            "SELECT last_seen FROM pm_wallet_seen WHERE wallet=?", (wallet,)
+        ).fetchone()
+        if seen and seen[0] and (now - seen[0]) > 30 * 86400:
             conn.execute("UPDATE pm_wallets SET smart=0 WHERE wallet=?", (wallet,))
             demoted += 1
-            reasons.append(f"{name}: only {recent} trades in 30d (min {WALLET_MIN_TRADES_30D})")
+            reasons.append(f"{name}: no flow activity in 30d+")
 
     conn.commit()
     for r in reasons:
@@ -337,6 +350,22 @@ def compute_wallet_archetype_pnl(conn):
     conn.commit()
 
 
+def _alert_graduation(name: str, stats: dict, wr: float) -> None:
+    """Fire Telegram alert when a wallet graduates to smart status."""
+    try:
+        from scripts.alert_formatter import send_telegram
+        net = stats.get("net", stats.get("realized", 0))
+        msg = (
+            f"🎓 <b>NEW SMART WALLET</b>\n\n"
+            f"<b>{name}</b> graduated:\n"
+            f"  {stats['closed']} closed | {wr*100:.1f}% WR | ${net:+,.0f} net\n\n"
+            f"This wallet now boosts signal scores on markets they enter."
+        )
+        send_telegram(msg)
+    except Exception:
+        pass  # Don't crash refresh on alert failure
+
+
 def is_smart(stats: dict) -> bool:
     if stats["closed"] < SMART_MIN_CLOSED:
         return False
@@ -367,11 +396,15 @@ def refresh_wallets(conn, cap: int = 60) -> dict:
         smart = 1 if is_smart(stats) else 0
         prev = conn.execute("SELECT smart FROM pm_wallets WHERE wallet=?",
                             (row["wallet"],)).fetchone()
+        was_smart = prev["smart"] if prev is not None else 0
         if prev is not None:
-            promoted += 1 if (smart and not prev["smart"]) else 0
-            demoted += 1 if (prev["smart"] and not smart) else 0
+            promoted += 1 if (smart and not was_smart) else 0
+            demoted += 1 if (was_smart and not smart) else 0
         elif smart:
             promoted += 1
+        # Graduation alerts silenced (2026-06-20) — Mr. V only wants elite move/consensus alerts
+        # if smart and not was_smart:
+        #     _alert_graduation(row["name"] or row["wallet"][:12], stats, wr)
         conn.execute(
             "INSERT INTO pm_wallets (wallet, name, first_seen, last_seen,"
             " closed_positions, wins, win_rate, realized_pnl, net_pnl, zombies,"
