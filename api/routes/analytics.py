@@ -185,3 +185,80 @@ async def ai_models_history(
     except Exception as e:
         logger.exception("ai_models_history failed: {}", e)
         return {"error": str(e), "history": []}
+
+
+@router.get("/api/signals/strategy-ic")
+async def strategy_ic(
+    window_days: int = Query(90, ge=1, le=365),
+    min_n: int = Query(30, ge=10, le=1000),
+):
+    """Information Coefficient per trading strategy, from REALIZED paper trades.
+
+    IC = Spearman rank correlation of pre-trade `confidence` vs realized `pnl`,
+    computed over resolved shadow_trades (the decision AND its outcome live in the
+    same row, so no lossy predictions<->trades join). Interpretation:
+    IC > 0 = confidence has edge; ~0 = noise; < 0 = contra-indicative.
+    Thresholds (|IC|): <0.03 KILL, <0.05 WARN, else OK. `min_n` guards small samples
+    (default 30 = statistical-validity floor). `significant_bonferroni` corrects the
+    p-value for testing k strategies at once.
+
+    NOTE: distinct from the legacy /api/signals/ic-report (prediction-based, empty
+    because signal_predictions and shadow_trades track disjoint markets).
+    """
+    import math
+    from collections import defaultdict
+
+    try:
+        from scipy.stats import spearmanr
+    except Exception as e:  # pragma: no cover
+        return {"error": f"scipy unavailable: {e}", "strategies": []}
+
+    try:
+        rows = _query(
+            "shadow_trades.db",
+            "SELECT strategy, confidence, pnl FROM shadow_trades "
+            "WHERE resolved = 1 AND confidence IS NOT NULL AND pnl IS NOT NULL "
+            "AND timestamp >= datetime('now', ?)",
+            [f"-{window_days} days"],
+        )
+        grouped = defaultdict(lambda: ([], []))
+        for r in rows:
+            grouped[r["strategy"]][0].append(r["confidence"])
+            grouped[r["strategy"]][1].append(r["pnl"])
+
+        results = []
+        for strat, (conf, pnl) in grouped.items():
+            n = len(conf)
+            if n < min_n:
+                continue
+            ic, p = spearmanr(conf, pnl)
+            if ic != ic:  # NaN — e.g. confidence is constant within the strategy
+                continue
+            se = 1.0 / math.sqrt(n - 1)  # approx SE of a Spearman IC
+            status = "KILL" if abs(ic) < 0.03 else ("WARN" if abs(ic) < 0.05 else "OK")
+            results.append(
+                {
+                    "strategy": strat,
+                    "n": n,
+                    "ic": round(float(ic), 4),
+                    "p_value": round(float(p), 4),
+                    "ic_se": round(se, 4),
+                    "ci95": [round(float(ic) - 1.96 * se, 4), round(float(ic) + 1.96 * se, 4)],
+                    "status": status,
+                }
+            )
+
+        k = len(results)
+        for r in results:
+            r["significant_bonferroni"] = bool(k and r["p_value"] < 0.05 / k)
+        results.sort(key=lambda r: -abs(r["ic"]))
+        return {
+            "window_days": window_days,
+            "min_n": min_n,
+            "strategies_tested": k,
+            "method": "Spearman(confidence, realized_pnl); |IC|<0.03 KILL, <0.05 WARN; Bonferroni across k strategies",
+            "strategies": results,
+        }
+    except Exception as e:
+        logger.exception("strategy_ic failed: {}", e)
+        return {"error": str(e), "strategies": []}
