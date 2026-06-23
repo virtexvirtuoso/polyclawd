@@ -119,6 +119,76 @@ def _run_safe(name: str, fn, *args, **kwargs):
 
 
 # ============================================================================
+# Task Schedule Registry — single source of truth for what runs when
+#
+# Each tick group lists task names.  The function is resolved at runtime via
+# _task_fn(name) → globals()[f"task_{name}"], with overrides for the few
+# names that don't follow the convention.
+# ============================================================================
+
+TICK_TASKS = {
+    "30s": ["hf_signals"],
+
+    "1min": ["stop_evaluator_urgent", "sport_whale_trades"],
+
+    "5min": [
+        "health_check", "stop_evaluator", "price_logger", "book_logger",
+        "shadow_resolution", "paper_resolution", "equity_snapshot",
+        "resolution_scanner", "mlb_props_scratch", "dashboard_warm",
+        "weather_reeval", "weather_fast_scan", "weather_shift_alerts",
+        "tweet_pace_alerts", "calibration_check", "insider_scan",
+        "poly_delta", "manifold_shadow", "clv_snapshot",
+        "cross_sport_drift", "soccer_live_monitor", "mlb_live_monitor",
+        "ufc_live_monitor",
+    ],
+
+    # Tasks gated to every Nth tick of a parent group
+    "5min_gated": {"ufc_edge_scan": 3},          # every 15min (3 × 5min)
+
+    "30min": [
+        "signal_scan", "options_scan", "options_resolution", "options_monitor",
+        "whale_wall_alerts", "whale_outcomes", "whale_wallets",
+        "credit_refresh", "source_health_touch", "stale_line_scan",
+        "ufc_prop_scan", "edge_alerts", "mlb_props_alert",
+        "mlb_props_resolve", "baseball_resolve", "ufc_resolve", "nfl_resolve",
+        "scorer_clv_snapshot", "kalshi_fade_scan",
+        "pm_maker_shadow", "ensemble_recorder", "arb_scan",
+        "resolution_edge_scan",
+    ],
+
+    "30min_gated": {                              # every Nth × 30min
+        "soccer_match_scan": 4,                   # every 2h
+        "soccer_resolve": 4,
+        "scorer_edge_scan": 4,                    # every 2h (same cadence as match scan)
+        "nfl_edge_scan": 4,                       # every 2h (self-gates in off-season)
+        "betfair_scan": 4,                        # every 2h (futures don't move fast)
+    },
+
+    "whale": ["whale_scanner", "whale_follower"],  # sequential, dynamic sleep
+    "clob": ["whale_clob"],                        # dynamic sleep
+    "vpin": ["vpin_scan"],
+
+    "6h": [
+        "arena_snapshot", "state_cleanup", "db_maintenance",
+        "ie_spending_refresh", "gdelt_refresh", "ufc_event_discovery",
+        "pm_leaderboard", "smart_wallet_resolve",
+    ],
+}
+
+# Names where the task function doesn't follow task_{name} convention
+_TASK_FN_ALIASES = {
+    "daily_summary": "task_daily_discord_summary",
+    "election_report": "task_election_weekly_report",
+}
+
+
+def _task_fn(name: str):
+    """Resolve a task name to its function. Uses globals() lookup with alias support."""
+    fn_name = _TASK_FN_ALIASES.get(name, f"task_{name}")
+    return globals()[fn_name]
+
+
+# ============================================================================
 # Task implementations
 # ============================================================================
 
@@ -218,6 +288,13 @@ def task_poly_delta():
     See services/poly_delta_tracker.py."""
     from services.poly_delta_tracker import run_once
     run_once()
+
+
+def task_manifold_shadow():
+    """Shadow-log Manifold-vs-Polymarket leading-indicator edges (#3).
+    See services/manifold_shadow.py."""
+    from services.manifold_shadow import run_once as _manifold_run
+    _manifold_run()
 
 
 def task_clv_snapshot():
@@ -565,6 +642,29 @@ def task_cross_sport_drift():
     _run()
 
 
+def task_ufc_live_monitor():
+    """UFC live fight monitor — round trigger, line drift, edge inversion.
+    Alert-only: fires on round transitions and fight conclusions."""
+    from scripts.ufc_live_monitor import main as _main
+    _main()
+
+
+def task_sport_whale_trades():
+    """Multi-sport whale trade alert — WC Soccer, MLS, MLB, UFC, NBA.
+    Replaces soccer_whale_trades for all sports. Every 60s."""
+    from scripts.sport_whale_trades import run as _run
+    _run()
+
+
+def task_pm_leaderboard():
+    """Polymarket leaderboard discovery — scrapes top traders, seeds new wallets,
+    promotes qualifying wallets to smart status, alerts on new discoveries."""
+    from scripts.pm_leaderboard_scraper import run as _run
+    result = _run()
+    if result.get("new") or result.get("graduated"):
+        logger.info("PM leaderboard: %d new, %d graduated", result["new"], result["graduated"])
+
+
 def task_ufc_edge_scan():
     """UFC edge scan: compares Polymarket + Kalshi vs Pinnacle.
     Self-gating: skips if no events within 6h window (0 credits)."""
@@ -634,6 +734,25 @@ def task_arb_scan():
                 logger.info("arb_alert: %s", out[:200])
     except Exception as e:
         logger.warning("arb_alert failed: %s", e)
+
+
+def task_resolution_edge_scan():
+    """Resolution-source edge scan for weather markets.
+    NWS edge for Kalshi, TWC edge for Polymarket. 30min cadence."""
+    try:
+        from signals.weather_resolution_edge import scan_resolution_edges
+        signals = scan_resolution_edges()
+        high = [s for s in signals if s.get("conviction_tier") == "HIGH"]
+        if signals:
+            logger.info("resolution_edge: %d signals (%d HIGH)", len(signals), len(high))
+        if high:
+            # Alert on HIGH conviction edges
+            for s in high:
+                logger.info("resolution_edge HIGH: %s %s edge=%+.1fpp %s (thr=%.0f)",
+                            s["city"], s["resolution_source"], s["edge_pp"],
+                            s["direction"], s["threshold_f"])
+    except Exception as e:
+        logger.debug("resolution_edge_scan: %s", e)
 
 
 def task_stale_line_scan():
@@ -730,6 +849,23 @@ def task_whale_wallets():
         stats = refresh_wallets(conn)
         if stats.get("refreshed"):
             logger.info("Whale wallets: %s", stats)
+    finally:
+        conn.close()
+
+
+def task_smart_wallet_resolve():
+    """Resolve outstanding smart-wallet shadow alerts (Gate-2 calibration)."""
+    import sqlite3
+    from scripts.smart_wallet_alert import (SHADOW_DB, init_shadows,
+                                            resolve_shadows,
+                                            settle_via_wallet_positions)
+    conn = sqlite3.connect(str(SHADOW_DB))
+    conn.row_factory = sqlite3.Row
+    try:
+        init_shadows(conn)
+        n = resolve_shadows(conn, settle_via_wallet_positions)
+        if n:
+            logger.info("Smart-wallet shadows resolved: %d", n)
     finally:
         conn.close()
 
@@ -1005,6 +1141,90 @@ def task_soccer_futures_scan():
     asyncio.run(run(["soccer_futures", "soccer_wc_board"]))
 
 
+def task_scorer_clv_snapshot():
+    """Scorer CLV: snapshot DK/FD anytime-goalscorer lines for upcoming matches.
+    Feeds the CLV logger's pre/close comparison and control-corrected gate."""
+    from scripts.scorer_paper_logger import db_connect, live_snapshot
+
+    con = db_connect(str(PROJECT_ROOT / "storage" / "scorer_clv.db"))
+    live_snapshot(con, "soccer_fifa_world_cup", window_hours=8.0)
+    con.close()
+
+
+def task_scorer_edge_scan():
+    """Scorer edge scan: find anytime-goalscorer edges + enrich with ESPN stats.
+    Runs every 2h alongside soccer_match_scan."""
+    import os
+    import requests as _req
+    from odds.scorer_edge import find_scorer_edges, ScorerSportConfig
+
+    sport_key = "soccer_fifa_world_cup"
+    config = ScorerSportConfig(sport_key=sport_key)
+    api_key = os.environ.get("ODDS_API_KEY", "")
+    if not api_key:
+        logger.warning("scorer_edge_scan: no ODDS_API_KEY")
+        return
+
+    # Fetch events with scorer props
+    try:
+        r = _req.get(
+            f"https://api.the-odds-api.com/v4/sports/{sport_key}/events",
+            params={"apiKey": api_key}, timeout=15,
+        )
+        events = r.json() if r.status_code == 200 else []
+    except Exception as e:
+        logger.warning(f"scorer_edge_scan: events fetch failed: {e}")
+        return
+
+    # Fetch odds for each event (limit to 5 nearest events to save credits)
+    events_odds = []
+    for ev in events[:5]:
+        eid = ev.get("id", "")
+        try:
+            r2 = _req.get(
+                f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/{eid}/odds",
+                params={
+                    "apiKey": api_key,
+                    "regions": config.regions,
+                    "markets": "player_goal_scorer_anytime",
+                    "oddsFormat": "american",
+                },
+                timeout=15,
+            )
+            if r2.status_code == 200:
+                events_odds.append(r2.json())
+        except Exception:
+            pass
+
+    if not events_odds:
+        return
+
+    edges = find_scorer_edges(events_odds, config)
+    logger.info(f"scorer_edge_scan: {len(edges)} edges from {len(events_odds)} events")
+
+    # Enrich with ESPN stats
+    try:
+        from odds.soccer_stats import fetch_scorers, enrich_scorer_edge
+        from odds.sports_edge_common import log_enrichment
+        # Pre-fetch tournament stats (cached 1h)
+        fetch_scorers(sport_key)
+        for edge in edges:
+            enrichment = enrich_scorer_edge(edge, sport_key)
+            if enrichment:
+                log_enrichment(
+                    shadow_trade_id=None,
+                    sport="scorer",
+                    stats_score=enrichment.get("goals_per_match", 0.0),
+                    stats_confirmation=enrichment.get("stats_agrees", False) or False,
+                    alert_tier="confirmed" if enrichment.get("stats_agrees") else "speculative",
+                    stats_detail=f"{enrichment.get('goals', 0)}G/{enrichment.get('matches', 0)}M "
+                                 f"GPG={enrichment.get('goals_per_match', 0):.2f} "
+                                 f"({enrichment.get('team', '')})",
+                )
+    except Exception as e:
+        logger.warning(f"scorer_edge_scan: enrichment failed: {e}")
+
+
 def task_soccer_resolve():
     """Soccer/WC: resolve closed shadows + capture PM closing mid (CLV) + feed
     soccer_forecast_log calibration."""
@@ -1021,14 +1241,80 @@ def task_baseball_resolve():
     scan_resolved_baseball_games()
 
 
+def task_ufc_resolve():
+    """Resolve closed Polymarket UFC fight shadows via CLOB per-market lookup."""
+    from signals.ufc_resolver import scan_resolved_ufc_trades
+
+    scan_resolved_ufc_trades()
+
+
+def task_nfl_resolve():
+    """Resolve closed Polymarket NFL game shadows via CLOB + capture CLV."""
+    from signals.nfl_resolver import scan_resolved_nfl_trades
+    scan_resolved_nfl_trades()
+
+
+def task_nfl_edge_scan():
+    """NFL edge scan: consensus devig vs Polymarket. Self-gating: skips if
+    no games within 7-day window (off-season = 0 credits)."""
+    import asyncio
+    from odds.nfl_edge import find_nfl_edges, CFG
+    from odds.sports_edge_common import summarize
+    edges = asyncio.run(find_nfl_edges())
+    if edges:
+        summarize(edges, CFG)
+        logger.info(f"NFL edge scan: {len(edges)} edges")
+    else:
+        logger.debug("NFL edge scan: no edges (off-season or no games)")
+
+
+_betfair_dedup: dict = {}  # event_key → last_alert_ts
+
+def task_betfair_scan():
+    """Betfair Exchange vs Polymarket futures edge scan."""
+    import asyncio
+    from odds.betfair_edge import find_betfair_edges
+    edges = asyncio.run(find_betfair_edges(min_edge=0.05))
+    if not edges:
+        logger.debug("Betfair scan: no edges")
+        return
+    now = time.time()
+    to_alert = []
+    for e in edges:
+        key = f"{e.sport}|{e.selection}"
+        last = _betfair_dedup.get(key, 0)
+        if now - last >= 14400:  # 4h dedup
+            to_alert.append(e)
+            _betfair_dedup[key] = now
+    if to_alert:
+        lines = [f"⚡ Betfair Futures Edges ({len(to_alert)})"]
+        for e in to_alert[:5]:
+            pm_str = f"{e.polymarket_price*100:.0f}¢" if e.polymarket_price else "N/A"
+            lines.append(
+                f"  {e.selection} ({e.sport}): Betfair {e.betfair_prob*100:.1f}% vs PM {pm_str} → {e.edge_pct*100:+.1f}%"
+            )
+        msg = "\n".join(lines)
+        logger.info(msg)
+        try:
+            send_telegram_alert(msg)
+        except Exception:
+            pass
+    logger.info(f"Betfair scan: {len(edges)} edges, {len(to_alert)} alerted")
+
+
 def task_arena_snapshot():
     """AI arena leaderboard snapshot."""
     venv = str(PROJECT_ROOT / "venv" / "bin" / "python3")
-    subprocess.run(
+    result = subprocess.run(
         [venv, str(PROJECT_ROOT / "signals" / "ai_model_tracker.py"), "snapshot"],
-        capture_output=True, timeout=60,
+        capture_output=True, timeout=60, text=True,
     )
-    logger.info("Arena leaderboard snapshot taken")
+    if result.returncode != 0:
+        logger.error(
+            "Arena snapshot FAILED (rc={}): {}", result.returncode, (result.stderr or "")[-500:]
+        )
+    else:
+        logger.info("Arena leaderboard snapshot taken")
 
 
 def task_daily_discord_summary():
@@ -1227,46 +1513,30 @@ async def run_in_thread(fn, *args, **kwargs):
 async def tick_30s():
     """Every 30 seconds: HF signals."""
     while True:
-        await run_in_thread(_run_safe, "hf_signals", task_hf_signals)
+        for name in TICK_TASKS["30s"]:
+            await run_in_thread(_run_safe, name, _task_fn(name))
         await asyncio.sleep(30)
 
 
 async def tick_1min():
-    """Every 60 seconds: urgent stop-loss + soccer whale trade alerts."""
+    """Every 60 seconds: urgent stop-loss + sport whale trade alerts."""
     while True:
-        await run_in_thread(_run_safe, "stop_evaluator_urgent", task_stop_evaluator_urgent)
-        await run_in_thread(_run_safe, "soccer_whale_trades", task_soccer_whale_trades)
+        for name in TICK_TASKS["1min"]:
+            await run_in_thread(_run_safe, name, _task_fn(name))
         await asyncio.sleep(60)
 
 
 async def tick_5min():
     """Every 5 minutes: health, stops, resolution, reeval, weather scan, alerts, calibration."""
     while True:
-        await run_in_thread(_run_safe, "health_check", task_health_check)
-        await run_in_thread(_run_safe, "stop_evaluator", task_stop_evaluator)
-        await run_in_thread(_run_safe, "price_logger", task_price_logger)
-        await run_in_thread(_run_safe, "book_logger", task_book_logger)
-        await run_in_thread(_run_safe, "shadow_resolution", task_shadow_resolution)
-        await run_in_thread(_run_safe, "paper_resolution", task_paper_resolution)
-        await run_in_thread(_run_safe, "equity_snapshot", task_equity_snapshot)
-        await run_in_thread(_run_safe, "resolution_scanner", task_resolution_scanner)
-        await run_in_thread(_run_safe, "mlb_props_scratch", task_mlb_props_scratch)
-        await run_in_thread(_run_safe, "dashboard_warm", task_dashboard_warm)
-        await run_in_thread(_run_safe, "weather_reeval", task_weather_reeval)
-        await run_in_thread(_run_safe, "weather_fast_scan", task_weather_fast_scan)
-        await run_in_thread(_run_safe, "weather_shift_alerts", task_weather_shift_alerts)
-        await run_in_thread(_run_safe, "tweet_pace_alerts", task_tweet_pace_alerts)
-        await run_in_thread(_run_safe, "calibration_check", task_calibration_check)
-        await run_in_thread(_run_safe, "insider_scan", task_insider_scan)
-        await run_in_thread(_run_safe, "poly_delta", task_poly_delta)
-        await run_in_thread(_run_safe, "clv_snapshot", task_clv_snapshot)
-        await run_in_thread(_run_safe, "cross_sport_drift", task_cross_sport_drift)
-        await run_in_thread(_run_safe, "soccer_live_monitor", task_soccer_live_monitor)
-        await run_in_thread(_run_safe, "mlb_live_monitor", task_mlb_live_monitor)
-        # UFC edge scan: runs every 15min (every 3rd tick), self-gating
-        _state["ufc_scan_n"] = _state.get("ufc_scan_n", 0) + 1
-        if _state["ufc_scan_n"] % 3 == 0:
-            await run_in_thread(_run_safe, "ufc_edge_scan", task_ufc_edge_scan)
+        for name in TICK_TASKS["5min"]:
+            await run_in_thread(_run_safe, name, _task_fn(name))
+        # Gated tasks — run every Nth tick
+        for name, every_n in TICK_TASKS["5min_gated"].items():
+            key = f"{name}_n"
+            _state[key] = _state.get(key, 0) + 1
+            if _state[key] % every_n == 0:
+                await run_in_thread(_run_safe, name, _task_fn(name))
         logger.debug("5-min tick complete")
         await asyncio.sleep(300)
 
@@ -1276,10 +1546,9 @@ async def tick_whale():
     take minutes and must never delay stop evaluation in tick_5min."""
     while True:
         t0 = time.time()
-        await run_in_thread(_run_safe, "whale_scanner", task_whale_scanner)
-        # follower rides the whale tick so ts_entry stays close to ts_alert
-        # (the K1 latency budget); paper-only, reads alerts written above
-        await run_in_thread(_run_safe, "whale_follower", task_whale_follower)
+        # Sequential — follower rides whale_scanner so ts_entry stays close to ts_alert
+        for name in TICK_TASKS["whale"]:
+            await run_in_thread(_run_safe, name, _task_fn(name))
         await asyncio.sleep(max(60, 300 - (time.time() - t0)))
 
 
@@ -1288,37 +1557,22 @@ async def tick_clob():
     resting orders from known whale wallets."""
     while True:
         t0 = time.time()
-        await run_in_thread(_run_safe, "whale_clob", task_whale_clob)
+        for name in TICK_TASKS["clob"]:
+            await run_in_thread(_run_safe, name, _task_fn(name))
         await asyncio.sleep(max(10, 60 - (time.time() - t0)))
 
 
 async def tick_30min():
     """Every 30 minutes: signal scans, options scan, edge alerts, source health."""
     while True:
-        await run_in_thread(_run_safe, "signal_scan", task_signal_scan)
-        await run_in_thread(_run_safe, "options_scan", task_options_scan)
-        await run_in_thread(_run_safe, "options_resolution", task_options_resolution)
-        await run_in_thread(_run_safe, "options_monitor", task_options_monitor)
-        await run_in_thread(_run_safe, "whale_wall_alerts", task_whale_wall_alerts)
-        await run_in_thread(_run_safe, "whale_outcomes", task_whale_outcomes)
-        await run_in_thread(_run_safe, "whale_wallets", task_whale_wallets)
-        await run_in_thread(_run_safe, "credit_refresh", task_credit_refresh)
-        await run_in_thread(_run_safe, "source_health_touch", task_source_health_touch)
-        await run_in_thread(_run_safe, "stale_line_scan", task_stale_line_scan)
-        await run_in_thread(_run_safe, "ufc_prop_scan", task_ufc_prop_scan)
-        await run_in_thread(_run_safe, "edge_alerts", task_edge_alerts)
-        await run_in_thread(_run_safe, "mlb_props_alert", task_mlb_props_alert)
-        await run_in_thread(_run_safe, "mlb_props_resolve", task_mlb_props_resolve)
-        await run_in_thread(_run_safe, "baseball_resolve", task_baseball_resolve)
-        await run_in_thread(_run_safe, "kalshi_fade_scan", task_kalshi_fade_scan)
-        await run_in_thread(_run_safe, "pm_maker_shadow", task_pm_maker_shadow)
-        await run_in_thread(_run_safe, "ensemble_recorder", task_ensemble_recorder)
-        await run_in_thread(_run_safe, "arb_scan", task_arb_scan)
-        # Soccer/WC: scan match edges + resolve closed shadows every 2h (4 ticks).
-        _state["soccer_scan_n"] = _state.get("soccer_scan_n", 0) + 1
-        if _state["soccer_scan_n"] % 4 == 0:
-            await run_in_thread(_run_safe, "soccer_match_scan", task_soccer_match_scan)
-            await run_in_thread(_run_safe, "soccer_resolve", task_soccer_resolve)
+        for name in TICK_TASKS["30min"]:
+            await run_in_thread(_run_safe, name, _task_fn(name))
+        # Gated tasks — run every Nth tick
+        for name, every_n in TICK_TASKS["30min_gated"].items():
+            key = f"{name}_n"
+            _state[key] = _state.get(key, 0) + 1
+            if _state[key] % every_n == 0:
+                await run_in_thread(_run_safe, name, _task_fn(name))
         logger.info("30-min tick complete")
         await asyncio.sleep(1800)
 
@@ -1409,22 +1663,16 @@ async def tick_vpin():
     """
     while True:
         t0 = time.time()
-        await run_in_thread(_run_safe, "vpin_scan", task_vpin_scan)
+        for name in TICK_TASKS["vpin"]:
+            await run_in_thread(_run_safe, name, _task_fn(name))
         await asyncio.sleep(max(60, 600 - (time.time() - t0)))
 
 
 async def tick_6h():
     """Every 6 hours: arena snapshot, state cleanup, DB maintenance, GDELT/IE refresh, UFC event discovery."""
     while True:
-        await run_in_thread(_run_safe, "arena_snapshot", task_arena_snapshot)
-        await run_in_thread(_run_safe, "state_cleanup", task_state_cleanup)
-        await run_in_thread(_run_safe, "db_maintenance", task_db_maintenance)
-        await run_in_thread(_run_safe, "ie_spending_refresh", task_ie_spending_refresh)
-        # GDELT election sentiment: single-process refresh so API workers never
-        # fetch live (live dual-worker fetching caused 429 storms). Runs ~60s after
-        # every boot, then every 6h.
-        await run_in_thread(_run_safe, "gdelt_refresh", task_gdelt_refresh)
-        await run_in_thread(_run_safe, "ufc_event_discovery", task_ufc_event_discovery)
+        for name in TICK_TASKS["6h"]:
+            await run_in_thread(_run_safe, name, _task_fn(name))
         await asyncio.sleep(21600)
 
 
