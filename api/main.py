@@ -138,7 +138,26 @@ app.include_router(live_router, prefix="/api", tags=["Live"])
 
 # Whale Shark dashboard: /api/whale/alerts, /stats, /wallets
 from api.routes.whale import router as whale_router
+
 app.include_router(whale_router, prefix="/api", tags=["Whale"])
+
+# Insider detection dashboard: /api/insider/recent, /leaderboard, /scan
+# (router carries its own /api/insider prefix)
+from api.routes.insider import router as insider_router
+
+app.include_router(insider_router, tags=["Insider"])
+
+# Social counts (Musk/Trump): /api/social/counts, /snapshots, /history/{person}
+# (router prefix is /social → mount under /api to match static/social.html)
+from api.routes.social import router as social_router
+
+app.include_router(social_router, prefix="/api", tags=["Social"])
+
+# Analytics read endpoints: surface cron/scanner data that had no API
+# (weather skill, election history, whale-alert precision). Read-only.
+from api.routes.analytics import router as analytics_router
+
+app.include_router(analytics_router, tags=["Analytics"])
 
 # ============================================================================
 # Visitor Tracking
