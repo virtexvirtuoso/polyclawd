@@ -46,6 +46,7 @@ WHALE_SIZE     = 30000   # CLOB book wall threshold (lower liquidity than WC)
 WHALE_DEDUP_S  = 1800    # suppress re-alert for same wall within 30 min
 EDGE_FLOOR     = 0.02    # close shadow trade if edge drops below 2pp
 PM_GAP_PP      = 6.0     # min pp gap between PM and Vegas to flag in alerts
+PM_STALE_PP    = 35.0    # gap above this = stale pre-game CLOB orders, not actionable
 
 DB_PATH  = BASE_DIR / "storage" / "shadow_trades.db"
 MC_HOST, MC_PORT = "localhost", 11211
@@ -655,6 +656,8 @@ def check_run_trigger(conn: sqlite3.Connection, game: Dict,
             gap = (pin_p - poly_p) * 100
             if not liquid:
                 lines.append(f"  🔒 <b>{name} wins</b>: Polymarket {poly_p:.0%}  (illiquid — no live orders)")
+            elif abs(gap) >= PM_STALE_PP:
+                lines.append(f"  ⏸ <b>{name} wins</b>: Polymarket {poly_p:.0%}  (stale pre-game orders, not actionable)")
             elif abs(gap) >= PM_GAP_PP:
                 direction = "cheaper" if gap > 0 else "pricier"
                 action = "BUY" if gap > 0 else "SELL"
@@ -775,7 +778,9 @@ def check_line_drift(conn: sqlite3.Connection, game: Dict,
         lines.append(f"   {d['prev']:.0%} → <b>{d['now']:.0%}</b>{move_tag}")
 
         if d["poly"] is not None and d["gap"] is not None:
-            if abs(d["gap"]) >= PM_GAP_PP:
+            if abs(d["gap"]) >= PM_STALE_PP:
+                lines.append(f"   Polymarket: {d['poly']:.0%}  ⏸ stale pre-game orders")
+            elif abs(d["gap"]) >= PM_GAP_PP:
                 direction = "cheaper" if d["gap"] > 0 else "pricier"
                 action = "BUY" if d["gap"] > 0 else "SELL"
                 lines.append(f"   Polymarket: {d['poly']:.0%}  ← <b>{abs(d['gap']):.0f}pts {direction} than Vegas</b>")
