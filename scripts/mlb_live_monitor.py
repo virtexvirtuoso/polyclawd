@@ -368,26 +368,23 @@ def fetch_pinnacle(home: str, away: str) -> Optional[Dict[str, float]]:
 # ── Polymarket ────────────────────────────────────────────────────────────────
 def fetch_poly_event(home: str, away: str) -> Optional[Dict]:
     """
-    Paginate baseball events starting at offset 200 (offsets 0-199 are futures/specials).
-    MLB game markets close at first pitch — return even closed markets for pre-game price reference.
-    Filter by today's endDate to avoid matching wrong-date games with same teams.
+    Fetch today's baseball events using date-filtered endpoint.
+    end_date_min/end_date_max returns ~43 today's games vs stale 2024 data from offset=200+.
     """
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    for offset in range(200, 2100, 100):
-        data = _get(POLY_EVENTS, {"tag_slug": "baseball", "limit": 100, "offset": offset})
-        if not data or not isinstance(data, list):
-            break
-        for ev in data:
-            t = ev.get("title", "").lower()
-            if " vs" not in t:
-                continue
-            if not (_nmatch(home, t) and _nmatch(away, t)):
-                continue
-            # Verify endDate is today (game markets end on game day)
-            for m in ev.get("markets", [])[:1]:
-                end = m.get("endDate", "")
-                if today in end:
-                    return ev
+    data = _get(POLY_EVENTS, {
+        "tag_slug": "baseball", "limit": 100,
+        "end_date_min": f"{today}T00:00:00Z",
+        "end_date_max": f"{today}T23:59:59Z",
+    })
+    if not data or not isinstance(data, list):
+        return None
+    for ev in data:
+        t = ev.get("title", "").lower()
+        if " vs" not in t:
+            continue
+        if _nmatch(home, t) and _nmatch(away, t):
+            return ev
     return None
 
 
