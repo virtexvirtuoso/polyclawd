@@ -140,10 +140,11 @@ def migrate(conn: sqlite3.Connection) -> None:
             ts            TEXT
         );
         CREATE TABLE IF NOT EXISTS mlb_line_snap (
-            game_id  TEXT,
-            outcome  TEXT,
-            devig    REAL,
-            ts       TEXT,
+            game_id      TEXT,
+            outcome      TEXT,
+            devig        REAL,
+            ts           TEXT,
+            game_status  TEXT DEFAULT 'pre',
             PRIMARY KEY (game_id, outcome)
         );
         CREATE TABLE IF NOT EXISTS mlb_whale_dedup (
@@ -154,6 +155,12 @@ def migrate(conn: sqlite3.Connection) -> None:
         );
     """)
     conn.commit()
+    # Add game_status column if missing (for existing installs)
+    try:
+        conn.execute("ALTER TABLE mlb_line_snap ADD COLUMN game_status TEXT DEFAULT 'pre'")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Column already exists
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────
@@ -284,38 +291,77 @@ def fetch_espn_games() -> List[Dict]:
 
 # ── Pinnacle ──────────────────────────────────────────────────────────────────
 def fetch_pinnacle(home: str, away: str) -> Optional[Dict[str, float]]:
-    """Returns {team_name: devigged_prob} — 2-way (no draw for MLB)."""
+    """Returns {team_name: devigged_prob} — consensus of live-updated books.
+
+    Uses ALL books with staleness filter (>10min behind freshest = excluded).
+    Prevents pre-game snapshot bug where one book freezes during in-play.
+    """
     if not ODDS_API_KEY:
         return None
     data = _get(ODDS_API_BASE, {
-        "apiKey": ODDS_API_KEY, "regions": "us",
-        "markets": "h2h", "oddsFormat": "american", "bookmakers": "pinnacle",
+        "apiKey": ODDS_API_KEY, "regions": "us,uk",
+        "markets": "h2h", "oddsFormat": "decimal",
     })
     if not data:
         return None
-
-    def imp(price: int) -> float:
-        p = int(price)
-        return (100 / (100 + p)) if p > 0 else (-p / (-p + 100))
 
     for game in data:
         if not (_nmatch(game.get("home_team", ""), home) and
                 _nmatch(game.get("away_team", ""), away)):
             continue
+
+        book_probs = []
         for bm in game.get("bookmakers", []):
-            if bm["key"] != "pinnacle":
-                continue
             for mkt in bm.get("markets", []):
                 if mkt["key"] != "h2h":
                     continue
-                outcomes = [o for o in mkt["outcomes"] if o.get("price", 0) != 0]
-                if not outcomes:
+                valid = [o for o in mkt["outcomes"] if o.get("price", 0) and o["price"] > 1.0]
+                if len(valid) < 2:
                     continue
-                raw = {o["name"]: imp(o["price"]) for o in outcomes}
+                raw = {o["name"]: 1.0 / o["price"] for o in valid}
                 total = sum(raw.values())
-                if total < 0.1:
-                    return None
-                return {k: v / total for k, v in raw.items()}
+                if total < 0.5:
+                    continue
+                devigged = {k: v / total for k, v in raw.items()}
+                upd = mkt.get("last_update", bm.get("last_update", ""))
+                book_probs.append((upd, devigged, bm["title"]))
+
+        if not book_probs:
+            return None
+
+        book_probs.sort(key=lambda x: x[0], reverse=True)
+        from datetime import timedelta
+        try:
+            fresh_dt = datetime.fromisoformat(book_probs[0][0].replace("Z", "+00:00"))
+            cutoff = fresh_dt - timedelta(minutes=10)
+            live_books = [
+                (ts, probs, name) for ts, probs, name in book_probs
+                if datetime.fromisoformat(ts.replace("Z", "+00:00")) >= cutoff
+            ]
+        except (ValueError, TypeError):
+            live_books = book_probs
+
+        if not live_books:
+            live_books = book_probs[:1]
+
+        all_outcomes = set()
+        for _, probs, _ in live_books:
+            all_outcomes.update(probs.keys())
+
+        consensus = {}
+        for outcome in all_outcomes:
+            vals = [probs.get(outcome, 0) for _, probs, _ in live_books if outcome in probs]
+            consensus[outcome] = sum(vals) / len(vals) if vals else 0
+
+        total = sum(consensus.values())
+        if total < 0.1:
+            return None
+
+        stale_count = len(book_probs) - len(live_books)
+        if stale_count > 0:
+            print(f"[fetch_pinnacle] {len(live_books)} live books, {stale_count} stale filtered", flush=True)
+
+        return {k: v / total for k, v in consensus.items()}
     return None
 
 
@@ -366,6 +412,9 @@ def extract_tokens(ev: Dict, home: str, away: str) -> Dict[str, Tuple[str, float
         q = m.get("question", "").lower()
         # Skip spread, over/under, and prop markets
         if any(noise in q for noise in _ML_NOISE):
+            continue
+        # Skip closed markets with no CLOB tokens — prices are frozen Gamma cache
+        if m.get("closed", False) and not m.get("clobTokenIds"):
             continue
         prices = m.get("outcomePrices", [])
         tids = m.get("clobTokenIds", [])
@@ -418,6 +467,32 @@ def fetch_book(token_id: str) -> Optional[Dict]:
     time.sleep(0.25)
     return _get(CLOB_BOOK, {"token_id": token_id})
 
+
+
+def refresh_clob_prices(tokens: Dict) -> Dict:
+    """Replace Gamma-cached prices with live CLOB mid. Adds liquid flag per token."""
+    updated = {}
+    for label, token_data in tokens.items():
+        tid = token_data[0]
+        gamma_price = token_data[1]
+        book = fetch_book(tid)
+        if not book:
+            updated[label] = (tid, gamma_price, True)
+            continue
+        bids = book.get("bids", [])
+        asks = book.get("asks", [])
+        best_bid = float(bids[0]["price"]) if bids else 0.0
+        best_ask = float(asks[0]["price"]) if asks else 1.0
+        if best_bid > 0 and best_ask < 1 and best_ask > best_bid:
+            clob_mid = (best_bid + best_ask) / 2
+            liquid = any(
+                abs(float(o["price"]) - clob_mid) <= 0.15
+                for o in (bids + asks)
+            )
+            updated[label] = (tid, clob_mid, liquid)
+        else:
+            updated[label] = (tid, gamma_price, False)
+    return updated
 
 def find_whale_wall(book: Dict, current_mid: Optional[float] = None,
                     proximity_pp: float = 15.0) -> Optional[Tuple[str, float, float]]:
@@ -515,12 +590,16 @@ def check_run_trigger(conn: sqlite3.Connection, game: Dict,
         for label, name in [("home", home), ("away", away)]:
             if label not in tokens:
                 continue
-            tid, poly_p = tokens[label]
+            token_data = tokens[label]
+            tid, poly_p = token_data[0], token_data[1]
+            liquid = token_data[2] if len(token_data) > 2 else True
             pin_p = next((v for k, v in pin.items() if _nmatch(k, name)), None)
             if pin_p is None:
                 continue
             gap = (pin_p - poly_p) * 100
-            if abs(gap) >= PM_GAP_PP:
+            if not liquid:
+                lines.append(f"  🔒 <b>{name} wins</b>: Polymarket {poly_p:.0%}  (illiquid — no live orders)")
+            elif abs(gap) >= PM_GAP_PP:
                 direction = "cheaper" if gap > 0 else "pricier"
                 action = "BUY" if gap > 0 else "SELL"
                 lines.append(f"  ⚠️ <b>{name} wins</b>: Polymarket {poly_p:.0%}  ← <b>{abs(gap):.0f}pts {direction} than Vegas</b>")
@@ -535,10 +614,10 @@ def check_run_trigger(conn: sqlite3.Connection, game: Dict,
         lines.extend(trade_signals)
 
     # Post-run whale depth check — parallel book fetches
+    walls_found: List[str] = []
     if tokens:
         run_labels = [(lbl, nm) for lbl, nm in [("home", home), ("away", away)] if lbl in tokens]
         book_futures = {lbl: _EXECUTOR.submit(fetch_book, tokens[lbl][0]) for lbl, _ in run_labels}
-        walls_found: List[str] = []
         for label, name in run_labels:
             try:
                 book = book_futures[label].result(timeout=15)
@@ -546,30 +625,42 @@ def check_run_trigger(conn: sqlite3.Connection, game: Dict,
                 book = None
             if not book:
                 continue
-            _, current_mid = tokens[label]
-            wall = find_whale_wall(book, current_mid=current_mid)
-            if wall:
-                side, price, size = wall
-                action_desc = "selling" if side == "ASK" else "buying"
-                walls_found.append(f"  🐋 Someone is {action_desc} <b>${size:,.0f}</b> at {price:.0%} on <b>{name} wins</b>")
-        if walls_found:
-            lines.append("")
-            lines.append("Big money spotted:")
-            lines.extend(walls_found)
+            current_mid = tokens[label][1]
+            # Whale walls disabled — resting orders, not executed trades.
+            # Actual trade flow alerts come from sport_whale_trades.py.
+            pass
+
+    # Only send TG alerts when there's actionable edge (PM gap or whale wall)
+    # Runs and pitcher changes are still tracked in DB snapshots above
+    if not trade_signals and not walls_found:
+        event = "Pitcher change" if pitcher_changed and not score_changed else "Run"
+        print(f"[mlb_monitor] {event} {home} {hs}-{as_} {away} — no edge/wall, suppressed", flush=True)
+        return
 
     send_telegram("\n".join(lines))
     print(f"[mlb_monitor] Run/pitcher alert: {home} {hs}-{as_} {away}", flush=True)
 
 
 # ── Alert 2: Line Drift ───────────────────────────────────────────────────────
+def _market_settling(tokens: Dict) -> bool:
+    """True if PM market has effectively resolved (any outcome ≥98% or all ≤2%)."""
+    if not tokens:
+        return False
+    prices = [t[1] for t in tokens.values()]
+    return any(p >= 0.98 for p in prices) or all(p <= 0.02 for p in prices)
+
+
 def check_line_drift(conn: sqlite3.Connection, game: Dict,
                      pin: Optional[Dict], tokens: Dict) -> None:
     if not pin:
+        return
+    if _market_settling(tokens):
         return
     gid = game["game_id"]
     home, away = game["home_team"], game["away_team"]
     hs, as_ = game["home_score"], game["away_score"]
     detail = game.get("detail", "")
+    current_status = game.get("status", "in")
     now_ts = datetime.now(timezone.utc).isoformat()
     fired_ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
 
@@ -578,12 +669,17 @@ def check_line_drift(conn: sqlite3.Connection, game: Dict,
 
     for outcome, prob in pin.items():
         row = conn.execute(
-            "SELECT devig FROM mlb_line_snap WHERE game_id=? AND outcome=?", (gid, outcome)
+            "SELECT devig, game_status FROM mlb_line_snap WHERE game_id=? AND outcome=?", (gid, outcome)
         ).fetchone()
 
         prev = float(row["devig"]) if row else prob
+        prev_status = row["game_status"] if row else None
         move = (prob - prev) * 100
-        if abs(move) >= LINE_DRIFT_PP:
+
+        # Only flag drift when BOTH the previous and current snapshot are live (in-game).
+        # Pre-game → in-game transition is expected (10% pre-game vs 56% trailing in Bottom 1st
+        # is normal; it's not a drift event).
+        if abs(move) >= LINE_DRIFT_PP and prev_status == "in" and current_status == "in":
             any_drift = True
 
         label = "home" if _nmatch(outcome, home) else "away"
@@ -596,9 +692,9 @@ def check_line_drift(conn: sqlite3.Connection, game: Dict,
         })
 
         conn.execute("""
-            INSERT OR REPLACE INTO mlb_line_snap (game_id, outcome, devig, ts)
-            VALUES (?, ?, ?, ?)
-        """, (gid, outcome, prob, now_ts))
+            INSERT OR REPLACE INTO mlb_line_snap (game_id, outcome, devig, ts, game_status)
+            VALUES (?, ?, ?, ?, ?)
+        """, (gid, outcome, prob, now_ts, current_status))
     conn.commit()
 
     if not any_drift:
@@ -666,7 +762,7 @@ def check_edge_inversion(conn: sqlite3.Connection, game: Dict,
         if not label or label not in tokens:
             continue
 
-        _, current_poly = tokens[label]
+        current_poly = tokens[label][1]
         team = home if label == "home" else away
         pin_prob = next((v for k, v in pin.items() if _nmatch(k, team)), 0)
         current_edge = pin_prob - current_poly
@@ -737,6 +833,7 @@ def main() -> None:
 
         if tokens:
             mc_register_tokens([tid for tid, _ in tokens.values()])
+            tokens = refresh_clob_prices(tokens)
 
         check_run_trigger(conn, game, pin, ev, tokens)
         check_line_drift(conn, game, pin, tokens)
