@@ -829,7 +829,8 @@ def check_whale_walls(conn: sqlite3.Connection, game: Dict,
     now_s = datetime.now(timezone.utc).timestamp()
     now_ts = datetime.now(timezone.utc).isoformat()
 
-    for label, (tid, _) in tokens.items():
+    for label, token_data in tokens.items():
+        tid = token_data[0]
         name = {"home": home, "away": away, "draw": "Draw"}.get(label, label)
 
         # Dedup: skip if alerted within WHALE_DEDUP_S
@@ -1017,7 +1018,7 @@ def main() -> None:
             tokens = extract_tokens(ev, home, away) if ev else {}
 
             if tokens:
-                mc_register_tokens([tid for tid, _ in tokens.values()])
+                mc_register_tokens([tokens[lbl][0] for lbl in tokens])
                 tokens = refresh_clob_prices(tokens)
 
             check_goal_trigger(conn, game, pin, ev, tokens)

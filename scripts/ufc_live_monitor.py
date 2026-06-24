@@ -713,7 +713,7 @@ def main() -> None:
         tokens = extract_tokens(ev, fa, fb) if ev else {}
 
         if tokens:
-            mc_register_tokens([tid for tid, _ in tokens.values()])
+            mc_register_tokens([tokens[lbl][0] for lbl in tokens])
             tokens = refresh_clob_prices(tokens)
 
         check_round_trigger(conn, fight, pin, ev, tokens)
