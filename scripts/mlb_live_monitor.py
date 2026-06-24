@@ -388,6 +388,65 @@ def fetch_poly_event(home: str, away: str) -> Optional[Dict]:
     return None
 
 
+def fetch_pm_sdk_moneyline(home: str, away: str) -> Dict[str, Tuple]:
+    """
+    Fallback when Gamma API has no full-game moneyline.
+    Queries PM US SDK for baseball_team_full_game_winner markets with live BBO prices.
+    Returns {label: (slug, mid_price, liquid)} — slug used as token_id placeholder.
+    """
+    try:
+        from polymarket_us import PolymarketUS
+        c = PolymarketUS()
+        resp = c.search.query({"query": "mlb game winner"})
+        events = resp if isinstance(resp, list) else resp.get("events", resp.get("results", []))
+        for ev in events:
+            title = ev.get("title", "").lower()
+            if " vs" not in title:
+                continue
+            if not (_nmatch(home, title) and _nmatch(away, title)):
+                continue
+            for m in (ev.get("markets", []) or []):
+                if m.get("sportsMarketType") != "baseball_team_full_game_winner":
+                    continue
+                slug = m.get("slug", "")
+                if not slug:
+                    continue
+                prices = m.get("outcomePrices", [])
+                if isinstance(prices, str):
+                    try:
+                        prices = json.loads(prices)
+                    except Exception:
+                        continue
+                if len(prices) < 2:
+                    continue
+                # Get live BBO
+                try:
+                    bbo = c.markets.bbo(slug)
+                    md = bbo.get("marketData", {})
+                    best_bid = float((md.get("bestBid") or {}).get("value", 0) or 0)
+                    best_ask = float((md.get("bestAsk") or {}).get("value", 1) or 1)
+                    if best_bid > 0 and best_ask < 1 and best_ask > best_bid:
+                        first_price = (best_bid + best_ask) / 2
+                        liquid = True
+                    else:
+                        first_price = float(prices[0])
+                        liquid = False
+                except Exception:
+                    first_price = float(prices[0])
+                    liquid = False
+                second_price = 1.0 - first_price
+                # First team in title is the YES/first outcome
+                parts = title.split(" vs")
+                first_team = parts[0].strip()
+                if _nmatch(away, first_team):
+                    return {"away": (slug, first_price, liquid), "home": (slug, second_price, liquid)}
+                else:
+                    return {"home": (slug, first_price, liquid), "away": (slug, second_price, liquid)}
+    except Exception as e:
+        print(f"[mlb_monitor] SDK moneyline fallback failed: {e}", flush=True)
+    return {}
+
+
 _ML_NOISE = {"spread", "o/u", "over", "under", "inning", "extra innings", "will there", "first inning", "run scored", "strikeout", "home run", "hit", "rbi"}
 
 
@@ -827,9 +886,18 @@ def main() -> None:
             ev = None
 
         tokens = extract_tokens(ev, home, away) if ev else {}
+        sdk_source = False
 
-        if tokens:
-            mc_register_tokens([tid for tid, _ in tokens.values()])
+        # SDK fallback: Gamma API doesn't expose all PM US game markets
+        if not tokens:
+            tokens = fetch_pm_sdk_moneyline(home, away)
+            sdk_source = bool(tokens)
+            if sdk_source:
+                print(f"[mlb_monitor] SDK moneyline fallback: {home} vs {away}", flush=True)
+
+        if tokens and not sdk_source:
+            # SDK tokens already have live BBO prices — skip CLOB refresh
+            mc_register_tokens([tokens[lbl][0] for lbl in tokens])
             tokens = refresh_clob_prices(tokens)
 
         check_run_trigger(conn, game, pin, ev, tokens)
