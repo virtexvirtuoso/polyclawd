@@ -160,9 +160,9 @@ def queue_wallet_seen(conn, wallet: str, name: str, dollars: float):
 
 
 def get_smart_wallets(conn) -> dict:
-    """wallet -> {name, win_rate, closed} for all currently-smart wallets."""
+    """wallet -> {name, win_rate, closed, net_pnl} for all currently-smart wallets."""
     return {r["wallet"]: {"name": r["name"], "win_rate": r["win_rate"],
-                          "closed": r["closed_positions"]}
+                          "closed": r["closed_positions"], "net_pnl": r["net_pnl"]}
             for r in conn.execute("SELECT * FROM pm_wallets WHERE smart=1")}
 
 

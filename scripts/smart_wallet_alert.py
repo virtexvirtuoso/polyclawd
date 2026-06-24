@@ -49,8 +49,14 @@ MIN_ALERT_MARKET_VOL = 100_000.0
 NEAR_SETTLED_HI = 0.90  # suppress when held outcome priced >= this
 NEAR_SETTLED_LO = 0.10  # ...or <= this (no edge near resolution)
 
-# Telegram delivery is opt-in (shadow-first). Logging always happens.
-_SEND_ENABLED = os.environ.get("SMART_WALLET_ALERT_SEND", "0") == "1"
+# Telegram delivery is live. Per-wallet CLV gate still filters noise.
+_SEND_ENABLED = os.environ.get("SMART_WALLET_ALERT_SEND", "1") == "1"
+
+# Per-wallet CLV gate: only fire if wallet has >= this many resolved shadows
+# with positive average CLV. New wallets get a free pass until they accumulate
+# enough data, then are gated.
+CLV_GATE_MIN_SHADOWS = 4   # need at least this many resolved before gating
+CLV_GATE_MIN_CLV = 0.0     # must have positive avg CLV to keep firing
 
 
 # --------------------------------------------------------------------------- #
@@ -182,6 +188,24 @@ def _gates_suppress(m: dict) -> bool:
     return False
 
 
+def _clv_gate_suppress(shadow_conn, wallet: str) -> bool:
+    """True = suppress Telegram delivery for this wallet.
+
+    Logic: if the wallet has >= CLV_GATE_MIN_SHADOWS resolved shadows,
+    check avg CLV. If avg CLV <= CLV_GATE_MIN_CLV, suppress.
+    Wallets with < CLV_GATE_MIN_SHADOWS resolved shadows get a free pass
+    (not enough data to gate them yet — shadow logging still captures them).
+    """
+    row = shadow_conn.execute("""
+        SELECT COUNT(*) as n, AVG(clv) as avg_clv
+        FROM smart_wallet_shadows
+        WHERE wallet=? AND resolved=1 AND clv IS NOT NULL
+    """, (wallet,)).fetchone()
+    if not row or row["n"] < CLV_GATE_MIN_SHADOWS:
+        return False  # free pass — not enough data
+    return (row["avg_clv"] or 0.0) <= CLV_GATE_MIN_CLV
+
+
 # --------------------------------------------------------------------------- #
 # Main entry
 # --------------------------------------------------------------------------- #
@@ -234,7 +258,7 @@ def check_and_fire(
             "close_time": m.get("close_time"),
         }
         _log_shadow(shadow_conn, rec)
-        if send:
+        if send and not _clv_gate_suppress(shadow_conn, f["wallet"]):
             try:
                 from scripts.alert_formatter import send_telegram
 
@@ -271,21 +295,36 @@ def _log_shadow(conn, rec: dict) -> None:
 
 def _format_alert(rec: dict) -> str:
     head = {
-        "entry": "🧠 Smart Wallet Entry",
-        "exit": "🧠 Smart Wallet Exit ⚠️",
-        "refire": "🧠 Smart Wallet — Adding",
-    }.get(rec["alert_type"], "🧠 Smart Wallet")
+        "entry": "🧠 <b>Smart Wallet Entry</b>",
+        "exit": "🧠 <b>Smart Wallet Exit</b> ⚠️",
+        "refire": "🧠 <b>Smart Wallet — Adding</b>",
+    }.get(rec["alert_type"], "🧠 <b>Smart Wallet</b>")
     cents = rec["price_at_alert"] * 100
-    side = "YES" if rec["direction"] == "BUY" else "SELL YES"
+    side = "BUY YES" if rec["direction"] == "BUY" else "SELL YES"
+    action = "Accumulated" if rec["direction"] == "BUY" else "Exited"
+
+    # Wallet stats line
+    wr = rec.get("wallet_wr")
+    pnl = rec.get("wallet_pnl")
+    trades = rec.get("wallet_trades")
+    stats_parts = []
+    if wr is not None:
+        stats_parts.append(f"{wr*100:.0f}% WR")
+    if trades is not None:
+        stats_parts.append(f"{trades} trades")
+    if pnl is not None:
+        stats_parts.append(f"${pnl:,.0f} lifetime")
+    stats_line = "   " + " · ".join(stats_parts) if stats_parts else ""
+
     return (
-        f"{head}\n\n"
-        f"{rec['name']}\n"
+        f"{head}\n"
+        f"\n"
+        f"<b>{rec['name']}</b>{stats_line}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{rec['title']}\n"
-        f"{'Accumulated' if rec['direction'] == 'BUY' else 'Exited'} "
-        f"${rec['cumulative_usd']:,.0f} → {side} @ ~{cents:.1f}¢ "
-        f"({rec['num_fills']} fills)\n"
-        f"[shadow] logged for calibration"
+        f"\n"
+        f"{action} <b>${rec['cumulative_usd']:,.0f}</b> → <b>{side} @ ~{cents:.1f}¢</b>"
+        f"  ({rec['num_fills']} fills)"
     )
 
 
@@ -326,6 +365,7 @@ def fills_from_trades(trades: list, smart: dict) -> list:
     out = []
     for (w, cid, side), a in agg.items():
         px = a["pxw"] / a["usd"] if a["usd"] else 0.0
+        sw = smart.get(w, {})
         out.append(
             {
                 "wallet": w,
@@ -337,6 +377,9 @@ def fills_from_trades(trades: list, smart: dict) -> list:
                 "outcome_index": a["outcome_index"],
                 "name": a["name"],
                 "title": a["title"],
+                "wallet_wr": sw.get("win_rate"),
+                "wallet_pnl": sw.get("net_pnl"),
+                "wallet_trades": sw.get("closed"),
             }
         )
     return out
