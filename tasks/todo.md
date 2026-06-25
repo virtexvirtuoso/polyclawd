@@ -42,3 +42,59 @@
 - [x] Maker shadows live both venues; first fills measured (K 43%/74%, PM 29%/46%)
 - [x] Ensemble recorder live (knob 6 training data)
 - [x] Dashboards replaced; crons updated; void/zombie resolver fixes; blindspots audit
+
+---
+
+# Codebase Structure Cleanup (audit 2026-06-25)
+
+> Source: vault `02-Projects/Polyclawd/Development/Codebase-Structure-Review-2026-06-25.md`.
+> Branch `feature/test-hygiene-and-db-timeout` has landed the items under "Done" below.
+
+## Done (2026-06-25, on feature/test-hygiene-and-db-timeout)
+- [x] Repair 9 stale unit tests → unit suite green (255/255)
+- [x] Fix 3 loguru %-format calls in volume_spike_detector (dropped args)
+- [x] Auth + cap `GET /api/visitor-log` (also edge-locked in nginx, live)
+- [x] `busy_timeout` on shadow_trades.db writers: scheduler.py (3) + markets.py (2)
+- [x] `db.py` central `connect()` wrapper (WAL + busy_timeout) + `scripts/migrate_db_connect.py`
+- [x] Migrate api/ package connect sites to `db_connect` (10 files, 19 sites)
+
+## Finish the db.connect() rollout (#1)
+- [ ] Migrate remaining ~85 CLEAN connect sites (signals/odds/services/execution) to `db_connect`.
+      BLOCKED on packaging (#4): standalone-run modules can't import top-level `db` until installable.
+      Then: `python scripts/migrate_db_connect.py <list> --apply` → py_compile + tests.
+- [ ] Migrate the 27 WIP-contaminated connect files AFTER `feature/soccer-ufc-worldcup-engines` merges (avoid conflicts).
+- [ ] Drop now-redundant inline `PRAGMA busy_timeout` lines in markets.py (wrapper sets it).
+
+## Dependency reconciliation + CI (#6 → #3) — PARKED, decision needed
+- [ ] Pin exact VPS dep set in pyproject via `[tool.uv] override-dependencies` so a clean resolve reproduces prod
+      (fastapi 0.109.0 / starlette 0.52.1 / httpx 0.28.1 / pydantic 2.12.5 / uvicorn 0.41.0 / numpy 2.4.2 /
+      py-clob-client 0.34.6). This fixes the 7 TestClient errors. `pip freeze` the VPS for ground truth.
+- [ ] requires-python / .python-version / CI already aligned to 3.12 (uncommitted on this branch's working tree).
+- [ ] Turn on the pytest CI job (drafted in pr-validation.yml, uncommitted) once deps resolve clean.
+- [ ] DECISION: pin-to-VPS+overrides (recommended) vs upgrade fastapi/starlette (deploy note warns against force-upgrade).
+
+## Config layer (H4)
+- [ ] Promote `api/deps.py:Settings` to pydantic-settings `BaseSettings`; centralize DB_PATHS, RPC, Simmer URL, trade limits.
+- [ ] Migrate ~81 scattered `os.getenv` sites to `get_settings()`, module by module.
+
+## God-file decomposition (#2 / H1, H3) — behind green CI, in a worktree
+- [ ] Split `api/routes/markets.py` (2,426 lines) → `api/routes/markets/{hf,vegas,espn,baseball,crossplatform}` (mostly mechanical).
+- [ ] Split `api/routes/signals.py` (4,334) AND move embedded scanning/scoring out to `signals/` + `services/signal_aggregation.py`.
+- [ ] After each move: contract tests + diff `/api/openapi.json` (endpoint set unchanged).
+
+## Packaging (#4 / M1) — biggest; sequence LAST; coordinate with file-copy deploy
+- [ ] `src/polyclawd/` layout + `[build-system]` + `pip install -e .`; delete the 65 `sys.path` hacks.
+- [ ] Break the api↔services import cycle (extract a shared leaf package).
+- [ ] Unblocks the full db.connect() migration above.
+
+## Prod auth (#7) — separate ops task, own maintenance window
+- [ ] Audit every client (dashboard JS, crons) sends `X-API-Key`, THEN set `POLYCLAWD_API_KEYS` in `/etc/default/polyclawd` + restart.
+- [ ] Edge-harden other sensitive endpoints in nginx (defense-in-depth, like visitor-log).
+- [ ] Until then app-layer auth is a no-op in prod — see vault `API-Keyless-Dev-Mode-And-Visitor-Log-Lockdown-2026-06-25`.
+
+## Test tree (#8)
+- [ ] Run + triage `tests/integration`, `tests/contract`, `tests/security` (likely more stale tests + mock wiring).
+- [ ] Add the green ones to CI; keep `locust` load tests OUT of PR CI.
+
+## CLAUDE.md doc drift (M2)
+- [ ] Fix Key Directories / Development Workflow tables — they reference `src/`, `whale-tracker/`, `integrations/`, `frontend/` that don't exist.
