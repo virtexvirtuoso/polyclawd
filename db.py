@@ -22,6 +22,7 @@ NOT for modules executed standalone (``python signals/foo.py``), which set
 ``sys.path`` manually. Migrating those is gated on the packaging fix — see
 tasks/todo.md.
 """
+
 import sqlite3
 
 BUSY_TIMEOUT_MS = 5000

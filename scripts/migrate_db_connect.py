@@ -17,9 +17,9 @@ WARNING: only safe for modules imported with the repo root on sys.path
 the packaging fix first or they will fail ``from db import``.
 """
 
+import pathlib
 import re
 import sys
-import pathlib
 
 IMPORT_LINE = "from db import connect as db_connect"
 
