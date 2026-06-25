@@ -330,4 +330,7 @@ if __name__ == "__main__":
     if a.cmd == "record":
         print(json.dumps(record_evening(force_window=a.force_window), indent=2))
     else:
-        evaluate(target_date=a.date, since_hours=a.hours)
+        # Default to yesterday (settled) if --date not specified
+        from datetime import timezone as _tz, timedelta as _td
+        date = a.date or (datetime.now(_tz.utc) - _td(days=1)).strftime('%Y-%m-%d')
+        evaluate(target_date=date, since_hours=a.hours)

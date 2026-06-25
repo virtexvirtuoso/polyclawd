@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Query
 from loguru import logger
 
-from insider_detector import (
+from signals.insider_detector import (
     get_insider_leaderboard,
     get_recent_insiders,
     scan_for_insiders,

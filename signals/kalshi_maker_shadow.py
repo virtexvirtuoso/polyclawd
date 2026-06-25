@@ -252,7 +252,10 @@ def run(since_hours: int = 24, target_date: str = None) -> dict:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--date", help="evaluate scans from this UTC date (YYYY-MM-DD)")
+    ap.add_argument("--date", help="evaluate scans from this UTC date (YYYY-MM-DD); defaults to yesterday")
     ap.add_argument("--hours", type=int, default=24)
     args = ap.parse_args()
-    run(since_hours=args.hours, target_date=args.date)
+    # Default to yesterday (the most recent settled night) instead of last 24h.
+    # --hours 24 would always land in the unsettled current night → pnl=0.
+    target = args.date or (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    run(since_hours=args.hours, target_date=target)

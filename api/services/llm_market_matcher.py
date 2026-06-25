@@ -8,7 +8,6 @@ Results cached in SQLite to avoid redundant LLM calls.
 """
 
 import json
-from db import connect as db_connect
 import sqlite3
 import hashlib
 import os
@@ -54,7 +53,7 @@ def _cache_key(title_a: str, title_b: str) -> str:
 def _ensure_cache_table():
     """Create cache table if not exists."""
     try:
-        conn = db_connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS llm_match_cache (
                 cache_key TEXT PRIMARY KEY,
@@ -76,7 +75,7 @@ def _ensure_cache_table():
 def _check_cache(key: str) -> Optional[MatchResult]:
     """Check SQLite cache for previous result."""
     try:
-        conn = db_connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH)
         row = conn.execute(
             "SELECT same, inverted, confidence, reason FROM llm_match_cache WHERE cache_key=?",
             (key,)
@@ -98,7 +97,7 @@ def _check_cache(key: str) -> Optional[MatchResult]:
 def _save_cache(key: str, title_a: str, title_b: str, result: MatchResult):
     """Persist result to SQLite cache."""
     try:
-        conn = db_connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH)
         conn.execute(
             "INSERT OR REPLACE INTO llm_match_cache (cache_key, title_a, title_b, same, inverted, confidence, reason) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",

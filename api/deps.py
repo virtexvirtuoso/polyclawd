@@ -1,66 +1,54 @@
 """Shared dependencies and settings for Polyclawd API.
 
-``Settings`` is a pydantic-settings ``BaseSettings``: every field keeps its
-previous name and default value, and any field can now be overridden via a
-``POLYCLAWD_<NAME>`` environment variable (12-factor). Behaviour is unchanged
-when no such env var is set, and ``POLYCLAWD_API_KEYS`` (comma-separated)
-continues to work exactly as before.
+This module provides:
+- Settings class with immutable configuration
+- Singleton pattern for shared services
+- Dependency injection helpers for FastAPI
 """
-
-from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Optional
-
-from pydantic import field_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from functools import lru_cache
+from typing import Optional, TYPE_CHECKING
+import os
 
 if TYPE_CHECKING:
     from api.services.storage import StorageService
 
-_ROOT = Path(__file__).parent.parent
 
-
-class Settings(BaseSettings):
-    """Application settings — loaded once and cached. Override any field via POLYCLAWD_<NAME>."""
-
-    model_config = SettingsConfigDict(env_prefix="POLYCLAWD_", extra="ignore")
-
+class Settings:
+    """Application settings - immutable after startup"""
     # Storage paths
-    STORAGE_DIR: Path = Path.home() / ".openclaw" / "paper-trading"
-    POLY_STORAGE_DIR: Path = Path.home() / ".openclaw" / "paper-trading-polymarket"
-    DATA_DIR: Path = _ROOT / "data"
+    STORAGE_DIR = Path.home() / ".openclaw" / "paper-trading"
+    POLY_STORAGE_DIR = Path.home() / ".openclaw" / "paper-trading-polymarket"
+    DATA_DIR = Path(__file__).parent.parent / "data"
 
     # Defaults
-    DEFAULT_BALANCE: float = 10000.0
+    DEFAULT_BALANCE = 10000.0
 
-    # Security — POLYCLAWD_API_KEYS is comma-separated; empty/unset => no keys (dev mode)
-    API_KEYS: Annotated[set[str], NoDecode] = set()
+    # Security
+    API_KEYS: set[str] = set()  # Loaded from env
     ALLOWED_ORIGINS: list[str] = [
         "https://virtuosocrypto.com",
         "http://localhost:8420",
     ]
 
     # External APIs
-    GAMMA_API: str = "https://gamma-api.polymarket.com"
-    SIMMER_API: str = "https://api.simmer.markets/api/sdk"
+    GAMMA_API = "https://gamma-api.polymarket.com"
+    SIMMER_API = "https://api.simmer.markets/api/sdk"
 
     # Rate limits
-    MAX_TRADE_AMOUNT: float = 100.0
-    TRADES_PER_MINUTE: int = 5
-
-    @field_validator("API_KEYS", mode="before")
-    @classmethod
-    def _parse_api_keys(cls, v):
-        """Accept a comma-separated string (env) or an existing collection."""
-        if isinstance(v, str):
-            return {k.strip() for k in v.split(",") if k.strip()}
-        return v
+    MAX_TRADE_AMOUNT = 100.0
+    TRADES_PER_MINUTE = 5
 
 
-@lru_cache
+@lru_cache()
 def get_settings() -> Settings:
-    """Get the cached Settings instance (environment is loaded automatically)."""
-    return Settings()
+    """Get cached Settings instance with API keys loaded from environment."""
+    settings = Settings()
+    # Load API keys from environment
+    api_keys_str = os.getenv("POLYCLAWD_API_KEYS", "")
+    if api_keys_str:
+        settings.API_KEYS = set(api_keys_str.split(","))
+    return settings
 
 
 # Singleton storage service - NOT recreated per request
@@ -72,6 +60,5 @@ def get_storage_service() -> "StorageService":
     global _storage_service
     if _storage_service is None:
         from api.services.storage import StorageService
-
         _storage_service = StorageService(get_settings().STORAGE_DIR)
     return _storage_service

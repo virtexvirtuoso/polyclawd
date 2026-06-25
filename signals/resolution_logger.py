@@ -308,18 +308,13 @@ def get_auto_scorecard(strategy: str) -> Optional[dict]:
     n = len(records)
     if n < 20:
         return None
-    total_brier = 0.0
-    wins = 0
-    for r in records:
-        p = float(r.get("mc_prob", 0.5))
-        won = bool(r.get("won", False))
-        total_brier += (p - (1.0 if won else 0.0)) ** 2
-        if won:
-            wins += 1
+    from signals.calibration_core import brier_score
+    preds = [float(r.get("mc_prob", 0.5)) for r in records]
+    outcomes = [1 if bool(r.get("won", False)) else 0 for r in records]
     return {
         "n": n,
-        "brier": total_brier / n,
-        "win_rate": wins / n,
+        "brier": brier_score(preds, outcomes),
+        "win_rate": sum(outcomes) / n,
         "source": "auto",
     }
 

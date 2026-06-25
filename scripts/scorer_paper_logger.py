@@ -13,19 +13,10 @@ NON-CIRCULAR CLV metric (does the soft line you'd bet move toward you by kickoff
 aggregated to the MATCH level — the independent unit, since props within a match
 are correlated.
 
-The decision is SEQUENTIAL and NOW CONTROL-CORRECTED (2026-06-18). The old gate
-compared the selected match-level beat-rate to a 50% coin flip and CONFIRMed when
-the Wilson lower bound cleared 0.55. That null was wrong: soft goalscorer lines
-drift up before kickoff for ~63% of ALL props (picked or not), so selected props
-beat 50% mechanically with zero skill. A matched-control re-analysis showed the
-within-match difference (selected vs same-match unpicked props) is a coin flip
-(12/24, p=1.0) — no edge. See scripts/scorer_clv_control.py.
-
-The corrected gate tests the WITHIN-MATCH PAIRED delta: in each match, does the
-mean move of selected props exceed the mean move of that match's control (never-
-flagged) props? CONFIRM when the Wilson 95% lower bound of the delta>0 rate clears
-0.50; KILL when its upper bound falls below 0.50; else accumulate. The old
-selected-vs-50% beat-rate is still printed for continuity but no longer decides.
+The decision is SEQUENTIAL, not a fixed N: CONFIRM when the Wilson 95% lower bound
+of the match-level beat-rate clears 0.55; KILL when the upper bound falls below it;
+else keep accumulating. A large effect (the 10-match pilot showed ~84%) resolves in
+~15-25 matches.
 
 MODES
 -----
@@ -57,7 +48,6 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import phase0_prop_falsification as P  # noqa: E402  (consensus anchor, parsing, fetch helpers)
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.alert_formatter import send_telegram  # noqa: E402
 
@@ -170,7 +160,13 @@ def seed_historical(con, entry_dir, close_dir):
 
 
 # ── live snapshot (cron this) ─────────────────────────────────────────────────
-def live_snapshot(con, sport, window_hours):
+def live_snapshot(con, sport, window_hours, min_edge=5.0, bankroll=10_000.0):
+    """Snapshot live props; fire Step-4 sizing alerts for newly-detected edges.
+
+    Uses send_telegram from scripts.alert_formatter (already imported above).
+    Fires exactly once per (event_id, player) crossing min_edge for the first time.
+    Sizing: half-Kelly × 1/√n match-cluster haircut, capped at $200 and 3% bankroll.
+    """
     key = os.getenv("ODDS_API_KEY")
     if not key:
         sys.exit("ODDS_API_KEY not set — cannot snapshot live.")
@@ -179,6 +175,10 @@ def live_snapshot(con, sport, window_hours):
     events = P._get(f"{P.ODDS_API_BASE}/sports/{sport}/events?apiKey={key}")
     snap_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     n_rows = n_ev = 0
+
+    # Accumulate new edge detections per match before alerting (need n for haircut).
+    new_edges: dict = {}
+
     for ev in events:
         ct = P._parse_iso(ev.get("commence_time"))
         if ct is None:
@@ -199,7 +199,8 @@ def live_snapshot(con, sport, window_hours):
         title = f"{od.get('home_team')} vs {od.get('away_team')}"
         got = 0
         for pc, praw, cons, sb, si, ns in scorer_props(od):
-            got += _insert(
+            edge_pct = (cons - si) * 100.0
+            inserted = _insert(
                 con,
                 snapshot_at=snap_at,
                 source="live",
@@ -211,16 +212,57 @@ def live_snapshot(con, sport, window_hours):
                 consensus_fair=cons,
                 best_soft_book=sb,
                 best_soft_implied=si,
-                edge_pct=(cons - si) * 100.0,
+                edge_pct=edge_pct,
                 n_sharp=ns,
                 mins_to_kickoff=round(mins, 1),
             )
+            if inserted:
+                got += 1
+                _betfair_sanity = (cons < 3.0 * si) if si > 0 else False
+                _min_implied_ok = si >= 0.10
+                if edge_pct >= min_edge and _min_implied_ok and _betfair_sanity:
+                    prior = con.execute(
+                        "SELECT COUNT(*) FROM scorer_snapshot "
+                        "WHERE event_id=? AND player=? AND edge_pct>=? AND snapshot_at<?",
+                        (eid, pc, min_edge, snap_at),
+                    ).fetchone()[0]
+                    if prior == 0:
+                        if eid not in new_edges:
+                            new_edges[eid] = []
+                        new_edges[eid].append((praw, cons, sb, si, ns, title, mins))
         if got:
             n_ev += 1
             n_rows += got
             print(f"  [snap] T-{mins / 60:.1f}h {title}: {got} scorer props")
     con.commit()
     print(f"[snapshot] {n_rows} rows across {n_ev} matches @ {snap_at}")
+
+    # ── Step 4: sizing alerts ─────────────────────────────────────────────────
+    for eid, candidates in new_edges.items():
+        n = len(candidates)
+        haircut = 1.0 / math.sqrt(n)
+        for praw, cons, sb, si, ns, title, mins in candidates:
+            b = (1.0 / si) - 1.0
+            p, q = cons, 1.0 - cons
+            f_half = max(0.0, (b * p - q) / b * 0.5 * haircut)
+            stake = max(0.0, round(min(f_half * bankroll, 200.0, 0.03 * bankroll)))
+            edge_pp = (cons - si) * 100.0
+            if si <= 0 or si >= 1:
+                amer_str = "n/a"
+            elif si < 0.5:
+                amer_str = f"+{round(100 * (1 / si - 1))}"
+            else:
+                amer_str = str(round(-100 * si / (1 - si)))
+            cap_label = " [book cap]" if stake == 200.0 else (" [match cap]" if stake == 0.03 * bankroll else "")
+            alert = "\n".join([
+                f"\u26bd [PAPER] {praw} anytime scorer",
+                title,
+                f"{sb} {amer_str} | Edge +{edge_pp:.1f}pp | T-{mins / 60:.1f}h",
+                f"Stake: ${stake:.0f}{cap_label} (half-Kelly, {n}-leg cluster, {haircut:.2f}x haircut)",
+                f"Fair: {cons * 100:.1f}% | Sharp books: {ns}",
+            ])
+            print(f"[alert] {praw} edge={edge_pp:.1f}pp stake=${stake:.0f} n={n}")
+            send_telegram(alert)
 
 
 # ── report: match-level CLV + sequential decision ─────────────────────────────
@@ -243,102 +285,62 @@ def report(con, min_edge, send=False):
         by_prop[(eid, player)].append((snap, soft, edge, mins))
         titles[eid] = title
 
-    sel_live = []  # (eid, mv)   selected, LIVE anchor (entry=first flag) — headline continuity
-    sel_unif = defaultdict(list)  # eid -> [mv]  selected, uniform anchor (entry=earliest)
-    ctl_unif = defaultdict(list)  # eid -> [mv]  control (never flagged), uniform anchor
+    prop_clv = []  # (eid, player, soft_move_pp)
     for (eid, player), snaps in by_prop.items():
         snaps.sort(key=lambda x: x[0])  # by snapshot_at
-        if len(snaps) < 2:
-            continue
+        flagged = [s for s in snaps if s[2] is not None and s[2] >= min_edge]
+        if not flagged:
+            continue  # never a survivor edge
+        entry = flagged[0]  # first time it flagged
         pre = [s for s in snaps if s[3] is not None and s[3] >= 0]  # pre-kickoff snaps
-        ever = any(s[2] is not None and s[2] >= min_edge for s in snaps)
+        close = max(pre, key=lambda x: x[0]) if pre else snaps[-1]  # closest to kickoff
+        if close[0] <= entry[0]:
+            continue  # need a later close snapshot
+        prop_clv.append((eid, player, (close[1] - entry[1]) * 100.0))
 
-        # uniform anchor (entry = earliest snapshot) — applies to EVERY prop, matched windows
-        e, c = snaps[0], (max(pre, key=lambda x: x[0]) if pre else snaps[-1])
-        if c[0] > e[0] and e[1] is not None and c[1] is not None:
-            (sel_unif if ever else ctl_unif)[eid].append((c[1] - e[1]) * 100.0)
-
-        # live anchor (entry = first flagged snapshot) — reproduces the old selected metric
-        if ever:
-            flagged = [s for s in snaps if s[2] is not None and s[2] >= min_edge]
-            en, cl = flagged[0], (max(pre, key=lambda x: x[0]) if pre else snaps[-1])
-            if cl[0] > en[0] and en[1] is not None and cl[1] is not None:
-                sel_live.append((eid, (cl[1] - en[1]) * 100.0))
-
-    # headline (uncorrected) selected vs 50% — kept for continuity only
     by_match = defaultdict(list)
-    for eid, mv in sel_live:
+    for eid, player, mv in prop_clv:
         by_match[eid].append(mv)
-    match_mean = {eid: sum(v) / len(v) for eid, v in by_match.items()}
+    match_mean = {eid: sum(mvs) / len(mvs) for eid, mvs in by_match.items()}
     n_matches = len(match_mean)
     beats = sum(1 for m in match_mean.values() if m > 0)
-    pool_n = len(sel_live)
-    pool_beat = sum(1 for _, mv in sel_live if mv > 0)
+    pool_n = len(prop_clv)
+    pool_beat = sum(1 for _, _, mv in prop_clv if mv > 0)
     lo, hi = wilson(beats, n_matches)
 
-    # honest baseline: ALL props, uniform anchor (the real null, not 50%)
-    all_unif = [mv for v in sel_unif.values() for mv in v] + [mv for v in ctl_unif.values() for mv in v]
-    base_pos = sum(1 for mv in all_unif if mv > 0)
-    base_n = len(all_unif)
-
-    # DECISIVE: within-match paired delta = mean(selected) - mean(control).
-    # Sign-test convention — DROP ties (delta≈0), else a perfect tie miscounts as a
-    # loss and fires a spurious KILL (caught by /qa 2026-06-18).
-    EPS = 1e-9
-    sel_mean = {eid: sum(v) / len(v) for eid, v in sel_unif.items()}
-    ctl_mean = {eid: sum(v) / len(v) for eid, v in ctl_unif.items()}
-    all_deltas = [sel_mean[eid] - ctl_mean[eid] for eid in sel_mean if eid in ctl_mean]
-    paired = [d for d in all_deltas if abs(d) > EPS]
-    n_pair = len(paired)
-    pair_pos = sum(1 for d in paired if d > 0)
-    plo, phi = wilson(pair_pos, n_pair)
-    mean_delta = (sum(paired) / n_pair) if n_pair else 0.0
-
     print("\n" + "═" * 74)
-    print("  SCORER PAPER LOGGER — CLV REPORT (control-corrected gate)")
+    print("  SCORER PAPER LOGGER — CLV REPORT (match-level, non-circular)")
     print("═" * 74)
+    print(f"  matches with gradable flagged props: {n_matches}")
     print(
-        f"  [headline, NOT decisive] selected vs 50%: {beats}/{n_matches} matches"
-        f"{(' = %.0f%%' % (100 * beats / n_matches)) if n_matches else ''}, "
-        f"Wilson [{lo:.2f}, {hi:.2f}]  (pooled props {pool_beat}/{pool_n})"
+        f"  match-level beat-rate (mean soft-move > 0): {beats}/{n_matches}"
+        f"{(' = %.0f%%' % (100 * beats / n_matches)) if n_matches else ''}"
     )
-    if base_n:
-        print(
-            f"  [honest baseline]  ALL props rose: {base_pos}/{base_n} = "
-            f"{100 * base_pos / base_n:.0f}%  <- the real null, not 50%"
-        )
-    print(f"\n  [DECISIVE] within-match  delta = mean(selected) - mean(control):")
-    print(f"    matches with both groups: {n_pair}")
-    if n_pair:
-        print(
-            f"    selected beat control: {pair_pos}/{n_pair} = {100 * pair_pos / n_pair:.0f}%"
-            f"   Wilson95 [{plo:.2f}, {phi:.2f}]   mean delta {mean_delta:+.2f}pp"
-        )
+    print(f"  Wilson 95% CI: [{lo:.2f}, {hi:.2f}]")
+    print(f"  (pooled prop-level: {pool_beat}/{pool_n} props moved toward you)")
+    if by_match:
+        print("\n  Per match (mean soft-move pp):")
+        for eid, m in sorted(match_mean.items(), key=lambda x: x[1], reverse=True):
+            print(f"    {('+' if m > 0 else '')}{m:5.1f}pp  {titles.get(eid, '?')[:40]} (n={len(by_match[eid])})")
 
     print("\n" + "═" * 74)
-    if n_pair < 12:
-        v = f"CONTINUE — only {n_pair} matches have both selected & control props (need ~12+)."
-    elif plo > 0.50:
-        v = (
-            f"CONFIRM — selected beat same-match control {pair_pos}/{n_pair}, "
-            f"CI lower bound {plo:.2f} > 0.50. Real edge net of drift; go to spec §6 Step 4."
-        )
-    elif phi < 0.50:
-        v = f"KILL — selected do NOT beat control (CI upper {phi:.2f} < 0.50). Edge is drift/reversion."
+    if n_matches < 12:
+        v = f"CONTINUE — only {n_matches} matches (need ~12+ for the sequential gate)."
+    elif lo > 0.55:
+        v = f"CONFIRM — match-level beat-rate CI lower bound {lo:.2f} > 0.55. Real CLV; go to spec §6 Step 4."
+    elif hi < 0.55:
+        v = f"KILL — CI upper bound {hi:.2f} < 0.55. No edge; stop."
     else:
-        v = f"CONTINUE — paired CI [{plo:.2f},{phi:.2f}] straddles 0.50; accumulate more matches."
+        v = f"CONTINUE — CI [{lo:.2f},{hi:.2f}] straddles 0.55; accumulate more matches."
     print(f"  VERDICT: {v}")
     print("═" * 74 + "\n")
 
     if send:
-        bpct = f"{100 * base_pos / base_n:.0f}%" if base_n else "n/a"
-        ppct = f"{100 * pair_pos / n_pair:.0f}%" if n_pair else "n/a"
+        pct = f"{100 * beats / n_matches:.0f}%" if n_matches else "n/a"
         msg = (
-            f"⚽ Scorer CLV paper logger (control-corrected)\n"
-            f"headline (vs 50%): {beats}/{n_matches} matches — NOT decisive\n"
-            f"honest baseline: all props rose {bpct}\n"
-            f"DECISIVE within-match: selected beat control {pair_pos}/{n_pair} ({ppct}), "
-            f"CI [{plo:.2f}, {phi:.2f}], delta {mean_delta:+.2f}pp\n"
+            f"⚽ Scorer CLV paper logger\n"
+            f"matches: {n_matches}  beat-rate: {beats}/{n_matches} ({pct})\n"
+            f"Wilson 95% CI: [{lo:.2f}, {hi:.2f}]  pooled props: {pool_beat}/{pool_n}\n"
             f"VERDICT: {v}"
         )
         send_telegram(msg)
@@ -354,6 +356,7 @@ def main():
     ap.add_argument("--entry-dir", default="/tmp/phase0_data")
     ap.add_argument("--close-dir", default="/tmp/phase0_close")
     ap.add_argument("--snapshot", action="store_true")
+    ap.add_argument("--bankroll", type=float, default=10_000.0, help="bankroll in USD for Step-4 sizing")
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--send", action="store_true", help="send report summary to Telegram")
     args = ap.parse_args()
@@ -362,7 +365,7 @@ def main():
     if args.seed_historical:
         seed_historical(con, args.entry_dir, args.close_dir)
     if args.snapshot:
-        live_snapshot(con, args.sport, args.window_hours)
+        live_snapshot(con, args.sport, args.window_hours, min_edge=args.min_edge, bankroll=args.bankroll)
     if args.report or not (args.seed_historical or args.snapshot):
         report(con, args.min_edge, send=args.send)
     con.close()

@@ -12,7 +12,6 @@ This router consolidates all market and edge detection endpoints:
 - /polyrouter/* - Cross-platform unified API (7 platforms)
 """
 import json
-from db import connect as db_connect
 import os
 import subprocess
 import urllib.parse
@@ -836,8 +835,7 @@ async def get_baseball_dashboard():
         return result
 
     try:
-        conn = db_connect(str(db_path), timeout=5)
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn = sqlite3.connect(str(db_path), timeout=5)
         conn.row_factory = sqlite3.Row
 
         # Open baseball trades
@@ -2292,8 +2290,7 @@ def _sports_shadow_dashboard(strategies: list) -> dict:
 
     ph = ",".join("?" * len(strategies))
     try:
-        conn = db_connect(str(db_path), timeout=5)
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn = sqlite3.connect(str(db_path), timeout=5)
         conn.row_factory = sqlite3.Row
 
         open_rows = conn.execute(f"""

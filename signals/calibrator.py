@@ -243,7 +243,7 @@ def compute_source_weights(db_path: str = None) -> dict:
         FROM signal_predictions
         WHERE resolved = 1
         GROUP BY source
-        HAVING cnt >= 10
+        HAVING cnt >= 1000  -- C': prevent small-n IC trap
     """).fetchall()
     conn.close()
 

@@ -30,9 +30,12 @@ BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from scripts.alert_formatter import send_telegram
+from scripts.whale_thresholds import TRADE_FLOOR
 
 # ── Config ───────────────────────────────────────────────────────────────────
-TRADE_WHALE_USDC  = 5_000    # single matched trade threshold (USDC)
+TRADE_WHALE_USDC  = TRADE_FLOOR["soccer"]  # 0k — data-driven floor (2026-06-19 study)
+NEAR_SETTLED_HI   = 0.90   # suppress alerts when YES >= 90% (near-resolved)
+NEAR_SETTLED_LO   = 0.10   # suppress alerts when YES <= 10% (near-resolved)
 DATA_API          = "https://data-api.polymarket.com"
 GAMMA_API         = "https://gamma-api.polymarket.com"
 # data-api global feed: 500 trades ≈ 9s at current PM volume.
@@ -207,12 +210,19 @@ def get_tokens_for_game(conn: sqlite3.Connection, game_id: str,
             if not tids:
                 continue
             yes_tid = tids[0]
+            no_tid = tids[1] if len(tids) > 1 else None
             if "draw" in q:
                 tokens["draw"] = (yes_tid, "Draw")
+                if no_tid:
+                    tokens["draw_no"] = (no_tid, "Draw")
             elif "win" in q and _nmatch(home, q) and not _nmatch(away, q):
                 tokens["home"] = (yes_tid, home)
+                if no_tid:
+                    tokens["home_no"] = (no_tid, home)
             elif "win" in q and _nmatch(away, q) and not _nmatch(home, q):
                 tokens["away"] = (yes_tid, away)
+                if no_tid:
+                    tokens["away_no"] = (no_tid, away)
         if tokens:
             break
 
@@ -356,9 +366,22 @@ def run() -> None:
 
         meta = game_meta[gid]
         home, away = meta["home"], meta["away"]
-        plain = "Draw" if label == "draw" else f"{outcome_name} wins"
-        direction = "buying" if trade["side"] == "BUY" else "selling"
-        _fire_alert(home, away, plain, direction, size_usdc, trade["price"], "live")
+        is_no_token = label.endswith("_no")
+        base_label = label[:-3] if is_no_token else label
+        # YES-equivalent price for near-settled check
+        yes_price = (1.0 - trade["price"]) if is_no_token else trade["price"]
+        if yes_price >= NEAR_SETTLED_HI or yes_price <= NEAR_SETTLED_LO:
+            print(f"[soccer_whale_trades] SKIP near-settled: {outcome_name} YES~={yes_price:.0%}", flush=True)
+            continue
+        plain = "Draw" if base_label == "draw" else f"{outcome_name} wins"
+        if is_no_token:
+            direction = "selling NO on" if trade["side"] == "SELL" else "buying NO on"
+            price_note = f"~{trade['price']*100:.0f}¢  (YES ~{yes_price*100:.0f}¢)"
+        else:
+            is_sell = trade["side"] == "SELL"
+            direction = "selling YES on" if is_sell else "buying YES on"
+            price_note = f"~{yes_price*100:.0f}¢" if not is_sell else f"~{yes_price*100:.0f}¢ (NO ~{(1-yes_price)*100:.0f}¢)"
+        _fire_alert(home, away, plain, direction, size_usdc, trade["price"], price_note, "live", meta)
 
         conn.execute("""
             INSERT OR REPLACE INTO soccer_trade_seen (token_id, last_tx, last_ts)
@@ -400,9 +423,21 @@ def run() -> None:
         gid, label, outcome_name = all_tokens[tid]
         meta = game_meta[gid]
         home, away = meta["home"], meta["away"]
-        plain = "Draw" if label == "draw" else f"{outcome_name} wins"
-        direction = "buying" if trade["side"] == "BUY" else "selling"
-        _fire_alert(home, away, plain, direction, trade["size_usdc"], trade["price"], "30s-delay")
+        is_no_token = label.endswith("_no")
+        base_label = label[:-3] if is_no_token else label
+        yes_price = (1.0 - trade["price"]) if is_no_token else trade["price"]
+        if yes_price >= NEAR_SETTLED_HI or yes_price <= NEAR_SETTLED_LO:
+            print(f"[soccer_whale_trades] SKIP near-settled: {outcome_name} YES~={yes_price:.0%}", flush=True)
+            continue
+        plain = "Draw" if base_label == "draw" else f"{outcome_name} wins"
+        if is_no_token:
+            direction = "selling NO on" if trade["side"] == "SELL" else "buying NO on"
+            price_note = f"~{trade['price']*100:.0f}¢  (YES ~{yes_price*100:.0f}¢)"
+        else:
+            is_sell = trade["side"] == "SELL"
+            direction = "selling YES on" if is_sell else "buying YES on"
+            price_note = f"~{yes_price*100:.0f}¢" if not is_sell else f"~{yes_price*100:.0f}¢ (NO ~{(1-yes_price)*100:.0f}¢)"
+        _fire_alert(home, away, plain, direction, trade["size_usdc"], trade["price"], price_note, "30s-delay", meta)
 
         conn.execute("""
             INSERT OR REPLACE INTO soccer_trade_seen (token_id, last_tx, last_ts)
@@ -416,17 +451,23 @@ def run() -> None:
 
 
 def _fire_alert(home: str, away: str, outcome: str, direction: str,
-                size_usdc: float, price: float, lag: str) -> None:
+                size_usdc: float, price: float, price_note: str,
+                lag: str, game_meta: Optional[Dict] = None) -> None:
     lag_note = "" if lag == "live" else "  <i>(~30s delay)</i>"
-    action_word = "taking" if direction == "buying" else "fading"
-    msg = (
-        f"🐋 <b>WHALE TRADE</b>  —  {home} vs {away}{lag_note}\n"
-        f"\n"
-        f"Someone just <b>{direction} ${size_usdc:,.0f}</b> on <b>{outcome}</b> at {price:.0%}\n"
-        f"\n"
-        f"They're {action_word} this outcome at scale — watch for price follow-through."
-    )
-    send_telegram(msg)
+    lines = [f"🐋 <b>WHALE TRADE</b> ⚽  —  {home} vs {away}{lag_note}", ""]
+
+    # Score + minute from game_meta
+    if game_meta:
+        detail = game_meta.get("detail", "")
+        scores = game_meta.get("scores", {})
+        if scores:
+            score_str = " – ".join(f"{k} {v}" for k, v in scores.items())
+            lines.append(f"📊 <b>{score_str}</b>  ({detail})")
+        elif detail:
+            lines.append(f"📊 {detail}")
+
+    lines.append(f"💵 <b>{direction} {outcome}</b> — ${size_usdc:,.0f} @ {price_note}")
+    send_telegram("\n".join(lines))
     print(f"[soccer_whale_trades] Alert: {outcome} {direction} ${size_usdc:,.0f}@{price:.0%} ({lag})", flush=True)
 
 

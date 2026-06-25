@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Step 0b: Ranked alert feed — deploy as system service."""
 import json, math, os, sys
-from db import connect as db_connect
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import sqlite3
@@ -20,7 +19,7 @@ WEIGHTS = {
 }
 
 def get_db():
-    conn = db_connect(META_DB, timeout=10)
+    conn = sqlite3.connect(META_DB, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 

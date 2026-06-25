@@ -43,7 +43,7 @@ PM_DATA_API = "https://data-api.polymarket.com"
 # market entries are uninformative (they enter everything), without excluding
 # big-net traders over a rounding-error percentage (RN1: 59.3% / +$1.04M net).
 SMART_MIN_CLOSED   = 20
-SMART_MIN_WIN_RATE = 0.55
+SMART_MIN_WIN_RATE = 0.62  # raised from 0.55 (2026-06-25): 500K+ fast-track wallets averaged 38.3% WR — not signal-quality
 SMART_MIN_NET      = 100000.0  # $ net profit — elite only for TG alerts (2026-06-20)
 REFRESH_TTL_S      = 24 * 3600
 QUEUE_MIN_USD      = 100.0   # don't bother tracking wallets below this burst size
@@ -73,7 +73,12 @@ def get_meta_db(path: Optional[Path] = None) -> sqlite3.Connection:
             smart INTEGER DEFAULT 0,
             refreshed REAL DEFAULT 0
         )""")
-    for col, typ in (("net_pnl", "REAL"), ("zombies", "INTEGER"), ("concentration", "REAL")):
+    for col, typ in (
+        ("net_pnl", "REAL"), ("zombies", "INTEGER"), ("concentration", "REAL"),
+        ("source_category", "TEXT"), ("rank_at_seed", "INTEGER"),
+        ("rank_last_seen", "INTEGER"), ("rank_scraped_at", "INTEGER"),
+        ("is_bot", "INTEGER DEFAULT 0"),
+    ):
         try:
             conn.execute(f"ALTER TABLE pm_wallets ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
@@ -160,9 +165,11 @@ def queue_wallet_seen(conn, wallet: str, name: str, dollars: float):
 
 
 def get_smart_wallets(conn) -> dict:
-    """wallet -> {name, win_rate, closed, net_pnl} for all currently-smart wallets."""
+    """wallet -> {name, win_rate, closed, net_pnl, source_category, is_bot} for all currently-smart wallets."""
     return {r["wallet"]: {"name": r["name"], "win_rate": r["win_rate"],
-                          "closed": r["closed_positions"], "net_pnl": r["net_pnl"]}
+                          "closed": r["closed_positions"], "net_pnl": r["net_pnl"],
+                          "source_category": r["source_category"],
+                          "is_bot": r["is_bot"] or 0}
             for r in conn.execute("SELECT * FROM pm_wallets WHERE smart=1")}
 
 

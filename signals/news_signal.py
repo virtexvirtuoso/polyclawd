@@ -86,7 +86,8 @@ def fetch_google_news(query: str, max_results: int = 10) -> List[Dict]:
                     "%a, %d %b %Y %H:%M:%S"
                 )
                 age_minutes = (datetime.now() - pub_dt).total_seconds() / 60
-            except:
+            except Exception as _e:
+                print(f"[news] warn: {_e}")
                 age_minutes = 999
             
             articles.append({
@@ -194,7 +195,8 @@ def fetch_cryptopanic(symbol: str = "BTC") -> List[Dict]:
             try:
                 pub_dt = datetime.fromisoformat(published.replace('Z', '+00:00'))
                 age_minutes = (datetime.now(pub_dt.tzinfo) - pub_dt).total_seconds() / 60
-            except:
+            except Exception as _e:
+                print(f"[news] warn: {_e}")
                 age_minutes = 999
             
             articles.append({
@@ -473,7 +475,8 @@ def load_news_cache() -> Dict:
         if CACHE_FILE.exists():
             with open(CACHE_FILE) as f:
                 return json.load(f)
-    except:
+    except Exception as _e:
+        print(f"[news] warn: {_e}")
         pass
     return {"seen_articles": [], "last_check": None}
 
@@ -486,7 +489,8 @@ def save_news_cache(cache: Dict):
         cache["last_check"] = datetime.now().isoformat()
         with open(CACHE_FILE, "w") as f:
             json.dump(cache, f)
-    except:
+    except Exception as _e:
+        print(f"[news] warn: {_e}")
         pass
 
 
@@ -597,7 +601,8 @@ def check_news_for_market(market: Dict) -> Optional[Dict]:
         try:
             confidence = boost_confidence_by_keywords(confidence, keywords)
             record_keyword_usage(keywords, market_id)  # Track usage
-        except:
+        except Exception as _e:
+            print(f"[news] warn: {_e}")
             pass
     
     if confidence < MIN_CONFIDENCE:
