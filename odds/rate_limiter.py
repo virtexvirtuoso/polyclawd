@@ -18,8 +18,8 @@ from loguru import logger
 # Config — The Odds API LIVE plan: 100K credits/month (free 500 tier is dead).
 # Daily soft budget is computed dynamically (remaining // days_left) which yields
 # ~3.2K/day at full balance, matching the plan's ~3K/day target.
-MONTHLY_LIMIT = 100_000
-DAILY_BUDGET = MONTHLY_LIMIT // 31  # ~3.2K/day soft budget
+MONTHLY_LIMIT = 5_000_000  # the-odds-api plan upgraded 100K -> 5M on 2026-06-25
+DAILY_BUDGET = MONTHLY_LIMIT // 31  # ~161K/day soft budget (was ~3.2K on 100K plan)
 CACHE_DIR = Path("/var/www/virtuosocrypto.com/polyclawd/cache")
 RATE_FILE = CACHE_DIR / "odds_api_usage.json"
 
@@ -30,10 +30,11 @@ if not CACHE_DIR.exists():
     CACHE_DIR.mkdir(exist_ok=True)
 
 # Hard floor: do not spend below this many REAL credits remaining (reserved for
-# "critical" priority only). Raised 500 -> 5,000 (0.5% -> 5% of the 100K plan).
-CREDIT_FLOOR = 5_000
-# Low-credit Discord alert fires when real remaining drops below this (20% of plan).
-LOW_CREDIT_WATERMARK = 20_000
+# "critical" priority only). 5% of the 5M plan (was 5,000 on the dead 100K plan).
+CREDIT_FLOOR = 250_000
+# Low-credit Discord alert fires when real remaining drops below this (20% of the
+# 5M plan) — early warning with weeks of runway, not minutes (was 20,000 on 100K).
+LOW_CREDIT_WATERMARK = 1_000_000
 
 # Authoritative real-credit balance, written by odds.the_odds_api from the live
 # `x-requests-remaining` header on every fetch so it survives process restarts.

@@ -33,6 +33,7 @@ from typing import Dict, List, Optional, Tuple
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
+from odds.monitor_gate import gated_fetch_json, LIVE_BOOKS
 
 from scripts.alert_formatter import send_telegram
 
@@ -473,9 +474,11 @@ def _get_vegas_consensus(sport: str, home: str, away: str, outcome_label: str) -
         api_key = os.environ.get("ODDS_API_KEY", "")
         if not api_key:
             return None
-        url = (f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
-               f"?apiKey={api_key}&regions=us,uk,eu&markets=h2h&oddsFormat=decimal")
-        data = _get(url)
+        data = gated_fetch_json(
+            f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
+            {"apiKey": api_key, "bookmakers": LIVE_BOOKS,
+             "markets": "h2h", "oddsFormat": "decimal"},
+        )
         if not data:
             return None
         # Find the matching event
