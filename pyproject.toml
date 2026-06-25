@@ -21,6 +21,7 @@ dependencies = [
     "fastapi==0.109.0",
     "uvicorn[standard]==0.41.0",
     "pydantic==2.12.5",
+    "pydantic-settings==2.13.1",
     "aiofiles",
     "slowapi",
     "numpy>=1.24",
