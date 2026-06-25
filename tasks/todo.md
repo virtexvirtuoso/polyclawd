@@ -78,8 +78,12 @@
       on a clean tree, or narrow the ruff `select` set / bump `target-version` to py312. Do on a clean base, not mid-WIP.
 
 ## Config layer (H4)
-- [ ] Promote `api/deps.py:Settings` to pydantic-settings `BaseSettings`; centralize DB_PATHS, RPC, Simmer URL, trade limits.
-- [ ] Migrate ~81 scattered `os.getenv` sites to `get_settings()`, module by module.
+- [x] Promote `api/deps.py:Settings` to pydantic-settings `BaseSettings` — DONE 2026-06-25 (commit 7df8df3).
+      Behavior-preserving; every field overridable via POLYCLAWD_<NAME>; API_KEYS comma-parse preserved.
+- [ ] Centralize DB_PATHS / RPC / Simmer URL / trade limits into Settings (foundation now exists).
+      NOTE: HF db path reads env `HF_DB_PATH` (no POLYCLAWD_ prefix) — needs an explicit alias when added.
+- [ ] Migrate ~81 scattered `os.getenv` + hardcoded DB-path literals to `get_settings()`, module by module.
+      Bulk BLOCKED on packaging (#4): standalone modules can't import `api.deps`. api/ package can migrate now.
 
 ## God-file decomposition (#2 / H1, H3) — behind green CI, in a worktree
 - [ ] Split `api/routes/markets.py` (2,426 lines) → `api/routes/markets/{hf,vegas,espn,baseball,crossplatform}` (mostly mechanical).
