@@ -217,12 +217,20 @@ class TestProbability:
 
 # ─── Scoring Tests ────────────────────────────────────────────
 
+
+def _future_date(days=30):
+    """A strike date inside the [MIN_DAYS, MAX_DAYS] scoring window."""
+    from datetime import timedelta
+
+    return (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%B %d, %Y")
+
+
 class TestScoring:
     def test_score_market_with_edge(self, calc):
         """Market with clear mispricing should return a signal."""
         # Deep ITM market priced at 25% → huge edge
         market = {
-            "title": "Will the price of Bitcoin be above $10,000 on March 15, 2026?",
+            "title": f"Will the price of Bitcoin be above $10,000 on {_future_date()}?",
             "id": "test-market-1",
             "yes_price": 0.25,
         }
@@ -240,7 +248,7 @@ class TestScoring:
         current = row[0]
 
         market = {
-            "title": f"Will the price of Bitcoin be above ${int(current)} on March 15, 2026?",
+            "title": f"Will the price of Bitcoin be above ${int(current)} on {_future_date()}?",
             "id": "test-market-2",
             "yes_price": 0.50,  # roughly fair for ATM
         }
@@ -293,12 +301,12 @@ class TestScan:
         markets = [
             {
                 "id": "m1",
-                "title": "Will the price of Bitcoin be above $10,000 on March 15, 2026?",
+                "title": f"Will the price of Bitcoin be above $10,000 on {_future_date()}?",
                 "yes_price": 0.25,
             },
             {
                 "id": "m2",
-                "title": "Will the price of Ethereum be below $1,000 on March 20, 2026?",
+                "title": f"Will the price of Ethereum be below $1,000 on {_future_date(35)}?",
                 "yes_price": 0.80,
             },
             {

@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,7 +20,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from api.deps import get_settings
-from api.middleware import add_security_headers, global_exception_handler
+from api.middleware import add_security_headers, global_exception_handler, verify_api_key
 from api.routes import (
     edge_scanner_router,
     engine_router,
@@ -253,8 +253,11 @@ async def visitor_log(request: Request):
 
 
 @app.get("/api/visitor-log")
-async def get_visitor_log(limit: int = 50):
-    """Get recent visitor log entries."""
+async def get_visitor_log(
+    limit: int = Query(50, le=200),
+    _auth: str = Depends(verify_api_key),
+):
+    """Get recent visitor log entries. Requires X-API-Key; limit capped at 200."""
     import sqlite3
 
     db_path = Path(__file__).parent.parent / "storage" / "shadow_trades.db"

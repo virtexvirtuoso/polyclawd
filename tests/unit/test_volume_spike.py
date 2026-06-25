@@ -1,6 +1,7 @@
 """Tests for volume spike detector."""
 import sqlite3
 import sys
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "signals"))
@@ -27,10 +28,15 @@ def _make_db():
 
 
 def _insert_snapshots(conn, market_id, volumes):
+    # Timestamps within the detector's 48h lookback window (relative to now),
+    # not a hardcoded date that drifts out of the window over time.
+    now = datetime.now(timezone.utc)
+    n = len(volumes)
     for i, vol in enumerate(volumes):
+        ts = now - timedelta(hours=(n - i))
         conn.execute(
             "INSERT INTO signal_snapshots (snapshot_date, snapshot_time, market_id, market, volume) VALUES (?, ?, ?, ?, ?)",
-            ("2026-02-24", f"{10+i}:00", market_id, "Test market", vol)
+            (ts.strftime("%Y-%m-%d"), ts.strftime("%H:%M"), market_id, "Test market", vol),
         )
     conn.commit()
 

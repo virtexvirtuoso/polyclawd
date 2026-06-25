@@ -84,7 +84,7 @@ def detect_spike(market_id: str, current_volume: int, conn: Optional[sqlite3.Con
 
     if baseline["data_points"] < MIN_HISTORY_POINTS:
         logger.debug(
-            "Insufficient history for spike check: market=%s points=%d need=%d",
+            "Insufficient history for spike check: market={} points={} need={}",
             market_id, baseline["data_points"], MIN_HISTORY_POINTS
         )
         return {
@@ -110,12 +110,12 @@ def detect_spike(market_id: str, current_volume: int, conn: Optional[sqlite3.Con
 
     if is_spike:
         logger.info(
-            "📈 VOLUME SPIKE: market=%s ratio=%.1fx level=%s current=%d avg=%.0f points=%d",
+            "📈 VOLUME SPIKE: market={} ratio={:.1f}x level={} current={} avg={:.0f} points={}",
             market_id[:40], ratio, level, current_volume, avg, baseline["data_points"]
         )
     else:
         logger.debug(
-            "No spike: market=%s ratio=%.1fx current=%d avg=%.0f",
+            "No spike: market={} ratio={:.1f}x current={} avg={:.0f}",
             market_id[:40], ratio, current_volume, avg
         )
 

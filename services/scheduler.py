@@ -69,6 +69,7 @@ def _db():
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")  # 5s: handles transient locks, fast-fail if stuck
     return conn
 
 
@@ -860,6 +861,7 @@ def task_smart_wallet_resolve():
                                             resolve_shadows,
                                             settle_via_wallet_positions)
     conn = sqlite3.connect(str(SHADOW_DB))
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
     try:
         init_shadows(conn)
@@ -1648,6 +1650,7 @@ def task_db_maintenance():
     # VACUUM in separate connection (can't run inside transaction)
     try:
         conn2 = sqlite3.connect(str(DB_PATH))
+        conn2.execute("PRAGMA busy_timeout=5000")
         conn2.execute("VACUUM")
         conn2.close()
         logger.info("DB maintenance: VACUUM complete")

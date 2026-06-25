@@ -836,6 +836,7 @@ async def get_baseball_dashboard():
 
     try:
         conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row
 
         # Open baseball trades
@@ -2291,6 +2292,7 @@ def _sports_shadow_dashboard(strategies: list) -> dict:
     ph = ",".join("?" * len(strategies))
     try:
         conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row
 
         open_rows = conn.execute(f"""
