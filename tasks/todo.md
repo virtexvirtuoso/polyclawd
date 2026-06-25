@@ -65,13 +65,17 @@
 - [ ] Migrate the 27 WIP-contaminated connect files AFTER `feature/soccer-ufc-worldcup-engines` merges (avoid conflicts).
 - [ ] Drop now-redundant inline `PRAGMA busy_timeout` lines in markets.py (wrapper sets it).
 
-## Dependency reconciliation + CI (#6 → #3) — PARKED, decision needed
-- [ ] Pin exact VPS dep set in pyproject via `[tool.uv] override-dependencies` so a clean resolve reproduces prod
-      (fastapi 0.109.0 / starlette 0.52.1 / httpx 0.28.1 / pydantic 2.12.5 / uvicorn 0.41.0 / numpy 2.4.2 /
-      py-clob-client 0.34.6). This fixes the 7 TestClient errors. `pip freeze` the VPS for ground truth.
-- [ ] requires-python / .python-version / CI already aligned to 3.12 (uncommitted on this branch's working tree).
-- [ ] Turn on the pytest CI job (drafted in pr-validation.yml, uncommitted) once deps resolve clean.
-- [ ] DECISION: pin-to-VPS+overrides (recommended) vs upgrade fastapi/starlette (deploy note warns against force-upgrade).
+## Dependency reconciliation + CI (#6 → #3) — DONE 2026-06-25 (commit 06438a9)
+- [x] Pinned web stack to VPS versions + `[tool.uv] override-dependencies=["starlette==0.52.1"]` → clean resolve reproduces prod.
+- [x] requires-python / .python-version / CI aligned to 3.12 (VPS runs 3.12.3).
+- [x] Regenerated uv.lock; added Tests (unit) job to pr-validation.yml. Clean `uv sync` + `pytest tests/unit` = 255 passed on 3.12; 7 TestClient errors fixed.
+- [ ] FOLLOW-UP: requirements.txt is now superseded by pyproject (its pins were stale vs VPS) — reconcile/remove after confirming the deploy doesn't `pip install -r` it.
+- [ ] FOLLOW-UP: widen the CI test job to integration/contract once #8 verifies them.
+
+## CI lint/format jobs are RED — pre-existing ruff debt (separate from pytest)
+- [ ] `ruff check .` reports ~3000 violations repo-wide (mostly UP006 `Dict`→`dict`, import sorting). The lint + format
+      CI jobs fail independently of the now-green pytest job. Options: a `ruff check --fix` (+`--unsafe-fixes`) sweep
+      on a clean tree, or narrow the ruff `select` set / bump `target-version` to py312. Do on a clean base, not mid-WIP.
 
 ## Config layer (H4)
 - [ ] Promote `api/deps.py:Settings` to pydantic-settings `BaseSettings`; centralize DB_PATHS, RPC, Simmer URL, trade limits.
