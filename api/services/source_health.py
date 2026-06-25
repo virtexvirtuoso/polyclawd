@@ -5,6 +5,7 @@ Stores last_success, last_error, consecutive_failures, avg_latency in SQLite.
 """
 
 import logging
+from db import connect as db_connect
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,7 +42,7 @@ TRACKED_SOURCES = [
 
 
 def _get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = db_connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")

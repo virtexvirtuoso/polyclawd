@@ -8,6 +8,7 @@ compact, capped, JSON-friendly view. Errors are returned as graceful payloads
 """
 
 import sqlite3
+from db import connect as db_connect
 import time
 from pathlib import Path
 from typing import Optional
@@ -25,7 +26,7 @@ def _query(db_name: str, sql: str, params=()):
     db = STORAGE / db_name
     if not db.exists():
         raise FileNotFoundError(f"{db_name} not found")
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn = db_connect(f"file:{db}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
