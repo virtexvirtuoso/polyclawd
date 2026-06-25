@@ -209,12 +209,16 @@ def count_posts_in_window(posts: List[dict], start: datetime, end: datetime) -> 
 # Monte Carlo Engine
 # ============================================================================
 
-def run_monte_carlo(daily_counts: List[int], window_days: float,
+def simulate_totals(daily_counts: List[int], window_days: float,
                     posts_so_far: int = 0, days_elapsed: float = 0,
                     simulations: int = MC_SIMULATIONS,
                     counts_by_dow: Optional[Dict[int, List[int]]] = None,
-                    window_start: Optional[datetime] = None) -> Dict[str, float]:
-    """Run Monte Carlo simulation for tweet count bracket probabilities.
+                    window_start: Optional[datetime] = None) -> List[int]:
+    """Run Monte Carlo and return raw simulated final post-count totals.
+
+    Bracket-AGNOSTIC: one total per run so callers bin into each market's
+    ACTUAL bracket scheme via bracket_probability(). The old code binned here
+    against a hardcoded BRACKET_WIDTH, silently mis-keying 25-wide markets.
     
     Args:
         daily_counts: Historical daily post counts (fallback pool)
@@ -229,7 +233,7 @@ def run_monte_carlo(daily_counts: List[int], window_days: float,
         Dict of bracket_key → probability (e.g. {"280-299": 0.144})
     """
     if not daily_counts:
-        return {}
+        return []
 
     remaining_days = max(0, window_days - days_elapsed)
     remaining_whole = int(remaining_days)
@@ -272,7 +276,7 @@ def run_monte_carlo(daily_counts: List[int], window_days: float,
                     pace_weights[pool_idx] = [w / total_w for w in weights] if total_w > 0 else None
 
     rng = random.Random(MC_SEED)
-    bracket_hits: Dict[str, int] = {}
+    totals: List[int] = []
 
     for _ in range(simulations):
         total = posts_so_far
@@ -297,16 +301,98 @@ def run_monte_carlo(daily_counts: List[int], window_days: float,
             frac_pool = day_pools[remaining_whole] if remaining_whole < len(day_pools) else daily_counts
             total += int(rng.choice(frac_pool) * remaining_frac)
 
-        # Map to bracket
-        bracket_start = (total // BRACKET_WIDTH) * BRACKET_WIDTH
-        if bracket_start >= 580:
-            key = "580+"
-        else:
-            key = f"{bracket_start}-{bracket_start + BRACKET_WIDTH - 1}"
-        bracket_hits[key] = bracket_hits.get(key, 0) + 1
+        totals.append(total)
 
-    # Convert to probabilities
-    return {k: v / simulations for k, v in bracket_hits.items()}
+    return totals
+
+
+def _parse_bracket_bounds(bracket: str) -> Tuple[int, Optional[int]]:
+    """Parse a market bracket string into (low, high); high is None for "N+"."""
+    bracket = bracket.strip()
+    if bracket.endswith("+"):
+        return int(bracket[:-1]), None
+    lo, hi = bracket.split("-")
+    return int(lo), int(hi)
+
+
+def bracket_probability(totals: List[int], bracket: str) -> Optional[float]:
+    """P(final count in `bracket`) from simulated `totals`, binned into the
+    bracket's ACTUAL bounds (Fix 1 - width-agnostic, works for 20- or 25-wide).
+
+    Returns None when the bracket lies ENTIRELY OUTSIDE the simulated support
+    (Fix 2): zero simulations is "no opinion", which the caller must NOT invert
+    into mc_no = 1.0 / certainty. 0.0 is returned only for an in-support gap,
+    where a genuine ~0 probability is actionable.
+    """
+    if not totals:
+        return None
+    lo, hi = _parse_bracket_bounds(bracket)
+    tmin, tmax = min(totals), max(totals)
+    if lo > tmax:                      # entirely above the envelope
+        return None
+    if hi is not None and hi < tmin:   # entirely below the envelope
+        return None
+    hits = sum(1 for t in totals if t >= lo and (hi is None or t <= hi))
+    return hits / len(totals)
+
+
+def decide_signal(mc_yes: Optional[float], yes_price: float,
+                  min_edge_pct: float = MIN_EDGE_PCT) -> Optional[dict]:
+    """Choose the better side (YES/NO) given the model's YES probability.
+
+    Returns None when there is no tradeable signal. mc_yes=None (bracket outside
+    MC support) yields None -- never a certainty-driven NO with edge == the
+    market price (Fix 2). Confidence is tied to the chosen side's probability,
+    never a blind default (Fix 3).
+    """
+    if mc_yes is None:
+        return None
+    mc_no = 1 - mc_yes
+    market_no = 1 - yes_price
+    edge_no = (mc_no - market_no) * 100      # positive => NO underpriced
+    edge_yes = (mc_yes - yes_price) * 100    # positive => YES underpriced
+
+    if edge_no > edge_yes and edge_no > min_edge_pct:
+        side, edge, our_prob, eff_price = "NO", edge_no, mc_no, 1 - yes_price
+    elif edge_yes > min_edge_pct:
+        side, edge, our_prob, eff_price = "YES", edge_yes, mc_yes, yes_price
+    else:
+        return None
+
+    if eff_price < 0.01 or eff_price > 0.98:
+        return None
+
+    return {
+        "side": side,
+        "edge_pct": round(edge, 1),
+        "confidence": round(min(0.95, our_prob), 3),
+        "our_prob": our_prob,
+        "effective_price": eff_price,
+    }
+
+
+def run_monte_carlo(daily_counts: List[int], window_days: float,
+                    posts_so_far: int = 0, days_elapsed: float = 0,
+                    simulations: int = MC_SIMULATIONS,
+                    counts_by_dow: Optional[Dict[int, List[int]]] = None,
+                    window_start: Optional[datetime] = None) -> Dict[str, float]:
+    """DEPRECATED back-compat shim: fixed-width bracket->prob dict.
+
+    Bins simulated totals into hardcoded BRACKET_WIDTH brackets. Kept only for
+    external callers; the scanner now uses simulate_totals()+bracket_probability()
+    to bin into each market's real bracket scheme. Do not use for new code.
+    """
+    totals = simulate_totals(daily_counts, window_days, posts_so_far, days_elapsed,
+                             simulations, counts_by_dow, window_start)
+    if not totals:
+        return {}
+    hits: Dict[str, int] = {}
+    for total in totals:
+        bracket_start = (total // BRACKET_WIDTH) * BRACKET_WIDTH
+        key = "580+" if bracket_start >= 580 else f"{bracket_start}-{bracket_start + BRACKET_WIDTH - 1}"
+        hits[key] = hits.get(key, 0) + 1
+    n = len(totals)
+    return {k: v / n for k, v in hits.items()}
 
 
 # ============================================================================
@@ -579,8 +665,8 @@ def scan_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optional[li
         logger.info("Event {}: {}/{} days elapsed, {} posts so far",
                      slug[:40], days_elapsed, window_days, posts_so_far)
 
-        # Run Monte Carlo (DOW-aware + pace-conditioned)
-        mc_probs = run_monte_carlo(
+        # Run Monte Carlo -> raw simulated totals (bracket-agnostic)
+        totals = simulate_totals(
             daily_counts, window_days,
             posts_so_far=posts_so_far,
             days_elapsed=days_elapsed,
@@ -588,7 +674,7 @@ def scan_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optional[li
             window_start=start,
         )
 
-        if not mc_probs:
+        if not totals:
             continue
 
         # 5. Compare MC to market prices
@@ -596,33 +682,17 @@ def scan_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optional[li
             bracket = m["bracket"]
             yes_price = m["yes_price"]
 
-            mc_yes = mc_probs.get(bracket, 0)
+            # Bin into the market's ACTUAL bracket bounds (Fix 1). Outside the
+            # simulated support -> None -> no opinion, never certainty (Fix 2/3).
+            mc_yes = bracket_probability(totals, bracket)
+            decision = decide_signal(mc_yes, yes_price)
+            if decision is None:
+                continue  # no edge, or bracket outside MC support
+
             mc_no = 1 - mc_yes
-            market_no = 1 - yes_price
-
-            # Calculate edges for both sides
-            edge_no = (mc_no - market_no) * 100  # positive = NO is underpriced
-            edge_yes = (mc_yes - yes_price) * 100  # positive = YES is underpriced
-
-            # Pick better side
-            if edge_no > edge_yes and edge_no > MIN_EDGE_PCT:
-                side = "NO"
-                edge = edge_no
-                our_prob = mc_no
-                effective_price = 1 - yes_price  # Cost of NO
-            elif edge_yes > MIN_EDGE_PCT:
-                side = "YES"
-                edge = edge_yes
-                our_prob = mc_yes
-                effective_price = yes_price
-            else:
-                continue  # No edge
-
-            # Skip garbage (too cheap or too expensive)
-            if effective_price < 0.01 or effective_price > 0.98:
-                continue
-
-            confidence = min(0.95, our_prob)
+            side = decision["side"]
+            edge = decision["edge_pct"]
+            confidence = decision["confidence"]
 
             signals.append({
                 "market_id": m["condition_id"],

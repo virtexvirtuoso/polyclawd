@@ -80,6 +80,7 @@ class HFMarket:
 def _detect_asset(text: str) -> Optional[str]:
     """Detect which crypto asset a market is about."""
     text_lower = text.lower()
+    # Check longer/more-specific names first to avoid substring collisions
     for asset in ["bitcoin", "btc"]:
         if asset in text_lower:
             return "BTC"
@@ -89,6 +90,9 @@ def _detect_asset(text: str) -> Optional[str]:
     for asset in ["solana", "sol"]:
         if asset in text_lower:
             return "SOL"
+    for asset in ["hyperliquid", "hype"]:
+        if asset in text_lower:
+            return "HYPE"
     for asset in ["bnb", "binance coin"]:
         if asset in text_lower:
             return "BNB"
@@ -104,12 +108,16 @@ def _detect_asset(text: str) -> Optional[str]:
 def _detect_duration(text: str) -> Optional[str]:
     """Detect the time duration of a market."""
     text_lower = text.lower()
-    if any(p in text_lower for p in ["5-minute", "5 minute", "5min", "5m ", "next 5"]):
-        return "5min"
+    # Order matters: check longer durations first to avoid substring false matches
+    # e.g. "5-minute" is a substring of "15-minute"
     if any(p in text_lower for p in ["15-minute", "15 minute", "15min", "15m ", "next 15"]):
         return "15min"
+    if any(p in text_lower for p in ["5-minute", "5 minute", "5min", "5m ", "next 5"]):
+        return "5min"
     if any(p in text_lower for p in ["1-minute", "1 minute", "1min"]):
         return "1min"
+    if any(p in text_lower for p in ["4-hour", "4 hour", "4 hours", "4h "]):
+        return "4h"
     if any(p in text_lower for p in ["1-hour", "1 hour", "1h ", "hourly"]):
         return "1h"
     if any(p in text_lower for p in ["30-minute", "30 minute", "30min"]):
@@ -138,6 +146,8 @@ def _detect_duration(text: str) -> Optional[str]:
             return "30min"
         if delta <= 75:
             return "1h"
+        if delta <= 300:
+            return "4h"
     
     # "Up or Down" pattern with date but no time range = likely daily
     if "up or down" in text_lower and not time_range:
@@ -214,6 +224,24 @@ def discover_hf_markets(limit: int = 200) -> List[HFMarket]:
             markets.extend(newest)
     except Exception:
         pass
+
+    # Strategy 4: tag_slug=1h and tag_slug=4h (hourly/4h markets need explicit tag query)
+    # These are NOT returned by the generic events endpoint.
+    # Inject _tag_duration so markets with ambiguous titles (e.g. "12PM ET" only) are
+    # correctly classified without needing time-range inference.
+    for tag in ["1h", "4h"]:
+        try:
+            url = f"{GAMMA_API}/events?active=true&closed=false&tag_slug={tag}&limit=100&order=endDate&ascending=true"
+            tag_events = _fetch_json(f"gamma_hf_{tag}", url, timeout=15)
+            if tag_events:
+                for event in tag_events:
+                    for m in event.get("markets", []):
+                        if not m.get("question"):
+                            m["question"] = event.get("title", "")
+                        m["_tag_duration"] = tag  # guaranteed duration from tag
+                        markets.append(m)
+        except Exception:
+            pass
     
     # Deduplicate by condition_id
     seen = set()
@@ -234,8 +262,8 @@ def discover_hf_markets(limit: int = 200) -> List[HFMarket]:
         if not asset:
             continue
         
-        # Must be short-duration — require time-range in title or explicit duration keyword
-        duration = _detect_duration(question)
+        # Must be short-duration — check tag-injected duration first, then title detection
+        duration = m.get("_tag_duration") or _detect_duration(question)
         if not duration:
             # Only fall back to date-based detection if title contains "up or down"
             # This prevents long-term markets (e.g. "bitcoin hit $1m before GTA VI") 

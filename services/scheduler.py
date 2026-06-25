@@ -69,7 +69,7 @@ def _db():
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")  # 5s: handles transient locks, fast-fail if stuck
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -139,12 +139,12 @@ TICK_TASKS = {
         "weather_reeval", "weather_fast_scan", "weather_shift_alerts",
         "tweet_pace_alerts", "calibration_check", "insider_scan",
         "poly_delta", "manifold_shadow", "clv_snapshot",
-        "cross_sport_drift", "soccer_live_monitor", "mlb_live_monitor",
+        "hf_spread_5m", "cross_sport_drift", "soccer_live_monitor", "mlb_live_monitor",
         "ufc_live_monitor",
     ],
 
     # Tasks gated to every Nth tick of a parent group
-    "5min_gated": {"ufc_edge_scan": 3},          # every 15min (3 × 5min)
+    "5min_gated": {"ufc_edge_scan": 3, "hf_spread_15m": 3},          # every 15min (3 × 5min)
 
     "30min": [
         "signal_scan", "options_scan", "options_resolution", "options_monitor",
@@ -155,6 +155,7 @@ TICK_TASKS = {
         "scorer_clv_snapshot", "kalshi_fade_scan",
         "pm_maker_shadow", "ensemble_recorder", "arb_scan",
         "resolution_edge_scan",
+        "hf_backfill_outcomes",
     ],
 
     "30min_gated": {                              # every Nth × 30min
@@ -163,6 +164,8 @@ TICK_TASKS = {
         "scorer_edge_scan": 4,                    # every 2h (same cadence as match scan)
         "nfl_edge_scan": 4,                       # every 2h (self-gates in off-season)
         "betfair_scan": 4,                        # every 2h (futures don't move fast)
+        "hf_window_snapshot": 2,                   # every 1h — conditional WR data collection
+        "hf_spread_scan": 2,                        # every 1h — cross-asset spread anomaly scan
     },
 
     "whale": ["whale_scanner", "whale_follower"],  # sequential, dynamic sleep
@@ -242,6 +245,63 @@ def task_hf_signals():
         logger.info("HF: opened %d positions", result["positions_opened"])
     resolve_hf_positions()
 
+
+
+def task_hf_window_snapshot():
+    """Capture HF window-open snapshots for conditional WR data collection.
+    
+    Runs every 1h (30min_gated every_n=2). Self-gates: only snapshots within
+    ±7 minutes of an actual 1h or 4h window open to avoid stale data.
+    """
+    from datetime import datetime, timezone
+    from services.hf_window_snapshot import snapshot_window_open
+    
+    now = datetime.now(timezone.utc)
+    minute = now.minute
+    
+    # Gate: only run within ±7 min of a window open (minute 0 or 53-59)
+    near_1h = minute <= 7 or minute >= 53
+    near_4h = near_1h and (now.hour % 4 == 0 or (now.hour % 4 == 3 and minute >= 53))
+    
+    if near_1h:
+        r = snapshot_window_open("1h")
+        if r["written"]:
+            logger.info("HF window snapshot (1h): %d rows written", r["written"])
+    
+    if near_4h:
+        r = snapshot_window_open("4h")
+        if r["written"]:
+            logger.info("HF window snapshot (4h): %d rows written", r["written"])
+
+
+def task_hf_backfill_outcomes():
+    """Backfill resolved outcomes into hf_window_snapshots for WR analysis."""
+    from services.hf_window_snapshot import backfill_outcomes
+    r = backfill_outcomes()
+    if r["updated"]:
+        logger.info("HF window snapshot outcomes backfilled: %d", r["updated"])
+
+
+def task_hf_spread_scan():
+    """1h+4h cross-asset spread scan."""
+    from services.hf_spread_scanner import scan_spreads
+    alerts = scan_spreads(["1h", "4h"])
+    if alerts:
+        logger.info("HF spread anomalies [1h/4h]: %d flagged", len(alerts))
+
+def task_hf_spread_5m():
+    """5m crypto spread scan — runs every 5min."""
+    from services.hf_spread_scanner import scan_spreads
+    alerts = scan_spreads(["5m"])
+    if alerts:
+        logger.info("HF spread anomalies [5m]: %d flagged", len(alerts))
+
+def task_hf_spread_15m():
+    """15m crypto spread scan — runs every 15min."""
+    from services.hf_spread_scanner import scan_spreads
+    alerts = scan_spreads(["15m"])
+    if alerts:
+        logger.info("HF spread anomalies [15m]: %d flagged", len(alerts))
 
 def task_resolution_scanner():
     """Tier 1 resolution certainty scanning."""
@@ -861,8 +921,8 @@ def task_smart_wallet_resolve():
                                             resolve_shadows,
                                             settle_via_wallet_positions)
     conn = sqlite3.connect(str(SHADOW_DB))
-    conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     try:
         init_shadows(conn)
         n = resolve_shadows(conn, settle_via_wallet_positions)
@@ -870,6 +930,18 @@ def task_smart_wallet_resolve():
             logger.info("Smart-wallet shadows resolved: %d", n)
     finally:
         conn.close()
+
+
+def task_smart_wallet_fast():
+    """Fast-poll smart wallet fills every 90s (see tick_smart_wallet).
+    Lightweight — only last 3 min of PM trades filtered to smart addresses.
+    Decoupled from heavy whale_scanner so convergence fires within 90s."""
+    from scripts.smart_wallet_fast_poll import run as _run
+    result = _run()
+    if result.get("alerts_fired"):
+        logger.info("Smart wallet fast poll: %s", result)
+    elif result.get("error"):
+        logger.warning("Smart wallet fast poll error: %s", result["error"])
 
 
 def task_whale_clob():
@@ -1270,7 +1342,21 @@ def task_nfl_edge_scan():
         logger.debug("NFL edge scan: no edges (off-season or no games)")
 
 
-_betfair_dedup: dict = {}  # event_key → last_alert_ts
+_BETFAIR_DEDUP_FILE = Path("/tmp/betfair_dedup.json")
+
+def _load_betfair_dedup() -> dict:
+    try:
+        if _BETFAIR_DEDUP_FILE.exists():
+            return json.loads(_BETFAIR_DEDUP_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _save_betfair_dedup(d: dict) -> None:
+    try:
+        _BETFAIR_DEDUP_FILE.write_text(json.dumps(d))
+    except Exception:
+        pass
 
 def task_betfair_scan():
     """Betfair Exchange vs Polymarket futures edge scan."""
@@ -1281,13 +1367,15 @@ def task_betfair_scan():
         logger.debug("Betfair scan: no edges")
         return
     now = time.time()
+    betfair_dedup = _load_betfair_dedup()
     to_alert = []
     for e in edges:
         key = f"{e.sport}|{e.selection}"
-        last = _betfair_dedup.get(key, 0)
+        last = betfair_dedup.get(key, 0)
         if now - last >= 14400:  # 4h dedup
             to_alert.append(e)
-            _betfair_dedup[key] = now
+            betfair_dedup[key] = now
+    _save_betfair_dedup(betfair_dedup)
     if to_alert:
         lines = [f"⚡ Betfair Futures Edges ({len(to_alert)})"]
         for e in to_alert[:5]:
@@ -1409,12 +1497,18 @@ def task_gdelt_refresh():
 
     Writes results to storage/gdelt_cache.json so the election API
     can serve cached GDELT data without blocking on rate-limited queries.
+    Self-gating: skips if cache is less than 6h old (prevents burst on restart).
     """
     import json as _json
+    cache_path = PROJECT_ROOT / "storage" / "gdelt_cache.json"
+    if cache_path.exists():
+        age_s = time.time() - cache_path.stat().st_mtime
+        if age_s < 21600:
+            logger.info("GDELT cache fresh (%.1fh old), skipping refresh", age_s / 3600)
+            return
     try:
         from signals.gdelt_client import build_gdelt_overlay
         result = build_gdelt_overlay()
-        cache_path = PROJECT_ROOT / "storage" / "gdelt_cache.json"
         # Only overwrite the cache when the fetch actually returned data —
         # a rate-limited (429) empty result must never blank a good cache.
         if result.get("candidate_sentiment") or result.get("state_sentiment"):
@@ -1562,6 +1656,20 @@ async def tick_clob():
         for name in TICK_TASKS["clob"]:
             await run_in_thread(_run_safe, name, _task_fn(name))
         await asyncio.sleep(max(10, 60 - (time.time() - t0)))
+
+
+async def tick_smart_wallet():
+    """Fast-poll smart wallet fills every 90s.
+
+    Decoupled from tick_whale() (heavy full-exchange sweep). Only fetches
+    the last 3 min of PM trades filtered to ~40 smart wallet addresses.
+    Enables sub-2-minute convergence detection for live sports markets.
+    Rate: ~40 req / 90s = 0.44 req/sec — well within PM CLOB limits.
+    """
+    while True:
+        t0 = time.time()
+        await run_in_thread(_run_safe, "smart_wallet_fast", task_smart_wallet_fast)
+        await asyncio.sleep(max(30, 90 - (time.time() - t0)))
 
 
 async def tick_30min():
@@ -1747,6 +1855,7 @@ async def main():
         asyncio.create_task(_delayed_start(15, tick_30min)),
         asyncio.create_task(_delayed_start(20, tick_whale)),
         asyncio.create_task(_delayed_start(25, tick_clob)),
+        asyncio.create_task(_delayed_start(10, tick_smart_wallet)),
         asyncio.create_task(_delayed_start(120, tick_vpin)),
         asyncio.create_task(_delayed_start(60, tick_6h)),
         asyncio.create_task(_delayed_start(30, tick_scheduled)),

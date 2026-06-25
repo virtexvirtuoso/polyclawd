@@ -44,32 +44,15 @@ ALERT_MIN_CONFIDENCE = 0.60  # Only alert on >= 60% confidence
 
 
 def _send_alert(message: str, silent: bool = False):
-    """Send alert via OpenClaw gateway to Telegram."""
+    """Send alert via polyclawd bot (alert_formatter → direct Bot API)."""
     if not ALERT_ENABLED:
         return
     try:
-        payload = json.dumps({
-            "action": "send",
-            "channel": "telegram",
-            "message": message,
-            "silent": silent,
-        }).encode()
-        req = urllib.request.Request(
-            f"{OPENCLAW_GATEWAY}/api/message",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=5)
+        from scripts.alert_formatter import send_telegram
+        send_telegram(message)
+        return
     except Exception as e:
-        # Fallback: write alert to a file the watchdog can pick up
-        try:
-            alert_file = Path(__file__).parent.parent / "data" / "hf_alerts.jsonl"
-            with open(alert_file, "a") as f:
-                f.write(json.dumps({"message": message, "ts": datetime.now(timezone.utc).isoformat()}) + "\n")
-        except:
-            pass
-        logger.debug(f"Alert send failed (non-critical): {e}")
+        logger.debug(f"HF alert send failed: {e}")
 
 
 # ============================================================================
@@ -228,6 +211,12 @@ def open_hf_paper_position(
             entry_price = market["no_price"]
         
         # Build signal dict in paper_portfolio format
+        # Microstructure-triggered archetypes pass K1 kill switch.
+        # cascade/smart_money_squeeze → intraday_updown_panic (allowed)
+        # All others → intraday_updown (blocked by K1 — conservative until data validates)
+        _PANIC_TRIGGERS = {"cascade", "smart_money_squeeze", "orderbook_cliff"}
+        hf_archetype = "intraday_updown_panic" if trigger_type in _PANIC_TRIGGERS else "intraday_updown"
+
         signal = {
             "market_id": market["market_id"],
             "market_title": market["question"],
@@ -238,7 +227,7 @@ def open_hf_paper_position(
             "confidence": confidence,
             "edge_pct": edge_pct,
             "bet_size": bet_size,
-            "archetype": "hf_crypto",
+            "archetype": hf_archetype,
             "strategy": f"hf_{trigger_type}",
             "market_slug": market.get("slug", ""),
         }
