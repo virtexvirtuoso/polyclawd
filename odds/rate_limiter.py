@@ -20,14 +20,26 @@ from loguru import logger
 # ~3.2K/day at full balance, matching the plan's ~3K/day target.
 MONTHLY_LIMIT = 5_000_000  # the-odds-api plan upgraded 100K -> 5M on 2026-06-25
 DAILY_BUDGET = MONTHLY_LIMIT // 31  # ~161K/day soft budget (was ~3.2K on 100K plan)
-CACHE_DIR = Path("/var/www/virtuosocrypto.com/polyclawd/cache")
-RATE_FILE = CACHE_DIR / "odds_api_usage.json"
 
-# Fallback for local dev
-if not CACHE_DIR.exists():
-    CACHE_DIR = Path.home() / "Desktop/polyclawd/cache"
-    RATE_FILE = CACHE_DIR / "odds_api_usage.json"
-    CACHE_DIR.mkdir(exist_ok=True)
+
+def _resolve_cache_dir(prod: Path, dev: Path) -> Path:
+    """Resolve the credit-cache dir. Prefer the prod path; SELF-CREATE it when
+    its parent (the deploy tree) exists, so the VPS never silently falls back to
+    a dev path (the 2026-06-25 footgun, where the missing prod cache dir sent all
+    credit/usage tracking to ~/Desktop). Only fall back to `dev` when the prod
+    tree is absent entirely (a real dev machine, where /var/www/... doesn't exist)."""
+    if prod.exists():
+        return prod
+    target = prod if prod.parent.exists() else dev
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+CACHE_DIR = _resolve_cache_dir(
+    Path("/var/www/virtuosocrypto.com/polyclawd/cache"),
+    Path.home() / "Desktop/polyclawd/cache",
+)
+RATE_FILE = CACHE_DIR / "odds_api_usage.json"
 
 # Hard floor: do not spend below this many REAL credits remaining (reserved for
 # "critical" priority only). 5% of the 5M plan (was 5,000 on the dead 100K plan).
