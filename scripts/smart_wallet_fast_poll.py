@@ -62,6 +62,23 @@ _SMART_WALLET_MIN_USD = 1000  # minimum fill size to consider (raised from $500 
 _SW_LIVE_ALERT_TYPES = {"entry"}
 _SW_LIVE_SIZE_USD = 25.0  # conservative start; raise after live validation
 
+# Category gate — only follow smart wallets into approved market verticals.
+# Gamma sometimes returns category=None (e.g. entertainment/pop-culture markets).
+# In that case we require a positive slug/question keyword match to proceed.
+_ALLOWED_CATEGORIES = {"sports", "crypto", "politics", "weather", "finance", "economics"}
+_ALLOWED_SLUG_KEYWORDS = (
+    # Sports
+    "mlb", "nfl", "nba", "nhl", "ufc", "mls", "wc", "fwc", "fifwc",
+    "soccer", "football", "basketball", "baseball", "tennis", "golf",
+    "nascar", "boxing", "mma", "hockey",
+    # Crypto / finance
+    "btc", "eth", "bitcoin", "ethereum", "crypto", "sol", "xrp", "doge",
+    "fed-rate", "gdp", "inflation", "cpi",
+    # Politics
+    "trump", "biden", "election", "senate", "congress", "president",
+    "democrat", "republican", "vote",
+)
+
 
 def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
     """Route qualifying smart wallet entry signals to the live executor.
@@ -91,6 +108,24 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
         price_at_alert = float(rec.get("price_at_alert") or 0)
         if not condition_id or price_at_alert <= 0:
             continue
+
+        # Category gate: only execute in approved market verticals (Option B).
+        # Blocks pop-culture/entertainment markets like the 2026-07-01 Rihanna incident.
+        gm_data = gamma.get(condition_id, {})
+        mkt_category = (gm_data.get("category") or "").lower().strip()
+        mkt_slug = (gm_data.get("slug") or "").lower()
+        mkt_question = (gm_data.get("question") or "").lower()
+        if mkt_category:
+            if mkt_category not in _ALLOWED_CATEGORIES:
+                logger.info("sw_live: blocked — category '%s' not in allowlist for %s, skipping",
+                            mkt_category, condition_id[:16])
+                continue
+        else:
+            # Gamma returned no category — require positive keyword match in slug/question
+            if not any(kw in mkt_slug or kw in mkt_question for kw in _ALLOWED_SLUG_KEYWORDS):
+                logger.info("sw_live: blocked — no category + no known pattern (slug='%s') for %s, skipping",
+                            mkt_slug[:40], condition_id[:16])
+                continue
 
         try:
             from odds.poly_executable_edge import condition_id_to_token_ids
