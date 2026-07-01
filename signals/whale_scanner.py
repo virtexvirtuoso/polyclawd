@@ -1575,7 +1575,14 @@ def scan_polymarket_flow(conn) -> list:
     if meta is not None and smart:
         try:
             from scripts.smart_wallet_alert import scanner_hook
-            scanner_hook(meta, trades, gamma, smart)
+            sw_fired = scanner_hook(meta, trades, gamma, smart)
+            # Route entry-type alerts to live executor (no-op in PAPER mode)
+            if sw_fired:
+                try:
+                    from scripts.smart_wallet_fast_poll import _route_live_smart_wallet
+                    _route_live_smart_wallet(sw_fired, gamma)
+                except Exception as _re:
+                    logger.warning("smart_wallet_alert live routing failed: %s", _re)
         except Exception as e:  # noqa: BLE001
             logger.warning("smart_wallet_alert hook failed: %s", e)
 
