@@ -84,10 +84,31 @@ _cache: Dict[str, dict] = {}
 _cache_ts: Dict[str, float] = {}
 CACHE_TTL = 1800  # 30 min — balances freshness vs API rate limits (Open-Meteo 429s at 15min)
 
+# Memory leak fix: per-source caches grew unboundedly (no eviction).
+# Max entries per source cache. When exceeded, oldest entries are evicted.
+_MAX_SOURCE_CACHE_SIZE = 500
+
+
+def _evict_cache(cache: dict, ts_cache: dict = None, max_size: int = _MAX_SOURCE_CACHE_SIZE):
+    """Evict oldest entries from a cache dict when it exceeds max_size.
+    If ts_cache is provided (maps same keys → timestamps), evicts by oldest ts.
+    Otherwise evicts by insertion order (dict preserves order in Python 3.7+)."""
+    if len(cache) <= max_size:
+        return
+    to_remove = len(cache) - max_size
+    if ts_cache:
+        oldest = sorted(ts_cache, key=ts_cache.get)[:to_remove]
+    else:
+        oldest = list(cache.keys())[:to_remove]
+    for k in oldest:
+        cache.pop(k, None)
+        if ts_cache:
+            ts_cache.pop(k, None)
+
 # Rate limit tracking per source
 _rate_limits = {
     "pirate_weather": {"calls": 0, "reset_ts": 0, "max_per_hour": 15, "max_per_month": 10000},
-    "tomorrow_io": {"calls": 0, "reset_ts": 0, "max_per_hour": 20, "max_per_day": 450},
+    "tomorrow_io": {"calls": 0, "reset_ts": 0, "max_per_hour": 15, "max_per_day": 450},
     "weatherapi": {"calls": 0, "reset_ts": 0, "max_per_hour": 50, "max_per_month": 95000},
     "visual_crossing": {"calls": 0, "reset_ts": 0, "max_per_hour": 35, "max_per_day": 1000},
     "weather_com": {"calls": 0, "reset_ts": 0, "max_per_hour": 80, "max_per_day": 1500},
@@ -126,6 +147,7 @@ def _cache_set(city: str, date: str, data: dict):
     key = _cache_key(city, date)
     _cache[key] = data
     _cache_ts[key] = time.time()
+    _evict_cache(_cache, _cache_ts)
 
 
 # ── HTTP helper ──────────────────────────────────────────────────────────
@@ -169,10 +191,6 @@ def _c_to_f(c: float) -> float:
 
 # ── Source 1: Open-Meteo Ensemble (PRIMARY — no key needed) ─────────────
 
-# Circuit breaker: skip Open-Meteo if rate limited (exponential backoff)
-_open_meteo_blocked = False
-_open_meteo_blocked_ts = 0.0
-_open_meteo_backoff = 600  # starts at 10min, doubles each trip, max 1h
 _open_meteo_cache = {}      # per-source cache: {(lat,lon,date): (result, ts)}
 _OPEN_METEO_SOURCE_TTL = 7200  # 2h per-source cache — forecasts don't change fast
 
@@ -181,11 +199,9 @@ def _fetch_open_meteo_ensemble(lat: float, lon: float, date: str) -> Optional[di
     Fetch ensemble forecasts from multiple independent models.
     Returns dict with high temps from each ensemble member.
     """
-    global _open_meteo_blocked, _open_meteo_blocked_ts, _open_meteo_backoff
-    if _open_meteo_blocked and (time.time() - _open_meteo_blocked_ts) < _open_meteo_backoff:
+    from api.services.source_health import is_circuit_open, trip_circuit, reset_circuit
+    if is_circuit_open("open_meteo"):
         return None
-    if _open_meteo_blocked:
-        _open_meteo_blocked = False  # Reset after backoff period
     # Per-source 2h cache — much longer than top-level 30min cache
     _om_key = (round(lat, 2), round(lon, 2), date)
     if _om_key in _open_meteo_cache:
@@ -209,15 +225,10 @@ def _fetch_open_meteo_ensemble(lat: float, lon: float, date: str) -> Optional[di
     _record_weather_fetch("open_meteo", data is not None, (time.time() - _t0) * 1000.0,
                           error="open-meteo /v1/forecast returned None")
     if not data:
-        # Only trip circuit breaker — the 429 detection is inside _fetch_json
-        # which returns None. But avoid doubling backoff on non-429 failures.
-        if not _open_meteo_blocked:
-            _open_meteo_blocked = True
-            _open_meteo_blocked_ts = time.time()
-            # Don't double if already at max
-            logger.info("Open-Meteo circuit breaker tripped (backoff={}s)", _open_meteo_backoff)
+        trip_circuit("open_meteo", initial_backoff_s=600, max_backoff_s=3600)
         return None
 
+    reset_circuit("open_meteo")
     highs_c = []
     lows_c = []
     models_used = []
@@ -273,7 +284,7 @@ def _fetch_open_meteo_ensemble(lat: float, lon: float, date: str) -> Optional[di
         "raw_highs_f": [round(h, 1) for h in highs_f],
     }
     _open_meteo_cache[_om_key] = (_result, time.time())
-    _open_meteo_backoff = 600  # Reset backoff on success
+    _evict_cache(_open_meteo_cache, max_size=_MAX_SOURCE_CACHE_SIZE)
     return _result
 
 
@@ -370,6 +381,7 @@ def _fetch_pirate_weather(lat: float, lon: float, date: str) -> Optional[dict]:
         }
     _pirate_cache[loc_key] = city_days
     _pirate_cache_ts[loc_key] = time.time()
+    _evict_cache(_pirate_cache, _pirate_cache_ts)
     return city_days.get(date)
 
 
@@ -379,14 +391,8 @@ def _fetch_pirate_weather(lat: float, lon: float, date: str) -> Optional[dict]:
 _tomorrow_cache: Dict[str, dict] = {}
 _tomorrow_cache_ts: Dict[str, float] = {}
 
-# Circuit breaker: trip on persistent 429s so we don't burn quota retrying.
-# Mirrors _open_meteo_blocked / _vc_blocked. Exponential backoff capped at 1h.
-_tomorrow_blocked = False
-_tomorrow_blocked_ts = 0.0
-_tomorrow_backoff = 600  # 10min, doubles each trip, max 1h
-
 def _fetch_tomorrow_io(lat: float, lon: float, date: str) -> Optional[dict]:
-    global _tomorrow_blocked, _tomorrow_blocked_ts, _tomorrow_backoff
+    from api.services.source_health import is_circuit_open, trip_circuit, reset_circuit
     if not TOMORROW_API_KEY:
         return None
 
@@ -394,11 +400,8 @@ def _fetch_tomorrow_io(lat: float, lon: float, date: str) -> Optional[dict]:
     if loc_key in _tomorrow_cache and (time.time() - _tomorrow_cache_ts.get(loc_key, 0)) < CACHE_TTL:
         return _tomorrow_cache[loc_key].get(date)
 
-    # Circuit breaker check — skip entirely if recently rate-limited.
-    if _tomorrow_blocked and (time.time() - _tomorrow_blocked_ts) < _tomorrow_backoff:
+    if is_circuit_open("tomorrow_io"):
         return None
-    if _tomorrow_blocked:
-        _tomorrow_blocked = False  # backoff window elapsed, try once
 
     if not _rate_check("tomorrow_io"):
         logger.debug("Tomorrow.io rate limited, skipping")
@@ -419,14 +422,9 @@ def _fetch_tomorrow_io(lat: float, lon: float, date: str) -> Optional[dict]:
     _record_weather_fetch("tomorrow_io", data is not None, (time.time() - _t0) * 1000.0,
                           error="tomorrow_io returned None (likely 429)")
     if not data:
-        if not _tomorrow_blocked:
-            _tomorrow_blocked = True
-            _tomorrow_blocked_ts = time.time()
-            _tomorrow_backoff = min(_tomorrow_backoff * 2, 3600)  # max 1h
-            logger.info("Tomorrow.io circuit breaker tripped (backoff={}s)", _tomorrow_backoff)
+        trip_circuit("tomorrow_io", initial_backoff_s=1800, max_backoff_s=3600)
         return None
-    # Success — reset backoff so the next failure starts at 10min again
-    _tomorrow_backoff = 600
+    reset_circuit("tomorrow_io")
 
     # Cache ALL days from response
     timelines = data.get("timelines", {})
@@ -450,6 +448,7 @@ def _fetch_tomorrow_io(lat: float, lon: float, date: str) -> Optional[dict]:
     
     _tomorrow_cache[loc_key] = city_days
     _tomorrow_cache_ts[loc_key] = time.time()
+    _evict_cache(_tomorrow_cache, _tomorrow_cache_ts)
     return city_days.get(date)
 
 
@@ -501,6 +500,7 @@ def _fetch_weatherapi(lat: float, lon: float, date: str) -> Optional[dict]:
         }
     _weatherapi_cache[loc_key] = city_days
     _weatherapi_cache_ts[loc_key] = time.time()
+    _evict_cache(_weatherapi_cache, _weatherapi_cache_ts)
     return city_days.get(date)
 
 
@@ -624,6 +624,7 @@ def _fetch_twc_actuals(city: str, date: str) -> Optional[dict]:
         }
 
         _actuals_cache[cache_key] = result
+        _evict_cache(_actuals_cache, _actuals_cache_ts)
         _actuals_cache_ts[cache_key] = time.time()
         logger.info("TWC actuals {}/{}: high={}°F low={}°F ({} obs)",
                      icao, date, actual_high, actual_low, len(temps))
@@ -725,6 +726,7 @@ def _fetch_weather_com(lat: float, lon: float, date: str, city: str = "") -> Opt
 
     _twc_cache[cache_key] = city_days
     _twc_cache_ts[cache_key] = time.time()
+    _evict_cache(_twc_cache, _twc_cache_ts)
     logger.debug("Weather.com {}: {} days fetched", icao, len(city_days))
     return city_days.get(date)
 
@@ -746,25 +748,20 @@ def _resolve_city(city: str) -> Optional[Tuple[float, float, str]]:
 # ── Source 6: Visual Crossing (free, 1K calls/day) ───────────────────────
 VISUAL_CROSSING_KEY = os.environ.get("VISUAL_CROSSING_KEY", "")
 _vc_cache = {}  # per-source 4h cache
-_vc_blocked = False
-_vc_blocked_ts = 0.0
-_vc_backoff = 600  # 10min start, max 1h
 _VC_SOURCE_TTL = 14400  # 4h — conservative for 1000 calls/day free tier
 
 def _fetch_visual_crossing(lat: float, lon: float, date: str, city: str = "") -> Optional[dict]:
     """Fetch from Visual Crossing Weather API (free tier: 1000 calls/day)."""
-    global _vc_blocked, _vc_blocked_ts, _vc_backoff
+    from api.services.source_health import is_circuit_open, trip_circuit, reset_circuit
     if not VISUAL_CROSSING_KEY:
         return None
     
     # Rate limiter
     if not _rate_check("visual_crossing"):
         return None
-    # Circuit breaker
-    if _vc_blocked and (time.time() - _vc_blocked_ts) < _vc_backoff:
+    # Circuit breaker (DB-backed, shared across workers)
+    if is_circuit_open("visual_crossing"):
         return None
-    if _vc_blocked:
-        _vc_blocked = False
     
     _vc_key = (round(lat, 2), round(lon, 2), date)
     if _vc_key in _vc_cache and (time.time() - _vc_cache[_vc_key][1]) < _VC_SOURCE_TTL:
@@ -782,13 +779,9 @@ def _fetch_visual_crossing(lat: float, lon: float, date: str, city: str = "") ->
     _record_weather_fetch("visual_crossing", data is not None, (time.time() - _t0) * 1000.0,
                           error="visual_crossing returned None")
     if not data:
-        if not _vc_blocked:
-            _vc_blocked = True
-            _vc_blocked_ts = time.time()
-            _vc_backoff = min(_vc_backoff * 2, 3600)  # max 1h
-            logger.info("Visual Crossing circuit breaker tripped (backoff={}s)", _vc_backoff)
+        trip_circuit("visual_crossing", initial_backoff_s=600, max_backoff_s=3600)
         return None
-    _vc_backoff = 600  # reset on success
+    reset_circuit("visual_crossing")
     _rate_track("visual_crossing")
     
     try:
@@ -805,6 +798,7 @@ def _fetch_visual_crossing(lat: float, lon: float, date: str, city: str = "") ->
             "model": "visual_crossing",
         }
         _vc_cache[_vc_key] = (result, time.time())
+        _evict_cache(_vc_cache, max_size=_MAX_SOURCE_CACHE_SIZE)
         return result
     except Exception as e:
         logger.debug("Visual Crossing parse failed: {}", e)
@@ -886,6 +880,7 @@ def _fetch_nws(lat: float, lon: float, date: str, city: str = "") -> Optional[di
                         "model": f"NWS_{office}",
                     }
                     _nws_cache[_nws_key] = (result, time.time())
+                    _evict_cache(_nws_cache, max_size=_MAX_SOURCE_CACHE_SIZE)
                     return result
     except Exception as e:
         logger.debug("NWS parse failed: {}", e)
@@ -1083,6 +1078,13 @@ def get_ensemble_forecast(city: str, date: str) -> Optional[dict]:
         log_source_forecasts(city, date, sources)
     except Exception:
         pass
+    
+    # GAP 2: Log ensemble forecast for accuracy tracking
+    try:
+        log_ensemble_forecast(city, date, result["ensemble"])
+    except Exception:
+        pass
+    
     _cache_set(city, date, result)
     return result
 
@@ -1545,6 +1547,7 @@ def _ensure_source_rmse_table():
                 forecast_high_f REAL,
                 actual_high_f REAL,
                 error_f REAL,
+                forecast_horizon_hours REAL,
                 logged_at TEXT DEFAULT (datetime('now')),
                 UNIQUE(city, source, target_date)
             )
@@ -1553,6 +1556,11 @@ def _ensure_source_rmse_table():
             CREATE INDEX IF NOT EXISTS idx_scr_city_source 
             ON source_city_rmse(city, source)
         """)
+        # Add horizon column if missing (migration for existing tables)
+        try:
+            conn.execute("ALTER TABLE source_city_rmse ADD COLUMN forecast_horizon_hours REAL")
+        except Exception:
+            pass  # Column already exists
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1568,6 +1576,11 @@ def log_source_forecasts(city: str, date: str, sources: dict):
     when the market resolves (via resolve_source_forecasts).
     """
     try:
+        # GAP 5: Compute forecast horizon
+        now = datetime.now(timezone.utc)
+        target = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+        horizon_hours = max(0, (target - now).total_seconds() / 3600)
+        
         conn = _sqlite3.connect(_DB_PATH)
         for name, src in sources.items():
             high_f = src.get("high_f")
@@ -1575,9 +1588,9 @@ def log_source_forecasts(city: str, date: str, sources: dict):
                 continue
             conn.execute("""
                 INSERT OR IGNORE INTO source_city_rmse 
-                (city, source, target_date, forecast_high_f)
-                VALUES (?, ?, ?, ?)
-            """, (city.lower(), name, date, high_f))
+                (city, source, target_date, forecast_high_f, forecast_horizon_hours)
+                VALUES (?, ?, ?, ?, ?)
+            """, (city.lower(), name, date, high_f, round(horizon_hours, 1)))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1597,13 +1610,54 @@ def resolve_source_forecasts(city: str, date: str, actual_high_f: float):
             SET actual_high_f = ?, error_f = forecast_high_f - ?
             WHERE city = ? AND target_date = ? AND actual_high_f IS NULL
         """, (actual_high_f, actual_high_f, city.lower(), date))
+        
+        # GAP 2: Also backfill forecast_log actuals
+        conn.execute("""
+            UPDATE forecast_log 
+            SET actual_high_f = ?,
+                forecast_error_f = ensemble_mean_f - ?,
+                resolved_at = datetime('now')
+            WHERE city = ? AND target_date = ? AND actual_high_f IS NULL
+        """, (actual_high_f, actual_high_f, city.lower(), date))
+        
         conn.commit()
         conn.close()
     except Exception as e:
         logger.debug("resolve_source_forecasts error: {}", e)
 
 
-def get_source_weights_for_city(city: str, min_samples: int = 10) -> dict:
+def log_ensemble_forecast(city: str, date: str, ensemble: dict):
+    """Log ensemble forecast for accuracy tracking.
+    
+    Writes to forecast_log. Actual temps filled in later via
+    resolve_source_forecasts().
+    """
+    try:
+        # Compute forecast horizon: hours from now until target date ends
+        now = datetime.now(timezone.utc)
+        target = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+        horizon_hours = max(0, (target - now).total_seconds() / 3600)
+        
+        conn = _sqlite3.connect(_DB_PATH)
+        conn.execute("""
+            INSERT OR IGNORE INTO forecast_log
+            (city, target_date, forecast_horizon_hours,
+             ensemble_mean_f, ensemble_std_f, effective_std_f,
+             n_sources, source_agreement)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            city.lower(), date, round(horizon_hours, 1),
+            ensemble.get("high_mean_f"), ensemble.get("high_std_f"),
+            ensemble.get("high_std_f"),
+            ensemble.get("n_sources"), ensemble.get("source_agreement"),
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug("log_ensemble_forecast error: {}", e)
+
+
+def get_source_weights_for_city(city: str, min_samples: int = 3) -> dict:
     """Get dynamic source weights based on per-city RMSE.
     
     Returns dict of {source_name: weight} where weight is relative
@@ -1612,14 +1666,24 @@ def get_source_weights_for_city(city: str, min_samples: int = 10) -> dict:
     Default weight = 1.0. Resolution source (weather_com) gets base 1.5x.
     Sources with lower RMSE than average get up to 2.0x.
     Sources with higher RMSE get scaled down to 0.5x minimum.
+    
+    Static adjustments (applied before dynamic scaling):
+    - Pirate Weather: baseline 0.5x (consistently worst RMSE across cities)
+    - Visual Crossing: 1.3x base for coastal cities (best on maritime climates)
     """
+    # Coastal cities where Visual Crossing excels
+    coastal_cities = {"wellington", "ankara", "tokyo", "paris", "miami", "seattle",
+                      "san francisco", "los angeles", "san diego", "boston",
+                      "new york", "new york city", "london", "sydney", "melbourne",
+                      "vancouver", "portland", "honolulu", "lisbon", "barcelona"}
+    
     default_weights = {
         "open_meteo_ensemble": 1.0,
-        "pirate_weather": 1.0,
+        "pirate_weather": 0.5,  # Consistently worst RMSE — baseline penalty
         "tomorrow_io": 1.0,
         "weatherapi": 1.0,
         "weather_com": 1.5,  # Base boost for resolution source
-        "visual_crossing": 1.0,
+        "visual_crossing": 1.3 if city.lower() in coastal_cities else 1.0,  # Coastal specialist
         "nws": 1.0,
     }
     
@@ -1756,6 +1820,67 @@ def get_ensemble_status() -> dict:
             FROM paper_positions WHERE archetype = 'weather' GROUP BY status
         """)]
 
+        # Per-source, per-city accuracy
+        src_city = [dict(r) for r in conn.execute("""
+            SELECT source, city, COUNT(*) AS n,
+                   ROUND(SQRT(AVG(error_f * error_f)), 2) AS rmse_f,
+                   ROUND(AVG(error_f), 2) AS bias_f
+            FROM source_city_rmse
+            WHERE error_f IS NOT NULL
+            GROUP BY source, city
+            ORDER BY source, city
+        """)]
+
+        # GAP 4: Source correlation matrix — pairwise error correlation
+        # For each pair of sources, compute how often they agree on direction
+        src_corr = []
+        src_list = [s["name"] for s in sources]
+        for i in range(len(src_list)):
+            for j in range(i + 1, len(src_list)):
+                s1, s2 = src_list[i], src_list[j]
+                rows = conn.execute(f"""
+                    SELECT r1.error_f AS e1, r2.error_f AS e2
+                    FROM source_city_rmse r1
+                    JOIN source_city_rmse r2
+                      ON r1.city = r2.city AND r1.target_date = r2.target_date
+                    WHERE r1.source = ? AND r2.source = ?
+                      AND r1.error_f IS NOT NULL AND r2.error_f IS NOT NULL
+                """, (s1, s2)).fetchall()
+                if len(rows) >= 3:
+                    e1s = [r["e1"] for r in rows]
+                    e2s = [r["e2"] for r in rows]
+                    # Direction agreement: same sign (both over or both under)
+                    same_dir = sum(1 for a, b in zip(e1s, e2s) if (a > 0) == (b > 0))
+                    dir_agree = round(same_dir / len(rows), 3)
+                    # Mean absolute difference
+                    mad = round(sum(abs(a - b) for a, b in zip(e1s, e2s)) / len(rows), 2)
+                    src_corr.append({
+                        "source_a": s1, "source_b": s2,
+                        "n": len(rows),
+                        "direction_agreement": dir_agree,
+                        "mean_abs_diff_f": mad,
+                    })
+        src_corr.sort(key=lambda x: x["direction_agreement"])
+
+        # GAP 5: Horizon-bucketed accuracy from source_city_rmse
+        horizon_accuracy = [dict(r) for r in conn.execute("""
+            SELECT
+              CASE
+                WHEN forecast_horizon_hours <= 24 THEN '0-24h'
+                WHEN forecast_horizon_hours <= 48 THEN '24-48h'
+                WHEN forecast_horizon_hours <= 72 THEN '48-72h'
+                ELSE '72h+'
+              END AS horizon,
+              COUNT(*) AS n,
+              ROUND(SQRT(AVG(error_f * error_f)), 2) AS rmse_f,
+              ROUND(AVG(ABS(error_f)), 2) AS mae_f,
+              ROUND(AVG(error_f), 2) AS bias_f
+            FROM source_city_rmse
+            WHERE error_f IS NOT NULL AND forecast_horizon_hours IS NOT NULL
+            GROUP BY horizon
+            ORDER BY horizon
+        """)]
+
         return {
             "ts": datetime.now(timezone.utc).isoformat(),
             "sources": sources,
@@ -1771,6 +1896,9 @@ def get_ensemble_status() -> dict:
                 "by_comparison": by_comp,
             },
             "paper_pnl": pnl,
+            "source_city_accuracy": src_city,
+            "source_correlation": src_corr,
+            "horizon_accuracy": horizon_accuracy,
         }
     finally:
         conn.close()

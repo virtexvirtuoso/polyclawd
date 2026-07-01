@@ -14,7 +14,6 @@ Scan every 5 minutes via watchdog Tier 1.
 """
 
 import json
-import logging
 import math
 import re
 import sqlite3
@@ -22,8 +21,8 @@ import urllib.request
 from datetime import datetime, timezone, timedelta, date
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
+from loguru import logger
 
-logger = logging.getLogger(__name__)
 
 # ============================================================================
 # Configuration
@@ -661,17 +660,17 @@ def main():
 
     if cmd == "scan":
         result = generate_resolution_signals()
-        print(json.dumps(result, indent=2))
+        logger.info(json.dumps(result, indent=2))
     elif cmd == "prices":
         prices = get_crypto_prices()
         for s, d in prices.items():
-            print(f"{s:15s} ${d['price']:>12,.4f}  {d['change_24h']:+6.1f}%  score={d['score']:5.1f}")
+            logger.info(f"{s:15s} ${d['price']:>12,.4f}  {d['change_24h']:+6.1f}%  score={d['score']:5.1f}")
     elif cmd == "arena":
         rankings = get_arena_rankings()
         for co, d in sorted(rankings.items(), key=lambda x: x[1]["rank"]):
-            print(f"#{d['rank']:2d}  {co:12s}  {d['model']}")
+            logger.info(f"#{d['rank']:2d}  {co:12s}  {d['model']}")
     else:
-        print(f"Usage: {sys.argv[0]} [scan|prices|arena]")
+        logger.info(f"Usage: {sys.argv[0]} [scan|prices|arena]")
 
 
 if __name__ == "__main__":

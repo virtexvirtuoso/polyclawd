@@ -1,0 +1,934 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WHALE SHARK — PREDATOR ATLAS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,600;1,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0c14; --surface:#10131e; --text:#e9e4d8; --muted:#8d8775;
+  --gold:#f5c84c; --crit:#ff5a68; --high:#f0a050; --low:#7f8fb0;
+  --border:#1c2030; --dim:#5a5648; --ringbg:#2a2f42;
+  --serif:"Spectral", Georgia, "Times New Roman", serif;
+  --mono:"JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --s1:8px; --s2:16px; --s3:24px; --s4:32px; --s5:40px;
+}
+*{box-sizing:border-box; margin:0; padding:0}
+html{background:var(--bg)}
+body{
+  background:var(--bg); color:var(--text);
+  font-family:var(--mono); font-size:14px; font-weight:400; line-height:1.6;
+}
+.vh{position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0}
+button{font:inherit; color:inherit; background:none; border:0; cursor:pointer}
+:focus-visible{outline:2px solid var(--gold); outline-offset:2px}
+a{color:var(--text)}
+.skip{position:absolute; left:-9999px; top:0; z-index:40; background:var(--gold); color:var(--bg); padding:var(--s1) var(--s2); font-size:12px}
+.skip:focus{left:var(--s1)}
+
+/* ---------- masthead ---------- */
+.mast{
+  display:flex; flex-wrap:wrap; align-items:baseline; gap:var(--s1) var(--s4);
+  padding:var(--s3) var(--s4) var(--s2);
+  border-bottom:1px solid var(--border);
+}
+.mast h1{
+  font-family:var(--serif); font-weight:600; font-size:26px; letter-spacing:.01em;
+  white-space:nowrap;
+}
+.mast h1 .sub{font-style:italic; color:var(--gold); font-weight:600}
+.tagline{color:var(--muted); font-size:12px}
+.xlinks{display:flex; gap:var(--s1); align-items:center; font-size:11px; letter-spacing:.14em}
+.xlinks a, .xlinks .here{
+  display:inline-flex; align-items:center; min-height:44px; padding:0 10px;
+  text-decoration:none; color:var(--muted); border-bottom:1px solid transparent;
+}
+.xlinks a:hover{color:var(--text); border-bottom-color:var(--muted)}
+.xlinks .here{color:var(--gold); border-bottom-color:var(--gold)}
+.health{
+  margin-left:auto; display:flex; flex-wrap:wrap; gap:var(--s1) var(--s3);
+  font-size:12px; align-items:baseline;
+}
+.health div{display:flex; gap:6px; align-items:baseline}
+.health dt{color:var(--muted); font-size:11px}
+.health dd{color:var(--text); font-weight:500}
+
+/* ---------- banners ---------- */
+.banner{
+  display:flex; gap:var(--s2); align-items:baseline;
+  margin:var(--s2) var(--s4) 0;
+  padding:10px var(--s2);
+  border:1px solid var(--crit); border-left:4px solid var(--crit);
+  background:#1a0e12; color:var(--text); font-size:12.5px;
+}
+.banner b{color:var(--crit); font-weight:500; letter-spacing:.08em}
+.banner[hidden]{display:none}
+.banner.warn{border-color:var(--high); border-left-color:var(--high); background:#1a1410}
+.banner.warn b{color:var(--high)}
+
+/* ---------- layout ---------- */
+main{
+  display:grid; grid-template-columns:minmax(0,1fr) 400px;
+  gap:0; align-items:start;
+}
+.atlas{grid-column:1; position:relative; padding:var(--s2) var(--s2) var(--s2) var(--s3)}
+.dossier{grid-column:2; grid-row:1 / span 2}
+.roster{grid-column:1; padding:0 var(--s2) var(--s4) var(--s3)}
+#sky{width:100%; height:min(62vh,640px); display:block}
+.skyNote{
+  position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  color:var(--muted); font-size:12px; letter-spacing:.1em; text-transform:uppercase;
+  pointer-events:none;
+}
+.skyNote[hidden]{display:none}
+@media (prefers-reduced-motion: no-preference){
+  #sky .field{animation:appear .8s ease-out both}
+  @keyframes appear{from{opacity:0} to{opacity:1}}
+  .w-node{animation:drift 30s ease-in-out infinite alternate}
+  @keyframes drift{
+    from{transform:translate(0,0)}
+    to{transform:translate(var(--dx,4px),var(--dy,-3px))}
+  }
+}
+
+/* node states */
+.halo{opacity:0; transition:opacity .15s ease}
+.hot .halo, .locked .halo{opacity:.30}
+.nlabel{opacity:0; transition:opacity .15s ease; pointer-events:none}
+.hot .nlabel, .locked .nlabel, .always .nlabel{opacity:1}
+.locked .core{stroke-width:2.5}
+.nodebtn{
+  display:block; width:100%; height:100%;
+  border-radius:50%; background:transparent; border:0; cursor:pointer;
+;pointer-events:none}
+.nodebtn:focus-visible{outline:2px solid var(--gold); outline-offset:1px}
+.name-t{font-family:var(--serif); font-style:italic; font-weight:600; font-size:15px; fill:var(--text)}
+.stat-t{font-family:var(--mono); font-size:10.5px; fill:var(--muted)}
+.ctr-t{font-family:var(--mono); fill:var(--muted)}
+
+/* ---------- legend ---------- */
+.legend{
+  margin-top:var(--s1);
+  display:flex; flex-wrap:wrap; gap:var(--s1) var(--s3);
+  padding:var(--s1) var(--s2);
+  border:1px solid var(--border); background:var(--surface);
+  font-size:11px; color:var(--muted); line-height:1.7;
+}
+.legend b{color:var(--text); font-weight:500}
+.legend .gold{color:var(--gold)}
+
+/* ---------- roster ---------- */
+.roster h2{
+  font-family:var(--serif); font-style:italic; font-weight:600; font-size:20px;
+  margin:var(--s3) 0 var(--s1);
+}
+.roster h2 small{font-style:normal; font-family:var(--mono); font-size:11px; color:var(--muted); font-weight:400}
+.sortbar{display:flex; flex-wrap:wrap; gap:var(--s1); align-items:center; margin-bottom:var(--s2)}
+.sortbar span{font-size:10px; color:var(--muted); letter-spacing:.14em; text-transform:uppercase; margin-right:4px}
+.sortbtn{
+  min-height:44px; padding:0 var(--s2); font-size:11px; letter-spacing:.1em;
+  border:1px solid var(--border); background:var(--surface); color:var(--muted);
+}
+.sortbtn:hover{border-color:var(--muted); color:var(--text)}
+.sortbtn[aria-pressed="true"]{border-color:var(--gold); color:var(--gold)}
+.rhead{
+  display:grid; grid-template-columns:34px minmax(0,1.5fr) 110px 120px 110px 70px; gap:var(--s2);
+  padding:4px 12px; font-size:10px; color:var(--muted); letter-spacing:.12em; text-transform:uppercase;
+}
+.rhead span:nth-child(3), .rhead span:nth-child(4), .rhead span:nth-child(5){text-align:right}
+ol.rlist{list-style:none}
+.rowbtn{
+  display:grid; width:100%; text-align:left;
+  grid-template-columns:34px minmax(0,1.5fr) 110px 120px 110px 70px; gap:2px var(--s2); align-items:center;
+  min-height:52px; padding:8px 12px; margin-bottom:4px;
+  border:1px solid var(--border); background:var(--surface);
+}
+.rowbtn:hover{border-color:var(--muted)}
+.rowbtn[aria-pressed="true"]{border-color:var(--gold)}
+.rowbtn .rk{color:var(--muted); font-size:11px}
+.rowbtn .nm{font-family:var(--serif); font-style:italic; font-weight:600; font-size:16px; overflow-wrap:anywhere; line-height:1.25}
+.rowbtn .nm .star{color:var(--gold); font-style:normal; font-size:12px}
+.rowbtn .ad{grid-column:2; font-size:10px; color:var(--muted)}
+.rowbtn .wr{text-align:right; font-size:13px}
+.rowbtn .wr small{color:var(--muted); font-size:10px}
+.rowbtn .pnl{text-align:right; font-size:13px; color:var(--gold); font-weight:500}
+.rowbtn .pnl.neg{color:var(--crit)}
+.rowbtn .seen{text-align:right; font-size:11px; color:var(--muted)}
+.rowbtn .badge{font-size:9.5px; letter-spacing:.1em; color:var(--gold); border:1px solid var(--gold); padding:1px 5px; justify-self:start; white-space:nowrap}
+.rowbtn .badge.dim{color:var(--muted); border-color:var(--border)}
+.rowbtn .wr, .rowbtn .pnl, .rowbtn .seen, .rowbtn .badge{grid-row:1 / span 2}
+details.unproven{margin-top:var(--s3)}
+details.unproven summary{
+  cursor:pointer; list-style:none; display:flex; align-items:center; gap:var(--s1);
+  min-height:44px; padding:0 12px; border:1px solid var(--border); background:var(--surface);
+  font-size:12px; color:var(--muted); letter-spacing:.06em;
+}
+details.unproven summary::before{content:"▸"; color:var(--muted)}
+details.unproven[open] summary::before{content:"▾"}
+details.unproven summary:hover{color:var(--text); border-color:var(--muted)}
+details.unproven ol{margin-top:var(--s1)}
+.empty{
+  border:1px dashed var(--border); padding:var(--s3); color:var(--muted); font-size:12.5px; line-height:1.8;
+}
+.empty b{color:var(--text); font-family:var(--serif); font-style:italic; font-weight:600; font-size:17px; display:block}
+.loading-skel .bar{height:12px; background:var(--surface); border:1px solid var(--border); margin-bottom:10px}
+.loading-skel .bar.w60{width:60%} .loading-skel .bar.w80{width:80%} .loading-skel .bar.w40{width:40%}
+.loading-skel p{color:var(--muted); font-size:11px; letter-spacing:.12em; text-transform:uppercase; margin-bottom:var(--s2)}
+
+/* ---------- dossier ---------- */
+.dossier{
+  border-left:1px solid var(--border);
+  min-height:70vh;
+  padding:var(--s3); position:sticky; top:0;
+  max-height:100vh; overflow:auto;
+  background:var(--bg);
+}
+.dosTop{display:flex; align-items:center; justify-content:space-between; gap:var(--s2);
+  padding-bottom:var(--s2); border-bottom:1px solid var(--border); margin-bottom:var(--s2)}
+.dosLabel{
+  font-family:var(--mono); font-weight:500; font-size:11px; letter-spacing:.22em;
+  color:var(--muted); text-transform:uppercase;
+}
+#dosClose{
+  display:none; min-width:44px; min-height:44px; border:1px solid var(--border);
+  background:var(--surface); color:var(--muted); font-size:14px;
+}
+.dos-kind{font-size:11px; letter-spacing:.18em; color:var(--gold); text-transform:uppercase}
+.dos-kind.dim{color:var(--muted)}
+.dos-name{
+  font-family:var(--serif); font-style:italic; font-weight:600;
+  font-size:28px; line-height:1.15; margin:6px 0 4px;
+  overflow-wrap:anywhere;
+}
+.dos-name .star{color:var(--gold); font-style:normal; font-size:19px}
+.dos-addr{font-size:11px; color:var(--muted); overflow-wrap:anywhere; margin-bottom:var(--s2)}
+.recRow{display:flex; gap:var(--s2); align-items:center; margin:var(--s2) 0}
+.wrRing{flex:0 0 auto}
+.wrRing text{font-family:var(--mono); font-size:14px; font-weight:500; fill:var(--text)}
+.dos-grid{
+  display:grid; grid-template-columns:1fr 1fr; gap:1px; flex:1;
+  background:var(--border); border:1px solid var(--border);
+}
+.dos-grid div{background:var(--surface); padding:8px 12px}
+.dos-grid dt{font-size:10px; color:var(--muted); letter-spacing:.1em; text-transform:uppercase}
+.dos-grid dd{font-size:15px; font-weight:500; margin-top:2px}
+.dos-grid dd small{font-size:11px; color:var(--muted); font-weight:400}
+.criteria{
+  border:1px dashed var(--border); padding:10px var(--s2); margin:var(--s2) 0;
+  font-size:12px; color:var(--muted); line-height:1.8;
+}
+.criteria .ok{color:var(--text)} .criteria .miss{color:var(--high)}
+.dos-h{
+  font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:var(--muted);
+  margin:var(--s3) 0 var(--s1); padding-top:var(--s2); border-top:1px solid var(--border);
+}
+.dos-empty{
+  border:1px dashed var(--border); padding:var(--s2);
+  color:var(--muted); font-size:12px; line-height:1.7;
+}
+.dos-empty b{color:var(--text); font-weight:500}
+.select-hint{padding:var(--s5) var(--s2); text-align:center; color:var(--muted)}
+.select-hint .big{
+  font-family:var(--serif); font-style:italic; font-size:22px; color:var(--text);
+  display:block; margin-bottom:var(--s1);
+}
+.select-hint .orbit{font-size:26px; color:var(--gold); display:block; margin-bottom:var(--s2)}
+
+/* entry list */
+ul.entries{list-style:none}
+.entrybtn{
+  display:grid; width:100%; text-align:left;
+  grid-template-columns:minmax(0,1fr) auto; gap:2px var(--s2); align-items:baseline;
+  min-height:48px; padding:8px 10px; margin-bottom:5px;
+  border:1px solid var(--border); background:var(--surface); font-size:12px;
+}
+.entrybtn:hover{border-color:var(--muted)}
+.entrybtn[aria-pressed="true"]{border-color:var(--gold)}
+.entrybtn .ti{color:var(--text); line-height:1.4; overflow-wrap:anywhere}
+.entrybtn .usd{text-align:right; color:var(--gold); font-weight:500}
+.entrybtn .mt{grid-column:1; color:var(--muted); font-size:10.5px}
+.entrybtn .ago{grid-column:2; text-align:right; color:var(--muted); font-size:10.5px}
+.sev-tag{font-weight:500; letter-spacing:.06em; font-size:10.5px}
+.sev-tag.CRITICAL{color:var(--crit)} .sev-tag.HIGH{color:var(--high)} .sev-tag.LOW{color:var(--low)}
+
+/* book ladder */
+.book{border:1px solid var(--border); background:var(--surface); margin-top:var(--s1)}
+.book .bh{
+  display:grid; grid-template-columns:46px 1fr 1fr; gap:8px;
+  padding:5px 10px; font-size:10px; letter-spacing:.12em; color:var(--muted);
+  border-bottom:1px solid var(--border); text-transform:uppercase;
+}
+.brow{
+  display:grid; grid-template-columns:46px 1fr 1fr; gap:8px;
+  padding:3px 10px; font-size:12px; position:relative;
+}
+.brow .side{font-size:10px; letter-spacing:.1em; align-self:center}
+.brow.ask .side{color:var(--crit)} .brow.bid .side{color:var(--gold)}
+.brow .px{text-align:left} .brow .qty{text-align:right; color:var(--muted)}
+.brow .bar{position:absolute; right:0; top:2px; bottom:2px; opacity:.14; pointer-events:none}
+.brow.ask .bar{background:var(--crit)} .brow.bid .bar{background:var(--gold)}
+.spread{
+  padding:4px 10px; font-size:11px; color:var(--muted);
+  border-top:1px solid var(--border); border-bottom:1px solid var(--border);
+}
+.bookless{font-size:12px; color:var(--muted); padding:var(--s1) 0}
+.bookcap{font-size:10.5px; color:var(--muted); margin-top:4px; overflow-wrap:anywhere}
+
+/* ---------- mini sky (mobile) ---------- */
+.mini{display:none}
+
+/* ---------- footer ---------- */
+footer{
+  border-top:1px solid var(--border); margin-top:var(--s2);
+  padding:var(--s2) var(--s4) var(--s4);
+  font-size:11px; color:var(--muted); line-height:1.8;
+}
+footer b{color:var(--text); font-weight:500}
+
+/* ---------- responsive ---------- */
+@media (max-width:1100px){
+  main{grid-template-columns:minmax(0,1fr) 340px}
+}
+@media (max-width:760px){
+  main{grid-template-columns:1fr; display:block}
+  .atlas{display:none}
+  .mini{display:block; padding:var(--s2) var(--s2) 0}
+  #miniSky{width:100%; height:132px; display:block; border:1px solid var(--border); background:var(--surface)}
+  .roster{padding:0 var(--s2) var(--s4)}
+  .rhead{display:none}
+  .rowbtn{grid-template-columns:28px minmax(0,1fr) auto; min-height:64px}
+  .rowbtn .ad{display:none}
+  .rowbtn .wr{grid-row:auto; grid-column:2; text-align:left; font-size:11px; color:var(--muted)}
+  .rowbtn .pnl{grid-row:1 / span 2; grid-column:3}
+  .rowbtn .seen{display:none}
+  .rowbtn .badge{grid-row:auto; grid-column:2; justify-self:start}
+  .dossier{
+    position:fixed; left:0; right:0; top:auto; bottom:0; z-index:30;
+    grid-column:auto; grid-row:auto;
+    border-left:0; border-top:1px solid var(--gold);
+    min-height:0; max-height:76vh; overflow:auto;
+    transform:translateY(105%); visibility:hidden;
+    box-shadow:0 -10px 30px rgba(0,0,0,.55);
+    padding:var(--s2);
+  }
+  .dossier.open{transform:translateY(0); visibility:visible}
+  #dosClose{display:inline-flex; align-items:center; justify-content:center}
+  .mast{padding:var(--s2)}
+  .mast h1{font-size:21px}
+  .health{margin-left:0; width:100%}
+  .xlinks{width:100%}
+  .banner{margin:var(--s2) var(--s2) 0}
+  footer{padding:var(--s2)}
+  body{font-size:15px}
+}
+@media (prefers-reduced-motion: no-preference){
+  @media (max-width:760px){
+    .dossier{transition:transform .25s ease, visibility .25s}
+  }
+}
+@media (prefers-reduced-motion: reduce){
+  *{animation:none !important; transition:none !important}
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#rosterH">Skip to roster</a>
+
+<header class="mast">
+  <div>
+    <h1>Whale Shark <span class="sub">· Predator Atlas</span></h1>
+    <p class="tagline">proven-wallet ledger · records refreshed every 30 min · UTC</p>
+  </div>
+  <nav class="xlinks" aria-label="Whale Shark pages">
+    <a href="/polyclawd/whale.html">STREAM</a>
+    <a href="/polyclawd/whale-tape.html">TAPE</a>
+    <span class="here" aria-current="page">ATLAS</span>
+  </nav>
+  <dl class="health" aria-label="Ledger vitals">
+    <div><dt>smart</dt><dd id="vSmart">—</dd></div>
+    <div><dt>tracked</dt><dd id="vTracked">—</dd></div>
+    <div><dt>queued</dt><dd id="vQueued">—</dd></div>
+    <div><dt>scan age</dt><dd id="vScan">—</dd></div>
+  </dl>
+</header>
+
+<div class="banner" id="uplinkBanner" role="alert" hidden>
+  <b>UPLINK LOST</b>
+  <span>&mdash; retrying every sweep. Displaying last intercepted data.</span>
+</div>
+<div class="banner warn" id="staleBanner" role="status" hidden>
+  <b>LEDGER STALE</b>
+  <span id="staleMsg"></span>
+</div>
+
+<main>
+  <section class="atlas" aria-labelledby="atlasH">
+    <h2 id="atlasH" class="vh">Smart-money constellation</h2>
+    <svg id="sky" viewBox="0 0 1040 760" role="group"
+         aria-label="Wallet constellation of proven smart-money wallets. Node size scales with realized profit, ring arc shows win rate. Activate a node to open its dossier."></svg>
+    <p class="skyNote" id="skyNote">charting the ledger&hellip;</p>
+    <div class="legend">
+      <span><b>node size</b> = realized PnL (&radic;)</span>
+      <span><b>ring arc</b> = win rate</span>
+      <span><span class="gold">&starf; gold</span> = smart money (proven)</span>
+      <span id="legendNote"></span>
+    </div>
+  </section>
+
+  <section class="mini" aria-hidden="true">
+    <svg id="miniSky" viewBox="0 0 1040 760" preserveAspectRatio="xMidYMid meet"></svg>
+  </section>
+
+  <aside class="dossier" id="dossier" aria-labelledby="dosH">
+    <div class="dosTop">
+      <h2 id="dosH" class="dosLabel">Dossier</h2>
+      <button type="button" id="dosClose" aria-label="Close dossier">&times;</button>
+    </div>
+    <div id="dosBody" aria-live="polite"></div>
+  </aside>
+
+  <section class="roster" aria-labelledby="rosterH">
+    <h2 id="rosterH">The Roster <small id="rosterCount"></small></h2>
+    <div class="sortbar" role="group" aria-label="Sort roster">
+      <span>sort</span>
+      <button type="button" class="sortbtn" data-sort="pnl" aria-pressed="true">REALIZED PNL</button>
+      <button type="button" class="sortbtn" data-sort="wr" aria-pressed="false">WIN RATE</button>
+      <button type="button" class="sortbtn" data-sort="closed" aria-pressed="false">CLOSED</button>
+    </div>
+    <div id="rosterBody">
+      <div class="loading-skel" id="rosterSkel">
+        <p>pulling the ledger&hellip;</p>
+        <div class="bar w80"></div><div class="bar w60"></div><div class="bar w80"></div><div class="bar w40"></div>
+      </div>
+      <div class="rhead" id="rheadSmart" aria-hidden="true" hidden>
+        <span>#</span><span>predator</span><span>win rate</span><span>realized</span><span>last seen</span><span></span>
+      </div>
+      <ol class="rlist" id="smartList"></ol>
+      <details class="unproven" id="unprovenWrap" hidden>
+        <summary id="unprovenSummary">Tracked — unproven</summary>
+        <ol class="rlist" id="unprovenList"></ol>
+      </details>
+      <div class="empty" id="rosterEmpty" hidden>
+        <b>The ledger is empty.</b>
+        Every wallet that drives a flow burst gets queued here; records are pulled from the public
+        positions API every 30 minutes. Nothing tracked yet &mdash; the scanner keeps sweeping.
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <p><b>Smart money</b> = &ge;20 closed positions &middot; &ge;60% win rate &middot; &ge;$500 realized PnL.
+  Records from the public positions API, refreshed every 30 min. Attribution lands only when a tracked
+  wallet led a flagged flow burst.</p>
+  <p>WHALE SHARK surveillance &middot; predator atlas &middot; sibling views:
+  <a href="/polyclawd/whale.html">stream</a> &middot; <a href="/polyclawd/whale-tape.html">tape</a></p>
+</footer>
+
+<script>
+'use strict';
+/* ══════════════════════════════════════════════════════════════
+   WHALE SHARK — PREDATOR ATLAS client.
+   wallets 60s · alerts 60s · stats 60s. Keyed diff render; the
+   locked dossier never moves under a poll.
+   ══════════════════════════════════════════════════════════════ */
+const API = '/polyclawd/api';
+const POLL_MS = 60000, STALE_S = 480, JOIN_HOURS = 24;
+const NODE_PTS=[];
+const SVGNS = "http://www.w3.org/2000/svg";
+const XHTML = "http://www.w3.org/1999/xhtml";
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function fmtUsd(v){ if(v==null||isNaN(v)) return '—'; const a=Math.abs(v);
+  return (v<0?'−$':'$') + Math.round(a).toLocaleString('en-US'); }
+function fmtUsdK(v){ if(v==null||isNaN(v)) return '—'; const a=Math.abs(v); const sg=v<0?'−':'';
+  if(a>=1000) return sg+'$'+(a/1000).toFixed(a>=100000?0:1)+'K';
+  return sg+'$'+Math.round(a); }
+function fmtPct(v){ return (v*100).toFixed(1)+'%'; }
+function shortName(w){
+  const n = w.name || '';
+  if(!n) return shortAddr(w.wallet||'');
+  if(/^0x[0-9a-fA-F]{40}/.test(n)) return n.slice(0,6)+'…'+n.slice(40,44);
+  return n;
+}
+function shortAddr(a){ a=String(a||''); return a.length>12 ? a.slice(0,6)+'…'+a.slice(-4) : a; }
+function fmtAgo(ts){
+  if(ts==null) return '—';
+  const s = Math.max(0, Date.now()/1000 - ts);
+  if(s<90) return Math.round(s)+'s';
+  if(s<5400) return Math.round(s/60)+'m';
+  if(s<129600) return (s/3600).toFixed(1)+'h';
+  return Math.round(s/86400)+'d';
+}
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function el(tag, attrs, parent){
+  const n = document.createElementNS(SVGNS, tag);
+  for(const k in attrs) n.setAttribute(k, attrs[k]);
+  if(parent) parent.appendChild(n);
+  return n;
+}
+function arcPath(cx,cy,r,frac){
+  if(frac>=0.999) frac=0.999; if(frac<0) frac=0;
+  const a0=-Math.PI/2, a1=a0+frac*2*Math.PI;
+  const large = frac>0.5?1:0;
+  return `M ${cx+r*Math.cos(a0)} ${cy+r*Math.sin(a0)} A ${r} ${r} 0 ${large} 1 ${cx+r*Math.cos(a1)} ${cy+r*Math.sin(a1)}`;
+}
+const SEV = {CRITICAL:'▲', HIGH:'◆', LOW:'●'};
+
+/* ── state ─────────────────────────────────────────────────── */
+const S = {
+  wallets: [],            // sorted by realized PnL desc (API order)
+  smart: [], unproven: [],
+  alerts: [],
+  sort: 'pnl',
+  sel: null,              // selected wallet address
+  selEntry: null,         // selected alert id (entry in dossier)
+  book: null,             // {state:'loading'|'ok'|'none', data, market, platform}
+  uplinkOk: true,
+  loadedWallets: false,
+  walletSig: '', alertSig: '',
+  rows: new Map(),        // addr -> {li, refs}
+};
+
+/* ── fetch layer ───────────────────────────────────────────── */
+async function api(path){
+  const r = await fetch(API+path, {cache:'no-store'});
+  if(!r.ok) throw new Error('http '+r.status);
+  return r.json();
+}
+function setUplink(ok){
+  S.uplinkOk = ok;
+  $('#uplinkBanner').hidden = ok;
+}
+
+async function pollWallets(){
+  try{
+    const d = await api('/whale/wallets?limit=100');
+    setUplink(true);
+    const ws = Array.isArray(d) ? d : (d.wallets || []);
+    $('#vSmart').textContent = d.smart_count != null ? d.smart_count : ws.filter(w=>w.smart===1).length;
+    $('#vTracked').textContent = d.tracked != null ? d.tracked : ws.length;
+    $('#vQueued').textContent = d.queued != null ? d.queued : '—';
+    const sig = JSON.stringify(ws.map(w=>[w.wallet,w.name,w.closed_positions,w.wins,w.realized_pnl,w.smart,w.last_seen]));
+    S.loadedWallets = true;
+    if(sig !== S.walletSig){
+      S.walletSig = sig;
+      S.wallets = ws.slice().sort((a,b)=>(b.realized_pnl||0)-(a.realized_pnl||0));
+      S.smart = S.wallets.filter(w=>w.smart===1);
+      S.unproven = S.wallets.filter(w=>w.smart!==1);
+      renderSky(); renderRoster(); refreshDossier();
+    } else {
+      // ranks unchanged; just refresh last-seen ages in place
+      updateAges();
+    }
+    if(!ws.length){ showEmpty(); }
+  }catch(e){
+    setUplink(false);
+    if(!S.loadedWallets){
+      $('#skyNote').textContent = 'uplink lost — no ledger yet';
+    }
+  }
+}
+
+async function pollAlerts(){
+  try{
+    const d = await api('/whale/alerts?limit=200&hours='+JOIN_HOURS);
+    const rows = Array.isArray(d) ? d : (d.alerts || []);
+    const sig = JSON.stringify(rows.map(a=>a.id));
+    if(sig !== S.alertSig){
+      S.alertSig = sig;
+      S.alerts = rows;
+      renderRoster();   // entry counts may shift
+      refreshDossier();
+    }
+  }catch(e){ setUplink(false); }
+}
+
+async function pollStats(){
+  try{
+    const st = await api('/whale/stats');
+    const h = (st && st.health) || {};
+    $('#vScan').textContent = h.last_scan_age_s != null ? Math.round(h.last_scan_age_s)+'s' : '—';
+    const stale = h.last_scan_age_s != null && h.last_scan_age_s > STALE_S;
+    $('#staleBanner').hidden = !stale;
+    if(stale) $('#staleMsg').textContent = '— scanner last completed '+Math.round(h.last_scan_age_s/60)+
+      ' min ago. Last-seen ages and attribution may lag reality.';
+  }catch(e){ /* vitals stay stale */ }
+}
+
+/* ── joins ─────────────────────────────────────────────────── */
+function entriesFor(w){
+  if(!w.name) return [];
+  return S.alerts.filter(a => a.top_wallet_name && a.top_wallet_name === w.name)
+                 .sort((a,b)=>(b.ts||0)-(a.ts||0)).slice(0,12);
+}
+
+/* ── constellation ─────────────────────────────────────────── */
+const W=1040, H=760, CX=520, CY=380;
+function renderSky(){
+  drawSky($('#sky'), true);
+  drawSky($('#miniSky'), false);
+  $('#skyNote').hidden = S.smart.length > 0;
+  if(S.loadedWallets && !S.smart.length)
+    $('#skyNote').textContent = S.wallets.length ? 'no wallet has cleared the smart bar yet' : 'the ledger is empty — scanner sweeping';
+  $('#legendNote').innerHTML = '<b>'+S.smart.length+'</b> proven of <b>'+S.wallets.length+'</b> tracked in view';
+}
+function drawSky(svg, interactive){
+  if(!svg) return;
+  while(svg.firstChild) svg.removeChild(svg.firstChild);
+  const smart = S.smart;
+  if(!smart.length) return;
+  const rnd = mulberry32(7341);
+  const field = el('g', {class:'field'}, svg);
+  if(!svg.__routed){
+    svg.__routed = true;
+    const nearest = (ev)=>{
+      const r = svg.getBoundingClientRect();
+      const sx = (ev.clientX - r.left) * (svg.viewBox.baseVal.width / r.width);
+      const sy = (ev.clientY - r.top) * (svg.viewBox.baseVal.height / r.height);
+      let best = null, bd = 36*36;
+      for(const n of NODE_PTS){
+        const d = (n.x-sx)*(n.x-sx) + (n.y-sy)*(n.y-sy);
+        if(d < bd){ bd = d; best = n; }
+      }
+      return best;
+    };
+    svg.addEventListener('mousemove',(ev)=>{
+      const n = nearest(ev);
+      NODE_PTS.forEach(o=>{ if(o!==n) o.g.classList.remove('hot'); });
+      if(n){ n.g.classList.add('hot'); svg.style.cursor='pointer'; }
+      else svg.style.cursor='';
+    });
+    svg.addEventListener('click',(ev)=>{ const n = nearest(ev); if(n) n.btn.click(); });
+  }
+  const rings = el('g', {'aria-hidden':'true'}, field);
+  [120,210,300].forEach(r=>{
+    el('ellipse',{cx:CX,cy:CY,rx:r,ry:r*0.9,fill:'none',stroke:'#1c2030','stroke-width':1,
+      'stroke-dasharray': r===300?'none':'2 6'},rings);
+  });
+  for(let i=0;i<60;i++){
+    const a=i*Math.PI/30;
+    el('line',{x1:CX+Math.cos(a)*300, y1:CY+Math.sin(a)*300*0.9,
+      x2:CX+Math.cos(a)*(300+(i%5===0?8:4)), y2:CY+Math.sin(a)*(300+(i%5===0?8:4))*0.9,
+      stroke:'#1c2030','stroke-width':1},rings);
+  }
+  // centre emblem
+  const ctr = el('g',{'aria-hidden':'true'},field);
+  el('text',{class:'ctr-t',x:CX,y:CY-6,'text-anchor':'middle','font-size':'11','letter-spacing':'.25em'},ctr).textContent='PREDATOR ATLAS';
+  el('text',{class:'ctr-t',x:CX,y:CY+14,'text-anchor':'middle','font-size':'10'},ctr).textContent=smart.length+' proven · '+S.wallets.length+' tracked';
+
+  const pnls = smart.map(w=>Math.sqrt(Math.max(0,w.realized_pnl||0)));
+  const pMin = Math.min(...pnls), pMax = Math.max(...pnls);
+  const span = (pMax-pMin) || 1;
+  const wg = el('g',{},field);
+  NODE_PTS.length = 0;       // nearest-node pointer routing (dense-scatter pattern)
+  const placedLabels = [];   // collision-skip: dense rings smear adjacent rank labels
+  smart.map((w,i)=>[w,i]).reverse().forEach(([w,i])=>{
+    const baseAng = -Math.PI/2 + i*(2*Math.PI/smart.length);
+    const ang = baseAng + (rnd()-0.5)*0.10;
+    const ringR = 300 + (rnd()-0.5)*28;
+    const nodeR = 11 + 22*((Math.sqrt(Math.max(0,w.realized_pnl||0))-pMin)/span);
+    const x = CX+Math.cos(ang)*ringR, y = CY+Math.sin(ang)*ringR*0.9;
+    const g = el('g',{class:'w-node'},wg);
+    g.style.setProperty('--dx',((rnd()-0.5)*10).toFixed(1)+'px');
+    g.style.setProperty('--dy',((rnd()-0.5)*10).toFixed(1)+'px');
+    if(interactive) g.style.animationDelay = (-(i*2.7)).toFixed(1)+'s';
+    el('circle',{class:'halo',cx:x,cy:y,r:nodeR+13,fill:'var(--gold)'},g);
+    el('circle',{cx:x,cy:y,r:nodeR+5,fill:'none',stroke:'var(--ringbg)','stroke-width':2},g);
+    el('path',{d:arcPath(x,y,nodeR+5,w.win_rate||0),fill:'none',stroke:'var(--gold)','stroke-width':2.5},g);
+    el('circle',{class:'core',cx:x,cy:y,r:nodeR,fill:'#2a2310',stroke:'var(--gold)','stroke-width':1.5},g);
+    el('text',{x:x,y:y+4,'text-anchor':'middle','font-family':'var(--mono)',
+      'font-size': nodeR>16?'11':'9', fill:'var(--gold)'},g).textContent='★';
+    const lab = el('g',{class:'nlabel'},g);
+    const ux = Math.cos(ang), uy = Math.sin(ang);
+    const anchor = ux > 0.35 ? 'start' : ux < -0.35 ? 'end' : 'middle';
+    const lx = x + ux*(nodeR+12);
+    const ty = uy < -0.3 ? y + uy*(nodeR+12) - 22 : y + uy*(nodeR+16) + 14;
+    el('text',{class:'name-t',x:lx,y:ty,'text-anchor':anchor},lab).textContent = shortName(w);
+    el('text',{class:'stat-t',x:lx,y:ty+15,'text-anchor':anchor},lab)
+      .textContent = fmtUsdK(w.realized_pnl)+' · '+Math.round((w.win_rate||0)*100)+'% WR · '+w.closed_positions+' closed';
+    if(interactive && i<12){
+      const bx = anchor==='start' ? lx : anchor==='end' ? lx-160 : lx-80;
+      const box = {x:bx, y:ty-14, w:160, h:34};
+      const hits = placedLabels.some(r => !(box.x+box.w<r.x || r.x+r.w<box.x || box.y+box.h<r.y || r.y+r.h<box.y));
+      if(!hits && placedLabels.length < 8){ g.classList.add('always'); placedLabels.push(box); }
+    }
+    if(interactive){
+      const hit = Math.max(32, nodeR*2+8);
+      const fo = el('foreignObject',{x:x-hit/2,y:y-hit/2,width:hit,height:hit},g);
+      const btn = document.createElementNS(XHTML,'button');
+      btn.className='nodebtn'; btn.dataset.addr=w.wallet;
+      btn.setAttribute('aria-pressed', S.sel===w.wallet ? 'true':'false');
+      btn.setAttribute('aria-label',
+        shortName(w)+', rank '+(i+1)+' of '+smart.length+' smart money. Win rate '+
+        Math.round((w.win_rate||0)*100)+' percent, realized '+fmtUsd(w.realized_pnl)+', '+
+        w.closed_positions+' closed positions. Open dossier.');
+      fo.appendChild(btn);
+      NODE_PTS.push({x, y, btn, g});
+      btn.addEventListener('mouseenter',()=>g.classList.add('hot'));
+      btn.addEventListener('mouseleave',()=>g.classList.remove('hot'));
+      btn.addEventListener('focus',()=>g.classList.add('hot'));
+      btn.addEventListener('blur',()=>g.classList.remove('hot'));
+      btn.addEventListener('click',()=>select(w.wallet));
+      g.dataset.addr = w.wallet;
+      if(S.sel===w.wallet) g.classList.add('locked');
+    }
+  });
+}
+
+/* ── roster ────────────────────────────────────────────────── */
+const SORTS = {
+  pnl:    (a,b)=>(b.realized_pnl||0)-(a.realized_pnl||0),
+  wr:     (a,b)=>((b.win_rate||0)-(a.win_rate||0)) || ((b.closed_positions||0)-(a.closed_positions||0)),
+  closed: (a,b)=>((b.closed_positions||0)-(a.closed_positions||0)) || ((b.realized_pnl||0)-(a.realized_pnl||0)),
+};
+function rowFor(w){
+  let rec = S.rows.get(w.wallet);
+  if(!rec){
+    const li = document.createElement('li');
+    const btn = document.createElement('button');
+    btn.type='button'; btn.className='rowbtn'; btn.dataset.addr=w.wallet;
+    btn.setAttribute('aria-pressed','false');
+    btn.innerHTML =
+      '<span class="rk"></span>'+
+      '<span class="nm"></span>'+
+      '<span class="wr"></span>'+
+      '<span class="pnl"></span>'+
+      '<span class="seen"></span>'+
+      '<span class="badge"></span>'+
+      '<span class="ad"></span>';
+    btn.addEventListener('click',()=>select(w.wallet));
+    li.appendChild(btn);
+    rec = {li, btn,
+      rk:btn.querySelector('.rk'), nm:btn.querySelector('.nm'), wr:btn.querySelector('.wr'),
+      pnl:btn.querySelector('.pnl'), seen:btn.querySelector('.seen'),
+      badge:btn.querySelector('.badge'), ad:btn.querySelector('.ad')};
+    S.rows.set(w.wallet, rec);
+  }
+  return rec;
+}
+function renderRoster(){
+  if(!S.loadedWallets) return;
+  $('#rosterSkel').hidden = true;
+  const empty = !S.wallets.length;
+  $('#rosterEmpty').hidden = !empty;
+  $('#rheadSmart').hidden = empty || !S.smart.length;
+  $('#unprovenWrap').hidden = !S.unproven.length;
+  $('#rosterCount').textContent = empty ? '' :
+    S.smart.length+' smart · '+S.unproven.length+' tracked-unproven';
+  if(empty){ $('#smartList').replaceChildren(); $('#unprovenList').replaceChildren(); return; }
+  const cmp = SORTS[S.sort] || SORTS.pnl;
+  const seen = new Set();
+  const place = (list, arr)=>{
+    const ordered = arr.slice().sort(cmp);
+    ordered.forEach((w,i)=>{
+      const r = rowFor(w);
+      seen.add(w.wallet);
+      const losses = (w.closed_positions||0)-(w.wins||0);
+      const nEntries = entriesFor(w).length;
+      r.rk.textContent = '#'+(i+1);
+      r.nm.innerHTML = (w.smart===1?'<span class="star" aria-hidden="true">★</span> ':'')+esc(shortName(w));
+      r.wr.innerHTML = Math.round((w.win_rate||0)*100)+'% <small>'+(w.wins||0)+'W–'+losses+'L of '+(w.closed_positions||0)+'</small>';
+      r.pnl.textContent = fmtUsdK(w.realized_pnl);
+      r.pnl.classList.toggle('neg',(w.realized_pnl||0)<0);
+      r.seen.textContent = fmtAgo(w.last_seen);
+      r.badge.textContent = w.smart===1 ? '★ SMART' : 'TRACKED';
+      r.badge.classList.toggle('dim', w.smart!==1);
+      r.ad.textContent = shortAddr(w.wallet)+(nEntries?' · '+nEntries+' attributed entr'+(nEntries===1?'y':'ies')+' 24h':'');
+      r.btn.setAttribute('aria-pressed', S.sel===w.wallet?'true':'false');
+      r.btn.setAttribute('aria-label',
+        shortName(w)+', '+(w.smart===1?'smart money':'tracked, unproven')+'. Win rate '+
+        Math.round((w.win_rate||0)*100)+' percent over '+(w.closed_positions||0)+' closed, realized '+
+        fmtUsd(w.realized_pnl)+', last seen '+fmtAgo(w.last_seen)+' ago. Open dossier.');
+      list.appendChild(r.li);   // appendChild reorders in place
+    });
+  };
+  place($('#smartList'), S.smart);
+  place($('#unprovenList'), S.unproven);
+  $('#unprovenSummary').textContent = 'Tracked — unproven ('+S.unproven.length+')';
+  // drop rows for wallets that vanished
+  for(const [addr,rec] of S.rows){ if(!seen.has(addr)){ rec.li.remove(); S.rows.delete(addr); } }
+}
+function updateAges(){
+  for(const w of S.wallets){
+    const r = S.rows.get(w.wallet);
+    if(r) r.seen.textContent = fmtAgo(w.last_seen);
+  }
+}
+function showEmpty(){
+  $('#rosterSkel').hidden = true;
+  $('#rosterEmpty').hidden = false;
+}
+
+document.querySelectorAll('.sortbtn').forEach(b=>{
+  b.addEventListener('click',()=>{
+    S.sort = b.dataset.sort;
+    document.querySelectorAll('.sortbtn').forEach(x=>x.setAttribute('aria-pressed', x===b?'true':'false'));
+    renderRoster();
+  });
+});
+
+/* ── dossier ───────────────────────────────────────────────── */
+const dosBody = $('#dosBody');
+function emptyDossier(){
+  dosBody.innerHTML = `<div class="select-hint">
+    <span class="orbit" aria-hidden="true">✦</span>
+    <span class="big">Select a predator.</span>
+    <p>Open any wallet to read its file —<br>record, criteria, recent entries,<br>and the live book on what it touched.</p>
+    <p style="margin-top:16px;font-size:11px">Esc clears the lock.</p>
+  </div>`;
+}
+function clearPressed(){
+  document.querySelectorAll('[data-addr][aria-pressed="true"]').forEach(b=>b.setAttribute('aria-pressed','false'));
+  document.querySelectorAll('#sky .locked').forEach(g=>g.classList.remove('locked'));
+}
+function select(addr){
+  if(S.sel !== addr){ S.selEntry = null; S.book = null; }
+  S.sel = addr;
+  clearPressed();
+  document.querySelectorAll('[data-addr]').forEach(n=>{
+    if(n.dataset.addr !== addr) return;
+    if(n.tagName==='BUTTON') n.setAttribute('aria-pressed','true');
+    if(n.classList && n.classList.contains('w-node')) n.classList.add('locked');
+  });
+  document.querySelectorAll('#sky [data-addr="'+(window.CSS&&CSS.escape?CSS.escape(addr):addr)+'"]').forEach(g=>{
+    if(g.classList.contains('w-node')) g.classList.add('locked');
+  });
+  renderDossier();
+  $('#dossier').classList.add('open');
+  if(window.innerWidth>760) $('#dossier').scrollIntoView({block:'nearest'});
+}
+function clearSel(){
+  S.sel=null; S.selEntry=null; S.book=null;
+  clearPressed(); emptyDossier();
+  $('#dossier').classList.remove('open');
+}
+$('#dosClose').addEventListener('click', clearSel);
+document.addEventListener('keydown',e=>{ if(e.key==='Escape' && S.sel) clearSel(); });
+
+function refreshDossier(){ if(S.sel) renderDossier(); }
+
+function renderDossier(){
+  const w = S.wallets.find(x=>x.wallet===S.sel);
+  if(!w){ emptyDossier(); return; }
+  const gold = w.smart===1;
+  const losses = (w.closed_positions||0)-(w.wins||0);
+  const wr = w.win_rate||0;
+  const entries = entriesFor(w);
+
+  let criteriaHtml = '';
+  if(!gold){
+    const c1 = (w.closed_positions||0)>=20, c2 = wr>=0.6, c3 = (w.realized_pnl||0)>=500;
+    criteriaHtml = `<div class="criteria">Not yet proven — the smart bar needs
+      <span class="${c1?'ok':'miss'}">≥20 closed (${w.closed_positions||0})</span> ·
+      <span class="${c2?'ok':'miss'}">≥60% win rate (${Math.round(wr*100)}%)</span> ·
+      <span class="${c3?'ok':'miss'}">≥$500 realized (${fmtUsd(w.realized_pnl)})</span>.</div>`;
+  }
+
+  let entriesHtml;
+  if(entries.length){
+    entriesHtml = '<ul class="entries">'+entries.map(a=>{
+      const sevG = SEV[a.severity]||SEV.LOW;
+      return `<li><button type="button" class="entrybtn" data-eid="${esc(a.id)}"
+        aria-pressed="${S.selEntry===a.id?'true':'false'}"
+        aria-label="Entry: ${esc(a.title||a.market)}. Severity ${esc(a.severity||'LOW')}${a.top_wallet_usd!=null?', size '+fmtUsd(a.top_wallet_usd):''}, ${fmtAgo(a.ts)} ago. Pull the live order book.">
+        <span class="ti">${esc(a.title||a.market)}</span>
+        <span class="usd">${a.top_wallet_usd!=null?fmtUsd(a.top_wallet_usd):''}</span>
+        <span class="mt"><span class="sev-tag ${esc(a.severity||'LOW')}">${sevG} ${esc(a.severity||'LOW')}</span> · ${esc(a.platform||'')}</span>
+        <span class="ago">${fmtAgo(a.ts)} ago</span>
+      </button></li>`;
+    }).join('')+'</ul>';
+  } else {
+    entriesHtml = `<div class="dos-empty"><b>No attributed entries in the last 24h.</b><br>
+      Attribution only exists when this wallet led a flagged flow burst — quiet is honest, not missing data.</div>`;
+  }
+
+  dosBody.innerHTML = `
+    <p class="dos-kind ${gold?'':'dim'}">${gold?'★ smart money':'tracked · unproven'} — predator file</p>
+    <p class="dos-name">${gold?'<span class="star" aria-hidden="true">★</span> ':''}${esc(shortName(w))}</p>
+    <p class="dos-addr" title="${esc(w.wallet)}">${esc(shortAddr(w.wallet))} · last seen ${fmtAgo(w.last_seen)} ago</p>
+    <div class="recRow">
+      <svg class="wrRing" width="76" height="76" viewBox="0 0 76 76" role="img"
+           aria-label="Win rate ${fmtPct(wr)}: ${w.wins||0} wins, ${losses} losses">
+        <circle cx="38" cy="38" r="31" fill="none" stroke="var(--ringbg)" stroke-width="5"/>
+        <path d="${arcPath(38,38,31,wr)}" fill="none" stroke="${gold?'var(--gold)':'var(--dim)'}" stroke-width="5"/>
+        <text x="38" y="43" text-anchor="middle">${Math.round(wr*100)}%</text>
+      </svg>
+      <dl class="dos-grid">
+        <div><dt>Realized PnL</dt><dd>${fmtUsd(w.realized_pnl)}</dd></div>
+        <div><dt>Closed</dt><dd>${w.closed_positions||0} <small>positions</small></dd></div>
+        <div><dt>Record</dt><dd>${w.wins||0}W <small>– ${losses}L</small></dd></div>
+        <div><dt>Win rate</dt><dd>${fmtPct(wr)}</dd></div>
+      </dl>
+    </div>
+    ${criteriaHtml}
+    <h3 class="dos-h">Recent entries — 24h attribution</h3>
+    ${entriesHtml}
+    <h3 class="dos-h">Live book</h3>
+    <div id="bookSlot">${bookSlotHtml()}</div>`;
+
+  dosBody.querySelectorAll('.entrybtn').forEach(b=>{
+    b.addEventListener('click',()=>selectEntry(b.dataset.eid));
+  });
+}
+
+function bookSlotHtml(){
+  if(!S.selEntry) return '<p class="bookless">— select an entry above to pull its live depth ladder.</p>';
+  if(!S.book || S.book.state==='loading') return '<p class="bookless">pulling book…</p>';
+  if(S.book.state==='none') return '<p class="bookless">— no depth on this market right now.</p>';
+  return bookLadder(S.book.data) +
+    `<p class="bookcap">${esc(S.book.platform)} · ${esc(S.book.market)} · 10s server cache</p>`;
+}
+
+let bookSeq = 0;
+async function selectEntry(eid){
+  const a = S.alerts.find(x=>String(x.id)===String(eid));
+  if(!a) return;
+  S.selEntry = a.id;
+  S.book = {state:'loading'};
+  dosBody.querySelectorAll('.entrybtn').forEach(b=>
+    b.setAttribute('aria-pressed', String(b.dataset.eid)===String(a.id)?'true':'false'));
+  const slot = $('#bookSlot'); if(slot) slot.innerHTML = bookSlotHtml();
+  const seq = ++bookSeq;
+  try{
+    const d = await api('/whale/book?platform='+encodeURIComponent(a.platform||'')+'&market='+encodeURIComponent(a.market||''));
+    if(seq !== bookSeq) return;   // a newer pull superseded this one
+    const ok = d && ((d.bids&&d.bids.length) || (d.asks&&d.asks.length));
+    S.book = ok ? {state:'ok', data:d, market:a.market, platform:a.platform||''} : {state:'none'};
+  }catch(e){
+    if(seq !== bookSeq) return;
+    S.book = {state:'none'};
+  }
+  const slot2 = $('#bookSlot'); if(slot2) slot2.innerHTML = bookSlotHtml();
+}
+
+function bookLadder(book){
+  const bids = (book.bids||[]), asks = (book.asks||[]);
+  const maxQty = Math.max(1, ...bids.map(b=>b[1]), ...asks.map(a=>a[1]));
+  const askRows = asks.slice(0,12).reverse().map(([p,q])=>
+    `<div class="brow ask"><span class="side">ASK</span><span class="px">${Number(p).toFixed(2)}</span><span class="qty">${Number(q).toLocaleString('en-US')}</span><span class="bar" style="width:${(q/maxQty*82).toFixed(1)}%"></span></div>`).join('');
+  const bidRows = bids.slice(0,12).map(([p,q])=>
+    `<div class="brow bid"><span class="side">BID</span><span class="px">${Number(p).toFixed(2)}</span><span class="qty">${Number(q).toLocaleString('en-US')}</span><span class="bar" style="width:${(q/maxQty*82).toFixed(1)}%"></span></div>`).join('');
+  const spread = (asks[0] && bids[0])
+    ? `<div class="spread">spread ${(asks[0][0]-bids[0][0]).toFixed(2)} · mid ${((asks[0][0]+bids[0][0])/2).toFixed(3)}</div>` : '';
+  return `<div class="book" role="table" aria-label="Order book ladder, ${asks.length} ask levels, ${bids.length} bid levels">
+    <div class="bh"><span>side</span><span>price</span><span style="text-align:right">qty</span></div>
+    ${askRows}${spread}${bidRows}
+  </div>`;
+}
+
+/* ── boot ──────────────────────────────────────────────────── */
+emptyDossier();
+pollWallets(); pollAlerts(); pollStats();
+setInterval(pollWallets, POLL_MS);
+setInterval(pollAlerts, POLL_MS);
+setInterval(pollStats, POLL_MS);
+</script>
+</body>
+</html>

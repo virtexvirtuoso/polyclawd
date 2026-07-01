@@ -17,12 +17,10 @@ import logging
 import os
 import sqlite3
 import sys
-import time
 import urllib.request
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
-from dataclasses import dataclass, asdict
 
 logger = logging.getLogger("hf_paper_trader")
 
@@ -46,32 +44,15 @@ ALERT_MIN_CONFIDENCE = 0.60  # Only alert on >= 60% confidence
 
 
 def _send_alert(message: str, silent: bool = False):
-    """Send alert via OpenClaw gateway to Telegram."""
+    """Send alert via polyclawd bot (alert_formatter → direct Bot API)."""
     if not ALERT_ENABLED:
         return
     try:
-        payload = json.dumps({
-            "action": "send",
-            "channel": "telegram",
-            "message": message,
-            "silent": silent,
-        }).encode()
-        req = urllib.request.Request(
-            f"{OPENCLAW_GATEWAY}/api/message",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=5)
+        from scripts.alert_formatter import send_telegram
+        send_telegram(message)
+        return
     except Exception as e:
-        # Fallback: write alert to a file the watchdog can pick up
-        try:
-            alert_file = Path(__file__).parent.parent / "data" / "hf_alerts.jsonl"
-            with open(alert_file, "a") as f:
-                f.write(json.dumps({"message": message, "ts": datetime.now(timezone.utc).isoformat()}) + "\n")
-        except:
-            pass
-        logger.debug(f"Alert send failed (non-critical): {e}")
+        logger.debug(f"HF alert send failed: {e}")
 
 
 # ============================================================================
@@ -230,6 +211,12 @@ def open_hf_paper_position(
             entry_price = market["no_price"]
         
         # Build signal dict in paper_portfolio format
+        # Microstructure-triggered archetypes pass K1 kill switch.
+        # cascade/smart_money_squeeze → intraday_updown_panic (allowed)
+        # All others → intraday_updown (blocked by K1 — conservative until data validates)
+        _PANIC_TRIGGERS = {"cascade", "smart_money_squeeze", "orderbook_cliff"}
+        hf_archetype = "intraday_updown_panic" if trigger_type in _PANIC_TRIGGERS else "intraday_updown"
+
         signal = {
             "market_id": market["market_id"],
             "market_title": market["question"],
@@ -240,7 +227,7 @@ def open_hf_paper_position(
             "confidence": confidence,
             "edge_pct": edge_pct,
             "bet_size": bet_size,
-            "archetype": "hf_crypto",
+            "archetype": hf_archetype,
             "strategy": f"hf_{trigger_type}",
             "market_slug": market.get("slug", ""),
         }
@@ -272,7 +259,7 @@ def open_hf_paper_position(
                 try:
                     from signals.discord_alerts import alert_position_opened
                     slug = market.get("slug", "")
-                    mkt_url = f"https://polymarket.com/event/{slug}" if slug else ""
+                    mkt_url = f"https://polymarket.com/market/{slug}" if slug else ""
                     alert_position_opened(
                         market["question"], "YES" if direction == "UP" else "NO",
                         entry_price, bet_size, f"hf_{trigger_type}",
@@ -618,6 +605,19 @@ def resolve_hf_positions() -> Dict:
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
+        
+        # Ensure table exists (resolve can run before process on first cycle)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS hf_paper_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id TEXT, asset TEXT, direction TEXT,
+                trigger_type TEXT, strength TEXT, confidence REAL,
+                edge_pct REAL, bet_size REAL, entry_price REAL,
+                market_question TEXT, market_end_time TEXT,
+                outcome TEXT, pnl REAL,
+                opened_at TEXT, resolved_at TEXT
+            )
+        """)
         
         # Get unresolved HF trades
         open_trades = conn.execute(

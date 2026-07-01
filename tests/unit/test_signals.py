@@ -1,18 +1,14 @@
 """Unit tests for signals router - signal aggregation, whale tracking, and confidence scoring."""
 import json
-from datetime import datetime
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
-from fastapi.testclient import TestClient
 
 from api.routes.signals import (
     router,
     load_predictor_stats,
     save_predictor_stats,
     load_source_outcomes,
-    save_source_outcomes,
     get_source_win_rate,
     record_outcome,
     load_conflict_history,
@@ -22,8 +18,6 @@ from api.routes.signals import (
     get_inverse_whale_signals,
     get_smart_money_flow,
     aggregate_all_signals,
-    DATA_DIR,
-    STORAGE_DIR,
 )
 
 

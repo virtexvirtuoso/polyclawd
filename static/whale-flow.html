@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Whale Flow — Polyclawd</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --abyss:#0a0a0f; --deep:#060b14; --mid:#0e0f16; --border:#1d2030;
+  --text:#e7eaf2; --dim:#8d93a8; --faint:#7d859e;
+  --crit:#ff3b52; --crit-glow:rgba(255,59,82,.55);
+  --high:#f0a050; --high-glow:rgba(240,160,80,.45);
+  --low:#4ecdc4; --low-glow:rgba(78,205,196,.35);
+  --yes:#00d68f; --no:#f65164; --gold:#ffd700;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:40;
+  background:repeating-linear-gradient(0deg,rgba(160,180,220,.022) 0 1px,transparent 1px 4px)}
+::selection{background:var(--crit);color:#fff}
+h1 em{font-style:normal;color:var(--crit)}
+html,body{height:100%}
+body{
+  background:var(--abyss); color:var(--text); overflow:hidden;
+  font-family:'IBM Plex Mono',ui-monospace,monospace; font-size:13px;
+}
+/* ── depth atmosphere behind everything ── */
+#bg{position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:
+    radial-gradient(120% 60% at 50% -10%, rgba(45,140,212,.10), transparent 60%),
+    linear-gradient(180deg, #0b0c12 0%, #0a0a0f 35%, #08080c 70%, #060608 100%);}
+#bg::after{content:"";position:absolute;inset:0;opacity:.05;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.6'/%3E%3C/svg%3E");}
+
+.shell{position:relative;z-index:1;display:flex;flex-direction:column;height:100vh}
+
+/* ── masthead ── */
+header{display:flex;align-items:center;gap:18px;padding:14px 22px 10px;flex-wrap:wrap}
+h1{font-family:'Big Shoulders Display','Arial Narrow',sans-serif;text-transform:uppercase;font-weight:800;font-size:24px;font-weight:700;letter-spacing:.04em;
+   display:flex;align-items:center;gap:10px}
+h1 .fin{color:var(--low)}
+.sonar{width:9px;height:9px;border-radius:50%;background:var(--low);position:relative;flex:0 0 auto}
+.sonar::after{content:"";position:absolute;inset:-5px;border-radius:50%;
+  border:1px solid var(--low);animation:ping 2.2s ease-out infinite}
+.sonar.stale{background:var(--crit)} .sonar.stale::after{border-color:var(--crit)}
+@keyframes ping{0%{transform:scale(.4);opacity:.9}100%{transform:scale(1.8);opacity:0}}
+.pills{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
+.pill{font-size:11px;color:var(--dim);border:1px solid var(--border);
+  background:rgba(14,15,22,.7);border-radius:999px;padding:4px 12px;backdrop-filter:blur(4px)}
+.pill b{color:var(--text);font-weight:700}
+.pill b.c{color:var(--crit)} .pill b.h{color:var(--high)} .pill b.l{color:var(--low)}
+
+/* ── controls ── */
+.controls{display:flex;align-items:center;gap:10px;padding:0 22px 8px;flex-wrap:wrap}
+.chip{cursor:pointer;user-select:none;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  padding:5px 12px;border-radius:6px;border:1px solid var(--border);color:var(--dim);
+  background:rgba(14,15,22,.6);transition:all .15s}
+.chip:hover{color:var(--text);border-color:#23406e}
+.chip.on{color:var(--text);border-color:transparent}
+.chip.on[data-sev="CRITICAL"]{background:rgba(255,59,82,.16);box-shadow:0 0 14px rgba(255,59,82,.25);color:var(--crit)}
+.chip.on[data-sev="HIGH"]{background:rgba(240,160,80,.14);box-shadow:0 0 14px rgba(240,160,80,.2);color:var(--high)}
+.chip.on[data-sev="LOW"]{background:rgba(78,205,196,.12);box-shadow:0 0 14px rgba(78,205,196,.18);color:var(--low)}
+.chip.on[data-plat]{background:rgba(45,140,212,.14);color:#8d93a8}
+.sep{width:1px;height:18px;background:var(--border)}
+.minusd{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:11px}
+.minusd input{accent-color:var(--low);width:130px}
+.minusd b{color:var(--gold);min-width:52px;display:inline-block}
+.nav{margin-left:auto;display:flex;gap:14px}
+.nav a{color:var(--faint);text-decoration:none;font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+.nav a:hover{color:var(--low)}
+
+/* ── stage: canvas + tape ── */
+.stage{flex:1;display:flex;min-height:0;padding:0 22px 18px;gap:14px}
+.tank{flex:1;position:relative;border:1px solid var(--border);border-radius:14px;overflow:hidden;
+  background:linear-gradient(180deg, rgba(17,19,28,.25) 0%, rgba(10,11,16,.4) 30%, rgba(6,6,8,.7) 100%);}
+canvas{display:block;width:100%;height:100%;cursor:crosshair}
+.depthlbl{position:absolute;left:10px;font-size:10px;color:var(--faint);letter-spacing:.12em;pointer-events:none}
+.axislbl{position:absolute;bottom:6px;font-size:10px;color:var(--faint);letter-spacing:.12em;pointer-events:none}
+
+/* tooltip card */
+#tip{position:absolute;display:none;z-index:5;max-width:340px;pointer-events:none;
+  background:rgba(11,12,18,.92);border:1px solid #272b40;border-radius:10px;
+  padding:10px 12px;backdrop-filter:blur(6px);box-shadow:0 8px 30px rgba(0,0,0,.6)}
+#tip .t{font-family:'Big Shoulders Display','Arial Narrow',sans-serif;font-weight:600;font-size:13px;margin-bottom:4px}
+#tip .m{color:var(--faint);font-size:10px;margin-bottom:6px;word-break:break-all}
+#tip .row{display:flex;justify-content:space-between;gap:14px;font-size:11px;color:var(--dim);padding:1px 0}
+#tip .row b{color:var(--text);font-weight:500}
+#tip .sig{margin-top:6px;font-size:10px;color:var(--faint);word-break:break-word}
+#tip .sev{display:inline-block;padding:1px 8px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:.08em}
+
+/* ── tape ── */
+.tape{width:330px;flex:0 0 330px;display:flex;flex-direction:column;border:1px solid var(--border);
+  border-radius:14px;background:rgba(13,14,21,.55);backdrop-filter:blur(6px);overflow:hidden}
+.tape h2{font-family:'Big Shoulders Display','Arial Narrow',sans-serif;font-size:12px;letter-spacing:.18em;color:var(--dim);
+  text-transform:uppercase;padding:12px 14px 8px;border-bottom:1px solid var(--border)}
+.tape h2 span{color:var(--low)}
+#tapeList{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#272b40 transparent}
+.trow{padding:9px 14px;border-bottom:1px solid rgba(29,32,48,.6);cursor:pointer;transition:background .12s;
+  animation:drop .4s ease both}
+@keyframes drop{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+.trow:hover{background:rgba(23,26,38,.35)}
+.trow .l1{display:flex;align-items:center;gap:8px;font-size:10px;color:var(--faint)}
+.trow .dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+.trow .usd{margin-left:auto;color:var(--gold);font-weight:700;font-size:11px}
+.trow .ttl{font-size:12px;color:var(--text);margin:3px 0 2px;line-height:1.35;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.trow .fl{font-size:10px;color:var(--dim)}
+.trow .fl .y{color:var(--yes)} .trow .fl .n{color:var(--no)}
+.empty{padding:30px 16px;color:var(--faint);text-align:center;font-size:11px;line-height:1.8}
+@media (max-width:980px){
+  .stage{flex-direction:column;padding:0 8px 8px;gap:8px}
+  .tape{width:100%;flex:none;max-height:50vh;border-radius:10px}
+  .tank{min-height:35vh}
+  header{padding:8px 10px 4px;gap:6px}
+  h1{font-size:16px;gap:6px}
+  .sonar{width:7px;height:7px}
+  .pills{font-size:11px;gap:4px}
+  .pill{padding:3px 9px}
+  /* wrap controls instead of side-scrolling so the view toggle is never hidden off-screen */
+  .controls{padding:0 10px 6px;gap:6px;flex-wrap:wrap;overflow-x:visible}
+  /* legible labels + 36px tap targets (was 9px / ~18px) */
+  .chip{font-size:12px;padding:8px 11px;white-space:nowrap;min-height:36px;display:inline-flex;align-items:center;letter-spacing:.04em}
+  .mob-toggle{order:-1}                 /* surface the 'Tape / Chart' toggle first */
+  .minusd{font-size:12px}
+  .minusd input{width:120px;height:28px}
+  .sep{display:none}
+  .nav{display:none}
+  #tip{max-width:85vw;font-size:12px;padding:10px 12px;pointer-events:auto}
+  #tip .t{font-size:14px}
+  #tip .row{font-size:12px;padding:3px 0}
+  #tip .m{font-size:11px}
+  #tip .sig{font-size:11px}
+  #tip .open-btn{display:block;margin-top:8px;padding:8px 0;text-align:center;
+    background:rgba(45,140,212,.2);border:1px solid rgba(45,140,212,.3);
+    border-radius:8px;color:var(--low);font-size:12px;font-weight:600;letter-spacing:.05em}
+  .trow{padding:12px 12px}
+  .trow .l1{font-size:12px}
+  .trow .ttl{font-size:13px}
+  .trow .fl{font-size:12px}
+  .trow .usd{font-size:12px}
+  .empty{font-size:12px;padding:20px 12px}
+  /* keep the last row clear of the fixed whale-nav dock (~37px tall, 14px offset) */
+  #tapeList{padding-bottom:calc(64px + env(safe-area-inset-bottom))}
+}
+/* ── round-2 mobile UX: reduced-motion, landscape, segmented toggle, stale banner, sevtag, skeleton, detail sheet ── */
+@media (prefers-reduced-motion: reduce){
+  .trow{animation:none}
+  .sonar::after{animation:none}
+  .sheet{transition:none}
+  .sheet-backdrop{transition:none}
+  .skel i{animation:none}
+}
+/* segmented Tape | Chart control (mobile only; shown by JS) */
+.mobseg{display:none;align-items:stretch;border:1px solid var(--border);border-radius:8px;overflow:hidden;order:-1}
+.mobseg button{font:inherit;cursor:pointer;border:0;background:transparent;color:var(--dim);
+  font-size:12px;letter-spacing:.06em;text-transform:uppercase;padding:8px 14px;min-height:36px}
+.mobseg button.on{background:rgba(78,205,196,.16);color:var(--low)}
+/* one-letter severity tag (non-colour-only encoding) */
+.sevtag{font-weight:700;font-size:10px;letter-spacing:.04em;padding:1px 5px;border-radius:3px;line-height:1.5}
+/* stale-scan banner */
+.stale-banner{display:none;margin:2px 12px 6px;padding:7px 12px;border-radius:8px;font-size:12px;font-weight:600;
+  letter-spacing:.03em;color:var(--crit);background:rgba(255,59,82,.1);border:1px solid rgba(255,59,82,.3)}
+.stale-banner.show{display:block}
+/* loading skeleton */
+.skel{padding:12px 14px;border-bottom:1px solid rgba(29,32,48,.6)}
+.skel i{display:block;height:10px;border-radius:4px;background:linear-gradient(90deg,#15171f,#1d2030,#15171f);
+  background-size:200% 100%;animation:shimmer 1.2s linear infinite;margin:5px 0}
+@keyframes shimmer{from{background-position:200% 0}to{background-position:-200% 0}}
+/* ── bottom-sheet detail card (mobile) ── */
+.sheet-wrap{position:fixed;inset:0;z-index:10000;display:flex;align-items:flex-end}
+.sheet-wrap[hidden]{display:none}
+.sheet-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.55);opacity:0;transition:opacity .22s}
+.sheet-wrap.open .sheet-backdrop{opacity:1}
+.sheet{position:relative;width:100%;max-height:85vh;overflow-y:auto;background:#0e0f16;
+  border-top:1px solid var(--border);border-radius:16px 16px 0 0;
+  padding:8px 18px calc(20px + env(safe-area-inset-bottom));
+  transform:translateY(101%);transition:transform .26s cubic-bezier(.4,0,.2,1)}
+.sheet-wrap.open .sheet{transform:translateY(0)}
+.sheet-handle{width:38px;height:4px;border-radius:2px;background:#333a4d;margin:6px auto 12px}
+.sheet .sev{display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:.08em}
+.sheet .t{font-family:'Big Shoulders Display','Arial Narrow',sans-serif;font-weight:600;font-size:17px;margin:8px 0 4px;line-height:1.25}
+.sheet .m{color:var(--faint);font-size:11px;margin-bottom:10px;word-break:break-all}
+.sheet .row{display:flex;justify-content:space-between;gap:14px;font-size:13px;color:var(--dim);padding:6px 0;border-top:1px solid rgba(29,32,48,.5)}
+.sheet .row b{color:var(--text);font-weight:600}
+.sheet .sig{margin:10px 0 0;font-size:12px;color:var(--faint);line-height:1.5;word-break:break-word}
+.sheet-open{display:block;margin-top:14px;padding:14px 0;text-align:center;text-decoration:none;
+  font-size:14px;font-weight:700;letter-spacing:.04em;border-radius:10px;
+  background:rgba(78,205,196,.16);color:var(--low);border:1px solid rgba(78,205,196,.35)}
+.sheet-pick{display:block;width:100%;text-align:left;cursor:pointer;font:inherit;color:var(--text);
+  background:rgba(20,22,31,.6);border:1px solid var(--border);border-radius:8px;padding:11px 12px;margin:6px 0}
+.sheet-pick .pk2{display:block;color:var(--dim);font-size:11px;margin-top:3px}
+.sheet-title{font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);margin:2px 0 8px}
+@media (max-width:980px) and (orientation:landscape){
+  .tank{display:none !important}
+  .tape{max-height:none !important;display:flex !important;flex:1}
+  header{padding:6px 10px 2px}
+  .controls{padding:0 10px 4px}
+}
+</style>
+</head>
+<body>
+<div id="bg"></div>
+<div class="shell">
+  <header>
+    <h1><span class="sonar" id="sonar"></span>WHALE<em>//</em>FLOW</h1>
+    <div class="pills">
+      <span class="pill">24h <b class="c" id="cCrit">–</b> crit · <b class="h" id="cHigh">–</b> high · <b class="l" id="cLow">–</b> low</span>
+      <span class="pill">window $ <b id="cUsd">–</b></span>
+      <span class="pill">scan <b id="cAge">–</b></span>
+    </div>
+  </header>
+
+  <div class="stale-banner" id="staleBanner"></div>
+
+  <div class="controls">
+    <span class="chip on" data-sev="CRITICAL">Critical</span>
+    <span class="chip on" data-sev="HIGH">High</span>
+    <span class="chip" data-sev="LOW">Low</span>
+    <span class="sep"></span>
+    <span class="chip on" data-plat="kalshi">Kalshi</span>
+    <span class="chip on" data-plat="polymarket">Polymarket</span>
+    <span class="sep"></span>
+    <label class="minusd">min flow <input type="range" id="minUsd" min="0" max="4" step="0.1" value="2">
+      <b id="minUsdLbl">$100</b></label>
+    <span class="mobseg" id="mobSeg">
+      <button type="button" class="on" data-view="tape">Tape</button>
+      <button type="button" data-view="chart">Chart</button>
+    </span>
+  </div>
+
+  <div class="stage">
+    <div class="tank" id="tank">
+      <canvas id="cv"></canvas>
+      <div id="tip"></div>
+    </div>
+    <aside class="tape">
+      <h2>Live tape <span id="tapeN"></span></h2>
+      <div id="tapeList"><div class="skel"><i style="width:60%"></i><i style="width:90%"></i><i style="width:40%"></i></div><div class="skel"><i style="width:55%"></i><i style="width:85%"></i><i style="width:45%"></i></div><div class="skel"><i style="width:65%"></i><i style="width:80%"></i><i style="width:35%"></i></div></div>
+    </aside>
+  </div>
+</div>
+
+<div class="sheet-wrap" id="sheetWrap" hidden>
+  <div class="sheet-backdrop" id="sheetBackdrop"></div>
+  <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="Alert detail">
+    <div class="sheet-handle"></div>
+    <div id="sheetBody"></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const API = '/polyclawd/api';
+const HOURS = 12;                       // time window on the X axis
+const MAX_BUF = 2000;                   // rolling-history buffer cap (bounds memory)
+const RENDER_CAP_DESKTOP = 600, RENDER_CAP_MOBILE = 250;  // max orbs drawn per frame
+const SEV_COLOR = {CRITICAL:'#ff3b52', HIGH:'#f0a050', LOW:'#4ecdc4'};
+const SEV_GLOW  = {CRITICAL:'rgba(255,59,82,', HIGH:'rgba(240,160,80,', LOW:'rgba(78,205,196,'};
+
+const state = {
+  alerts: [],                            // newest-first view of the rolling buffer
+  buf: new Map(),                        // id -> alert, accumulated across polls (rolling history)
+  orbs: [],                              // renderable
+  sev: new Set(['CRITICAL','HIGH']),
+  plat: new Set(['kalshi','polymarket']),
+  minUsd: 100,
+  hover: null,
+  seenIds: new Set(),
+};
+
+/* ── data ── */
+async function fetchAlerts(){
+  try{
+    const r = await fetch(`${API}/whale/alerts?hours=${HOURS}&limit=200`);
+    const d = await r.json();
+    const incoming = d.alerts || [];
+    const cutoff = Date.now()/1000 - HOURS*3600;
+    const fresh = [];
+    for(const a of incoming){
+      if(a.ts && a.ts < cutoff) continue;
+      if(!state.seenIds.has(a.id)) fresh.push(a);
+      state.buf.set(a.id, a);                 // accumulate across polls (rolling history)
+    }
+    for(const [id,a] of state.buf){ if(a.ts && a.ts < cutoff) state.buf.delete(id); }  // drop >12h
+    if(state.buf.size > MAX_BUF){             // bound memory: evict oldest
+      const old=[...state.buf.values()].sort((x,y)=>(x.ts||0)-(y.ts||0));
+      for(let i=0,n=state.buf.size-MAX_BUF; i<n; i++) state.buf.delete(old[i].id);
+    }
+    state.alerts = [...state.buf.values()].sort((a,b)=>(b.ts||0)-(a.ts||0));  // newest first
+    rebuildOrbs(fresh);
+    renderTape();
+    startLoop();
+    const c = d.counts || {};
+    el('cCrit').textContent = c.CRITICAL ?? 0;
+    el('cHigh').textContent = c.HIGH ?? 0;
+    el('cLow').textContent  = c.LOW ?? 0;
+    const usd = state.alerts.reduce((s,a)=>s+(a.flow_dollars||0),0);
+    el('cUsd').textContent = fmtUsd(usd);
+  }catch(e){ console.error(e); }
+}
+async function fetchStats(){
+  try{
+    const d = await (await fetch(`${API}/whale/stats`)).json();
+    const age = d.health?.last_scan_age_s;
+    const ageTxt = age==null ? 'n/a' : age<120 ? age+'s ago' : Math.round(age/60)+'m ago';
+    el('cAge').textContent = ageTxt;
+    const stale = age==null || age>900;
+    el('sonar').classList.toggle('stale', stale);
+    const banner = el('staleBanner');
+    if(banner){ banner.classList.toggle('show', stale); if(stale) banner.textContent = '\u26a0 Scan stale \u2014 last update '+ageTxt; }
+  }catch(e){ console.error(e); }
+}
+
+/* ── orbs ── */
+function rebuildOrbs(freshAlerts){
+  const freshIds = new Set((freshAlerts||[]).map(a=>a.id));
+  state.orbs = state.alerts.map(a=>{
+    const usd = a.flow_dollars || 0;
+    const old = state.orbs.find(o=>o.id===a.id);
+    state.seenIds.add(a.id);
+    return {
+      id:a.id, a, usd,
+      r: 4 + Math.min(26, Math.pow(Math.log10(Math.max(usd,1))/5,1.25)*26),
+      phase: old?.phase ?? Math.random()*Math.PI*2,
+      wob: old?.wob ?? (.4+Math.random()*.8),
+      born: old?.born ?? (freshIds.has(a.id) ? performance.now() : 0),
+      dir: dirOf(a),
+    };
+  });
+}
+function dirOf(a){
+  const y=a.flow_yes||0, n=a.flow_no||0;
+  if(y>=2*n && y>0) return 'YES';
+  if(n>=2*y && n>0) return 'NO';
+  return null;
+}
+function visible(o){
+  return state.sev.has(o.a.severity) && state.plat.has(o.a.platform) && o.usd>=state.minUsd;
+}
+
+/* ── canvas ── */
+const cv = el('cv'), ctx = cv.getContext('2d');
+let W=0,H=0,DPR=1;
+const PAD = {l:64, r:24, t:26, b:34};
+function resize(){
+  const tank = el('tank');
+  DPR = window.devicePixelRatio||1;
+  W = tank.clientWidth; H = tank.clientHeight;
+  cv.width = W*DPR; cv.height = H*DPR;
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize', ()=>{ resize(); startLoop(); });
+
+// Y: log10($) — surface $10 at top, abyss $100k at bottom
+const LOG_MIN=1, LOG_MAX=5;
+const yOf = usd => {
+  const lg = Math.min(LOG_MAX, Math.max(LOG_MIN, Math.log10(Math.max(usd,10))));
+  return PAD.t + (lg-LOG_MIN)/(LOG_MAX-LOG_MIN) * (H-PAD.t-PAD.b);
+};
+const xOf = ts => {
+  const now = Date.now()/1000;
+  const f = 1 - Math.min(1,(now-ts)/(HOURS*3600));
+  return PAD.l + f*(W-PAD.l-PAD.r);
+};
+
+/* marine snow */
+const snow = Array.from({length:90},()=>({x:Math.random(),y:Math.random(),s:.3+Math.random()*1.2,v:.008+Math.random()*.02}));
+
+/* ── mobile orb spread: alerts collapse into a near-vertical time-column and become
+   un-tappable on a phone. Push overlapping orbs apart to a >=44px pitch (X-biased,
+   since the time axis is the least precise read here). Mobile-only; desktop untouched. ── */
+const ORB_MIN_PITCH = 44, ORB_GAP = 6;
+function relaxOrbs(orbs){
+  // Break exact coincidence so push directions are well-defined (orbs pile on the same
+  // (time,magnitude) point), then run distance-based relaxation across the full 2D plot.
+  for(const o of orbs){ o._bx += Math.cos(o.phase)*0.6; o._by += Math.sin(o.phase)*0.6; }
+  const minX=PAD.l, maxX=W-PAD.r, minY=PAD.t, maxY=H-PAD.b;
+  for(let pass=0; pass<24; pass++){
+    for(let i=0;i<orbs.length;i++){
+      const a=orbs[i];
+      for(let j=i+1;j<orbs.length;j++){
+        const b=orbs[j];
+        let dx=b._bx-a._bx, dy=b._by-a._by;
+        let dist=Math.hypot(dx,dy);
+        if(dist<0.01){ const ang=i*1.7+j; dx=Math.cos(ang); dy=Math.sin(ang); dist=1; } // degenerate
+        const need=Math.max(ORB_MIN_PITCH, a.r+b.r+ORB_GAP);
+        if(dist<need){
+          const push=(need-dist)/2, ux=dx/dist, uy=dy/dist;
+          a._bx-=ux*push; b._bx+=ux*push;
+          a._by-=uy*push; b._by+=uy*push;
+        }
+      }
+    }
+    for(const o of orbs){   // keep everyone inside the plot each pass so pushes don't fling out
+      o._bx = Math.min(maxX, Math.max(minX, o._bx));
+      o._by = Math.min(maxY, Math.max(minY, o._by));
+    }
+  }
+}
+const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let _rafId = null;
+function startLoop(){ if(_rafId===null) _rafId = requestAnimationFrame(draw); }
+function chartHidden(){ return document.hidden || (window.innerWidth<=980 && mobView!=='chart'); }
+function draw(now){
+  _rafId = null;
+  if(chartHidden()) return;            // pause render when canvas is off-screen/backgrounded (battery)
+  ctx.clearRect(0,0,W,H);
+
+  /* caustic light shafts from the surface */
+  for(let i=0;i<3;i++){
+    const cx = W*(.2+.3*i) + Math.sin(now/4200+i*2.1)*40;
+    const g = ctx.createLinearGradient(cx,0,cx+90,H*.7);
+    g.addColorStop(0,'rgba(80,160,220,.05)'); g.addColorStop(1,'rgba(80,160,220,0)');
+    ctx.fillStyle=g;
+    ctx.beginPath();
+    ctx.moveTo(cx-30,0); ctx.lineTo(cx+60,0); ctx.lineTo(cx+150,H*.72); ctx.lineTo(cx-90,H*.72);
+    ctx.closePath(); ctx.fill();
+  }
+
+  /* depth grid + labels */
+  ctx.font=(window.innerWidth<=980?'12px':'10px')+' "IBM Plex Mono"'; ctx.textBaseline='middle';
+  for(let lg=LOG_MIN;lg<=LOG_MAX;lg++){
+    const y=yOf(Math.pow(10,lg));
+    ctx.strokeStyle='rgba(70,100,150,.12)'; ctx.beginPath();
+    ctx.moveTo(PAD.l,y); ctx.lineTo(W-PAD.r,y); ctx.stroke();
+    ctx.fillStyle='rgba(110,140,180,.62)'; ctx.textAlign='right';
+    ctx.fillText('$'+fmtUsd(Math.pow(10,lg)), PAD.l-10, y);
+  }
+  /* time ticks */
+  ctx.textAlign='center'; ctx.fillStyle='rgba(110,140,180,.6)';
+  for(let h=0;h<=HOURS;h+=3){
+    const x = PAD.l + (1-h/HOURS)*(W-PAD.l-PAD.r);
+    ctx.fillText(h===0?'now':`-${h}h`, x, H-PAD.b/2);
+    ctx.strokeStyle='rgba(70,100,150,.07)';
+    ctx.beginPath(); ctx.moveTo(x,PAD.t); ctx.lineTo(x,H-PAD.b); ctx.stroke();
+  }
+
+  /* marine snow */
+  ctx.fillStyle='rgba(160,190,230,.16)';
+  for(const p of snow){
+    p.y += p.v/100; if(p.y>1)p.y=0;
+    ctx.beginPath(); ctx.arc(PAD.l+p.x*(W-PAD.l-PAD.r), PAD.t+p.y*(H-PAD.t-PAD.b), p.s, 0, 7); ctx.fill();
+  }
+
+  /* orbs — draw small/dim first so whales sit on top */
+  for(const o of state.orbs) o.sx=null;                 // only drawn orbs are hit-testable
+  const SPREAD = window.innerWidth <= 980;
+  const CAP = SPREAD ? RENDER_CAP_MOBILE : RENDER_CAP_DESKTOP;
+  let orbs = state.orbs.filter(visible);
+  if(orbs.length > CAP) orbs = orbs.sort((a,b)=>(b.a.ts||0)-(a.a.ts||0)).slice(0, CAP);  // keep most-recent
+  orbs.sort((a,b)=>a.usd-b.usd);                        // small first so whales sit on top
+  for(const o of orbs){ o._bx = xOf(o.a.ts); o._by = yOf(o.usd); }
+  if(SPREAD && orbs.length > 1 && orbs.length <= 60) relaxOrbs(orbs);  // relax only when sparse; accumulated history spreads X by time
+  const _nowSec = Date.now()/1000;
+  for(const o of orbs){
+    const x = o._bx + Math.sin(now/1400*o.wob+o.phase)*3;
+    const y = o._by + Math.cos(now/1700*o.wob+o.phase)*2.5;
+    o.sx=x; o.sy=y;
+    o._decay = 1 - 0.7*Math.min(1, Math.max(0,(_nowSec - (o.a.ts||_nowSec))/(HOURS*3600)));  // older = fainter
+    const col = SEV_COLOR[o.a.severity]||'#888';
+    const glow = SEV_GLOW[o.a.severity]||'rgba(136,136,136,';
+    const pulse = o.a.severity==='CRITICAL' ? .75+.25*Math.sin(now/420+o.phase) : 1;
+    const spawn = o.born ? Math.min(1,(now-o.born)/700) : 1;
+    const r = o.r * (0.4+0.6*spawn) * (o.hover?1.18:1);
+
+    /* spawn ripple */
+    if(o.born && now-o.born<900){
+      const f=(now-o.born)/900;
+      ctx.strokeStyle=glow+(0.5*(1-f))+')';
+      ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.arc(x,y,r+f*34,0,7); ctx.stroke();
+    }
+    /* bioluminescent glow */
+    const g=ctx.createRadialGradient(x,y,0,x,y,r*3.2);
+    g.addColorStop(0, glow+(.5*pulse*spawn*o._decay)+')');
+    g.addColorStop(1, glow+'0)');
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(x,y,r*3.2,0,7); ctx.fill();
+    /* body */
+    ctx.fillStyle=col; ctx.globalAlpha=.92*spawn*o._decay;
+    ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.fill();
+    ctx.globalAlpha=1;
+    /* inner highlight */
+    ctx.fillStyle='rgba(255,255,255,.35)';
+    ctx.beginPath(); ctx.arc(x-r*.3,y-r*.35,r*.3,0,7); ctx.fill();
+    /* taker-direction ring */
+    if(o.dir){
+      ctx.strokeStyle = o.dir==='YES' ? 'rgba(0,214,143,.85)' : 'rgba(246,81,100,.85)';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.arc(x,y,r+3,0,7); ctx.stroke();
+    }
+  }
+  if(!REDUCED_MOTION) _rafId = requestAnimationFrame(draw);
+}
+
+/* ── hover / click ── */
+const tip = el('tip');
+cv.addEventListener('mousemove', e=>{
+  const rect=cv.getBoundingClientRect();
+  const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+  let best=null,bd=1e9;
+  for(const o of state.orbs){
+    if(!visible(o)||o.sx==null) continue;
+    const d=Math.hypot(o.sx-mx,o.sy-my);
+    if(d<Math.max(o.r+6,12) && d<bd){best=o;bd=d;}
+  }
+  state.orbs.forEach(o=>o.hover=false);
+  if(best){
+    best.hover=true; cv.style.cursor='pointer';
+    showTip(best, mx, my);
+  } else { cv.style.cursor='crosshair'; tip.style.display='none'; }
+});
+let _clickStart = null;
+cv.addEventListener('mousedown', e=>{ _clickStart={x:e.clientX,y:e.clientY}; });
+cv.addEventListener('mouseup', e=>{
+  if(!_clickStart) return;
+  const dx=e.clientX-_clickStart.x, dy=e.clientY-_clickStart.y;
+  _clickStart=null;
+  if(Math.hypot(dx,dy)>5) return; // was a drag, not a click
+  const o=state.orbs.find(o=>o.hover);
+  if(o) window.open(linkOf(o.a),'_blank');
+});
+// Mobile: touch support
+cv.addEventListener('touchstart', e=>{
+  const t=e.touches[0];
+  _clickStart={x:t.clientX,y:t.clientY};
+}, {passive:true});
+cv.addEventListener('touchend', e=>{
+  if(!_clickStart) return;
+  const t=e.changedTouches[0];
+  const dx=t.clientX-_clickStart.x, dy=t.clientY-_clickStart.y;
+  _clickStart=null;
+  if(Math.hypot(dx,dy)>10) return; // was a scroll/drag
+  const rect=cv.getBoundingClientRect();
+  const mx=t.clientX-rect.left, my=t.clientY-rect.top;
+  const hits=[];
+  for(const o of state.orbs){
+    if(!visible(o)||o.sx==null) continue;
+    const d=Math.hypot(o.sx-mx,o.sy-my);
+    if(d<Math.max(o.r+14,24)) hits.push({o,d});
+  }
+  if(!hits.length) return;
+  hits.sort((a,b)=>a.d-b.d);
+  if(hits.length===1) openSheet(hits[0].o.a);   // detail sheet instead of leaving the page
+  else openOrbDisambig(hits.map(h=>h.o));        // overlapping cluster -> pick one
+}, {passive:true});
+function showTip(o,mx,my){
+  const a=o.a;
+  const col=SEV_COLOR[a.severity];
+  const link = linkOf(a);
+  tip.innerHTML = `
+    <div><span class="sev" style="background:${col}22;color:${col}">${a.severity} ${a.score}/10</span></div>
+    <div class="t">${esc(a.title||a.market)}${a.sub_title?` <span style="color:var(--dim)">[${esc(a.sub_title)}]</span>`:''}</div>
+    <div class="m">${esc(a.market)}</div>
+    <div class="row"><span>flow this window</span><b style="color:var(--gold)">$${fmtUsd(a.flow_dollars||0)}</b></div>
+    ${a.flow_yes!=null?`<div class="row"><span>taker</span><b><span style="color:var(--yes)">${Math.round(a.flow_yes)} Y</span> / <span style="color:var(--no)">${Math.round(a.flow_no)} N</span></b></div>`:''}
+    ${a.best_bid!=null?`<div class="row"><span>book</span><b>${(+a.best_bid).toFixed(2)} / ${(+a.best_ask).toFixed(2)}</b></div>`:''}
+    ${a.bid_depth!=null?`<div class="row"><span>depth</span><b>${fmtUsd(a.bid_depth)}B / ${fmtUsd(a.ask_depth)}A</b></div>`:''}
+    <div class="row"><span>when</span><b>${ago(a.ts)}</b></div>
+    <div class="sig">${esc(a.reasons)}</div>
+    <div class="open-btn" onclick="window.open('${link}','_blank')">OPEN MARKET →</div>`;
+  tip.style.display='block';
+  const tw=tip.offsetWidth, th=tip.offsetHeight;
+  tip.style.left = Math.min(mx+16, W-tw-10)+'px';
+  tip.style.top  = Math.max(8, Math.min(my-th/2, H-th-10))+'px';
+}
+
+/* ── tape ── */
+function renderTape(){
+  const list=el('tapeList');
+  const rows=state.alerts.filter(a=>state.sev.has(a.severity)&&state.plat.has(a.platform)&&(a.flow_dollars||0)>=state.minUsd).slice(0,40);
+  el('tapeN').textContent = rows.length?`· ${rows.length}`:'';
+  if(!rows.length){list.innerHTML='<div class="empty">no alerts match the current filters<br>— the abyss is quiet —</div>';return;}
+  list.innerHTML = rows.map(a=>{
+    const col=SEV_COLOR[a.severity];
+    const dir = (a.flow_yes||0)>=(2*(a.flow_no||0))&&a.flow_yes>0 ? `<span class="y">▲ YES</span>`
+              : (a.flow_no||0)>=(2*(a.flow_yes||0))&&a.flow_no>0 ? `<span class="n">▼ NO</span>` : '';
+    const sevL = (a.severity||'')[0]||'';
+    return `<div class="trow" data-id="${esc(String(a.id))}">
+      <div class="l1"><span class="dot" style="background:${col};box-shadow:0 0 8px ${col}"></span>
+        <span class="sevtag" style="background:${col}22;color:${col}">${sevL}</span>
+        ${a.platform==='kalshi'?'KALSHI':'POLY'} · ${ago(a.ts)}
+        <span class="usd">$${fmtUsd(a.flow_dollars||0)}</span></div>
+      <div class="ttl">${esc(a.title||a.market)}</div>
+      <div class="fl">${dir} ${a.flow_yes!=null?`${Math.round(a.flow_yes)}Y/${Math.round(a.flow_no)}N · `:''}score ${a.score}/10</div>
+    </div>`;
+  }).join('');
+}
+
+/* ── controls ── */
+document.querySelectorAll('.chip[data-sev]').forEach(ch=>ch.addEventListener('click',()=>{
+  ch.classList.toggle('on');
+  ch.classList.contains('on') ? state.sev.add(ch.dataset.sev) : state.sev.delete(ch.dataset.sev);
+  renderTape();
+}));
+document.querySelectorAll('.chip[data-plat]').forEach(ch=>ch.addEventListener('click',()=>{
+  ch.classList.toggle('on');
+  ch.classList.contains('on') ? state.plat.add(ch.dataset.plat) : state.plat.delete(ch.dataset.plat);
+  renderTape();
+}));
+el('minUsd').addEventListener('input',e=>{
+  state.minUsd = Math.round(Math.pow(10,+e.target.value));
+  el('minUsdLbl').textContent='$'+fmtUsd(state.minUsd);
+  renderTape();
+});
+
+/* ── utils ── */
+function el(id){return document.getElementById(id)}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function fmtUsd(v){
+  if(v>=1e6) return (v/1e6).toFixed(1)+'M';
+  if(v>=1e3) return (v/1e3).toFixed(v>=1e4?0:1)+'K';
+  return Math.round(v).toString();
+}
+function ago(ts){
+  const s=Date.now()/1000-ts;
+  if(s<90) return Math.round(s)+'s ago';
+  if(s<5400) return Math.round(s/60)+'m ago';
+  return (s/3600).toFixed(1)+'h ago';
+}
+function linkOf(a){
+  return a.platform==='kalshi'
+    ? `https://kalshi.com/markets/${a.market.split('-')[0]}`
+    : `https://polymarket.com/event/${a.market}`;
+}
+
+/* ── mobile view: segmented Tape | Chart (tape leads on mobile) ── */
+let mobView = 'tape'; // 'tape' | 'chart'
+try{ const sv = localStorage.getItem('whaleMobView'); if(sv) mobView = sv; }catch(_){}
+const mobSeg = el('mobSeg');
+function updateMobView(){
+  const isMobile = window.innerWidth <= 980;
+  const tank = el('tank'), tape = document.querySelector('.tape');
+  if(mobSeg) mobSeg.style.display = isMobile ? 'inline-flex' : 'none';
+  if(!isMobile){ tank.style.display=''; tape.style.display=''; return; }
+  if(mobView === 'chart'){
+    tank.style.display = 'block'; tape.style.display = 'none';
+    resize(); startLoop();
+  } else {
+    tank.style.display = 'none'; tape.style.display = 'flex';
+  }
+  if(mobSeg) mobSeg.querySelectorAll('button').forEach(b=>b.classList.toggle('on', b.dataset.view===mobView));
+}
+if(mobSeg) mobSeg.addEventListener('click', e=>{
+  const b = e.target.closest('button'); if(!b) return;
+  mobView = b.dataset.view;
+  try{ localStorage.setItem('whaleMobView', mobView); }catch(_){}
+  updateMobView();
+});
+window.addEventListener('resize', updateMobView);
+
+/* ── mobile detail sheet ── */
+const sheetWrap = el('sheetWrap'), sheetBody = el('sheetBody');
+function sheetRowsHTML(a){
+  const col=SEV_COLOR[a.severity];
+  const platName = a.platform==='kalshi'?'Kalshi':'Polymarket';
+  return `
+    <div><span class="sev" style="background:${col}22;color:${col}">${a.severity} ${a.score}/10</span></div>
+    <div class="t">${esc(a.title||a.market)}${a.sub_title?` <span style="color:var(--dim)">[${esc(a.sub_title)}]</span>`:''}</div>
+    <div class="m">${esc(a.market)}</div>
+    <div class="row"><span>flow this window</span><b style="color:var(--gold)">$${fmtUsd(a.flow_dollars||0)}</b></div>
+    ${a.flow_yes!=null?`<div class="row"><span>taker</span><b><span style="color:var(--yes)">${Math.round(a.flow_yes)} Y</span> / <span style="color:var(--no)">${Math.round(a.flow_no)} N</span></b></div>`:''}
+    ${a.best_bid!=null?`<div class="row"><span>book</span><b>${(+a.best_bid).toFixed(2)} / ${(+a.best_ask).toFixed(2)}</b></div>`:''}
+    ${a.bid_depth!=null?`<div class="row"><span>depth</span><b>${fmtUsd(a.bid_depth)}B / ${fmtUsd(a.ask_depth)}A</b></div>`:''}
+    <div class="row"><span>when</span><b>${ago(a.ts)}</b></div>
+    ${a.reasons?`<div class="sig">${esc(a.reasons)}</div>`:''}
+    <a class="sheet-open" href="${linkOf(a)}" target="_blank" rel="noopener">Open ${platName} market ↗</a>`;
+}
+function openSheet(a){ sheetBody.innerHTML = sheetRowsHTML(a); showSheet(); }
+function openOrbDisambig(orbs){
+  const items = orbs.slice(0,8).map((o,i)=>{
+    const a=o.a, col=SEV_COLOR[a.severity];
+    return `<button type="button" class="sheet-pick" data-i="${i}">
+      <span class="sevtag" style="background:${col}22;color:${col}">${(a.severity||'')[0]||''}</span> ${esc(a.title||a.market)}
+      <span class="pk2">$${fmtUsd(a.flow_dollars||0)} flow · score ${a.score}/10</span></button>`;
+  }).join('');
+  sheetBody.innerHTML = `<div class="sheet-title">${orbs.length} alerts here — pick one</div>${items}`;
+  sheetBody.querySelectorAll('.sheet-pick').forEach(btn=>btn.addEventListener('click',()=>openSheet(orbs[+btn.dataset.i].a)));
+  showSheet();
+}
+function showSheet(){ sheetWrap.hidden=false; requestAnimationFrame(()=>sheetWrap.classList.add('open')); }
+function closeSheet(){ sheetWrap.classList.remove('open'); setTimeout(()=>{ sheetWrap.hidden=true; }, 260); }
+if(sheetWrap){
+  el('sheetBackdrop').addEventListener('click', closeSheet);
+  window.addEventListener('keydown', e=>{ if(e.key==='Escape' && !sheetWrap.hidden) closeSheet(); });
+}
+/* route tape-row taps to the sheet on mobile, straight to market on desktop */
+el('tapeList').addEventListener('click', e=>{
+  const row=e.target.closest('.trow'); if(!row) return;
+  const a=state.alerts.find(x=>String(x.id)===row.dataset.id); if(!a) return;
+  if(window.innerWidth<=980) openSheet(a); else window.open(linkOf(a),'_blank');
+});
+
+/* ── boot ── */
+resize();
+state.minUsd=100;
+startLoop();
+fetchAlerts(); fetchStats();
+setInterval(fetchAlerts, 45000);
+setInterval(fetchStats, 60000);
+updateMobView();
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) startLoop(); });
+</script>
+<script src="whale-nav.js" defer></script>
+</body>
+</html>

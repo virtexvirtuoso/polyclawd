@@ -4,7 +4,17 @@ pydantic==2.5.3
 aiofiles
 slowapi
 httpx
+numpy>=1.24
+loguru>=0.7.2
+requests>=2.31
+aiomcache>=0.8
+websockets>=12.0
 scipy>=1.10.0
 pytest
 pytest-asyncio
 locust
+py-clob-client==0.34.6
+# DEPLOY NOTE (Phase H): /live + execution layer add ONE new runtime dep:
+# py-clob-client. Do NOT force-upgrade fastapi/starlette on the VPS — the /live
+# code is plain APIRouter and runs on the existing versions. See
+# scripts/deploy_live_dashboard.md.

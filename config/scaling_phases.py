@@ -5,7 +5,7 @@ Phase-based position sizing for the $100 → $1M journey.
 Each phase has different risk parameters optimized for the capital level.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 try:
     from signals.cv_kelly import calculate_cv_kelly_haircut
     CV_KELLY_AVAILABLE = True

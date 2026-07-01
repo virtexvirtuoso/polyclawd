@@ -9,13 +9,12 @@ Reads cache keys written by virtuoso-trading every ~15s.
 
 import asyncio
 import json
-import logging
 import time
 from typing import Any, Dict, Optional
 
 import aiomcache
+from loguru import logger
 
-logger = logging.getLogger("hf_enrichment")
 
 # Virtuoso memcached (same host on VPS)
 MEMCACHED_HOST = "localhost"
@@ -196,13 +195,13 @@ def get_enrichment_reader() -> VirtuosoEnrichmentReader:
 if __name__ == "__main__":
     async def test():
         reader = get_enrichment_reader()
-        print("Reading Virtuoso enrichment data...")
+        logger.debug("Reading Virtuoso enrichment data...")
         data = await reader.read_enrichment("BTCUSDT")
         meta = data.get("_meta", {})
-        print(f"  Read latency: {meta.get('read_latency_ms', '?')}ms")
-        print(f"  Keys found: {meta.get('keys_found', 0)}")
-        print(f"  Regime: {reader.get_regime(data)}")
-        print(f"  Confluence: {reader.get_confluence_score(data, 'BTCUSDT')}")
+        logger.info(f"  Read latency: {meta.get('read_latency_ms', '?')}ms")
+        logger.info(f"  Keys found: {meta.get('keys_found', 0)}")
+        logger.info(f"  Regime: {reader.get_regime(data)}")
+        logger.info(f"  Confluence: {reader.get_confluence_score(data, 'BTCUSDT')}")
         print(f"  Liq zones: {len(reader.get_liquidation_zones(data, 'BTCUSDT'))}")
         print(f"  Whale trades: {len(reader.get_whale_trades(data, 'BTCUSDT'))}")
         await reader.close()

@@ -5,12 +5,11 @@ Stores in SQLite for trend analysis and prediction market signal confirmation.
 
 import sqlite3
 import time
-import logging
 import httpx
 from datetime import datetime, timezone
 from pathlib import Path
+from loguru import logger
 
-logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
 DASHBOARD_URL = "http://localhost:8002"
@@ -310,7 +309,7 @@ def score_velocity_modifier(symbol: str, hours: int = 2, db_path: str = None) ->
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     result = run_snapshot()
-    print(f"Snapshot: {result['alpha_symbols']} symbols, BTC=${result['prices'].get('BTCUSDT', 'N/A')}")
-    print(f"Scores: {result['scores']}")
+    logger.info(f"Snapshot: {result['alpha_symbols']} symbols, BTC=${result['prices'].get('BTCUSDT', 'N/A')}")
+    logger.info(f"Scores: {result['scores']}")
     if result['errors']:
-        print(f"Errors: {result['errors']}")
+        logger.error(f"Errors: {result['errors']}")

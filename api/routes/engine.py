@@ -14,15 +14,14 @@ import sys
 import threading
 import time
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from api.models import EngineStatus
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -73,7 +72,6 @@ _engine_thread: Optional[threading.Thread] = None
 
 # Phase scaling - try to import
 try:
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "config"))
     from scaling_phases import (
         get_phase, get_phase_config, calculate_position_size,
         check_daily_limits, Phase, PHASES
@@ -156,6 +154,17 @@ def load_engine_state() -> dict:
     state.setdefault("post_lock_stops_enabled", False)
     state.setdefault("post_lock_weather_hours", 3.0)
     state.setdefault("post_lock_weather_max_loss", 0.12)
+    # Weather strategy switchover 2026-06-10 (Weather-Edge-Analysis-Jun2026):
+    # PM day-ahead strategy falsified -> new entries OFF; Kalshi tail-fade
+    # (paper) validated sec 10 -> ON.
+    state.setdefault("weather_trading_enabled", False)
+    state.setdefault("kalshi_fade_enabled", True)
+    # knob 1: best-candidates-first fill ordering (default off = clean baseline)
+    state.setdefault("kalshi_fade_ranked_fill", False)
+    # knob 7: Polymarket maker-shadow recorder (evidence only, no positions)
+    state.setdefault("pm_maker_shadow_enabled", True)
+    # knob 6 prep: evening 82-member ensemble snapshots (pure data capture)
+    state.setdefault("ensemble_recorder_enabled", True)
     return state
 
 
@@ -947,6 +956,44 @@ async def update_stop_curve(
         "enabled": bool(state.get("post_lock_stops_enabled", False)),
         "weather_hours": state.get("post_lock_weather_hours", 3.0),
         "weather_max_loss": state.get("post_lock_weather_max_loss", 0.12),
+    }
+
+
+@router.get("/engine/weather-strategies")
+async def get_weather_strategies():
+    """Weather strategy toggles: legacy PM day-ahead vs Kalshi tail-fade (paper)."""
+    state = load_engine_state()
+    return {
+        "weather_trading_enabled": bool(state.get("weather_trading_enabled", False)),
+        "kalshi_fade_enabled": bool(state.get("kalshi_fade_enabled", True)),
+        "kalshi_fade_ranked_fill": bool(state.get("kalshi_fade_ranked_fill", False)),
+        "pm_maker_shadow_enabled": bool(state.get("pm_maker_shadow_enabled", True)),
+    }
+
+
+@router.post("/engine/weather-strategies")
+async def update_weather_strategies(
+    weather_trading_enabled: Optional[bool] = Query(None),
+    kalshi_fade_enabled: Optional[bool] = Query(None),
+    kalshi_fade_ranked_fill: Optional[bool] = Query(None),
+):
+    """Toggle weather strategies (PM legacy / Kalshi fade paper)."""
+    state = load_engine_state()
+    if weather_trading_enabled is not None:
+        state["weather_trading_enabled"] = bool(weather_trading_enabled)
+    if kalshi_fade_enabled is not None:
+        state["kalshi_fade_enabled"] = bool(kalshi_fade_enabled)
+    if kalshi_fade_ranked_fill is not None:
+        state["kalshi_fade_ranked_fill"] = bool(kalshi_fade_ranked_fill)
+    save_engine_state(state)
+    logger.info(
+        "Weather strategies updated: pm=%s kalshi_fade=%s",
+        state.get("weather_trading_enabled"), state.get("kalshi_fade_enabled"),
+    )
+    return {
+        "updated": True,
+        "weather_trading_enabled": bool(state.get("weather_trading_enabled", False)),
+        "kalshi_fade_enabled": bool(state.get("kalshi_fade_enabled", True)),
     }
 
 

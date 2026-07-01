@@ -126,6 +126,10 @@ def _fetch_price(pos):
         data = _fetch_url(f"{KALSHI_API}/markets/{market_id}")
         if data:
             market = data.get("market", data)
+            # Fractional markets null legacy cents fields; *_dollars first
+            cp = market.get("last_price_dollars")
+            if cp not in (None, ""):
+                return (pos["id"], float(cp))
             cp = market.get("last_price")
             if cp and cp > 1:
                 cp = cp / 100
@@ -188,6 +192,137 @@ def _should_alert(position_id):
         return False
     _alert_cache[position_id] = now
     return True
+
+
+# ---------------------------------------------------------------------------
+# Phase G — Live-position exit routing
+# ---------------------------------------------------------------------------
+
+def _get_live_position(market_id):
+    """Return the first open live_positions row for *market_id*, or None.
+
+    Uses a fresh live_db connection each call — stop_evaluator runs on its
+    own conn (paper_positions) and we keep the two schemas separate.
+    Never raises: returns None on any error or when in PAPER mode.
+    """
+    conn = None
+    try:
+        from execution import live_config, live_db
+        if live_config.mode() != "LIVE":
+            return None
+        conn = live_db.connect()
+        cur = conn.execute(
+            "SELECT * FROM live_positions WHERE market_id = ? AND status = 'open' LIMIT 1",
+            (market_id,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row is not None else None
+    except Exception as exc:
+        logger.debug("_get_live_position: {} — treating as no live position", exc)
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _close_live_position_early(live_pos_row, current_yes_price, reason, hard_cap_frac=0.50):
+    """Route a genuine stop on a LIVE position through execute_exit.
+
+    Called ONLY when a stop GENUINELY fires (hard-cap or near-resolution).
+    The weather noise-stop deferral in evaluate_stops() still suppresses
+    non-genuine stops before this function is ever reached.
+
+    Parameters
+    ----------
+    live_pos_row : dict
+        Row from live_positions (with id, market_id, token_id, entry_price,
+        shares, cost_usd, neg_risk).
+    current_yes_price : float
+        Current mark price (mid from order book or last price).
+    reason : str
+        Human-readable trigger reason.
+    hard_cap_frac : float
+        Loss fraction that qualifies this as a genuine hard stop vs. a
+        noise stop that should be held to resolution.
+        Weather default = 0.70 (STOP_CONFIG["weather"]["max_loss_pct"]).
+        Non-weather default = 0.50 (STOP_CONFIG["default"]["max_loss_pct"]).
+
+    Returns stop_info dict or None on error.
+    """
+    try:
+        from execution import live_config, live_db, risk_governor
+        from execution.live_executor import execute_exit
+        from odds.polymarket_clob import get_orderbook
+
+        token_id = live_pos_row.get("token_id") or ""
+        market_id = str(live_pos_row.get("market_id") or "")
+
+        # Use CLOB order-book mid as the mark price where available; fall back
+        # to the price already computed by the stop-evaluator loop.
+        mark_price = current_yes_price
+        if token_id:
+            try:
+                book = get_orderbook(token_id)
+                if book is not None and getattr(book, "mid_price", None):
+                    mark_price = book.mid_price
+            except Exception:
+                pass
+
+        # Get tick_size for the token — default 0.01 if unknown.
+        try:
+            from execution.clob_client import get_tick_size
+            tick_size = get_tick_size(token_id) if token_id else 0.01
+        except Exception:
+            tick_size = 0.01
+
+        # I4: derive category and strategy label from archetype so non-weather
+        # live strategies (when added) route through the correct fee tier.
+        # Weather is the only LIVE-eligible strategy today; this is future-proofing.
+        archetype = live_pos_row.get("archetype") or "weather"
+        conn = live_db.connect()
+        try:
+            gov = risk_governor.RiskGovernor(conn, mode=live_config.mode())
+
+            exit_result = execute_exit(
+                conn,
+                gov,
+                position_row=live_pos_row,
+                mark_price=mark_price,
+                tick_size=tick_size,
+                hard_cap_frac=hard_cap_frac,
+                reason=reason,
+                category=archetype,
+            )
+
+            pnl = exit_result.get("pnl", 0.0)
+            logger.info(
+                "LIVE STOP-LOSS: market={} action={} shares={:.2f} @ {:.4f} pnl={:+.4f} reason={}",
+                market_id,
+                exit_result.get("action"),
+                exit_result.get("shares_sold", 0.0),
+                exit_result.get("exit_price", mark_price),
+                pnl,
+                reason,
+            )
+
+            return {
+                "position_id": live_pos_row.get("id"),
+                "market_title": live_pos_row.get("market_title", ""),
+                "side": live_pos_row.get("side", "BUY"),
+                "entry_price": live_pos_row.get("entry_price", 0.0),
+                "current_price": mark_price,
+                "pnl": round(pnl, 4),
+                "bet_size": live_pos_row.get("cost_usd", 0.0),
+                "reason": reason,
+                "strategy": archetype,
+                "live": True,
+                "action": exit_result.get("action"),
+            }
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.error("_close_live_position_early: {} — skipping live exit", exc)
+        return None
 
 
 def _close_position_early(conn, pos, current_yes_price, unrealized_pnl, reason):
@@ -331,6 +466,11 @@ def evaluate_stops():
     now = datetime.now(timezone.utc)
 
     for pos in positions:
+        # kalshi_weather_fade is hold-to-resolution by design (validated eve
+        # entry, settles next day); thin overnight Kalshi last_price would
+        # fire noise stops. See Weather-Edge-Analysis-Jun2026 sec 10.
+        if (pos["archetype"] or "") == "kalshi_weather_fade":
+            continue
         pid = pos["id"]
         current_yes_price = price_map.get(pid)
         if current_yes_price is None:
@@ -363,20 +503,38 @@ def evaluate_stops():
                         reason = (f"HARD-CAP loss {loss_pct:.0%} >= {HARD_CAP:.0%} "
                                   f"({hours_to_close:.1f}h to close, deferred "
                                   f"to reeval otherwise)")
-                        result = _close_position_early(conn, pos, current_yes_price,
-                                                       unrealized, reason)
-                        conn.commit()
-                        stopped.append(result)
-                        _send_discord_alert(result)
+                        live_pos = _get_live_position(pos["market_id"])
+                        if live_pos is not None:
+                            result = _close_live_position_early(
+                                live_pos, current_yes_price, reason,
+                                hard_cap_frac=HARD_CAP,
+                            )
+                        else:
+                            result = _close_position_early(conn, pos, current_yes_price,
+                                                           unrealized, reason)
+                            if result is not None:
+                                conn.commit()
+                        if result is not None:
+                            stopped.append(result)
+                            _send_discord_alert(result)
                     continue  # skip threshold + edge_floor while deferred
 
         # ── Check 1: Max loss percentage ──
         if unrealized < 0 and loss_pct >= config["max_loss_pct"]:
             reason = f"loss {loss_pct:.0%} >= {config['max_loss_pct']:.0%} threshold"
-            result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-            conn.commit()
-            stopped.append(result)
-            _send_discord_alert(result)
+            live_pos = _get_live_position(pos["market_id"])
+            if live_pos is not None:
+                result = _close_live_position_early(
+                    live_pos, current_yes_price, reason,
+                    hard_cap_frac=config["max_loss_pct"],
+                )
+            else:
+                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+                if result is not None:
+                    conn.commit()
+            if result is not None:
+                stopped.append(result)
+                _send_discord_alert(result)
             continue
 
         # ── Check 1b: Post-lock tight stop (toggle-gated) ──
@@ -388,10 +546,19 @@ def evaluate_stops():
             if post_thr is not None and loss_pct >= post_thr:
                 reason = (f"POST-LOCK loss {loss_pct:.0%} >= {post_thr:.0%} threshold "
                           f"({strategy}, inside info-lock window)")
-                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                conn.commit()
-                stopped.append(result)
-                _send_discord_alert(result)
+                live_pos = _get_live_position(pos["market_id"])
+                if live_pos is not None:
+                    result = _close_live_position_early(
+                        live_pos, current_yes_price, reason,
+                        hard_cap_frac=post_thr,
+                    )
+                else:
+                    result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+                    if result is not None:
+                        conn.commit()
+                if result is not None:
+                    stopped.append(result)
+                    _send_discord_alert(result)
                 continue
 
         # ── Check 2: Edge decay stop ──
@@ -418,10 +585,19 @@ def evaluate_stops():
         if current_edge < edge_floor and unrealized < 0:
             reason = (f"edge decay: {entry_edge:+.1%} → {current_edge:+.1%} "
                       f"(floor {edge_floor:+.1%})")
-            result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-            conn.commit()
-            stopped.append(result)
-            _send_discord_alert(result)
+            live_pos = _get_live_position(pos["market_id"])
+            if live_pos is not None:
+                result = _close_live_position_early(
+                    live_pos, current_yes_price, reason,
+                    hard_cap_frac=config.get("edge_floor_hard_cap_frac", 0.50),
+                )
+            else:
+                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+                if result is not None:
+                    conn.commit()
+            if result is not None:
+                stopped.append(result)
+                _send_discord_alert(result)
             continue
 
     conn.close()
@@ -541,6 +717,8 @@ def evaluate_stops_urgent():
         }
 
     for pos in urgent_positions:
+        if (pos["archetype"] or "") == "kalshi_weather_fade":
+            continue  # hold-to-resolution; see evaluate_stops()
         pid = pos["id"]
         current_yes_price = price_map.get(pid)
         if current_yes_price is None:
@@ -561,10 +739,19 @@ def evaluate_stops_urgent():
             if post_thr is not None and loss_pct >= post_thr:
                 reason = (f"POST-LOCK URGENT loss {loss_pct:.0%} >= {post_thr:.0%} "
                           f"({strategy}, {pos['_hours_left']}h to resolution)")
-                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                conn.commit()
-                stopped.append(result)
-                _send_discord_alert(result)
+                live_pos = _get_live_position(pos["market_id"])
+                if live_pos is not None:
+                    result = _close_live_position_early(
+                        live_pos, current_yes_price, reason,
+                        hard_cap_frac=post_thr,
+                    )
+                else:
+                    result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+                    if result is not None:
+                        conn.commit()
+                if result is not None:
+                    stopped.append(result)
+                    _send_discord_alert(result)
                 continue
 
         # Dead-zone gate (lower) + window-ceiling (upper). Skip PnL stop if
@@ -583,10 +770,19 @@ def evaluate_stops_urgent():
         if not pnl_stop_suppressed and unrealized < 0 and loss_pct >= config["max_loss_pct"]:
             reason = (f"URGENT loss {loss_pct:.0%} >= {config['max_loss_pct']:.0%} "
                       f"threshold ({pos['_hours_left']}h to resolution)")
-            result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-            conn.commit()
-            stopped.append(result)
-            _send_discord_alert(result)
+            live_pos = _get_live_position(pos["market_id"])
+            if live_pos is not None:
+                result = _close_live_position_early(
+                    live_pos, current_yes_price, reason,
+                    hard_cap_frac=config["max_loss_pct"],
+                )
+            else:
+                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+                if result is not None:
+                    conn.commit()
+            if result is not None:
+                stopped.append(result)
+                _send_discord_alert(result)
             continue
 
         # ── Edge decay (urgent) ──
@@ -606,10 +802,19 @@ def evaluate_stops_urgent():
         if current_edge < urgent_edge_floor and unrealized < 0:
             reason = (f"URGENT edge decay: {entry_edge:+.1%} → {current_edge:+.1%} "
                       f"({pos['_hours_left']}h to resolution)")
-            result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-            conn.commit()
-            stopped.append(result)
-            _send_discord_alert(result)
+            live_pos = _get_live_position(pos["market_id"])
+            if live_pos is not None:
+                result = _close_live_position_early(
+                    live_pos, current_yes_price, reason,
+                    hard_cap_frac=0.50,
+                )
+            else:
+                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+                if result is not None:
+                    conn.commit()
+            if result is not None:
+                stopped.append(result)
+                _send_discord_alert(result)
             continue
 
     conn.close()

@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WHALE SHARK — Size-Anomaly Surveillance</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;700;800&family=Big+Shoulders:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ════════════════════════════════════════════════════════════════
+   WHALE SHARK — surveillance instrument, not a dashboard.
+   Type: Big Shoulders (display) / IBM Plex Mono (data).
+   Metaphor: sonar room. Contacts enter hot, sink cold.
+   ════════════════════════════════════════════════════════════════ */
+:root{
+  --bg:#0a0a0f;
+  --bg2:#0d0e15;
+  --panel:#0e0f16;
+  --panel2:#11131c;
+  --line:#1d2030;
+  --line2:#272b40;
+  --ink:#e7eaf2;
+  --dim:#8d93a8;
+  --faint:#4d5268;
+
+  --crit:#ff3b52;        /* hot red — CRITICAL chrome */
+  --crit-deep:#5b0f1a;
+  --high:#f0a050;        /* amber */
+  --low:#5e6f8d;         /* cold, dim */
+  --low-tint:#4ecdc4;    /* faint cyan accent for cold tier */
+  --bid:#00d68f;
+  --ask:#f65164;
+  --gold:#ffd700;
+  --gold-deep:#6b5500;
+
+  --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --disp:'Big Shoulders Display','Big Shoulders','Arial Narrow',sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{background:var(--bg)}
+body{
+  font-family:var(--mono);
+  font-size:13px;
+  color:var(--ink);
+  background:var(--bg);
+  min-height:100vh;
+  padding-bottom:64px; /* clear the wallet tape */
+}
+/* phosphor scanlines — the only texture on the page, earned by the metaphor */
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:40;
+  background:repeating-linear-gradient(0deg,rgba(160,180,220,.022) 0 1px,transparent 1px 4px);
+}
+::selection{background:var(--crit);color:#fff}
+
+a{color:inherit}
+button{font-family:var(--mono);color:inherit;background:none;border:none;cursor:pointer}
+button:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--low-tint);outline-offset:2px}
+
+/* ── CHROME ─────────────────────────────────────────────────── */
+header.chrome{
+  position:sticky;top:0;z-index:30;
+  background:linear-gradient(180deg,#0b0c12 0%,rgba(10,10,15,.96) 100%);
+  border-bottom:1px solid var(--line);
+  display:flex;align-items:stretch;flex-wrap:wrap;
+}
+.brand{
+  display:flex;align-items:center;gap:14px;
+  padding:14px 22px;border-right:1px solid var(--line);
+}
+.lamp{width:10px;height:10px;background:var(--bid);position:relative;flex:none}
+.lamp::after{content:"";position:absolute;inset:-5px;border:1px solid var(--bid);animation:ping 2.2s ease-out infinite}
+.lamp.down{background:var(--crit)}
+.lamp.down::after{border-color:var(--crit);animation-duration:.9s}
+@keyframes ping{0%{transform:scale(.4);opacity:1}100%{transform:scale(1.8);opacity:0}}
+h1{
+  font-family:var(--disp);font-weight:800;font-size:30px;line-height:.9;
+  letter-spacing:.04em;text-transform:uppercase;white-space:nowrap;
+}
+h1 em{font-style:normal;color:var(--crit)}
+.brand .role{
+  font-size:10px;letter-spacing:.22em;color:var(--faint);text-transform:uppercase;
+  border-left:1px solid var(--line);padding-left:14px;line-height:1.7;
+}
+.tele{
+  display:flex;align-items:center;flex:1 1 auto;min-width:0;
+  padding:0 10px;gap:0;flex-wrap:wrap;
+}
+.t{
+  display:flex;flex-direction:column;gap:3px;
+  padding:10px 18px;border-right:1px solid var(--line);
+  flex:none;
+}
+.t:first-child{border-left:1px solid var(--line)}
+.t label{font-size:9px;letter-spacing:.2em;color:var(--faint);text-transform:uppercase;white-space:nowrap}
+.t b{font-family:var(--disp);font-weight:700;font-size:21px;line-height:1;letter-spacing:.03em;font-variant-numeric:tabular-nums;white-space:nowrap}
+.t b small{font-family:var(--mono);font-size:10px;color:var(--dim);font-weight:400;letter-spacing:0}
+.t.warn b{color:var(--high)}
+.t.bad b{color:var(--crit)}
+.controls{display:flex;align-items:center;gap:10px;padding:10px 22px 10px 12px;margin-left:auto}
+.seg{display:flex;border:1px solid var(--line2)}
+.seg button{
+  font-size:10px;letter-spacing:.14em;padding:7px 11px;color:var(--dim);
+  border-right:1px solid var(--line);transition:color .18s,background .18s;
+}
+.seg button:last-child{border-right:none}
+.seg button:hover{color:var(--ink)}
+.seg button.on{background:var(--ink);color:#0a0a0f;font-weight:600}
+.seg[data-key="sev"] button.on[data-v="critical"]{background:var(--crit);color:#fff}
+.seg[data-key="sev"] button.on[data-v="high"]{background:var(--high);color:#0a0a0f}
+.seg[data-key="sev"] button.on[data-v="low"]{background:var(--low);color:#0a0a0f}
+
+/* uplink banner */
+#linkbanner{
+  background:var(--crit-deep);color:#ffb9c2;border-bottom:1px solid var(--crit);
+  font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+  padding:7px 22px;
+}
+#linkbanner b{color:#fff}
+
+/* ── STREAM HEAD ─────────────────────────────────────────────── */
+main{max-width:1500px;margin:0 auto;padding:0 22px}
+.streamhead{
+  display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;
+  padding:20px 0 12px;border-bottom:1px solid var(--line);
+}
+.streamhead .name{
+  font-family:var(--disp);font-weight:700;font-size:17px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--dim);
+}
+.streamhead .name b{color:var(--ink)}
+#sh-counts{font-size:11px;color:var(--faint);letter-spacing:.06em}
+#sh-counts b{font-weight:600}
+#sh-counts .c-crit{color:var(--crit)} #sh-counts .c-high{color:var(--high)} #sh-counts .c-low{color:var(--low)}
+#sh-sweep{margin-left:auto;font-size:10px;letter-spacing:.16em;color:var(--faint);text-transform:uppercase}
+#sh-sweep b{color:var(--dim)}
+
+/* ── CONTACT STREAM ──────────────────────────────────────────── */
+ol.stream{list-style:none;position:relative}
+/* the time ruler running down the left gutter */
+ol.stream::before{
+  content:"";position:absolute;left:74px;top:0;bottom:0;width:1px;
+  background:var(--line);
+}
+.contact{
+  display:grid;
+  grid-template-columns:96px minmax(0,1.25fr) minmax(330px,470px);
+  gap:0 26px;
+  padding:20px 0 22px;
+  border-bottom:1px solid var(--line);
+  position:relative;
+  transition:opacity .6s linear;
+}
+/* age decay — fresh contacts burn, old ones cool */
+.contact.age-warm{opacity:.82}
+.contact.age-cold{opacity:.6}
+.contact.age-cold:hover,.contact.age-warm:hover{opacity:1}
+
+/* severity tier rail on the far left edge */
+.contact::before{
+  content:"";position:absolute;left:0;top:14px;bottom:16px;width:3px;background:var(--low);
+}
+.sev-critical::before{background:var(--crit);box-shadow:0 0 14px rgba(255,59,82,.55)}
+.sev-high::before{background:var(--high)}
+.sev-low::before{background:var(--low);opacity:.5}
+
+/* entry: contact acquired */
+@keyframes acquire{
+  0%{transform:translateY(-14px);opacity:0}
+  60%{opacity:1}
+  100%{transform:translateY(0);opacity:1}
+}
+.contact.enter{animation:acquire .5s cubic-bezier(.2,.9,.3,1) both}
+.sev-critical.enter::after{
+  content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(180deg,rgba(255,59,82,.18),transparent 65%);
+  animation:flash 1.1s ease-out both;
+}
+@keyframes flash{0%{opacity:1}100%{opacity:0}}
+
+/* gutter: clock tick + score block */
+.gutter{
+  display:flex;flex-direction:column;align-items:flex-start;gap:8px;
+  padding-left:16px;position:relative;
+}
+.gutter::after{ /* ruler tick — crosses the time-ruler line at left:74px */
+  content:"";position:absolute;left:70px;top:8px;width:9px;height:1px;background:var(--line2);
+}
+.tstamp{font-size:10px;color:var(--faint);letter-spacing:.08em;font-variant-numeric:tabular-nums}
+.score{display:flex;flex-direction:column;line-height:1}
+.score b{
+  font-family:var(--disp);font-weight:800;font-size:46px;letter-spacing:.02em;
+  font-variant-numeric:tabular-nums;
+}
+.sev-critical .score b{color:var(--crit);text-shadow:0 0 22px rgba(255,59,82,.45)}
+.sev-high .score b{color:var(--high)}
+.sev-low .score b{color:var(--low);font-size:30px}
+.score span{font-size:8px;letter-spacing:.3em;color:var(--faint);margin-top:4px}
+
+/* meta column */
+.topline{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.sevtag{
+  font-size:9px;font-weight:600;letter-spacing:.22em;padding:3px 8px 2px;
+}
+.sev-critical .sevtag{background:var(--crit);color:#fff}
+.sev-high .sevtag{background:transparent;color:var(--high);border:1px solid var(--high)}
+.sev-low .sevtag{background:transparent;color:var(--low);border:1px solid var(--line2)}
+.plat{font-size:10px;letter-spacing:.14em;color:var(--dim)}
+.plat::before{content:"◆ ";color:var(--faint);font-size:8px}
+.mkt{font-size:10px;color:var(--faint);letter-spacing:.04em;overflow:hidden;text-overflow:ellipsis;max-width:30ch;white-space:nowrap}
+.tago{font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums}
+.contact:not(.age-warm):not(.age-cold) .tago{color:var(--ink)}
+.closes{font-size:10px;color:var(--faint)}
+.title{
+  font-family:var(--disp);font-weight:700;font-size:27px;line-height:1.02;
+  letter-spacing:.015em;text-transform:uppercase;max-width:34ch;overflow-wrap:anywhere;
+}
+.sev-low .title{font-size:17px;color:var(--dim);font-weight:500}
+.subtitle{font-size:11px;color:var(--dim);margin-top:5px}
+.sigs{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}
+.sig{
+  font-size:9px;letter-spacing:.12em;color:var(--dim);
+  border:1px solid var(--line2);padding:3px 7px 2px;text-transform:uppercase;
+}
+.sev-critical .sig{border-color:rgba(255,59,82,.35);color:#d9a2ab}
+
+/* flow + book gauges */
+.gauges{display:flex;flex-direction:column;gap:7px;margin-top:13px;max-width:430px}
+.gauge{display:grid;grid-template-columns:46px 1fr auto;align-items:center;gap:10px}
+.glabel{font-size:8px;letter-spacing:.24em;color:var(--faint)}
+.gbar{height:5px;background:var(--line);position:relative;overflow:hidden}
+.gbar i{position:absolute;left:0;top:0;bottom:0;background:var(--bid);transition:width .5s ease}
+.gbar.vs{background:var(--ask)} /* remainder reads as the opposing side */
+.gval{font-size:9px;color:var(--dim);font-variant-numeric:tabular-nums;letter-spacing:.04em;white-space:nowrap}
+
+/* PROVEN WINNER — gold strike */
+.smartrow{
+  display:flex;align-items:center;gap:10px;margin-top:13px;
+  border:1px solid var(--gold);background:linear-gradient(90deg,rgba(255,215,0,.13),rgba(255,215,0,.02) 70%);
+  padding:7px 12px;max-width:430px;
+  box-shadow:0 0 18px rgba(255,215,0,.12);
+}
+.smartrow svg{flex:none}
+.smartrow .swl{font-size:9px;font-weight:600;letter-spacing:.26em;color:var(--gold)}
+.smartrow .swn{font-size:11px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.smartrow .swu{margin-left:auto;font-size:11px;color:var(--gold);font-variant-numeric:tabular-nums;white-space:nowrap}
+.contact.smart{background:linear-gradient(90deg,rgba(255,215,0,.035),transparent 55%)}
+.contact.smart::before{background:var(--gold);box-shadow:0 0 14px rgba(255,215,0,.5)}
+
+/* ── THE LADDER — centerpiece ────────────────────────────────── */
+.bookpane{
+  border:1px solid var(--line);background:var(--panel);
+  display:flex;flex-direction:column;min-height:0;align-self:start;
+}
+.bookhead{
+  display:flex;align-items:center;gap:4px 12px;flex-wrap:wrap;
+  padding:8px 12px;border-bottom:1px solid var(--line);
+}
+.bh-l{font-size:9px;letter-spacing:.26em;color:var(--faint)}
+.bh-q{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums;letter-spacing:.03em}
+.bh-q .q-bid{color:var(--bid);font-weight:600}
+.bh-q .q-ask{color:var(--ask);font-weight:600}
+.bh-q .q-spr{font-style:normal;color:var(--faint);margin-left:8px;font-size:10px}
+.bookbtn{
+  margin-left:auto;font-size:9px;letter-spacing:.16em;padding:5px 10px;
+  border:1px solid var(--line2);color:var(--dim);
+  transition:color .18s,border-color .18s,background .18s;cursor:pointer;
+}
+.bookbtn:hover{color:var(--ink);border-color:var(--dim)}
+.focused .bookbtn{background:var(--bid);border-color:var(--bid);color:#04140d;font-weight:600}
+.bookage{font-size:9px;color:var(--faint);font-variant-numeric:tabular-nums}
+
+.ladder{position:relative;padding:8px 10px 10px;min-height:54px}
+/* center spine — the spread lives here */
+.ladder.live::before{
+  content:"";position:absolute;left:50%;top:8px;bottom:10px;width:1px;
+  background:var(--line2);
+}
+.lgrid{display:grid;grid-template-columns:1fr 1fr;column-gap:18px;row-gap:2px}
+.lhead{display:grid;grid-template-columns:1fr 1fr;column-gap:18px;margin-bottom:5px}
+.lhead span{font-size:8px;letter-spacing:.26em;color:var(--faint)}
+.lhead .hb{text-align:right;color:var(--bid)}
+.lhead .ha{color:var(--ask)}
+.bcell{
+  position:relative;height:18px;display:flex;align-items:center;
+  font-size:10px;font-variant-numeric:tabular-nums;overflow:visible;
+}
+.bcell .bar{
+  position:absolute;top:2px;bottom:2px;opacity:.34;
+  transition:width .45s ease;min-width:1px;
+}
+.bcell.bid{justify-content:flex-end}
+.bcell.bid .bar{right:0;background:var(--bid)}
+.bcell.ask .bar{left:0;background:var(--ask)}
+.bcell .px{position:relative;z-index:1;font-weight:600}
+.bcell.bid .px{color:var(--bid);order:2;margin-left:9px}
+.bcell.ask .px{color:var(--ask);margin-right:9px}
+.bcell .sz{position:relative;z-index:1;color:var(--dim)}
+.bcell.bid .sz{order:1}
+/* the whale's wall */
+.bcell.wall .bar{opacity:.6;box-shadow:0 0 12px currentColor}
+.bcell.wall{outline:1px solid currentColor}
+.bcell.bid.wall{color:var(--bid)} .bcell.ask.wall{color:var(--ask)}
+.walltag{
+  position:relative;z-index:2;font-size:7px;font-weight:600;letter-spacing:.2em;
+  padding:1px 4px;background:currentColor;
+  animation:wallpulse 1.6s ease-in-out infinite;
+}
+.bcell.bid .walltag{order:0;margin-right:7px}
+.bcell.ask .walltag{margin-left:7px}
+.walltag b{color:#0a0a0f;font-weight:700}
+@keyframes wallpulse{0%,100%{opacity:1}50%{opacity:.55}}
+.lspread{
+  grid-column:1 / -1;text-align:center;font-size:9px;letter-spacing:.2em;
+  color:var(--faint);padding:4px 0;position:relative;z-index:1;background:var(--panel);
+}
+.lspread b{color:var(--ink)}
+.nodepth{
+  display:flex;align-items:center;justify-content:center;min-height:54px;
+  font-size:10px;letter-spacing:.3em;color:var(--faint);
+}
+
+/* LOW tier compresses to tape lines */
+.sev-low:not(.focused){padding:10px 0 12px;grid-template-columns:96px minmax(0,1fr) auto;align-items:center}
+.sev-low:not(.focused) .gutter{flex-direction:row;align-items:center;gap:12px}
+.sev-low:not(.focused) .score b{font-size:21px}
+.sev-low:not(.focused) .score span{display:none}
+.sev-low:not(.focused) .tstamp,
+.sev-low:not(.focused) .subtitle,
+.sev-low:not(.focused) .sigs,
+.sev-low:not(.focused) .gauges{display:none}
+.sev-low:not(.focused) .topline{margin-bottom:3px}
+.sev-low:not(.focused) .bookpane{border:none;background:transparent}
+.sev-low:not(.focused) .ladder{display:none}
+.sev-low:not(.focused) .bookhead{border:none;padding:0}
+/* non-focused HIGH/CRIT: ladder waits on standby */
+.contact:not(.focused) .ladder .nodepth::after{content:""}
+
+/* ── EMPTY STATE — idle scope ────────────────────────────────── */
+#empty{padding:80px 0 90px;text-align:center}
+.scope{
+  width:130px;height:130px;margin:0 auto 26px;border-radius:50%;
+  border:1px solid var(--line2);position:relative;overflow:hidden;
+  background:
+    radial-gradient(circle,transparent 0 39px,rgba(78,205,196,.12) 40px 41px,transparent 42px),
+    radial-gradient(circle,transparent 0 19px,rgba(78,205,196,.12) 20px 21px,transparent 22px);
+}
+.scope::after{
+  content:"";position:absolute;inset:0;border-radius:50%;
+  background:conic-gradient(from 0deg,rgba(78,205,196,.5),transparent 70deg,transparent);
+  animation:sweep 3.4s linear infinite;
+}
+@keyframes sweep{to{transform:rotate(360deg)}}
+#empty p{font-family:var(--disp);font-weight:700;font-size:24px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+#empty .sub{font-family:var(--mono);font-weight:400;font-size:11px;letter-spacing:.1em;color:var(--faint);margin-top:8px;text-transform:none}
+
+/* ── WALLET TAPE ─────────────────────────────────────────────── */
+footer.tape{
+  position:fixed;left:0;right:0;bottom:0;z-index:35;
+  display:flex;align-items:stretch;height:44px;
+  background:#0b0a06;border-top:1px solid var(--gold-deep);
+}
+.tapelabel{
+  display:flex;align-items:center;gap:9px;flex:none;
+  padding:0 18px;border-right:1px solid var(--gold-deep);
+  font-size:9px;font-weight:600;letter-spacing:.26em;color:var(--gold);
+  background:rgba(255,215,0,.05);white-space:nowrap;
+}
+.tapeviewport{flex:1;overflow:hidden;display:flex;align-items:center}
+.tapetrack{display:flex;gap:0;white-space:nowrap;animation:tape 60s linear infinite;will-change:transform}
+.tapeviewport:hover .tapetrack{animation-play-state:paused}
+@keyframes tape{to{transform:translateX(-50%)}}
+.tapehalf{display:inline-flex}
+.titem{display:inline-flex;align-items:baseline;gap:9px;padding:0 26px;border-right:1px solid #1d1a0e;font-size:11px}
+.titem .tn{color:var(--ink)}
+.titem.gold .tn{color:var(--gold)}
+.titem .tw{color:var(--bid);font-variant-numeric:tabular-nums}
+.titem .tp{color:var(--dim);font-variant-numeric:tabular-nums}
+.titem .tt{color:var(--faint);font-size:9px}
+.tape-meta{display:flex;align-items:center;flex:none;padding:0 18px;border-left:1px solid var(--gold-deep);font-size:9px;letter-spacing:.14em;color:var(--faint);white-space:nowrap}
+
+/* ── RESPONSIVE ──────────────────────────────────────────────── */
+/* telemetry readouts drop progressively as the strip tightens */
+@media(max-width:1390px){
+  .brand .role{display:none}
+}
+@media(max-width:1260px) and (min-width:761px){
+  .t--hit{display:none}
+}
+@media(max-width:1110px) and (min-width:761px){
+  .t--a24{display:none}
+}
+@media(max-width:950px) and (min-width:761px){
+  .t--mkts{display:none}
+}
+@media(max-width:1100px){
+  .controls{gap:8px;padding:10px 14px 10px 12px}
+  .seg button{padding:7px 8px}
+  .contact{grid-template-columns:84px minmax(0,1fr)}
+  .bookpane{grid-column:2;margin-top:16px;max-width:560px}
+  .sev-low:not(.focused){grid-template-columns:84px minmax(0,1fr) auto}
+  .sev-low:not(.focused) .bookpane{grid-column:3;margin-top:0}
+  ol.stream::before{left:66px}
+  .gutter::after{left:62px}
+}
+@media(max-width:760px){
+  body{font-size:12px}
+  main{padding:0 14px}
+  header.chrome{flex-direction:column}
+  .brand{border-right:none;border-bottom:1px solid var(--line);padding:12px 16px}
+  h1{font-size:24px}
+  .tele{order:3;border-top:1px solid var(--line);padding:0}
+  .t{flex:1 1 auto;padding:8px 13px;border-bottom:1px solid var(--line);margin-bottom:-1px}
+  .t:first-child{border-left:none}
+  .t b{font-size:17px}
+  .controls{margin-left:0;padding:9px 14px;flex-wrap:wrap}
+  .contact{grid-template-columns:minmax(0,1fr);gap:0;padding-left:14px}
+  ol.stream::before{display:none}
+  .gutter{flex-direction:row;align-items:baseline;gap:14px;padding-left:0;margin-bottom:6px}
+  .gutter::after{display:none}
+  .score{flex-direction:row;align-items:baseline;gap:6px}
+  .score b{font-size:28px}
+  .title{font-size:21px}
+  .bookpane{grid-column:1;margin-top:14px;max-width:none}
+  .sev-low:not(.focused){grid-template-columns:minmax(0,1fr);padding-left:14px}
+  .sev-low:not(.focused) .bookpane{grid-column:1;margin-top:8px}
+  .tapelabel{padding:0 10px;letter-spacing:.14em}
+  .tape-meta{display:none}
+  #sh-sweep{margin-left:0}
+}
+
+@media(prefers-reduced-motion:reduce){
+  .lamp::after,.scope::after,.walltag{animation:none}
+  .tapetrack{animation:none}
+  .tapehalf+.tapehalf{display:none}
+  .contact.enter,.sev-critical.enter::after{animation:none}
+  *{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}
+}
+</style>
+</head>
+<body>
+
+<header class="chrome">
+  <div class="brand">
+    <span class="lamp" id="lamp" aria-hidden="true"></span>
+    <h1>Whale<em>//</em>Shark</h1>
+    <span class="role">Size-anomaly<br>surveillance</span>
+  </div>
+
+  <div class="tele" id="telemetry">
+    <span class="t t--scan" id="t-scan-wrap"><label>Last sweep</label><b id="t-scan">&mdash;</b></span>
+    <span class="t t--mkts"><label>Markets watched</label><b id="t-mkts">&mdash;</b></span>
+    <span class="t t--a24"><label>Alerts 24h</label><b id="t-a24">&mdash;</b></span>
+    <span class="t t--hit"><label>Crit resolve hit</label><b id="t-hit">&mdash;</b></span>
+  </div>
+
+  <div class="controls">
+    <div class="seg" role="group" aria-label="Severity filter" data-key="sev">
+      <button type="button" data-v="all" class="on">ALL</button>
+      <button type="button" data-v="critical">CRIT</button>
+      <button type="button" data-v="high">HIGH</button>
+      <button type="button" data-v="low">LOW</button>
+    </div>
+    <div class="seg" role="group" aria-label="Platform filter" data-key="plat">
+      <button type="button" data-v="all" class="on">ALL</button>
+      <button type="button" data-v="kalshi">KALSHI</button>
+      <button type="button" data-v="polymarket">POLY</button>
+    </div>
+  </div>
+</header>
+
+<div id="linkbanner" role="alert" hidden><b>UPLINK LOST</b> &mdash; retrying every sweep. Displaying last intercepted data.</div>
+
+<main>
+  <div class="streamhead">
+    <span class="name">Contact <b>stream</b></span>
+    <span id="sh-counts">&mdash;</span>
+    <span id="sh-sweep">last sweep <b id="sh-sweep-t">&mdash;</b></span>
+  </div>
+
+  <ol class="stream" id="stream"></ol>
+
+  <div id="empty" hidden>
+    <div class="scope" aria-hidden="true"></div>
+    <p>No contacts on scope</p>
+    <p class="sub" id="empty-sub">sweep continues</p>
+  </div>
+</main>
+
+<footer class="tape" aria-label="Proven winning wallets ticker">
+  <span class="tapelabel">
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 1.6l3.1 6.9 7.3.8-5.5 5 1.6 7.3L12 17.8 5.5 21.6 7.1 14.3 1.6 9.3l7.3-.8z"/></svg>
+    PROVEN WALLETS
+  </span>
+  <div class="tapeviewport"><div class="tapetrack" id="tapetrack"><span class="titem"><span class="tt">loading roster&hellip;</span></span></div></div>
+  <span class="tape-meta" id="tape-meta"></span>
+</footer>
+
+<script>
+'use strict';
+/* ══════════════════════════════════════════════════════════════
+   WHALE SHARK client — id-diffed stream, focused-book polling.
+   alerts 15s · books 10s (focused set, max 6) · stats 60s · wallets 5m
+   ══════════════════════════════════════════════════════════════ */
+const API = '/polyclawd/api';
+const ALERTS_MS = 15000, BOOKS_MS = 10000, STATS_MS = 60000, WALLETS_MS = 300000;
+const MAX_FOCUS = 6, LIMIT = 40;
+
+const $ = s => document.querySelector(s);
+const stream = $('#stream');
+
+const state = {
+  sev: 'all', plat: 'all',
+  data: new Map(),   // id -> alert payload
+  els:  new Map(),   // id -> <li>
+  pins: new Set(),   // user-toggled book focus (explicit on)
+  blocks: new Set(), // user-toggled book focus (explicit off)
+  focus: new Set(),  // active book-poll set
+  fails: 0,
+  lastSweep: 0,
+};
+
+/* ── utils ─────────────────────────────────────────────────── */
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const fmtC = p => (p == null || isNaN(p)) ? '—'
+  : (Math.round(p * 1000) / 10).toFixed(p * 100 % 1 ? 1 : 0).replace(/\.0$/,'') + '¢';
+
+function fmtSz(n){
+  n = Number(n) || 0;
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e4) return (n/1e3).toFixed(1) + 'k';
+  return Math.round(n).toLocaleString('en-US');
+}
+const fmtUsd = n => (n == null || isNaN(n)) ? '' : '$' + fmtSz(n);
+
+function fmtAgo(ts){
+  const s = Math.max(0, Date.now()/1000 - ts);
+  if (s < 60)    return Math.floor(s) + 's';
+  if (s < 3600)  return Math.floor(s/60) + 'm' + (s%60>=1 && s<600 ? String(Math.floor(s%60)).padStart(2,'0') + 's' : '');
+  if (s < 86400) return Math.floor(s/3600) + 'h';
+  return Math.floor(s/86400) + 'd';
+}
+function fmtClock(ts){
+  try { return new Date(ts*1000).toLocaleTimeString('en-US',{hour12:false}); }
+  catch(e){ return ''; }
+}
+function fmtClose(iso){
+  if (!iso) return '';
+  const ms = Date.parse(iso) - Date.now();
+  if (isNaN(ms)) return '';
+  if (ms <= 0) return 'CLOSED';
+  const h = ms/3.6e6;
+  if (h < 1)  return 'closes ' + Math.max(1, Math.round(ms/6e4)) + 'm';
+  if (h < 48) return 'closes ' + Math.round(h) + 'h';
+  return 'closes ' + Math.round(h/24) + 'd';
+}
+function parseReasons(r){
+  if (!r) return [];
+  return String(r).split(',').map(t => t.trim().replace(/_/g,' ').toUpperCase())
+    .filter(Boolean).slice(0, 6);
+}
+
+/* ── alert element ─────────────────────────────────────────── */
+function gaugeHTML(label, a, b, val){
+  const tot = (a||0) + (b||0);
+  if (!tot) return '';
+  const pct = Math.round(100 * (a||0) / tot);
+  return `<div class="gauge"><span class="glabel">${label}</span>` +
+    `<div class="gbar vs"><i style="width:${pct}%"></i></div>` +
+    `<span class="gval">${esc(val)}</span></div>`;
+}
+function smartHTML(a){
+  const name = a.top_wallet_name || 'tracked wallet';
+  return `<div class="smartrow">` +
+    `<svg width="13" height="13" viewBox="0 0 24 24" fill="#ffd700" aria-hidden="true"><path d="M12 1.6l3.1 6.9 7.3.8-5.5 5 1.6 7.3L12 17.8 5.5 21.6 7.1 14.3 1.6 9.3l7.3-.8z"/></svg>` +
+    `<span class="swl">PROVEN WINNER</span>` +
+    `<span class="swn">${esc(name)}</span>` +
+    (a.top_wallet_usd != null ? `<span class="swu">${esc(fmtUsd(a.top_wallet_usd))}</span>` : '') +
+    `</div>`;
+}
+function metaInner(a){
+  const yes = Number(a.flow_yes)||0, no = Number(a.flow_no)||0;
+  const bd  = Number(a.bid_depth)||0, ad = Number(a.ask_depth)||0;
+  const yesPct = (yes+no) ? Math.round(100*yes/(yes+no)) : 0;
+  return `
+    <div class="topline">
+      <span class="sevtag">${esc(a.severity || 'LOW')}</span>
+      <span class="plat">${esc(String(a.platform||'').toUpperCase())}</span>
+      <span class="mkt" title="${esc(a.market)}">${esc(a.market)}</span>
+      <span class="tago" data-ts="${Number(a.ts)||0}">${esc(fmtAgo(a.ts))}</span>
+      <span class="closes">${esc(fmtClose(a.close_time))}</span>
+    </div>
+    <h2 class="title">${esc(a.title || a.market)}</h2>
+    ${a.sub_title ? `<div class="subtitle">${esc(a.sub_title)}</div>` : ''}
+    <div class="sigs">${parseReasons(a.reasons).map(t=>`<span class="sig">${esc(t)}</span>`).join('')}</div>
+    <div class="gauges">
+      ${gaugeHTML('TAKER', yes, no, `YES ${yesPct}% · ${fmtSz(yes)}/${fmtSz(no)}` + (a.flow_dollars ? ` · ${fmtUsd(a.flow_dollars)}` : ''))}
+      ${gaugeHTML('BOOK',  bd,  ad, `BID ${fmtSz(bd)} / ASK ${fmtSz(ad)}`)}
+    </div>
+    ${a.smart ? smartHTML(a) : ''}`;
+}
+function bookHeadQuote(a){
+  const spr = (a.best_bid != null && a.best_ask != null && !isNaN(a.best_bid) && !isNaN(a.best_ask))
+    ? `<i class="q-spr">SPR ${fmtC(a.best_ask - a.best_bid)}</i>` : '';
+  return `<b class="q-bid">${fmtC(a.best_bid)}</b> / <b class="q-ask">${fmtC(a.best_ask)}</b>${spr}`;
+}
+function createAlertEl(a){
+  const li = document.createElement('li');
+  const sev = String(a.severity || 'LOW').toLowerCase();
+  li.className = `contact sev-${esc(sev)}${a.smart ? ' smart' : ''} enter`;
+  li.dataset.id = a.id;
+  li.dataset.ts = a.ts;
+  li.innerHTML = `
+    <div class="gutter">
+      <span class="tstamp">${esc(fmtClock(a.ts))}</span>
+      <span class="score"><b>${Number(a.score)||0}</b><span>SCORE</span></span>
+    </div>
+    <div class="meta">${metaInner(a)}</div>
+    <div class="bookpane">
+      <div class="bookhead">
+        <span class="bh-l">DEPTH</span>
+        <span class="bh-q">${bookHeadQuote(a)}</span>
+        <span class="bookage"></span>
+        <button type="button" class="bookbtn" aria-pressed="false">LIVE BOOK</button>
+      </div>
+      <div class="ladder"><div class="nodepth">STANDBY</div></div>
+    </div>`;
+  li.addEventListener('animationend', () => li.classList.remove('enter'), {once:true});
+  li.querySelector('.bookbtn').addEventListener('click', () => togglePin(a.id));
+  return li;
+}
+function updateAlertEl(li, a){
+  // mutable bits only — leave structure alone
+  const q = li.querySelector('.bh-q'); if (q) q.innerHTML = bookHeadQuote(a);
+  const meta = li.querySelector('.meta');
+  // gauges + smart row can shift on re-scan; cheap targeted refresh
+  if (meta && (a.flow_yes != null || a.bid_depth != null)) {
+    const fresh = document.createElement('div');
+    fresh.innerHTML = `<div>${metaInner(a)}</div>`;
+    const newG = fresh.querySelector('.gauges'), oldG = meta.querySelector('.gauges');
+    if (newG && oldG && newG.innerHTML !== oldG.innerHTML) oldG.innerHTML = newG.innerHTML;
+  }
+}
+
+/* ── stream diff render ────────────────────────────────────── */
+function renderAlerts(list, counts){
+  const sorted = list.slice().sort((x,y) => (y.ts||0) - (x.ts||0)).slice(0, LIMIT);
+  const liveIds = new Set(sorted.map(a => String(a.id)));
+
+  // drop departed contacts
+  for (const [id, el] of state.els) {
+    if (!liveIds.has(id)) { el.remove(); state.els.delete(id); state.data.delete(id); state.pins.delete(id); state.blocks.delete(id); }
+  }
+  // upsert
+  for (const a of sorted) {
+    const id = String(a.id);
+    state.data.set(id, a);
+    if (state.els.has(id)) updateAlertEl(state.els.get(id), a);
+    else state.els.set(id, createAlertEl(a));
+  }
+  // minimal reorder
+  sorted.forEach((a, i) => {
+    const el = state.els.get(String(a.id));
+    if (stream.children[i] !== el) stream.insertBefore(el, stream.children[i] || null);
+  });
+
+  // counts + empty state
+  const c = counts || {};
+  $('#sh-counts').innerHTML =
+    `<b class="c-crit">${Number(c.CRITICAL)||0} CRIT</b> · ` +
+    `<b class="c-high">${Number(c.HIGH)||0} HIGH</b> · ` +
+    `<b class="c-low">${Number(c.LOW)||0} LOW</b> on file`;
+  $('#empty').hidden = sorted.length > 0;
+  $('#stream').style.display = sorted.length ? '' : 'none';
+
+  recomputeFocus();
+}
+
+/* ── book focus ────────────────────────────────────────────── */
+function recomputeFocus(){
+  const next = new Set();
+  for (const id of state.pins) if (state.data.has(id) && next.size < MAX_FOCUS) next.add(id);
+  // auto-fill: newest CRITICAL/HIGH first, then anything
+  const ordered = [...stream.children].map(el => el.dataset.id);
+  for (const pass of [a => /CRITICAL|HIGH/.test(a.severity||''), () => true]) {
+    for (const id of ordered) {
+      if (next.size >= MAX_FOCUS) break;
+      const a = state.data.get(id);
+      if (a && !next.has(id) && !state.blocks.has(id) && pass(a)) next.add(id);
+    }
+  }
+  const newly = [...next].filter(id => !state.focus.has(id));
+  for (const id of state.focus) if (!next.has(id)) {
+    const el = state.els.get(id);
+    if (el) { el.classList.remove('focused');
+      el.querySelector('.bookbtn').setAttribute('aria-pressed','false');
+      const l = el.querySelector('.ladder'); l.classList.remove('live');
+      l.innerHTML = '<div class="nodepth">STANDBY</div>'; delete l.dataset.has; }
+  }
+  for (const id of next) {
+    const el = state.els.get(id);
+    if (el) { el.classList.add('focused');
+      el.querySelector('.bookbtn').setAttribute('aria-pressed','true'); }
+  }
+  state.focus = next;
+  if (newly.length) pollBooks(newly);
+}
+function togglePin(id){
+  id = String(id);
+  if (state.focus.has(id)) {          // explicit off — block auto re-focus
+    state.pins.delete(id);
+    state.blocks.add(id);
+  } else {                            // explicit on
+    state.blocks.delete(id);
+    state.pins.add(id);
+    if (state.pins.size > MAX_FOCUS) state.pins.delete(state.pins.values().next().value);
+  }
+  recomputeFocus();
+}
+
+/* ── ladder render ─────────────────────────────────────────── */
+function ladderCell(level, side, isWall){
+  if (!level) return '<div class="bcell"></div>';
+  const px = fmtC(level[0]), sz = fmtSz(level[1]);
+  const w = level._w;
+  return `<div class="bcell ${side}${isWall ? ' wall' : ''}">` +
+    (isWall ? `<span class="walltag"><b>WALL</b></span>` : '') +
+    `<i class="bar" style="width:${w}%"></i>` +
+    `<span class="px">${px}</span><span class="sz">${sz}</span></div>`;
+}
+function renderLadder(ladderEl, book){
+  const bids = (book && Array.isArray(book.bids) ? book.bids : []).slice(0, 12);
+  const asks = (book && Array.isArray(book.asks) ? book.asks : []).slice(0, 12);
+  if (!bids.length && !asks.length) {
+    ladderEl.classList.remove('live');
+    ladderEl.innerHTML = '<div class="nodepth">NO DEPTH</div>';
+    delete ladderEl.dataset.has;
+    return;
+  }
+  const max = Math.max(1, ...bids.map(b=>b[1]||0), ...asks.map(a=>a[1]||0));
+  bids.forEach(b => b._w = Math.max(2, Math.round(100*(b[1]||0)/max)));
+  asks.forEach(a => a._w = Math.max(2, Math.round(100*(a[1]||0)/max)));
+  // the whale's wall = single largest resting level in view
+  let wall = {side:null, i:-1, sz:0};
+  bids.forEach((b,i) => { if ((b[1]||0) > wall.sz) wall = {side:'bid', i, sz:b[1]}; });
+  asks.forEach((a,i) => { if ((a[1]||0) > wall.sz) wall = {side:'ask', i, sz:a[1]}; });
+
+  const spread = (bids[0] && asks[0]) ? fmtC(asks[0][0] - bids[0][0]) : null;
+  const n = Math.max(bids.length, asks.length);
+  let rows = '';
+  for (let i = 0; i < n; i++) {
+    rows += ladderCell(bids[i], 'bid', wall.side==='bid' && wall.i===i);
+    rows += ladderCell(asks[i], 'ask', wall.side==='ask' && wall.i===i);
+  }
+  ladderEl.classList.add('live');
+  ladderEl.dataset.has = '1';
+  ladderEl.innerHTML =
+    `<div class="lhead"><span class="hb">BIDS</span><span class="ha">ASKS</span></div>` +
+    `<div class="lgrid">${rows}` +
+    (spread ? `<div class="lspread">SPREAD <b>${spread}</b> · wall ${fmtSz(wall.sz)} ${wall.side === 'bid' ? 'BID' : 'ASK'} side</div>` : '') +
+    `</div>`;
+}
+
+/* ── polling ───────────────────────────────────────────────── */
+function setLink(ok){
+  $('#lamp').classList.toggle('down', !ok);
+  $('#linkbanner').hidden = ok;
+}
+async function pollAlerts(){
+  try {
+    const r = await fetch(`${API}/whale/alerts?severity=${encodeURIComponent(state.sev)}&platform=${encodeURIComponent(state.plat)}&limit=${LIMIT}`);
+    if (!r.ok) throw new Error(r.status);
+    const j = await r.json();
+    state.fails = 0; setLink(true);
+    state.lastSweep = Date.now();
+    renderAlerts(j.alerts || [], j.counts || {});
+  } catch(e) {
+    state.fails++;
+    if (state.fails >= 2) setLink(false);
+    if (!state.data.size) {
+      $('#empty').hidden = false;
+      $('#empty-sub').textContent = 'uplink unavailable — retrying';
+    }
+  }
+}
+async function pollBooks(onlyIds){
+  const ids = onlyIds || [...state.focus];
+  await Promise.all(ids.map(async id => {
+    const a = state.data.get(String(id));
+    const el = state.els.get(String(id));
+    if (!a || !el || !state.focus.has(String(id))) return;
+    const ladderEl = el.querySelector('.ladder');
+    try {
+      const r = await fetch(`${API}/whale/book?platform=${encodeURIComponent(a.platform)}&market=${encodeURIComponent(a.market)}`);
+      if (!r.ok) throw new Error(r.status);
+      const b = await r.json();
+      renderLadder(ladderEl, b);
+      const age = el.querySelector('.bookage');
+      if (age) age.textContent = b.ts ? 'book ' + fmtAgo(b.ts) : '';
+    } catch(e) {
+      if (!ladderEl.dataset.has) {
+        ladderEl.classList.remove('live');
+        ladderEl.innerHTML = '<div class="nodepth">NO DEPTH</div>';
+      }
+    }
+  }));
+}
+async function pollStats(){
+  try {
+    const r = await fetch(`${API}/whale/stats`);
+    if (!r.ok) throw new Error(r.status);
+    const j = await r.json();
+    const h = j.health || {};
+    const age = h.last_scan_age_s;
+    const scanEl = $('#t-scan'), wrap = $('#t-scan-wrap');
+    if (age != null) {
+      scanEl.innerHTML = `${Math.round(age)}<small>s ago</small>`;
+      wrap.classList.toggle('warn', age > 180 && age <= 600);
+      wrap.classList.toggle('bad',  age > 600);
+    }
+    const m = h.markets_tracked || {};
+    if (m.kalshi != null || m.polymarket != null) {
+      $('#t-mkts').innerHTML =
+        `${fmtSz(m.kalshi||0)}<small> KAL</small> ${fmtSz(m.polymarket||0)}<small> POLY</small>`;
+    }
+    if (h.alerts_24h != null) $('#t-a24').textContent = Number(h.alerts_24h).toLocaleString('en-US');
+    const prec = (j.precision || []).filter(p => p.severity === 'CRITICAL' && p.p_res != null);
+    if (prec.length) {
+      const best = prec.reduce((x,y) => (y.n_res||0) > (x.n_res||0) ? y : x);
+      $('#t-hit').innerHTML = `${Math.round(best.p_res*100)}<small>% n=${best.n_res||0}</small>`;
+    }
+    const totalMk = (m.kalshi||0) + (m.polymarket||0);
+    if (totalMk) $('#empty-sub').textContent =
+      `sweep continues — ${totalMk.toLocaleString('en-US')} markets under watch`;
+  } catch(e) { /* telemetry degrades silently; alert poll owns the link lamp */ }
+}
+async function pollWallets(){
+  try {
+    const r = await fetch(`${API}/whale/wallets?limit=12`);
+    if (!r.ok) throw new Error(r.status);
+    const j = await r.json();
+    const ws = j.wallets || [];
+    if (!ws.length) { $('#tapetrack').innerHTML = '<span class="titem"><span class="tt">no tracked wallets</span></span>'; return; }
+    const item = w =>
+      `<span class="titem${w.smart ? ' gold' : ''}">` +
+      `<span class="tn">${esc(w.name || (w.wallet||'').slice(0,10))}</span>` +
+      `<span class="tw">${w.win_rate != null ? Math.round(w.win_rate*100) + '% W' : ''}</span>` +
+      `<span class="tp">${w.realized_pnl != null ? (w.realized_pnl >= 0 ? '+' : '−') + '$' + fmtSz(Math.abs(w.realized_pnl)) : ''}</span>` +
+      `<span class="tt">${w.closed_positions != null ? w.closed_positions + ' closed' : ''}</span>` +
+      `</span>`;
+    const half = `<span class="tapehalf">${ws.map(item).join('')}</span>`;
+    $('#tapetrack').innerHTML = half + half; // duplicated for seamless loop
+    $('#tape-meta').textContent =
+      `${j.smart_count != null ? j.smart_count + ' PROVEN' : ''}${j.tracked != null ? ' / ' + j.tracked + ' TRACKED' : ''}`;
+  } catch(e) {
+    $('#tapetrack').innerHTML = '<span class="titem"><span class="tt">wallet roster unavailable</span></span>';
+  }
+}
+
+/* ── 1s tick: ages + decay ─────────────────────────────────── */
+function tick(){
+  const now = Date.now()/1000;
+  for (const [id, el] of state.els) {
+    const a = state.data.get(id); if (!a) continue;
+    const t = el.querySelector('.tago');
+    if (t) t.textContent = fmtAgo(a.ts);
+    const age = now - (a.ts||0);
+    el.classList.toggle('age-warm', age >= 120 && age < 900);
+    el.classList.toggle('age-cold', age >= 900);
+  }
+  if (state.lastSweep) {
+    $('#sh-sweep-t').textContent = Math.round((Date.now()-state.lastSweep)/1000) + 's ago';
+  }
+}
+
+/* ── controls ──────────────────────────────────────────────── */
+document.querySelectorAll('.seg').forEach(seg => {
+  seg.addEventListener('click', e => {
+    const btn = e.target.closest('button'); if (!btn) return;
+    seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === btn));
+    state[seg.dataset.key] = btn.dataset.v;
+    // hard reset the scope for the new filter
+    state.data.clear(); state.els.clear(); state.pins.clear(); state.blocks.clear(); state.focus.clear();
+    stream.innerHTML = '';
+    $('#empty').hidden = false;
+    $('#empty-sub').textContent = 'sweeping…';
+    pollAlerts();
+  });
+});
+
+/* ── boot ──────────────────────────────────────────────────── */
+pollAlerts();
+pollStats();
+pollWallets();
+setInterval(pollAlerts, ALERTS_MS);
+setInterval(() => pollBooks(), BOOKS_MS);
+setInterval(pollStats, STATS_MS);
+setInterval(pollWallets, WALLETS_MS);
+setInterval(tick, 1000);
+</script>
+<script src="whale-hub.js" defer></script>
+<script src="whale-nav.js" defer></script>
+</body>
+</html>

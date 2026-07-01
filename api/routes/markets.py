@@ -23,6 +23,9 @@ import logging
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
+
+from odds.edge_math import net_arb_edge
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -119,11 +122,6 @@ def _get_market_prices(market: dict) -> tuple:
         return 0.0, 0.0
 
 
-def _get_odds_modules_path() -> str:
-    """Get path to odds modules directory."""
-    return str(Path(__file__).parent.parent.parent / "odds")
-
-
 def _scan_new_markets() -> dict:
     """Scan for newly created markets."""
     try:
@@ -185,6 +183,18 @@ async def arb_scan(limit: int = Query(default=50, ge=1, le=100)):
                 continue
             total = yes_price + no_price
             if total < 0.99 or total > 1.01:
+                # For underpriced (total < 1.0): buy both YES+NO, collect $1
+                # Polymarket charges ~2% on net winnings
+                if total < 0.99:
+                    gross_return = (1.0 / total) - 1.0
+                    profit = 1.0 - total
+                    poly_fee = profit * 0.02
+                    slippage = 0.005
+                    net_return = gross_return - poly_fee - slippage
+                    net_edge_pp = round(net_return * 100, 2)
+                else:
+                    net_edge_pp = 0.0  # Can't short; no actionable adjustment
+                
                 opportunities.append({
                     "market_id": market["id"],
                     "question": market.get("question", "Unknown"),
@@ -192,13 +202,25 @@ async def arb_scan(limit: int = Query(default=50, ge=1, le=100)):
                     "no_price": no_price,
                     "total": total,
                     "spread": abs(1.0 - total),
+                    "net_edge_pp": net_edge_pp,
                     "type": "underpriced" if total < 0.99 else "overpriced",
                 })
 
-        opportunities.sort(key=lambda x: x["spread"], reverse=True)
+        # Sort by net edge (underpriced) then raw spread
+        opportunities.sort(key=lambda x: x["net_edge_pp"], reverse=True)
+        
+        # Fee assumption documentation
+        fee_info = {
+            "polymarket_fee_pct": 2.0,
+            "slippage_pct": 0.5,
+            "note": "Polymarket charges ~2%% on net winnings. Overpriced markets (>1.0) not actionable for retail (can't short)."
+        }
+        
         return {
             "count": len(opportunities),
             "opportunities": opportunities[:20],
+            "actionable_count": sum(1 for o in opportunities if o["net_edge_pp"] >= 2.0 and o["type"] == "underpriced"),
+            "fee_info": fee_info,
             "scanned_at": datetime.now().isoformat()
         }
     except Exception as e:
@@ -676,10 +698,7 @@ async def get_soccer_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
     """
     async def _get_soccer():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
-        from soccer_edge import get_soccer_edge_summary
+        from the_odds_api import get_soccer_edge_summary
         return await get_soccer_edge_summary()
 
     return await handle_edge_request("soccer", _get_soccer())
@@ -692,10 +711,7 @@ async def get_soccer_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
 async def _get_league_edges(league: str, min_edge: float = 0.01):
     """Helper to get edges for a specific soccer league."""
     import sys
-    odds_path = _get_odds_modules_path()
-    if odds_path not in sys.path:
-        sys.path.insert(0, odds_path)
-    from soccer_edge import find_soccer_edges
+    from the_odds_api import find_soccer_edges
 
     all_edges = await find_soccer_edges(min_edge)
     # Filter to specific league
@@ -766,6 +782,288 @@ async def get_worldcup_edges(min_edge: float = Query(default=0.01, ge=0, le=1)):
 
 
 # ----------------------------------------------------------------------------
+# MLB Baseball Edge
+# ----------------------------------------------------------------------------
+
+@router.get("/baseball/edge")
+async def get_baseball_edge(min_edge: float = Query(default=0.05, ge=0, le=1)):
+    """MLB moneyline edges: devigged The Odds API vs Polymarket game markets.
+
+    Data sources:
+      - The Odds API baseball_mlb h2h (requires ODDS_API_KEY env var)
+      - Polymarket Gamma API tag_slug=baseball game events
+
+    Edge = devigged bookmaker probability - Polymarket price (YES).
+    Only returns |edge| >= min_edge (default 5%).
+
+    Returns:
+      {source, timestamp, total_edges, edges: [...], top_opportunities: [...]}
+    """
+    async def _get_baseball():
+        import sys
+        from baseball_edge import get_baseball_edge_summary
+        return await get_baseball_edge_summary(min_edge)
+
+    return await handle_edge_request("baseball", _get_baseball())
+
+
+@router.get("/baseball/dashboard")
+async def get_baseball_dashboard():
+    """Baseball shadow trade dashboard — open trades, resolved stats, collection progress.
+
+    Queries shadow_trades.db for strategy='baseball_moneyline' trades.
+    Returns empty-state data (no errors) if no trades exist or forecast_log table missing.
+
+    Returns:
+      {open_trades: [...], resolved: {total, wins, losses, win_rate, pnl, ...},
+       forecast_log: [...], collection: {resolved_count, target, pct}}
+    """
+    import sqlite3
+    from pathlib import Path
+
+    db_path = Path(__file__).parent.parent.parent / "storage" / "shadow_trades.db"
+    result = {
+        "open_trades": [],
+        "open_count": 0,
+        "resolved": {"total": 0, "wins": 0, "losses": 0, "win_rate": 0, "total_pnl": 0},
+        "forecast_log": [],
+        "forecast_count": 0,
+        "collection": {"resolved": 0, "target": 30, "pct": 0},
+    }
+
+    if not db_path.exists():
+        return result
+
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.row_factory = sqlite3.Row
+
+        # Open baseball trades
+        open_rows = conn.execute("""
+            SELECT id, market, side, entry_price, confidence, days_to_close,
+                   timestamp, reasoning, category
+            FROM shadow_trades
+            WHERE resolved = 0
+              AND strategy = 'baseball_moneyline'
+            ORDER BY timestamp DESC
+            LIMIT 25
+        """).fetchall()
+
+        result["open_trades"] = [
+            {
+                "id": r["id"],
+                "market": r["market"],
+                "side": r["side"],
+                "entry_price": round(r["entry_price"], 3) if r["entry_price"] else None,
+                "confidence": round(r["confidence"], 1) if r["confidence"] else None,
+                "days_to_close": round(r["days_to_close"], 1) if r["days_to_close"] else None,
+                "timestamp": r["timestamp"],
+                "reasoning": r["reasoning"],
+            }
+            for r in open_rows
+        ]
+        result["open_count"] = len(result["open_trades"])
+
+        # Resolved baseball trades
+        resolved_row = conn.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN outcome = side AND pnl > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN outcome != side THEN 1 ELSE 0 END) as losses,
+                SUM(COALESCE(pnl, 0)) as total_pnl,
+                AVG(confidence) as avg_confidence
+            FROM shadow_trades
+            WHERE resolved = 1
+              AND strategy = 'baseball_moneyline'
+              AND outcome IN ('YES','NO')
+              AND side IN ('YES','NO')
+        """).fetchone()
+
+        if resolved_row and resolved_row["total"]:
+            total = resolved_row["total"]
+            wins = resolved_row["wins"] or 0
+            losses = resolved_row["losses"] or 0
+            result["resolved"] = {
+                "total": total,
+                "wins": wins,
+                "losses": losses,
+                "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
+                "total_pnl": round(resolved_row["total_pnl"] or 0, 4),
+                "avg_confidence": round(resolved_row["avg_confidence"] or 0, 1),
+            }
+            result["collection"] = {
+                "resolved": total,
+                "target": 30,
+                "pct": min(100, round(total / 30 * 100, 1)),
+            }
+
+        # Recent resolved trades (last 10)
+        recent_rows = conn.execute("""
+            SELECT id, market, side, entry_price, confidence,
+                   outcome, pnl, resolved_at
+            FROM shadow_trades
+            WHERE resolved = 1
+              AND strategy = 'baseball_moneyline'
+              AND outcome IN ('YES','NO')
+            ORDER BY resolved_at DESC
+            LIMIT 10
+        """).fetchall()
+
+        result["recent_trades"] = [
+            {
+                "id": r["id"],
+                "market": r["market"],
+                "side": r["side"],
+                "entry_price": round(r["entry_price"], 3) if r["entry_price"] else None,
+                "confidence": round(r["confidence"], 1) if r["confidence"] else None,
+                "outcome": r["outcome"],
+                "pnl": round(r["pnl"], 4) if r["pnl"] else None,
+                "resolved_at": r["resolved_at"],
+            }
+            for r in recent_rows
+        ]
+
+        # Forecast log (Phase 1 — gracefully handle missing table)
+        try:
+            forecast_rows = conn.execute("""
+                SELECT team, opponent, game_date, edge_pct, direction,
+                       actual_outcome, predicted_correct
+                FROM baseball_forecast_log
+                ORDER BY game_date DESC
+                LIMIT 20
+            """).fetchall()
+
+            result["forecast_log"] = [
+                {
+                    "team": r["team"],
+                    "opponent": r["opponent"],
+                    "game_date": r["game_date"],
+                    "edge_pct": round(r["edge_pct"] * 100, 1) if r["edge_pct"] else 0,
+                    "direction": r["direction"],
+                    "actual_outcome": r["actual_outcome"],
+                    "correct": bool(r["predicted_correct"]),
+                }
+                for r in forecast_rows
+            ]
+            result["forecast_count"] = len(result["forecast_log"])
+        except sqlite3.OperationalError:
+            # Table doesn't exist yet (Phase 1 not deployed)
+            result["forecast_log"] = []
+            result["forecast_count"] = 0
+
+        conn.close()
+    except Exception as e:
+        logger.exception(f"baseball dashboard query failed: {e}")
+
+    return result
+
+
+@router.get("/baseball/props")
+async def get_baseball_props():
+    """MLB player props (batter_*/pitcher_*) for tonight's games — powers the
+    Player Props tab on baseball.html.
+
+    Data source: The Odds API event-odds endpoint, sharp books only
+    (Pinnacle/FanDuel/DraftKings/BetMGM/Caesars). MLB uses batter_*/pitcher_*
+    market keys (NOT player_*). Result is cached 10 min and hard-stops below the
+    Odds API credit floor so dashboard traffic cannot drain the budget.
+
+    Returns:
+      {source, timestamp, credit_remaining, games: [{away_team, home_team,
+       away_pitcher, home_pitcher, commence_time, props: {market: [rows]}}]}
+    """
+    try:
+        from odds.mlb_props import get_mlb_props
+        return await get_mlb_props()
+    except Exception as e:
+        logger.exception(f"baseball props fetch failed: {e}")
+        return {"source": "the_odds_api_mlb_props", "games": [], "error": str(e)}
+
+
+@router.get("/baseball/props/scout")
+async def get_baseball_props_scout(
+    last_n: int = Query(default=10, ge=3, le=30, description="Games back for hit-rate"),
+    min_edge: float = Query(default=-0.99, description="Minimum edge filter (e.g. 0.05 = 5%+)"),
+    min_games: int = Query(default=5, ge=1, le=30, description="Min games sampled (filters call-ups)"),
+):
+    """MLB prop scout: enriches today's book props with MLB Stats API game logs.
+
+    For each player in today's batter_home_runs / batter_hits / batter_total_bases /
+    pitcher_strikeouts props, computes:
+      - hit_rate_pct  : % of last N games player cleared the prop line
+      - avg_stat      : rolling average of the stat
+      - edge_pct      : hit_rate_pct - book_over_pct (positive = player cheap vs book)
+
+    Returns results sorted by edge descending. Uses MLB Stats API (free, no key)
+    and reuses the cached Odds API props payload (no extra credits).
+    """
+    try:
+        from odds.mlb_prop_scout import get_prop_scout
+        return await get_prop_scout(last_n=last_n, min_edge=min_edge, min_games=min_games)
+    except Exception as e:
+        logger.exception(f"baseball prop scout failed: {e}")
+        return {"source": "mlb_prop_scout", "results": [], "error": str(e)}
+
+
+@router.get("/baseball/kalshi/scan")
+async def get_baseball_kalshi_scan(
+    min_edge: float = Query(default=2.0, description="Min |edge vs book| % to include"),
+    last_n: int = Query(default=10, ge=3, le=30, description="Games back for L10 hit rate"),
+):
+    """Kalshi K+HR prop scanner.
+
+    Cross-references Kalshi orderbook mid-prices against Odds API implied probs
+    and MLB Stats API L10 hit rates.
+
+    Signals:
+      STRONG_YES  = book AND L10 both say Kalshi YES is cheap → buy YES on Kalshi
+      STRONG_NO   = book AND L10 both say Kalshi NO is cheap  → buy NO on Kalshi
+      BUY_YES     = book says Kalshi cheap, L10 neutral/missing
+      BUY_NO      = book says Kalshi expensive, L10 neutral/missing
+
+    edge_vs_book_pct > 0 = Kalshi YES priced below sportsbook implied prob.
+    """
+    try:
+        from odds.kalshi_props import get_kalshi_prop_scan
+        return await get_kalshi_prop_scan(min_edge_pct=min_edge, last_n=last_n)
+    except Exception as e:
+        logger.exception(f"kalshi prop scan failed: {e}")
+        return {"source": "kalshi_prop_scan", "results": [], "error": str(e)}
+
+
+@router.get("/baseball/props/alerts")
+async def get_baseball_prop_alerts(
+    limit: int = Query(default=100, ge=1, le=500, description="Max alert rows"),
+):
+    """MLB prop alert history + shadow-trade calibration (WS-A pipeline / WS-D feed).
+
+    Returns fired alerts with their shadow-trade status, CLV vs the independent
+    (Kalshi) close, and the accumulating calibration curve (alerted edge bucket ->
+    realized hit rate). This is the view that answers "is the hit-rate edge real"
+    at Gate 2. Degrades to empty before data accumulates."""
+    try:
+        from signals.mlb_prop_alerts import get_prop_alert_feed
+        return get_prop_alert_feed(limit=limit)
+    except Exception as e:
+        logger.exception(f"baseball prop alerts feed failed: {e}")
+        return {"alerts": [], "summary": {}, "calibration": [], "error": str(e)}
+
+
+@router.get("/baseball/props/scan-analytics")
+async def get_baseball_scan_analytics():
+    """Control-sample analytics over mlb_prop_scan_log (WS-D): calibration-integrity
+    overlay (alerted vs below-threshold control realized hit%), lookback-window
+    predictive power (L7/10/15/20), and scan-window timing. Defends the Gate-2
+    calibration curve against the censored top-of-sort sample."""
+    try:
+        from signals.mlb_prop_alerts import get_scan_analytics
+        return get_scan_analytics()
+    except Exception as e:
+        logger.exception(f"baseball scan analytics failed: {e}")
+        return {"calibration_integrity": [], "lookback_sweep": [], "timing": [], "error": str(e)}
+
+
+# ----------------------------------------------------------------------------
 # NFL Futures Endpoints
 # ----------------------------------------------------------------------------
 
@@ -778,9 +1076,6 @@ async def get_nfl_futures():
     """
     async def _get_nfl():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from vegas_scraper import get_nfl_odds_with_fallback
         
         data = await get_nfl_odds_with_fallback()
@@ -837,9 +1132,6 @@ async def get_superbowl_odds():
     """
     async def _get_sb():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from vegas_scraper import get_nfl_odds_with_fallback
         
         data = await get_nfl_odds_with_fallback()
@@ -875,9 +1167,6 @@ async def get_espn_odds():
     """
     try:
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from espn_odds import get_espn_summary
         return get_espn_summary()
     except ImportError as e:
@@ -897,9 +1186,6 @@ async def get_espn_edge(min_edge: float = Query(default=5.0, ge=0, le=100)):
     """
     async def _get_espn_edges():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from espn_odds import get_espn_edges as espn_edge_fn
         return await espn_edge_fn(min_edge)
 
@@ -936,9 +1222,6 @@ def _format_espn_games(games, sport: str):
 async def _get_sport_odds(sport: str):
     """Helper to get odds for a specific sport."""
     import sys
-    odds_path = _get_odds_modules_path()
-    if odds_path not in sys.path:
-        sys.path.insert(0, odds_path)
     from espn_odds import fetch_odds
 
     games = fetch_odds(sport)
@@ -1021,9 +1304,6 @@ async def get_espn_moneyline(sport: str):
     """
     async def _get_ml():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from espn_odds import get_moneyline
         
         games = get_moneyline(sport)
@@ -1047,9 +1327,6 @@ async def get_all_espn_moneylines():
     """
     async def _get_all_ml():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from espn_odds import get_all_moneylines
         
         all_ml = get_all_moneylines()
@@ -1084,9 +1361,6 @@ async def get_betfair_edge():
     """
     async def _get_betfair():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from betfair_edge import get_betfair_edge_summary
         return await get_betfair_edge_summary()
 
@@ -1108,10 +1382,18 @@ async def hf_full_scan(
     
     Based on the $134→$200K Polymarket bot strategy.
     """
+    import asyncio as _aio
+
     async def _scan():
-        from odds.hf_scanner import full_hf_scan
-        return full_hf_scan(neg_vig_threshold=threshold)
-    
+        loop = _aio.get_event_loop()
+        try:
+            return await _aio.wait_for(
+                loop.run_in_executor(None, lambda: __import__('odds.hf_scanner', fromlist=['full_hf_scan']).full_hf_scan(neg_vig_threshold=threshold)),
+                timeout=30.0
+            )
+        except _aio.TimeoutError:
+            return {"error": "HF scan timed out after 30s", "markets": [], "neg_vig": []}
+
     return await handle_edge_request("hf-scanner", _scan())
 
 
@@ -1121,16 +1403,27 @@ async def hf_discover_markets():
     
     Searches for 5-min, 15-min BTC/ETH/SOL up/down markets on Polymarket.
     """
+    import asyncio as _aio2
+
     async def _discover():
-        from odds.hf_scanner import discover_hf_markets
-        from dataclasses import asdict
-        markets = discover_hf_markets()
-        return {
-            "markets": [asdict(m) for m in markets],
-            "count": len(markets),
-            "timestamp": datetime.now().isoformat(),
-        }
-    
+        loop = _aio2.get_event_loop()
+        try:
+            def _sync():
+                from odds.hf_scanner import discover_hf_markets
+                from dataclasses import asdict
+                markets = discover_hf_markets()
+                return {
+                    "markets": [asdict(m) for m in markets],
+                    "count": len(markets),
+                    "timestamp": datetime.now().isoformat(),
+                }
+            return await _aio2.wait_for(
+                loop.run_in_executor(None, _sync),
+                timeout=30.0
+            )
+        except _aio2.TimeoutError:
+            return {"markets": [], "count": 0, "error": "Discovery timed out after 30s"}
+
     return await handle_edge_request("hf-discovery", _discover())
 
 
@@ -1142,20 +1435,41 @@ async def hf_neg_vig_scan(
     
     Checks CLOB orderbooks where Yes_ask + No_ask < threshold.
     Buying both sides = guaranteed profit on resolution.
+    Timeout: 30s (Gamma API can be slow).
     """
+    import asyncio
+
     async def _negvig():
-        from odds.hf_scanner import discover_hf_markets, scan_neg_vig
-        from dataclasses import asdict
-        markets = discover_hf_markets()
-        opps = scan_neg_vig(markets, threshold=threshold)
-        return {
-            "opportunities": [asdict(o) for o in opps],
-            "count": len(opps),
-            "markets_scanned": len(markets),
-            "threshold": threshold,
-            "timestamp": datetime.now().isoformat(),
-        }
-    
+        loop = asyncio.get_event_loop()
+
+        def _sync_scan():
+            from odds.hf_scanner import discover_hf_markets, scan_neg_vig
+            from dataclasses import asdict
+            markets = discover_hf_markets()
+            opps = scan_neg_vig(markets, threshold=threshold)
+            return {
+                "opportunities": [asdict(o) for o in opps],
+                "count": len(opps),
+                "markets_scanned": len(markets),
+                "threshold": threshold,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, _sync_scan),
+                timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            return {
+                "opportunities": [],
+                "count": 0,
+                "markets_scanned": 0,
+                "threshold": threshold,
+                "timestamp": datetime.now().isoformat(),
+                "error": "Scan timed out after 30s (Gamma API slow)",
+            }
+
     return await handle_edge_request("hf-negvig", _negvig())
 
 
@@ -1172,7 +1486,7 @@ async def hf_directional_signal(asset: str):
     async def _signal():
         from services.virtuoso_bridge import get_directional_signal
         from dataclasses import asdict
-        sig = get_directional_signal(asset)
+        sig = await run_in_threadpool(get_directional_signal, asset)
         return asdict(sig)
     
     return await handle_edge_request("hf-signal", _signal())
@@ -1183,7 +1497,7 @@ async def hf_all_signals():
     """Get directional signals for all supported assets (BTC, ETH)."""
     async def _signals():
         from services.virtuoso_bridge import scan_all_assets
-        return scan_all_assets()
+        return await run_in_threadpool(scan_all_assets)
     
     return await handle_edge_request("hf-signals", _signals())
 
@@ -1197,7 +1511,7 @@ async def hf_opportunities():
     """
     async def _opps():
         from services.virtuoso_bridge import match_signals_to_markets
-        return match_signals_to_markets()
+        return await run_in_threadpool(match_signals_to_markets)
     
     return await handle_edge_request("hf-opportunities", _opps())
 
@@ -1419,9 +1733,6 @@ async def get_kalshi_markets():
     """
     async def _get_kalshi():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from kalshi_edge import get_kalshi_polymarket_comparison
         return await get_kalshi_polymarket_comparison()
 
@@ -1442,9 +1753,6 @@ async def get_kalshi_entertainment():
     """
     async def _get_entertainment():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from kalshi_edge import get_kalshi_entertainment_props
         return await get_kalshi_entertainment_props()
 
@@ -1463,9 +1771,6 @@ async def get_all_kalshi_markets():
     """
     async def _get_all():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from kalshi_edge import get_kalshi_all_markets
         return await get_kalshi_all_markets()
 
@@ -1481,9 +1786,6 @@ async def get_manifold_edge(min_edge: float = Query(default=5.0, ge=0, le=100)):
     """Get Manifold vs Polymarket edges."""
     async def _get_manifold():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from manifold import get_manifold_edges
         return await get_manifold_edges(min_edge)
 
@@ -1495,9 +1797,6 @@ async def get_manifold_markets():
     """Get Manifold market summary."""
     try:
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from manifold import get_manifold_summary
         return get_manifold_summary()
     except ImportError as e:
@@ -1517,9 +1816,6 @@ async def get_predictit_edge(min_edge: float = Query(default=5.0, ge=0, le=100))
     """Get PredictIt vs Polymarket edges."""
     async def _get_predictit():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from predictit import get_predictit_edges
         return await get_predictit_edges(min_edge)
 
@@ -1531,9 +1827,6 @@ async def get_predictit_markets():
     """Get PredictIt market summary."""
     try:
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from predictit import get_predictit_summary
         return get_predictit_summary()
     except ImportError as e:
@@ -1557,9 +1850,6 @@ async def get_polyrouter_markets(
     """Get markets from PolyRouter (7 platforms unified)."""
     async def _get_markets():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from polyrouter import get_markets
         return await get_markets(platform=platform, limit=limit, query=query)
 
@@ -1574,9 +1864,6 @@ async def search_polyrouter(
     """Search across all 7 platforms."""
     async def _search():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from polyrouter import search_markets
         return await search_markets(query, limit)
 
@@ -1588,9 +1875,6 @@ async def get_polyrouter_edge(min_edge: float = Query(default=3.0, ge=0, le=100)
     """Find cross-platform arbitrage via PolyRouter."""
     async def _get_edges():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from polyrouter import find_cross_platform_edges
         edges = await find_cross_platform_edges(min_edge)
         return {"edges": edges, "count": len(edges), "min_edge_pct": min_edge}
@@ -1606,9 +1890,6 @@ async def get_polyrouter_sports(
     """Get sports games/odds from PolyRouter (nfl, nba, mlb, nhl, epl, etc.)."""
     async def _get_games():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from polyrouter import list_games
         return await list_games(league, limit)
 
@@ -1620,9 +1901,6 @@ async def get_polyrouter_futures(league: str):
     """Get championship futures (Super Bowl, World Series, etc.)."""
     async def _get_futures():
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from polyrouter import list_futures
         return await list_futures(league)
 
@@ -1634,9 +1912,6 @@ async def get_polyrouter_platforms():
     """List all 7 supported platforms."""
     try:
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from polyrouter import list_platforms
         return {"platforms": list_platforms()}
     except ImportError as e:
@@ -1659,9 +1934,6 @@ async def get_metaculus_questions(
     """Fetch Metaculus forecasts - free crowd predictions for politics, economics, etc."""
     try:
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from metaculus import fetch_questions
         questions = fetch_questions(limit=limit)
         # Filter by minimum forecasters
@@ -1682,9 +1954,6 @@ async def get_metaculus_edge(
     """Find edge between Metaculus forecasts and Polymarket prices."""
     try:
         import sys
-        odds_path = _get_odds_modules_path()
-        if odds_path not in sys.path:
-            sys.path.insert(0, odds_path)
         from metaculus import find_edges
         edges = find_edges(min_edge_pct=min_edge * 100)
         return {"edges": edges, "count": len(edges), "min_edge_pct": min_edge * 100}
@@ -1938,3 +2207,218 @@ async def get_kalshi_entertainment():
     except Exception as e:
         logger.exception("Kalshi entertainment error")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# NEW: The Odds API credit status
+# ============================================================================
+
+@router.get("/odds-api/credits")
+async def get_odds_api_credits():
+    """Get The Odds API credit budget status (20K/mo, usage tracking).
+    Makes a free API call to /v4/sports to read the real headers."""
+    try:
+        from odds.the_odds_api import refresh_credit_balance
+        return refresh_credit_balance()
+    except Exception as e:
+        logger.exception("Odds API credit status error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Soccer / UFC / World Cup edge engines
+# ----------------------------------------------------------------------------
+# Separation-of-concerns: these endpoints SERVE cached results written by
+# scripts/sports_edge_scan.py. They do NOT compute signals (no live Odds API /
+# Gamma calls, no order-book walks), keeping the event loop free and credit
+# spend on a controlled cron cadence. Shadow dashboards are read-only sqlite.
+# ============================================================================
+
+_SPORTS_EDGE_CACHE = {
+    "soccer_match": "soccer_match_edges.json",
+    "soccer_futures": "soccer_futures_edges.json",
+    "soccer_wc_board": "soccer_wc_board.json",
+    "ufc": "ufc_edges.json",
+}
+
+
+def _empty_edge_summary(source: str) -> dict:
+    return {
+        "source": source, "total_edges": 0, "edges": [], "top_opportunities": [],
+        "cached": False, "hint": "scanner has not run yet (scripts/sports_edge_scan.py)",
+    }
+
+
+async def _read_edge_cache(key: str, source: str) -> dict:
+    from api.deps import get_storage_service
+    storage = get_storage_service()
+    return await storage.load(_SPORTS_EDGE_CACHE[key], default=_empty_edge_summary(source))
+
+
+@router.get("/soccer/match-edge")
+async def get_soccer_match_edge():
+    """Cached soccer per-match 3-way edges (scanner-populated)."""
+    return await _read_edge_cache("soccer_match", "the_odds_api_soccer_match")
+
+
+@router.get("/soccer/futures-edge")
+async def get_soccer_futures_edge():
+    """Cached soccer outright / World Cup futures edges (scanner-populated)."""
+    return await _read_edge_cache("soccer_futures", "the_odds_api_soccer_futures")
+
+
+@router.get("/ufc/edge")
+async def get_ufc_edge():
+    """Cached UFC moneyline edges + manual-review prop listings (scanner-populated)."""
+    return await _read_edge_cache("ufc", "the_odds_api_ufc")
+
+
+def _sports_shadow_dashboard(strategies: list) -> dict:
+    """Shadow-trade dashboard for the given strategy names (mirrors the baseball
+    dashboard shape). Read-only over storage/shadow_trades.db."""
+    import sqlite3
+    from pathlib import Path
+
+    db_path = Path(__file__).parent.parent.parent / "storage" / "shadow_trades.db"
+    result = {
+        "open_trades": [], "open_count": 0,
+        "resolved": {"total": 0, "wins": 0, "losses": 0, "win_rate": 0, "total_pnl": 0},
+        "recent_trades": [], "collection": {"resolved": 0, "target": 30, "pct": 0},
+        "strategies": strategies,
+    }
+    if not db_path.exists() or not strategies:
+        return result
+
+    ph = ",".join("?" * len(strategies))
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.row_factory = sqlite3.Row
+
+        open_rows = conn.execute(f"""
+            SELECT id, market, side, entry_price, confidence, days_to_close, timestamp, reasoning
+            FROM shadow_trades
+            WHERE resolved = 0 AND strategy IN ({ph})
+            ORDER BY timestamp DESC LIMIT 25
+        """, strategies).fetchall()
+        result["open_trades"] = [
+            {
+                "id": r["id"], "market": r["market"], "side": r["side"],
+                "entry_price": round(r["entry_price"], 3) if r["entry_price"] else None,
+                "confidence": round(r["confidence"], 1) if r["confidence"] else None,
+                "days_to_close": round(r["days_to_close"], 1) if r["days_to_close"] else None,
+                "timestamp": r["timestamp"], "reasoning": r["reasoning"],
+            }
+            for r in open_rows
+        ]
+        result["open_count"] = len(result["open_trades"])
+
+        resolved_row = conn.execute(f"""
+            SELECT COUNT(*) as total,
+                   SUM(CASE WHEN outcome = side AND pnl > 0 THEN 1 ELSE 0 END) as wins,
+                   SUM(CASE WHEN outcome != side THEN 1 ELSE 0 END) as losses,
+                   SUM(COALESCE(pnl, 0)) as total_pnl,
+                   AVG(confidence) as avg_confidence
+            FROM shadow_trades
+            WHERE resolved = 1 AND strategy IN ({ph})
+              AND outcome IN ('YES','NO') AND side IN ('YES','NO')
+        """, strategies).fetchone()
+        if resolved_row and resolved_row["total"]:
+            total = resolved_row["total"]
+            wins = resolved_row["wins"] or 0
+            result["resolved"] = {
+                "total": total, "wins": wins, "losses": resolved_row["losses"] or 0,
+                "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
+                "total_pnl": round(resolved_row["total_pnl"] or 0, 4),
+                "avg_confidence": round(resolved_row["avg_confidence"] or 0, 1),
+            }
+            result["collection"] = {
+                "resolved": total, "target": 30,
+                "pct": min(100, round(total / 30 * 100, 1)),
+            }
+
+        recent_rows = conn.execute(f"""
+            SELECT id, market, side, entry_price, confidence, outcome, pnl, resolved_at
+            FROM shadow_trades
+            WHERE resolved = 1 AND strategy IN ({ph}) AND outcome IN ('YES','NO')
+            ORDER BY resolved_at DESC LIMIT 10
+        """, strategies).fetchall()
+        result["recent_trades"] = [
+            {
+                "id": r["id"], "market": r["market"], "side": r["side"],
+                "entry_price": round(r["entry_price"], 3) if r["entry_price"] else None,
+                "confidence": round(r["confidence"], 1) if r["confidence"] else None,
+                "outcome": r["outcome"],
+                "pnl": round(r["pnl"], 4) if r["pnl"] else None,
+                "resolved_at": r["resolved_at"],
+            }
+            for r in recent_rows
+        ]
+        conn.close()
+    except sqlite3.OperationalError as e:
+        logger.warning(f"sports shadow dashboard query failed: {e}")
+    return result
+
+
+@router.get("/soccer/dashboard")
+async def get_soccer_dashboard():
+    """Soccer shadow-trade dashboard (match 3-way + futures strategies)."""
+    return await run_in_threadpool(
+        _sports_shadow_dashboard, ["soccer_match_3way", "soccer_futures"])
+
+
+@router.get("/soccer/calibration")
+async def get_soccer_calibration_route():
+    """Soccer/WC closed-loop calibration: per-strategy win-rate, edge-bucket ->
+    realized win% + CLV (vs PM close), CLV summary. The 'is the edge real' view."""
+    try:
+        from signals.soccer_resolver import get_soccer_calibration
+        return await run_in_threadpool(get_soccer_calibration)
+    except Exception as e:
+        logger.exception(f"soccer calibration failed: {e}")
+        return {"by_strategy": [], "calibration": [], "clv": {}, "error": str(e)}
+
+
+@router.get("/soccer/wc-board")
+async def get_soccer_wc_board():
+    """World Cup outright FAIR-VALUE board — every matched PM<->Betfair team pair
+    with NO edge floor (the WC-winner market is efficient, so this shows fair value
+    even when nothing clears the 3% tradeable threshold). Scanner-populated."""
+    return await _read_edge_cache("soccer_wc_board", "the_odds_api_soccer_futures")
+
+
+_KWC_TTL_S = 300  # Kalshi WC prices move slowly; 5-min board freshness is plenty.
+
+
+@router.get("/soccer/kalshi-wc")
+async def get_soccer_kalshi_wc():
+    """Kalshi World Cup game-winner markets (executable venue), DISK-cached 5 min so
+    the ~5s/216-market live fetch happens once per 5 min and is SHARED across uvicorn
+    workers (an in-process cache wouldn't be — requests round-robin across workers).
+    Empty until the WC series lists. PM/Betfair cross-ref is client-side."""
+    import time as _t
+    from api.deps import get_storage_service
+
+    storage = get_storage_service()
+    fname = "soccer_kalshi_wc.json"
+    cached = await storage.load(fname, default=None)
+    if cached and (_t.time() - cached.get("_ts", 0)) < _KWC_TTL_S:
+        return cached
+    try:
+        from odds.kalshi_sports import fetch_wc_game_markets
+        markets = await run_in_threadpool(fetch_wc_game_markets)
+        payload = {
+            "markets": markets, "count": len(markets),
+            "cached_ttl_s": _KWC_TTL_S, "_ts": _t.time(),
+            "note": ("Kalshi WC game-winner venue — cross-ref to PM by team; taker fee ~quadratic, maker fee-free."
+                     if markets else "No Kalshi WC series live yet (KXWC26* lists near kickoff)."),
+        }
+        await storage.save(fname, payload)
+        return payload
+    except Exception as e:
+        logger.exception(f"soccer kalshi-wc failed: {e}")
+        return cached or {"markets": [], "count": 0, "error": str(e)}
+
+
+@router.get("/ufc/dashboard")
+async def get_ufc_dashboard():
+    """UFC shadow-trade dashboard (moneyline strategy)."""
+    return await run_in_threadpool(_sports_shadow_dashboard, ["ufc_moneyline"])

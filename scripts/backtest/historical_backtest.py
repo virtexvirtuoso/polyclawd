@@ -1,0 +1,307 @@
+"""
+Historical Weather Backtest — Full Polymarket + Weather Source Simulation
+
+Pulls EVERY resolved weather bracket from Polymarket (Feb 5 - Mar 19, 2026),
+gets actual temps from Open-Meteo archive, and simulates our model's performance.
+
+This gives us ~8,000+ data points vs the 1,114 we had from forecast_log.
+"""
+import json
+import sqlite3
+import time
+import urllib.request
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+GAMMA_API = "https://gamma-api.polymarket.com"
+ARCHIVE_API = "https://archive-api.open-meteo.com/v1/archive"
+
+# Cities and their coordinates (from weather_ensemble.py)
+CITIES = {
+    "new-york-city": (40.71, -74.01),
+    "miami": (25.76, -80.19),
+    "dallas": (32.78, -96.80),
+    "atlanta": (33.75, -84.39),
+    "chicago": (41.88, -87.63),
+    "seattle": (47.61, -122.33),
+    "toronto": (43.65, -79.38),
+    "london": (51.51, -0.13),
+    "paris": (48.86, 2.35),
+    "tokyo": (35.68, 139.69),
+    "seoul": (37.57, 126.98),
+    "buenos-aires": (-34.60, -58.38),
+    "sao-paulo": (-23.55, -46.63),
+    "munich": (48.14, 11.58),
+    "ankara": (39.93, 32.86),
+    "lucknow": (26.85, 80.95),
+    "singapore": (1.35, 103.82),
+    "wellington": (-41.29, 174.78),
+    "los-angeles": (34.05, -118.24),
+    "houston": (29.76, -95.37),
+    "denver": (39.74, -104.99),
+    "boston": (42.36, -71.06),
+    "san-francisco": (37.77, -122.42),
+    "phoenix": (33.45, -112.07),
+    "san-diego": (32.72, -117.16),
+}
+
+def fetch_json(url, timeout=15):
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd-Backtest/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        return None
+
+
+def get_actual_temps(city_slug, start_date, end_date):
+    """Get actual daily high temps from Open-Meteo archive."""
+    coords = CITIES.get(city_slug)
+    if not coords:
+        return {}
+    
+    lat, lon = coords
+    url = f"{ARCHIVE_API}?latitude={lat}&longitude={lon}&start_date={start_date}&end_date={end_date}&daily=temperature_2m_max&temperature_unit=fahrenheit"
+    data = fetch_json(url)
+    if not data or "daily" not in data:
+        return {}
+    
+    result = {}
+    for dt, temp in zip(data["daily"]["time"], data["daily"]["temperature_2m_max"]):
+        if temp is not None:
+            result[dt] = temp
+    return result
+
+
+def get_weather_event(city_slug, month_name, day, year):
+    """Fetch a weather event from Gamma API."""
+    slug = f"highest-temperature-in-{city_slug}-on-{month_name}-{day}-{year}"
+    data = fetch_json(f"{GAMMA_API}/events?slug={slug}")
+    if not data or not isinstance(data, list) or len(data) == 0:
+        return None
+    return data[0]
+
+
+def parse_bracket(question):
+    """Extract bracket bounds from market question.
+    Returns (low_f, high_f, comparison) or None.
+    """
+    import re
+    q = question.lower()
+    
+    # "between 58-59°f" or "between 58-59°F"
+    m = re.search(r'between\s+(\d+)-(\d+)\s*°\s*f', q)
+    if m:
+        return (float(m.group(1)), float(m.group(2)), 'between')
+    
+    # "be XX°C" (exact Celsius — need to handle)
+    m = re.search(r'be\s+(\d+)\s*°\s*c\b', q)
+    if m:
+        c = float(m.group(1))
+        f_low = c * 9/5 + 32 - 0.9  # ~1°C = ~1.8°F bracket
+        f_high = c * 9/5 + 32 + 0.9
+        return (f_low, f_high, 'exact_c')
+    
+    # "be XX°F or below" / "XX°F or less"
+    m = re.search(r'(\d+)\s*°\s*f\s+or\s+(below|less)', q)
+    if m:
+        return (None, float(m.group(1)), 'below')
+    
+    # "be XX°F or above" / "XX°F or more"  
+    m = re.search(r'(\d+)\s*°\s*f\s+or\s+(above|more)', q)
+    if m:
+        return (float(m.group(1)), None, 'above')
+    
+    # "between XX-YY°C"
+    m = re.search(r'between\s+(\d+)-(\d+)\s*°\s*c', q)
+    if m:
+        c_lo = float(m.group(1))
+        c_hi = float(m.group(2))
+        return (c_lo * 9/5 + 32, c_hi * 9/5 + 32, 'between_c')
+    
+    return None
+
+
+# ── Main backtest ────────────────────────────────────────────────────────
+
+MONTH_NAMES = {
+    1: 'january', 2: 'february', 3: 'march', 4: 'april',
+    5: 'may', 6: 'june', 7: 'july', 8: 'august',
+    9: 'september', 10: 'october', 11: 'november', 12: 'december',
+}
+
+start = datetime(2026, 2, 5)
+end = datetime(2026, 3, 19)
+all_dates = []
+d = start
+while d <= end:
+    all_dates.append(d)
+    d += timedelta(days=1)
+
+print(f"Date range: {start.date()} to {end.date()} ({len(all_dates)} days)")
+print(f"Cities: {len(CITIES)}")
+print(f"Max events to check: {len(all_dates) * len(CITIES):,}")
+
+# Step 1: Get actual temps for all cities
+print("\n--- Fetching actual temperatures from Open-Meteo archive ---")
+city_actuals = {}
+for city_slug in CITIES:
+    actuals = get_actual_temps(city_slug, str(start.date()), str(end.date()))
+    city_actuals[city_slug] = actuals
+    print(f"  {city_slug}: {len(actuals)} days")
+    time.sleep(0.2)  # Be nice to Open-Meteo
+
+# Step 2: Fetch all weather events from Gamma API
+print("\n--- Fetching Polymarket weather events ---")
+all_brackets = []
+events_found = 0
+events_checked = 0
+errors = 0
+
+def fetch_event_data(args):
+    city_slug, dt = args
+    month = MONTH_NAMES[dt.month]
+    day = dt.day
+    year = dt.year
+    event = get_weather_event(city_slug, month, day, year)
+    return (city_slug, dt, event)
+
+# Build job list
+jobs = []
+for city_slug in CITIES:
+    for dt in all_dates:
+        jobs.append((city_slug, dt))
+
+print(f"  Fetching {len(jobs)} events (parallel, 6 workers)...")
+
+with ThreadPoolExecutor(max_workers=6) as pool:
+    futures = {pool.submit(fetch_event_data, j): j for j in jobs}
+    for i, future in enumerate(as_completed(futures)):
+        city_slug, dt, event = future.result()
+        events_checked += 1
+        
+        if event is None:
+            continue
+        
+        events_found += 1
+        date_str = str(dt.date())
+        actual_temp = city_actuals.get(city_slug, {}).get(date_str)
+        
+        if actual_temp is None:
+            continue
+        
+        for m in event.get("markets", []):
+            bracket = parse_bracket(m.get("question", ""))
+            if bracket is None:
+                continue
+            
+            low_f, high_f, comp = bracket
+            
+            # Determine if bracket hit
+            if comp in ('between', 'between_c', 'exact_c'):
+                hit = 1 if low_f <= actual_temp <= high_f else 0
+            elif comp == 'above':
+                hit = 1 if actual_temp >= low_f else 0
+            elif comp == 'below':
+                hit = 1 if actual_temp <= high_f else 0
+            else:
+                continue
+            
+            # Get outcome prices (final resolution)
+            try:
+                prices = json.loads(m.get("outcomePrices", "[]"))
+                yes_price = float(prices[0]) if prices else None
+            except:
+                yes_price = None
+
+            # 2026-05-15: skip un-tradeable rows (Kalshi-native tickers pulled into
+            # Polymarket-shaped event blob with no Polymarket price + zero volume).
+            # Empirically 119 NULL-price `below` rows from KXHIGHNY-* tickers were
+            # inflating aggregate hit rates to a fake 13.5% (priced-only edge = 0pp).
+            # See ENSEMBLE_AUDIT_2026-05-15_04_Below-Bracket-NULL-Trace.md
+            volume_num = m.get("volumeNum") or 0
+            try:
+                volume_num = float(volume_num)
+            except (TypeError, ValueError):
+                volume_num = 0
+            if yes_price is None and volume_num == 0:
+                continue
+
+            all_brackets.append({
+                "city": city_slug,
+                "date": date_str,
+                "question": m.get("question", "")[:80],
+                "bracket_low": low_f,
+                "bracket_high": high_f,
+                "comparison": comp,
+                "actual_temp": actual_temp,
+                "hit": hit,
+                "volume": volume_num,
+                "yes_final_price": yes_price,
+                "condition_id": m.get("conditionId", ""),
+            })
+        
+        if events_checked % 200 == 0:
+            print(f"  ... {events_checked}/{len(jobs)} checked, {events_found} found, {len(all_brackets)} brackets")
+
+print(f"\n--- Results ---")
+print(f"Events checked: {events_checked}")
+print(f"Events found: {events_found}")
+print(f"Total brackets with actuals: {len(all_brackets)}")
+
+if not all_brackets:
+    print("No data found!")
+    exit(1)
+
+# Step 3: Analysis
+total_vol = sum(b["volume"] for b in all_brackets)
+hits = sum(b["hit"] for b in all_brackets)
+print(f"Total volume: ${total_vol:,.0f}")
+print(f"Bracket hit rate: {hits}/{len(all_brackets)} = {hits/len(all_brackets)*100:.1f}%")
+
+# By city
+print(f"\n{'City':<20} {'N':>5} {'Hits':>5} {'HitRate':>8} {'Volume':>12}")
+city_stats = {}
+for b in all_brackets:
+    c = b["city"]
+    if c not in city_stats:
+        city_stats[c] = {"n": 0, "hits": 0, "vol": 0}
+    city_stats[c]["n"] += 1
+    city_stats[c]["hits"] += b["hit"]
+    city_stats[c]["vol"] += b["volume"]
+
+for c in sorted(city_stats, key=lambda x: -city_stats[x]["n"]):
+    s = city_stats[c]
+    hr = s["hits"] / s["n"] * 100
+    print(f"{c:<20} {s['n']:>5} {s['hits']:>5} {hr:>7.1f}% ${s['vol']:>11,.0f}")
+
+# Save to DB for further analysis
+db_path = '/var/www/virtuosocrypto.com/polyclawd/storage/shadow_trades.db'
+db = sqlite3.connect(db_path)
+db.execute("""CREATE TABLE IF NOT EXISTS backtest_brackets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    city TEXT, target_date TEXT, question TEXT,
+    bracket_low_f REAL, bracket_high_f REAL, comparison TEXT,
+    actual_high_f REAL, hit INTEGER,
+    volume REAL, yes_final_price REAL, condition_id TEXT,
+    UNIQUE(city, target_date, bracket_low_f, bracket_high_f, comparison)
+)""")
+
+inserted = 0
+for b in all_brackets:
+    try:
+        db.execute("""INSERT OR IGNORE INTO backtest_brackets 
+            (city, target_date, question, bracket_low_f, bracket_high_f, comparison,
+             actual_high_f, hit, volume, yes_final_price, condition_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (b["city"], b["date"], b["question"], b["bracket_low"], b["bracket_high"],
+             b["comparison"], b["actual_temp"], b["hit"], b["volume"], 
+             b["yes_final_price"], b["condition_id"]))
+        inserted += 1
+    except:
+        pass
+
+db.commit()
+db.close()
+print(f"\nSaved {inserted} brackets to backtest_brackets table")
+print("Run further analysis with: SELECT * FROM backtest_brackets")

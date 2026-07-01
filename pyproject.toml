@@ -1,20 +1,15 @@
 [project]
-name = "prediction-market-data"
+name = "polyclawd"
 version = "0.1.0"
-description = "Add your description here"
+description = "Polyclawd — prediction-market trading bot (FastAPI API + HF engine + scheduler)"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = [
-    "brokenaxes>=0.6.2",
     "cryptography>=46.0.3",
     "duckdb>=1.4.2",
-    "httpx>=0.28.1",
-    "imageio>=2.36.0",
-    "kalshi-python>=2.1.4",
+    "httpx==0.28.1",
     "matplotlib>=3.9.4",
     "pandas>=2.3.3",
-    "polymarket-py>=0.1.0",
-    "pyarrow>=18.0.0",
     "scipy>=1.13.1",
     "squarify>=0.4.4",
     "tenacity>=8.0.0",
@@ -22,12 +17,34 @@ dependencies = [
     "web3>=6.0.0",
     "simple-term-menu>=1.6.0",
     "python-dotenv>=1.2.1",
+    # ── web stack pinned to the VPS's working set (reproduces prod; see tasks/todo.md) ──
+    "fastapi==0.109.0",
+    "uvicorn[standard]==0.41.0",
+    "pydantic==2.12.5",
+    "pydantic-settings==2.13.1",
+    "aiofiles",
+    "slowapi",
+    "numpy>=1.24",
+    "loguru>=0.7.2",
+    "requests>=2.31",
+    "aiomcache>=0.8",
+    "websockets>=12.0",
+    "py-clob-client==0.34.6",
 ]
 
 [dependency-groups]
 dev = [
     "ruff>=0.9.0",
+    "pytest",
+    "pytest-asyncio",
+    "locust",
 ]
+
+[tool.uv]
+# starlette is force-upgraded past fastapi 0.109's declared <0.36 bound to match the
+# VPS's working set, so a clean resolve reproduces prod (and starlette 0.52's TestClient
+# works with httpx 0.28). The VPS runs exactly this combo in production.
+override-dependencies = ["starlette==0.52.1"]
 
 [tool.ruff]
 target-version = "py39"

@@ -11,15 +11,14 @@ Same structural pattern as weather_scanner.py.
 """
 
 import json
-import logging
 import random
 import statistics
 import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from loguru import logger
 
-logger = logging.getLogger("polyclawd.tweet_count_scanner")
 
 # ============================================================================
 # Configuration
@@ -77,7 +76,7 @@ def _fetch_json(url: str, timeout: int = 15) -> Optional[dict]:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
-        logger.warning("Fetch failed %s: %s", url[:80], e)
+        logger.warning("Fetch failed {}: {}", url[:80], e)
         return None
 
 
@@ -98,16 +97,16 @@ def fetch_post_history(handle: str) -> Optional[List[dict]]:
         entry = cache[cache_key]
         age = datetime.now(timezone.utc).timestamp() - entry.get("fetched_at", 0)
         if age < CACHE_TTL_SECONDS:
-            logger.debug("Cache hit for %s (%d posts, %.0fs old)", handle, len(entry["posts"]), age)
+            logger.debug("Cache hit for {} ({} posts, {}s old)", handle, len(entry["posts"]), age)
             return entry["posts"]
 
     data = _fetch_json(f"{XTRACKER_API}/users/{handle}/posts")
     if not data or not data.get("success"):
-        logger.warning("Failed to fetch posts for %s", handle)
+        logger.warning("Failed to fetch posts for {}", handle)
         return None
 
     posts = data.get("data", [])
-    logger.info("Fetched %d posts for @%s from xtracker", len(posts), handle)
+    logger.info("Fetched {} posts for @{} from xtracker", len(posts), handle)
 
     # Cache
     cache[cache_key] = {
@@ -210,12 +209,16 @@ def count_posts_in_window(posts: List[dict], start: datetime, end: datetime) -> 
 # Monte Carlo Engine
 # ============================================================================
 
-def run_monte_carlo(daily_counts: List[int], window_days: float,
+def simulate_totals(daily_counts: List[int], window_days: float,
                     posts_so_far: int = 0, days_elapsed: float = 0,
                     simulations: int = MC_SIMULATIONS,
                     counts_by_dow: Optional[Dict[int, List[int]]] = None,
-                    window_start: Optional[datetime] = None) -> Dict[str, float]:
-    """Run Monte Carlo simulation for tweet count bracket probabilities.
+                    window_start: Optional[datetime] = None) -> List[int]:
+    """Run Monte Carlo and return raw simulated final post-count totals.
+
+    Bracket-AGNOSTIC: one total per run so callers bin into each market's
+    ACTUAL bracket scheme via bracket_probability(). The old code binned here
+    against a hardcoded BRACKET_WIDTH, silently mis-keying 25-wide markets.
     
     Args:
         daily_counts: Historical daily post counts (fallback pool)
@@ -230,7 +233,7 @@ def run_monte_carlo(daily_counts: List[int], window_days: float,
         Dict of bracket_key → probability (e.g. {"280-299": 0.144})
     """
     if not daily_counts:
-        return {}
+        return []
 
     remaining_days = max(0, window_days - days_elapsed)
     remaining_whole = int(remaining_days)
@@ -273,7 +276,7 @@ def run_monte_carlo(daily_counts: List[int], window_days: float,
                     pace_weights[pool_idx] = [w / total_w for w in weights] if total_w > 0 else None
 
     rng = random.Random(MC_SEED)
-    bracket_hits: Dict[str, int] = {}
+    totals: List[int] = []
 
     for _ in range(simulations):
         total = posts_so_far
@@ -298,16 +301,98 @@ def run_monte_carlo(daily_counts: List[int], window_days: float,
             frac_pool = day_pools[remaining_whole] if remaining_whole < len(day_pools) else daily_counts
             total += int(rng.choice(frac_pool) * remaining_frac)
 
-        # Map to bracket
-        bracket_start = (total // BRACKET_WIDTH) * BRACKET_WIDTH
-        if bracket_start >= 580:
-            key = "580+"
-        else:
-            key = f"{bracket_start}-{bracket_start + BRACKET_WIDTH - 1}"
-        bracket_hits[key] = bracket_hits.get(key, 0) + 1
+        totals.append(total)
 
-    # Convert to probabilities
-    return {k: v / simulations for k, v in bracket_hits.items()}
+    return totals
+
+
+def _parse_bracket_bounds(bracket: str) -> Tuple[int, Optional[int]]:
+    """Parse a market bracket string into (low, high); high is None for "N+"."""
+    bracket = bracket.strip()
+    if bracket.endswith("+"):
+        return int(bracket[:-1]), None
+    lo, hi = bracket.split("-")
+    return int(lo), int(hi)
+
+
+def bracket_probability(totals: List[int], bracket: str) -> Optional[float]:
+    """P(final count in `bracket`) from simulated `totals`, binned into the
+    bracket's ACTUAL bounds (Fix 1 - width-agnostic, works for 20- or 25-wide).
+
+    Returns None when the bracket lies ENTIRELY OUTSIDE the simulated support
+    (Fix 2): zero simulations is "no opinion", which the caller must NOT invert
+    into mc_no = 1.0 / certainty. 0.0 is returned only for an in-support gap,
+    where a genuine ~0 probability is actionable.
+    """
+    if not totals:
+        return None
+    lo, hi = _parse_bracket_bounds(bracket)
+    tmin, tmax = min(totals), max(totals)
+    if lo > tmax:                      # entirely above the envelope
+        return None
+    if hi is not None and hi < tmin:   # entirely below the envelope
+        return None
+    hits = sum(1 for t in totals if t >= lo and (hi is None or t <= hi))
+    return hits / len(totals)
+
+
+def decide_signal(mc_yes: Optional[float], yes_price: float,
+                  min_edge_pct: float = MIN_EDGE_PCT) -> Optional[dict]:
+    """Choose the better side (YES/NO) given the model's YES probability.
+
+    Returns None when there is no tradeable signal. mc_yes=None (bracket outside
+    MC support) yields None -- never a certainty-driven NO with edge == the
+    market price (Fix 2). Confidence is tied to the chosen side's probability,
+    never a blind default (Fix 3).
+    """
+    if mc_yes is None:
+        return None
+    mc_no = 1 - mc_yes
+    market_no = 1 - yes_price
+    edge_no = (mc_no - market_no) * 100      # positive => NO underpriced
+    edge_yes = (mc_yes - yes_price) * 100    # positive => YES underpriced
+
+    if edge_no > edge_yes and edge_no > min_edge_pct:
+        side, edge, our_prob, eff_price = "NO", edge_no, mc_no, 1 - yes_price
+    elif edge_yes > min_edge_pct:
+        side, edge, our_prob, eff_price = "YES", edge_yes, mc_yes, yes_price
+    else:
+        return None
+
+    if eff_price < 0.01 or eff_price > 0.98:
+        return None
+
+    return {
+        "side": side,
+        "edge_pct": round(edge, 1),
+        "confidence": round(min(0.95, our_prob), 3),
+        "our_prob": our_prob,
+        "effective_price": eff_price,
+    }
+
+
+def run_monte_carlo(daily_counts: List[int], window_days: float,
+                    posts_so_far: int = 0, days_elapsed: float = 0,
+                    simulations: int = MC_SIMULATIONS,
+                    counts_by_dow: Optional[Dict[int, List[int]]] = None,
+                    window_start: Optional[datetime] = None) -> Dict[str, float]:
+    """DEPRECATED back-compat shim: fixed-width bracket->prob dict.
+
+    Bins simulated totals into hardcoded BRACKET_WIDTH brackets. Kept only for
+    external callers; the scanner now uses simulate_totals()+bracket_probability()
+    to bin into each market's real bracket scheme. Do not use for new code.
+    """
+    totals = simulate_totals(daily_counts, window_days, posts_so_far, days_elapsed,
+                             simulations, counts_by_dow, window_start)
+    if not totals:
+        return {}
+    hits: Dict[str, int] = {}
+    for total in totals:
+        bracket_start = (total // BRACKET_WIDTH) * BRACKET_WIDTH
+        key = "580+" if bracket_start >= 580 else f"{bracket_start}-{bracket_start + BRACKET_WIDTH - 1}"
+        hits[key] = hits.get(key, 0) + 1
+    n = len(totals)
+    return {k: v / n for k, v in hits.items()}
 
 
 # ============================================================================
@@ -393,7 +478,7 @@ def discover_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optiona
                         seen_slugs.add(slug)
                         event_mkts = _extract_event_markets(event)
                         markets.extend(event_mkts)
-                        logger.debug("Slug discovery: %s → %d markets", slug[:40], len(event_mkts))
+                        logger.debug("Slug discovery: {} → {} markets", slug[:40], len(event_mkts))
 
             # Also try monthly pattern: "Elon Musk musk # tweets in March 2026?"
             month_match = re.search(r'in\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{4})', title)
@@ -420,7 +505,7 @@ def discover_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optiona
                 seen_slugs.add(slug)
                 markets.extend(_extract_event_markets(event))
 
-    logger.info("Discovered %d bracket markets for @%s across %d events",
+    logger.info("Discovered {} bracket markets for @{} across {} events",
                 len(markets), handle, len(seen_slugs))
     return markets
 
@@ -521,13 +606,13 @@ def scan_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optional[li
     # 1. Fetch post history
     posts = fetch_post_history(handle)
     if not posts:
-        logger.warning("No post history for @%s — skipping", handle)
+        logger.warning("No post history for @{} — skipping", handle)
         return []
 
     daily_counts = get_daily_counts(posts, rolling_days=rolling_days)
     counts_by_dow = get_daily_counts_by_dow(posts, rolling_days=rolling_days)
     if len(daily_counts) < 7:
-        logger.warning("Only %d days of data for @%s — need 7+", len(daily_counts), handle)
+        logger.warning("Only {} days of data for @{} — need 7+", len(daily_counts), handle)
         return []
 
     mean_daily = statistics.mean(daily_counts)
@@ -535,14 +620,14 @@ def scan_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optional[li
     # Log DOW breakdown
     dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     dow_means = {dow_names[d]: round(statistics.mean(c), 1) if c else 0 for d, c in counts_by_dow.items()}
-    logger.info("@%s: %d days, mean=%.1f/day, stdev=%.1f, median=%.0f | DOW: %s",
+    logger.info("@{}: {} days, mean={}/day, stdev={}, median={} | DOW: {}",
                 handle, len(daily_counts), mean_daily, stdev_daily, statistics.median(daily_counts),
                 " ".join(f"{k}={v}" for k, v in dow_means.items()))
 
     # 2. Discover markets
     markets = discover_tweet_markets(handle, gamma_volume_cache=gamma_volume_cache)
     if not markets:
-        logger.info("No active markets for @%s", handle)
+        logger.info("No active markets for @{}", handle)
         return []
 
     # 3. Group markets by event
@@ -562,7 +647,7 @@ def scan_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optional[li
         sample = event_markets[0]
         start, end = _parse_window_from_event(slug, sample.get("event_end_date", ""))
         if not start or not end:
-            logger.warning("Cannot parse window for %s", slug)
+            logger.warning("Cannot parse window for {}", slug)
             continue
 
         window_days = (end - start).total_seconds() / 86400
@@ -572,16 +657,16 @@ def scan_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optional[li
         # Calculate days elapsed and posts so far
         days_elapsed = max(0, (now - start).total_seconds() / 86400)
         if days_elapsed >= window_days:
-            logger.debug("Window %s already closed", slug)
+            logger.debug("Window {} already closed", slug)
             continue
 
         posts_so_far = count_posts_in_window(posts, start, min(now, end))
 
-        logger.info("Event %s: %.1f/%.1f days elapsed, %d posts so far",
+        logger.info("Event {}: {}/{} days elapsed, {} posts so far",
                      slug[:40], days_elapsed, window_days, posts_so_far)
 
-        # Run Monte Carlo (DOW-aware + pace-conditioned)
-        mc_probs = run_monte_carlo(
+        # Run Monte Carlo -> raw simulated totals (bracket-agnostic)
+        totals = simulate_totals(
             daily_counts, window_days,
             posts_so_far=posts_so_far,
             days_elapsed=days_elapsed,
@@ -589,7 +674,7 @@ def scan_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optional[li
             window_start=start,
         )
 
-        if not mc_probs:
+        if not totals:
             continue
 
         # 5. Compare MC to market prices
@@ -597,33 +682,17 @@ def scan_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optional[li
             bracket = m["bracket"]
             yes_price = m["yes_price"]
 
-            mc_yes = mc_probs.get(bracket, 0)
+            # Bin into the market's ACTUAL bracket bounds (Fix 1). Outside the
+            # simulated support -> None -> no opinion, never certainty (Fix 2/3).
+            mc_yes = bracket_probability(totals, bracket)
+            decision = decide_signal(mc_yes, yes_price)
+            if decision is None:
+                continue  # no edge, or bracket outside MC support
+
             mc_no = 1 - mc_yes
-            market_no = 1 - yes_price
-
-            # Calculate edges for both sides
-            edge_no = (mc_no - market_no) * 100  # positive = NO is underpriced
-            edge_yes = (mc_yes - yes_price) * 100  # positive = YES is underpriced
-
-            # Pick better side
-            if edge_no > edge_yes and edge_no > MIN_EDGE_PCT:
-                side = "NO"
-                edge = edge_no
-                our_prob = mc_no
-                effective_price = 1 - yes_price  # Cost of NO
-            elif edge_yes > MIN_EDGE_PCT:
-                side = "YES"
-                edge = edge_yes
-                our_prob = mc_yes
-                effective_price = yes_price
-            else:
-                continue  # No edge
-
-            # Skip garbage (too cheap or too expensive)
-            if effective_price < 0.01 or effective_price > 0.98:
-                continue
-
-            confidence = min(0.95, our_prob)
+            side = decision["side"]
+            edge = decision["edge_pct"]
+            confidence = decision["confidence"]
 
             signals.append({
                 "market_id": m["condition_id"],
@@ -657,7 +726,7 @@ def scan_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optional[li
             })
 
     signals.sort(key=lambda x: x["edge_pct"], reverse=True)
-    logger.info("Tweet count scan: %d signals with >%.0f%% edge for @%s",
+    logger.info("Tweet count scan: {} signals with >{}%% edge for @{}",
                 len(signals), MIN_EDGE_PCT, handle)
     return signals
 
@@ -682,7 +751,7 @@ def scan_all_tweet_markets() -> Dict[str, any]:
                 "top_edge": signals[0]["edge_pct"] if signals else 0,
             }
         except Exception as e:
-            logger.error("Error scanning @%s: %s", handle, e)
+            logger.error("Error scanning @{}: {}", handle, e)
             account_stats[handle] = {"signals": 0, "error": str(e)}
 
     return {
@@ -721,7 +790,7 @@ def get_tweet_portfolio_signals(min_edge: float = 5.0, max_signals: int = 5) -> 
     top = sorted(best_per_event.values(), key=lambda x: x["edge_pct"], reverse=True)[:max_signals]
 
     # Already in portfolio signal format
-    logger.info("Tweet portfolio signals: %d/%d pass min_edge=%.0f%%",
+    logger.info("Tweet portfolio signals: {}/{} pass min_edge={}%%",
                 len(top), len(all_signals), min_edge)
     return top
 
@@ -748,7 +817,7 @@ def _save_cache(cache: Dict):
         with open(CACHE_FILE, "w") as f:
             json.dump(cache, f)
     except Exception as e:
-        logger.warning("Failed to save cache: %s", e)
+        logger.warning("Failed to save cache: {}", e)
 
 
 # ============================================================================
@@ -764,46 +833,46 @@ if __name__ == "__main__":
     if cmd == "scan":
         result = scan_all_tweet_markets()
         signals = result["signals"]
-        print(f"\n{'='*80}")
-        print(f"Tweet Count Scanner — {result['total_signals']} signals found")
-        print(f"{'='*80}\n")
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Tweet Count Scanner — {result['total_signals']} signals found")
+        logger.info(f"{'='*80}\n")
 
         for handle, stats in result["accounts"].items():
             name = TRACKED_ACCOUNTS[handle]["name"]
-            print(f"@{handle} ({name}): {stats['signals']} signals, top edge={stats.get('top_edge',0):.1f}%")
+            logger.info(f"@{handle} ({name}): {stats['signals']} signals, top edge={stats.get('top_edge',0):.1f}%")
 
         if signals:
-            print(f"\n{'Bracket':>12s}  {'Side':>4s}  {'Mkt YES':>8s}  {'MC YES':>8s}  {'Edge':>6s}  {'Market'}")
-            print("-" * 90)
+            logger.info(f"\n{'Bracket':>12s}  {'Side':>4s}  {'Mkt YES':>8s}  {'MC YES':>8s}  {'Edge':>6s}  {'Market'}")
+            logger.info("-" * 90)
             for s in signals[:20]:
-                print(f"{s['bracket']:>12s}  {s['side']:>4s}  {s['entry_price']:>7.1%}  "
+                logger.info(f"{s['bracket']:>12s}  {s['side']:>4s}  {s['entry_price']:>7.1%}  "
                       f"{s['mc_yes_prob']:>7.1%}  {s['edge_pct']:>+5.1f}%  {s['market'][:45]}")
 
-            print(f"\nProjections:")
+            logger.info(f"\nProjections:")
             seen = set()
             for s in signals:
                 slug = s["event_slug"]
                 if slug not in seen:
                     seen.add(slug)
-                    print(f"  {s['event_title'][:50]}: {s['posts_so_far']} posts in {s['days_elapsed']:.1f}d → projected {s['projected_total']}")
+                    logger.info(f"  {s['event_title'][:50]}: {s['posts_so_far']} posts in {s['days_elapsed']:.1f}d → projected {s['projected_total']}")
         else:
-            print("\nNo signals with sufficient edge found.")
+            logger.info("\nNo signals with sufficient edge found.")
 
     elif cmd == "portfolio":
         signals = get_tweet_portfolio_signals()
-        print(json.dumps(signals, indent=2))
+        logger.info(json.dumps(signals, indent=2))
 
     elif cmd == "history":
         handle = sys.argv[2] if len(sys.argv) > 2 else "elonmusk"
         posts = fetch_post_history(handle)
         if posts:
             counts = get_daily_counts(posts, rolling_days=28)
-            print(f"@{handle}: {len(counts)} days, mean={statistics.mean(counts):.1f}, "
+            logger.info(f"@{handle}: {len(counts)} days, mean={statistics.mean(counts):.1f}, "
                   f"stdev={statistics.stdev(counts):.1f}, median={statistics.median(counts):.0f}")
-            print(f"7-day projection: {statistics.mean(counts)*7:.0f} ± {statistics.stdev(counts)*7**0.5:.0f}")
-            print("\nDaily counts (last 14 days):")
+            logger.info(f"7-day projection: {statistics.mean(counts)*7:.0f} ± {statistics.stdev(counts)*7**0.5:.0f}")
+            logger.info("\nDaily counts (last 14 days):")
             for i, c in enumerate(counts[-14:]):
                 d = (datetime.now(timezone.utc).date() - timedelta(days=14-i))
-                print(f"  {d}: {c} posts")
+                logger.info(f"  {d}: {c} posts")
     else:
-        print("Usage: tweet_count_scanner.py [scan|portfolio|history [handle]]")
+        logger.info("Usage: tweet_count_scanner.py [scan|portfolio|history [handle]]")

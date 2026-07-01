@@ -8,7 +8,6 @@ import json
 import argparse
 import os
 import importlib.util
-from typing import Optional
 
 from app import mcp
 

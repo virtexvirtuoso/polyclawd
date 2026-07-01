@@ -852,26 +852,55 @@ def evaluate_weather_market(title: str, market_price: float) -> Optional[dict]:
 
 
 def scan_kalshi_weather() -> List[dict]:
-    """Scan Kalshi weather markets for edges."""
+    """Scan Kalshi weather markets for edges.
+
+    Kalshi migrated from generic series (KXTEMPD, KXRAIND) to per-city series
+    (KXHIGHTATL, KXLOWTNYC, KXRAINNY, etc.) in mid-2026. This fetches all
+    per-city weather series that match our tracked cities.
+    """
     signals = []
-    
-    weather_cats = ["KXTEMPD", "KXTEMPW", "KXRAIND", "KXWIND", "KXSNOW", "KXHUMID"]
-    
-    for cat in weather_cats:
-        url = f"{KALSHI_API}/events?series_ticker={cat}&status=open&limit=50"
+
+    # Per-city series tickers — high temp, low temp, rain (monthly variants too)
+    weather_series = [
+        # High temperature (daily)
+        "KXHIGHTATL", "KXHIGHTBOS", "KXHIGHTDAL", "KXHIGHTDC",
+        "KXHIGHTEMPDEN", "KXHIGHTHOU", "KXHIGHTLV", "KXHIGHTMIN",
+        "KXHIGHTNOLA", "KXHIGHTOKC", "KXHIGHTPHX", "KXHIGHTSATX",
+        "KXHIGHTSEA", "KXHIGHTSFO",
+        # Low temperature (daily)
+        "KXLOWTATL", "KXLOWTAUS", "KXLOWTBOS", "KXLOWTCHI",
+        "KXLOWTDAL", "KXLOWTDC", "KXLOWTDEN", "KXLOWTHOU",
+        "KXLOWTLAX", "KXLOWTLV", "KXLOWTMIA", "KXLOWTMIN",
+        "KXLOWTNOLA", "KXLOWTNYC", "KXLOWTOKC", "KXLOWTPHIL",
+        "KXLOWTPHX", "KXLOWTSATX", "KXLOWTSEA", "KXLOWTSFO",
+        # Rain (daily/monthly)
+        "KXRAINNY", "KXRAINNYC", "KXRAINMIA", "KXRAINHOU",
+        "KXRAINSEA", "KXRAINDALM", "KXRAINLAXM", "KXRAINSFOM",
+        "KXRAINCHIM", "KXRAINDENM", "KXRAINAUSM", "KXRAINHOUM",
+        "KXRAINMIAM", "KXRAINSEAM", "KXRAINNYCM",
+        # Snow (monthly)
+        "KXNYCSNOWM", "KXBOSSNOWM", "KXCHISNOWM", "KXDCSNOWM",
+        "KXDENSNOWM", "KXDALSNOWM", "KXASPSNOWM",
+        # Hourly directional temp
+        "KXTEMPBOSH", "KXTEMPCHIH", "KXTEMPDCH",
+        "KXTEMPLAXH", "KXTEMPMIAH",
+    ]
+
+    for series in weather_series:
+        url = f"{KALSHI_API}/events?series_ticker={series}&status=open&limit=20"
         data = _fetch_json(url)
         if not data:
             continue
-        
+
         for event in data.get("events", []):
             for market in event.get("markets", []):
                 title = market.get("title", "")
                 yes_price = market.get("yes_price", 50) / 100.0  # Kalshi cents → decimal
                 volume = market.get("volume", 0)
-                
+
                 if volume < 100:
                     continue
-                
+
                 result = evaluate_weather_market(title, yes_price)
                 if result:
                     result["platform"] = "kalshi"
@@ -879,7 +908,7 @@ def scan_kalshi_weather() -> List[dict]:
                     result["market"] = title
                     result["volume"] = volume
                     signals.append(result)
-    
+
     return signals
 
 
@@ -1118,6 +1147,49 @@ def scan_polymarket_weather() -> List[dict]:
 
     logger.info("Weather scan: %d signals from %d cities × %d dates (parallel)",
                 len(signals), len(active_cities), len(dates_to_check))
+
+    # --- Executable-edge enrichment (order-book reality check; additive) ---
+    # The edge above is vs the Gamma midpoint; the price you can actually take
+    # is the ask of the side token walked to size. Derive the side fair value as
+    # midpoint_side + edge (avoids the ambiguous fair_value field), then gate.
+    try:
+        from odds import poly_executable_edge as pee
+    except Exception:
+        pee = None
+    if pee is not None:
+        for sig in signals:
+            cid = sig.get("market_id")
+            side = sig.get("side")
+            mkt = sig.get("market_price")
+            if not cid or side not in ("YES", "NO") or mkt is None:
+                continue
+            midpoint_side = mkt if side == "YES" else (1.0 - mkt)
+            fair_side = midpoint_side + (sig.get("edge_pct", 0) or 0) / 100.0
+            try:
+                ex = pee.executable_edge(
+                    fair_side, side, condition_id=cid,
+                    outcome_index=0 if side == "YES" else 1, target_usd=100.0,
+                    category="weather",
+                )
+            except Exception:
+                ex = {"available": False}
+            if ex.get("available"):
+                sig["executable_price"] = ex["executable_price"]
+                sig["executable_edge_pct"] = (round(ex["executable_edge"] * 100, 1)
+                                              if ex["executable_edge"] is not None else None)
+                sig["book_spread_pct"] = (round(ex["spread"] * 100, 1)
+                                          if ex["spread"] is not None else None)
+                sig["slippage_bps"] = ex["slippage_bps"]
+                sig["tradeable"] = ex["tradeable"]
+                sig["net_edge_maker_pct"] = (
+                    round(ex["net_edge_maker"] * 100, 1)
+                    if ex.get("net_edge_maker") is not None else None
+                )
+                sig["net_edge_taker_pct"] = (
+                    round(ex["net_edge_taker"] * 100, 1)
+                    if ex.get("net_edge_taker") is not None else None
+                )
+
     return signals
 
 

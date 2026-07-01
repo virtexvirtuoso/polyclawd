@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Polyclawd — Options-Implied Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
+<style>
+  :root {
+    --bg: #0a0e17; --card: #111827; --border: #1e293b;
+    --text: #e2e8f0; --dim: #94a3b8; --accent: #3b82f6;
+    --green: #10b981; --red: #ef4444; --amber: #f59e0b;
+    --cyan: #06b6d4; --purple: #8b5cf6;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; } html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+  body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); padding: 20px; padding-left: max(20px, env(safe-area-inset-left)); padding-right: max(20px, env(safe-area-inset-right)); max-width: 1400px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { color: var(--dim); font-size: 0.85rem; margin-bottom: 20px; }
+  .grid { display: grid; gap: 16px; margin-bottom: 16px; }
+  .grid-4 { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  .grid-3 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .grid-2 { grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px;
+  }
+  .stat-value { font-size: 1.8rem; font-weight: 700; line-height: 1.2; }
+  .stat-label { font-size: 0.75rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
+  .positive { color: var(--green); }
+  .negative { color: var(--red); }
+  .neutral { color: var(--amber); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; } .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  th { text-align: left; color: var(--dim); font-weight: 500; padding: 8px 6px; border-bottom: 1px solid var(--border); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  td { padding: 7px 6px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover { background: rgba(59,130,246,0.05); }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 0.7rem; font-weight: 600; white-space: nowrap;
+  }
+  .badge-no { background: rgba(16, 185, 129, 0.15); color: var(--green); }
+  .badge-yes { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+  .badge-won { background: rgba(16, 185, 129, 0.15); color: var(--green); }
+  .badge-lost { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+  .badge-bracket { background: rgba(59, 130, 246, 0.15); color: var(--accent); }
+  .badge-threshold { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
+  .badge-exact { background: rgba(6, 182, 212, 0.15); color: var(--cyan); }
+  .badge-open { background: rgba(139, 92, 246, 0.15); color: var(--purple); }
+  .badge-stopped { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
+  .badge-above { background: rgba(16, 185, 129, 0.15); color: var(--green); }
+  .badge-below { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+  .chart-wrap { position: relative; height: 250px; }
+  .chart-wrap-tall { position: relative; height: 400px; }
+  .refresh-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .refresh-timer { font-size: 0.75rem; color: var(--dim); }
+  .header-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .tag { font-size: 0.7rem; background: rgba(59,130,246,0.15); color: var(--accent); padding: 2px 8px; border-radius: 10px; }
+  .section-title { font-size: 0.95rem; font-weight: 600; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .empty-state { color: var(--dim); font-style: italic; padding: 30px; text-align: center; font-size: 0.85rem; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .status-live { background: var(--green); animation: pulse 2s infinite; }
+  .status-stale { background: var(--amber); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .nav-links { display: flex; gap: 12px; margin-bottom: 16px; }
+  .nav-links a { color: var(--accent); font-size: 0.8rem; text-decoration: none; }
+  .nav-links a:hover { text-decoration: underline; }
+  .last-updated { font-size: 0.7rem; color: var(--dim); margin-top: 8px; }
+  .banner { background: rgba(139,92,246,0.1); border: 1px solid rgba(139,92,246,0.3); color: var(--purple); border-radius: 10px; padding: 10px 14px; font-size: 0.8rem; margin-bottom: 16px; }
+  .tab-bar { display: flex; gap: 4px; margin-bottom: 16px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; } .tab-bar::-webkit-scrollbar { display: none; }
+  .tab { padding: 6px 14px; border-radius: 8px; font-size: 0.8rem; cursor: pointer; background: transparent; color: var(--dim); border: 1px solid var(--border); transition: all 0.2s; white-space: nowrap; }
+  .tab.active { background: var(--accent); color: white; border-color: var(--accent); }
+  .tab:hover:not(.active) { background: rgba(59,130,246,0.1); color: var(--text); }
+  .section { display: none; }
+  .section.active { display: block; }
+  .meter-track { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+  .meter-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
+  @media (max-width: 768px) {
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    .grid-4 { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .chart-wrap-tall { height: 250px; }
+    .chart-wrap { height: 200px; }
+    h1 { font-size: 1.2rem; }
+    .subtitle { font-size: 0.75rem; margin-bottom: 12px; }
+    .header-row { gap: 4px; }
+    .tag { font-size: 0.6rem; padding: 2px 6px; }
+    .stat-value { font-size: 1.4rem; }
+    .refresh-bar { flex-direction: column; gap: 6px; align-items: flex-start; }
+    .section-title { font-size: 0.85rem; }
+    table { font-size: 0.72rem; }
+    th { font-size: 0.6rem; }
+    td { padding: 5px 4px; }
+    .card { padding: 12px; }
+    .nav-links { gap: 8px; }
+    .nav-links a { font-size: 0.72rem; }
+    .banner { font-size: 0.72rem; }
+    .tab { font-size: 0.72rem; padding: 5px 8px; }
+  }
+  @media (max-width: 480px) {
+    body { padding: 10px; }
+    .grid-4 { grid-template-columns: 1fr 1fr; gap: 8px; }
+    .stat-value { font-size: 1.2rem; }
+    table { font-size: 0.65rem; }
+    td { padding: 4px 3px; }
+    th { font-size: 0.55rem; padding: 4px 3px; }
+    .badge { font-size: 0.6rem; padding: 1px 5px; }
+    .tag { font-size: 0.5rem; padding: 1px 4px; }
+    .nav-links { gap: 6px; flex-wrap: wrap; }
+    .nav-links a { font-size: 0.68rem; }
+    .section-title { font-size: 0.78rem; }
+    .banner { font-size: 0.68rem; padding: 8px 10px; }
+    h1 { font-size: 1rem; }
+  }
+</style>
+</head>
+<body>
+
+<div class="refresh-bar">
+  <div>
+    <div class="header-row">
+      <h1>📈 Options-Implied Signal</h1>
+      <span class="tag">N(d2) vs Polymarket</span>
+      <span class="tag" id="ticker-tag" style="background:rgba(16,185,129,0.15);color:var(--green)">Auto-discovered</span>
+      <span class="tag" style="background:rgba(139,92,246,0.15);color:var(--purple)">Display-Only</span>
+    </div>
+    <div class="subtitle">Alpaca OPRA options-implied probabilities vs Polymarket close-ladder prices — auto-refreshes every 60s</div>
+  </div>
+  <div style="text-align:right">
+    <div class="refresh-timer" id="timer">Refreshing...</div>
+    <div id="api-status" class="last-updated"></div>
+  </div>
+</div>
+
+<div class="nav-links">
+  <a href="/polyclawd/portfolio.html">← Portfolio</a>
+  <a href="/polyclawd/weather.html">🌡️ Weather</a>
+  <a href="/polyclawd/baseball.html">⚾ Baseball</a>
+  <a href="/polyclawd/analysis.html">Analysis</a>
+</div>
+
+<div class="banner">⚠️ Display-only research signal — spread is risk-premium-detrended; raw level is not edge.</div>
+
+<!-- Tab Navigation -->
+<div class="tab-bar">
+  <div class="tab active" onclick="switchTab('divergences')">📊 Divergences</div>
+  <div class="tab" onclick="switchTab('trading')">💰 Trading</div>
+</div>
+
+<!-- ===================== DIVERGENCES TAB ===================== -->
+<div class="section active" id="tab-divergences">
+
+<!-- KPI Cards -->
+<div class="grid grid-4" id="kpi-stats">
+  <div class="card"><div class="stat-value" id="kpi-matched">—</div><div class="stat-label">Matched Markets</div></div>
+  <div class="card"><div class="stat-value" id="kpi-mean">—</div><div class="stat-label">Mean Spread (pp)</div></div>
+  <div class="card"><div class="stat-value" id="kpi-std">—</div><div class="stat-label">Std Spread (pp)</div></div>
+  <div class="card"><div class="stat-value" id="kpi-date">—</div><div class="stat-label">Last Run</div></div>
+</div>
+
+<!-- IV/RV Volatility Spread Card -->
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">📊 Volatility Spread — IV vs RV</div>
+  <div class="subtitle" style="margin-bottom:12px">Implied Vol (Alpaca OPRA) vs Realized Vol (yfinance 30d). Ratio &gt;1.5 = expensive options (reduces BUY confidence).</div>
+  <div id="iv-rv-table">
+    <div class="empty-state">Loading volatility data…</div>
+  </div>
+</div>
+
+<!-- Chart + Top Divergences -->
+<div class="grid grid-2">
+  <div class="card">
+    <div class="section-title">📊 Mean Spread by Ticker</div>
+    <div class="chart-wrap" id="ticker-wrap"><canvas id="tickerChart"></canvas></div>
+  </div>
+  <div class="card">
+    <div class="section-title">🎯 Top Divergences</div>
+    <div id="divergences-table" class="table-wrap"><div class="empty-state">Loading…</div></div>
+  </div>
+</div>
+
+<!-- All Rows -->
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">🗂️ All Matched Rows <span id="rows-count" style="font-size:0.75rem;color:var(--dim)"></span></div>
+  <div id="rows-table" class="table-wrap"><div class="empty-state">Loading…</div></div>
+</div>
+
+</div>
+
+<!-- ===================== TRADING TAB ===================== -->
+<div class="section" id="tab-trading">
+
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">💾 Options-Implied Shadow Trades</div>
+  <div class="subtitle" style="margin-bottom:12px">Paper trades logged via paper_portfolio with strategy=options_implied, archetype=options.</div>
+  <div id="shadow-status">
+    <div class="empty-state" style="padding:20px">
+      No options shadow trades yet — data appears when the options scanner runs and feeds paper_portfolio.<br><br>
+      📊 Monitor open options positions with live prices at <a href="/polyclawd/portfolio.html" style="color:var(--accent)">Portfolio →</a>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<script>
+const API = '/polyclawd/api/options/dashboard';
+const STATUS_API = '/polyclawd/api/options/status';
+let charts = {};
+let refreshInterval = 60;
+let countdown = refreshInterval;
+let lastData = null;
+
+function spreadClass(v) { return v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral'; }
+function spreadSign(v) { return v > 0 ? '+' : ''; }
+function fmtNum(v, d = 2) { return (v === null || v === undefined || isNaN(v)) ? '—' : Number(v).toFixed(d); }
+function fmtPrice(v) { return (v === null || v === undefined || isNaN(v)) ? '—' : (Number(v) * 100).toFixed(1) + '¢'; }
+function fmtProb(v) { return (v === null || v === undefined || isNaN(v)) ? '—' : (Number(v) * 100).toFixed(1) + '%'; }
+function fmtStrike(v) { return (v === null || v === undefined || isNaN(v)) ? '—' : '$' + Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 }); }
+function mtypeBadge(t) {
+  if (t === 'bracket') return 'badge-bracket';
+  if (t === 'above') return 'badge-above';
+  if (t === 'below') return 'badge-below';
+  return 'badge-exact';
+}
+
+async function load() {
+  try {
+    const res = await fetch(API);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const d = await res.json();
+    lastData = d;
+
+    document.getElementById('api-status').innerHTML =
+      `<span class="status-dot status-live"></span>Live — ${new Date().toLocaleTimeString()}`;
+
+    renderKPI(d.totals);
+    renderTickerChart(d.by_ticker);
+    renderDivergences(d.divergences);
+    renderRows(d.rows);
+    if (d.shadow) renderShadowTrades(d.shadow);
+    if (d.accuracy) renderAccuracy(d.accuracy);
+    
+    // Fetch IV/RV data
+    fetch('/polyclawd/api/options/iv-rv')
+      .then(r => r.json())
+      .then(ivData => renderIVRV(ivData))
+      .catch(() => {});
+    
+    // Update ticker tag with discovered count
+    const tkTag = document.getElementById('ticker-tag');
+    if (tkTag && d.by_ticker) {
+      const tks = Object.keys(d.by_ticker).join(' · ');
+      tkTag.textContent = tks || 'Auto-discovered';
+    }
+  } catch (e) {
+    console.error('Dashboard load failed:', e);
+    document.getElementById('api-status').innerHTML =
+      `<span class="status-dot status-stale"></span>Error: ${e.message}`;
+  }
+}
+
+function renderKPI(t) {
+  t = t || {};
+  document.getElementById('kpi-matched').textContent = (t.matched != null) ? t.matched : '—';
+  const meanEl = document.getElementById('kpi-mean');
+  meanEl.textContent = (t.mean_spread_pp != null) ? spreadSign(t.mean_spread_pp) + fmtNum(t.mean_spread_pp) : '—';
+  meanEl.className = 'stat-value ' + spreadClass(t.mean_spread_pp || 0);
+  document.getElementById('kpi-std').textContent = (t.std_spread_pp != null) ? fmtNum(t.std_spread_pp) : '—';
+  document.getElementById('kpi-date').textContent = t.date || '—';
+}
+
+function renderTickerChart(byTicker) {
+  if (charts.ticker) charts.ticker.destroy();
+  const wrap = document.getElementById('ticker-wrap');
+  const entries = byTicker ? Object.entries(byTicker) : [];
+  if (!entries.length) {
+    wrap.innerHTML = '<div class="empty-state" style="height:220px;display:flex;align-items:center;justify-content:center">No matched markets yet</div>';
+    return;
+  }
+  wrap.innerHTML = '<canvas id="tickerChart"></canvas>';
+  const ctx = document.getElementById('tickerChart').getContext('2d');
+  const sorted = entries.sort((a, b) => (b[1].mean_spread_pp || 0) - (a[1].mean_spread_pp || 0));
+  const labels = sorted.map(e => e[0]);
+  const values = sorted.map(e => e[1].mean_spread_pp || 0);
+  charts.ticker = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Mean Spread (pp)',
+        data: values,
+        backgroundColor: values.map(v => v >= 0 ? 'rgba(16,185,129,0.7)' : 'rgba(239,68,68,0.7)'),
+        borderRadius: 4
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (c) => { const e = sorted[c.dataIndex][1]; return `${c.raw >= 0 ? '+' : ''}${Number(c.raw).toFixed(2)}pp (n=${e.n})`; } } }
+      },
+      scales: {
+        x: { ticks: { color: '#64748b', callback: v => (v > 0 ? '+' : '') + v + 'pp' }, grid: { color: '#1e293b' } },
+        y: { ticks: { color: '#94a3b8', font: { size: 11 } }, grid: { display: false } }
+      }
+    }
+  });
+}
+
+function renderDivergences(divs) {
+  const el = document.getElementById('divergences-table');
+  if (!divs || !divs.length) { el.innerHTML = '<div class="empty-state">No divergences yet</div>'; return; }
+  let html = '<table><tr><th>Ticker</th><th>Expiry</th><th>Strike</th><th>Type</th><th>Poly</th><th>Implied</th><th>Spread</th></tr>';
+  for (const r of divs) {
+    html += `<tr>
+      <td style="font-weight:600">${r.ticker || '—'}</td>
+      <td style="color:var(--dim)">${r.expiry || '—'}</td>
+      <td>${fmtStrike(r.strike)}</td>
+      <td><span class="badge ${mtypeBadge(r.market_type)}">${r.market_type || '—'}</span></td>
+      <td>${fmtPrice(r.poly_price)}</td>
+      <td>${fmtProb(r.implied_prob)}</td>
+      <td class="${spreadClass(r.spread_pp)}">${r.spread_pp != null ? spreadSign(r.spread_pp) + fmtNum(r.spread_pp) + 'pp' : '—'}</td>
+    </tr>`;
+  }
+  el.innerHTML = html + '</table>';
+}
+
+function renderRows(rows) {
+  const el = document.getElementById('rows-table');
+  const cntEl = document.getElementById('rows-count');
+  if (!rows || !rows.length) { el.innerHTML = '<div class="empty-state">No matched rows yet</div>'; if (cntEl) cntEl.textContent = ''; return; }
+  const shown = rows.slice(0, 100);
+  if (cntEl) cntEl.textContent = `(showing ${shown.length} of ${rows.length})`;
+  let html = '<table><tr><th>Ticker</th><th>Expiry</th><th>Strike</th><th>Type</th><th>Poly</th><th>Implied</th><th>Spread</th><th>Underlying</th><th>IV</th><th>Liq</th><th>Vol 24h</th><th>Book Spr</th><th>Tradeable</th></tr>';
+  for (const r of shown) {
+    html += `<tr>
+      <td style="font-weight:600">${r.ticker || '—'}</td>
+      <td style="color:var(--dim)">${r.expiry || '—'}</td>
+      <td>${fmtStrike(r.strike)}</td>
+      <td><span class="badge ${mtypeBadge(r.market_type)}">${r.market_type || '—'}</span></td>
+      <td>${fmtPrice(r.poly_price)}</td>
+      <td>${fmtProb(r.implied_prob)}</td>
+      <td class="${spreadClass(r.spread_pp)}">${r.spread_pp != null ? spreadSign(r.spread_pp) + fmtNum(r.spread_pp) + 'pp' : '—'}</td>
+      <td>${fmtStrike(r.underlying)}</td>
+      <td>${r.iv != null ? (Number(r.iv) * 100).toFixed(1) + '%' : '—'}</td>
+      <td style="color:var(--dim)">${r.poly_liquidity != null ? '$' + Number(r.poly_liquidity).toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'}</td>
+      <td style="color:var(--dim)">${r.poly_vol_24h != null ? '$' + Number(r.poly_vol_24h).toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'}</td>
+      <td>${r.book_spread_pp != null ? r.book_spread_pp + '¢' : '—'}</td>
+      <td>${(r.tradeable === 1 || r.tradeable === true) ? '<span style="color:var(--green)">✓</span>' : ((r.tradeable === 0 || r.tradeable === false) ? '<span style="color:var(--dim)">✗</span>' : '<span style="color:var(--dim)">—</span>')}</td>
+    </tr>`;
+  }
+  el.innerHTML = html + '</table>';
+}
+
+function renderShadowTrades(shadow) {
+  if (!shadow) return;
+  const container = document.getElementById('shadow-status');
+  const openCount = shadow.open_count || 0;
+  const resolved = shadow.resolved || {};
+  const collection = shadow.collection || {resolved: 0, target: 30, pct: 0};
+  const recent = shadow.recent_trades || [];
+  
+  let html = `<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px">`;
+  html += `<div><span style="color:var(--dim)">Open:</span> <strong>${openCount}</strong></div>`;
+  html += `<div><span style="color:var(--dim)">Resolved:</span> <strong>${resolved.total || 0}</strong></div>`;
+  html += `<div><span style="color:var(--dim)">Win Rate:</span> <strong style="color:${resolved.win_rate > 50 ? 'var(--green)' : (resolved.win_rate > 0 && resolved.win_rate < 50 ? 'var(--red)' : 'var(--dim)')}">${resolved.win_rate || '—'}%</strong></div>`;
+  html += `<div><span style="color:var(--dim)">P&amp;L:</span> <strong style="color:${resolved.total_pnl > 0 ? 'var(--green)' : (resolved.total_pnl < 0 ? 'var(--red)' : 'var(--dim)')}">$${resolved.total_pnl || '0.00'}</strong></div>`;
+  html += `<div><span style="color:var(--dim)">Avg Conf:</span> <strong>${resolved.avg_confidence || '—'}%</strong></div>`;
+  html += `</div>`;
+  
+  const pct = collection.pct || 0;
+  const barColor = pct >= 100 ? 'var(--green)' : (pct >= 50 ? 'var(--amber)' : 'var(--accent)');
+  html += `<div style="margin-bottom:12px">`;
+  html += `<div style="display:flex;justify-content:space-between;font-size:0.75rem;margin-bottom:4px">
+    <span style="color:var(--dim)">Collection: ${collection.resolved || 0} / ${collection.target} resolved</span>
+    <span style="color:${barColor}">${pct}%</span>
+  </div>`;
+  html += `<div class="meter-track"><div class="meter-fill" style="width:${pct}%;background:${barColor}"></div></div>`;
+  html += `</div>`;
+  
+  if (recent.length) {
+    html += '<div class="section-title" style="font-size:0.85rem;margin-top:12px">🕐 Recent Resolved</div>';
+    html += '<div class="table-wrap"><table><thead><tr><th>Market</th><th>Side</th><th>Price</th><th>Outcome</th><th>P&amp;L</th></tr></thead><tbody>';
+    for (const t of recent) {
+      const outcomeClass = t.side === t.outcome ? 'badge-won' : 'badge-lost';
+      const outcomeBadge = t.side === t.outcome ? 'WON' : 'LOST';
+      const pnlColor = t.pnl > 0 ? 'var(--green)' : (t.pnl < 0 ? 'var(--red)' : 'var(--dim)');
+      const sideBadge = t.side === 'YES' ? 'badge-yes' : 'badge-no';
+      const market = (t.market || '—').length > 35 ? (t.market || '—').slice(0, 35) + '…' : (t.market || '—');
+      html += `<tr><td>${market}</td><td><span class="badge ${sideBadge}">${t.side}</span></td><td>${t.entry_price || '—'}</td><td><span class="badge ${outcomeClass}">${outcomeBadge}</span></td><td style="color:${pnlColor}">${t.pnl > 0 ? '+' : ''}${t.pnl || '0.00'}</td></tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+  
+  container.innerHTML = html;
+}
+
+function renderAccuracy(accuracy) {
+  if (!accuracy || !accuracy.total) return;
+  const container = document.getElementById('shadow-status');
+  
+  // Build on top of existing shadow trade content
+  let html = container.innerHTML;
+  
+  // Collection progress
+  const coll = accuracy.collection || {resolved: 0, target: 30, pct: 0};
+  const pct = coll.pct || 0;
+  const barColor = pct >= 100 ? 'var(--green)' : (pct >= 50 ? 'var(--amber)' : 'var(--accent)');
+  html += '<div class="section-title" style="font-size:0.85rem;margin-top:12px">📊 Forecast Accuracy</div>';
+  html += '<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px">';
+  html += '<div><span style="color:var(--dim)">Resolved:</span> <strong>' + accuracy.total + '</strong></div>';
+  html += '<div><span style="color:var(--dim)">Accuracy:</span> <strong>' + (accuracy.accuracy || '—') + '%</strong></div>';
+  html += '</div>';
+  html += '<div style="font-size:0.75rem;margin-bottom:4px;color:var(--dim)">Collection: ' + coll.resolved + '/' + coll.target + '</div>';
+  html += '<div class="meter-track"><div class="meter-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>';
+  
+  // By ticker
+  const tickers = accuracy.by_ticker || {};
+  if (Object.keys(tickers).length) {
+    html += '<div class="section-title" style="font-size:0.85rem;margin-top:12px">🏷️ By Ticker</div>';
+    html += '<div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Resolved</th><th>Correct</th><th>Accuracy</th></tr></thead><tbody>';
+    for (const [tk, stats] of Object.entries(tickers)) {
+      const accColor = stats.accuracy > 60 ? 'var(--green)' : (stats.accuracy > 40 ? 'var(--amber)' : 'var(--red)');
+      html += '<tr><td style="font-weight:600">' + tk + '</td><td>' + stats.total + '</td><td>' + stats.correct + '</td><td style="color:' + accColor + '">' + stats.accuracy + '%</td></tr>';
+    }
+    html += '</tbody></table></div>';
+  }
+  
+  // By market type
+  const types = accuracy.by_market_type || {};
+  if (Object.keys(types).length) {
+    html += '<div class="section-title" style="font-size:0.85rem;margin-top:12px">📦 By Market Type</div>';
+    html += '<div class="table-wrap"><table><thead><tr><th>Type</th><th>Resolved</th><th>Correct</th><th>Accuracy</th></tr></thead><tbody>';
+    for (const [mt, stats] of Object.entries(types)) {
+      html += '<tr><td>' + mt + '</td><td>' + stats.total + '</td><td>' + stats.correct + '</td><td>' + stats.accuracy + '%</td></tr>';
+    }
+    html += '</tbody></table></div>';
+  }
+  
+  // Recent resolved
+  const recent = accuracy.recent || [];
+  if (recent.length) {
+    html += '<div class="section-title" style="font-size:0.85rem;margin-top:12px">🕐 Recent Resolutions</div>';
+    html += '<div class="table-wrap"><table><thead><tr><th>Market</th><th>Prob</th><th>Poly</th><th>Predicted</th><th>Actual</th><th>✅</th></tr></thead><tbody>';
+    for (const r of recent) {
+      const correctBadge = r.correct ? 'badge-won' : 'badge-lost';
+      const correctLabel = r.correct ? '✅' : '❌';
+      const title = (r.ticker || '') + ' ' + (r.market_type || '') + ' $' + (r.strike || '') + ' (' + (r.expiry || '') + ')';
+      html += '<tr><td>' + title + '</td><td>' + (r.implied_prob || '—') + '%</td><td>' + (r.poly_price || '—') + '¢</td><td>' + (r.predicted_side || '—') + '</td><td>' + (r.actual_outcome || '—') + '</td><td><span class="badge ' + correctBadge + '">' + correctLabel + '</span></td></tr>';
+    }
+    html += '</tbody></table></div>';
+  }
+  
+  container.innerHTML = html;
+}
+
+function renderIVRV(data) {
+  const el = document.getElementById('iv-rv-table');
+  if (!data || !Object.keys(data).length) {
+    el.innerHTML = '<div class="empty-state">Volatility data unavailable</div>';
+    return;
+  }
+  let html = '<div class="table-wrap"><table><thead><tr><th>Ticker</th><th>IV</th><th>RV (30d)</th><th>IV/RV</th><th>Assessment</th></tr></thead><tbody>';
+  for (const [tk, stats] of Object.entries(data)) {
+    const ratio = stats.iv_rv_ratio;
+    let assessment, ratioColor;
+    if (ratio === null || ratio === undefined) {
+      assessment = '—';
+      ratioColor = 'var(--dim)';
+    } else if (ratio > 1.5) {
+      assessment = '💎 Expensive';
+      ratioColor = 'var(--green)';
+    } else if (ratio < 0.8) {
+      assessment = '🟡 Cheap';
+      ratioColor = 'var(--red)';
+    } else {
+      assessment = '⚪ Fair';
+      ratioColor = 'var(--dim)';
+    }
+    html += `<tr>
+      <td style="font-weight:600">${tk}</td>
+      <td>${stats.iv != null ? (stats.iv * 100).toFixed(1) + '%' : '—'}</td>
+      <td>${stats.rv != null ? (stats.rv * 100).toFixed(1) + '%' : '—'}</td>
+      <td style="color:${ratioColor};font-weight:600">${ratio != null ? ratio.toFixed(2) : '—'}</td>
+      <td>${assessment}</td>
+    </tr>`;
+  }
+  el.innerHTML = html + '</tbody></table></div>';
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  const tabEls = document.querySelectorAll(`[onclick*="'${name}'"]`);
+  tabEls.forEach(t => t.classList.add('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+}
+
+async function loadStatus() {
+  try {
+    const res = await fetch(STATUS_API);
+    if (!res.ok) return;
+    const d = await res.json();
+    // Status fields (last_run, rows_today, tickers) surface via KPI/api-status; no extra panel needed.
+    if (d && d.last_run) {
+      const dateEl = document.getElementById('kpi-date');
+      if (dateEl && dateEl.textContent === '—') dateEl.textContent = d.last_run;
+    }
+  } catch (e) { console.error('Status load:', e); }
+}
+
+function tick() {
+  countdown--;
+  if (countdown <= 0) { load(); loadStatus(); countdown = refreshInterval; }
+  document.getElementById('timer').textContent = `Refresh in ${countdown}s`;
+}
+
+load();
+loadStatus();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

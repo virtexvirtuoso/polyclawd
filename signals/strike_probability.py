@@ -10,6 +10,7 @@ Uses Student-t distribution (df=4) for fat tails + momentum overlay.
 """
 
 import json
+from loguru import logger
 import logging
 import math
 import re
@@ -19,7 +20,6 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent
 DB_PATH = BASE_DIR / "storage" / "shadow_trades.db"
@@ -110,7 +110,7 @@ class StrikeProbabilityCalculator:
             return None
 
         title_lower = market_title.lower().strip()
-        logger.debug("Parsing strike market: %s", market_title[:80])
+        logger.debug("Parsing strike market: {}", market_title[:80])
 
         # Pattern: "Will the price of {asset} be above/below ${strike} on/by {date}?"
         # Also: "Will {asset} be above/below ${strike}..."
@@ -138,13 +138,13 @@ class StrikeProbabilityCalculator:
                 break
 
         if asset_name is None or strike is None:
-            logger.debug("Failed to parse strike from: %s", market_title[:80])
+            logger.debug("Failed to parse strike from: {}", market_title[:80])
             return None
 
         # Map asset name to symbol
         symbol = ASSET_MAP.get(asset_name)
         if not symbol:
-            logger.debug("Unknown asset: %s", asset_name)
+            logger.debug("Unknown asset: {}", asset_name)
             return None
 
         # Extract expiry date
@@ -214,7 +214,7 @@ class StrikeProbabilityCalculator:
                         pass
 
         if not expiry_date:
-            logger.debug("Could not extract expiry date from: %s", market_title[:80])
+            logger.debug("Could not extract expiry date from: {}", market_title[:80])
             return None
 
         result = {
@@ -224,7 +224,7 @@ class StrikeProbabilityCalculator:
             "direction": direction,
             "expiry_date": expiry_date,
         }
-        logger.debug("Parsed strike market: %s", result)
+        logger.debug("Parsed strike market: {}", result)
         return result
 
     def get_realized_vol(self, symbol: str, window_hours: int = 168) -> Optional[float]:
@@ -244,7 +244,7 @@ class StrikeProbabilityCalculator:
         conn.close()
 
         if len(rows) < MIN_SNAPSHOTS:
-            logger.debug("Insufficient snapshots for vol: %s has %d (need %d)", symbol, len(rows), MIN_SNAPSHOTS)
+            logger.debug("Insufficient snapshots for vol: {} has {} (need {})", symbol, len(rows), MIN_SNAPSHOTS)
             return None
 
         # Compute log returns
@@ -274,7 +274,7 @@ class StrikeProbabilityCalculator:
         # Annualize to daily vol
         daily_vol = std_ret * math.sqrt(snapshots_per_day)
 
-        logger.debug("Realized vol for %s: %.4f daily (%.1f%%) from %d snapshots, %.1f/day",
+        logger.debug("Realized vol for {}: {} daily ({}%%) from {} snapshots, {}/day",
                       symbol, daily_vol, daily_vol * 100, len(rows), snapshots_per_day)
         return daily_vol
 
@@ -295,7 +295,7 @@ class StrikeProbabilityCalculator:
         conn.close()
 
         if len(rows) < 3:
-            logger.debug("Insufficient snapshots for momentum: %s has %d", symbol, len(rows))
+            logger.debug("Insufficient snapshots for momentum: {} has {}", symbol, len(rows))
             return None
 
         # Linear regression: price vs time index
@@ -335,7 +335,7 @@ class StrikeProbabilityCalculator:
         # Clamp to [-1, +1]
         momentum = max(-1.0, min(1.0, momentum))
 
-        logger.debug("Momentum for %s: %.3f (slope=%.2f/snap, vol=%.4f, price=%.0f)",
+        logger.debug("Momentum for {}: {} (slope={}/snap, vol={}, price={})",
                       symbol, momentum, slope, daily_vol, current_price)
         return round(momentum, 4)
 
@@ -353,18 +353,18 @@ class StrikeProbabilityCalculator:
         conn.close()
 
         if not row:
-            logger.debug("No current price for %s", symbol)
+            logger.debug("No current price for {}", symbol)
             return None
 
         current_price = row["price"]
         daily_vol = self.get_realized_vol(symbol)
 
         if daily_vol is None or daily_vol <= 0:
-            logger.debug("No vol available for %s", symbol)
+            logger.debug("No vol available for {}", symbol)
             return None
 
         if days_left <= 0:
-            logger.debug("Non-positive days_left: %.2f", days_left)
+            logger.debug("Non-positive days_left: {}", days_left)
             return None
 
         distance_pct = (strike - current_price) / current_price
@@ -406,7 +406,7 @@ class StrikeProbabilityCalculator:
             "distance_pct": round(distance_pct * 100, 2),
             "days_left": round(days_left, 2),
         }
-        logger.debug("Probability calc: %s strike=%.0f dir=%s → %.1f%% (z=%.2f, vol=%.1f%%/day, mom=%.2f)",
+        logger.debug("Probability calc: {} strike={} dir={} → {}%% (z={}, vol={}%%/day, mom={})",
                       symbol, strike, direction, final_prob * 100, z_score, daily_vol * 100, momentum)
         return result
 
@@ -430,10 +430,10 @@ class StrikeProbabilityCalculator:
         days_left = (expiry - now).total_seconds() / 86400
 
         if days_left < MIN_DAYS:
-            logger.debug("Skipping same-day market: %s (%.1f days)", title[:50], days_left)
+            logger.debug("Skipping same-day market: {} ({} days)", title[:50], days_left)
             return None
         if days_left > MAX_DAYS:
-            logger.debug("Skipping long-dated market: %s (%.0f days)", title[:50], days_left)
+            logger.debug("Skipping long-dated market: {} ({} days)", title[:50], days_left)
             return None
 
         # Get market-implied probability
@@ -468,7 +468,7 @@ class StrikeProbabilityCalculator:
                 no_price = float(tokens[1].get("price", 0))
 
         if yes_price is None or yes_price <= 0:
-            logger.debug("No market price found for: %s", title[:50])
+            logger.debug("No market price found for: {}", title[:50])
             return None
 
         # Calculate our probability
@@ -518,7 +518,7 @@ class StrikeProbabilityCalculator:
         }
 
         if signal != "SKIP":
-            logger.info("🎯 Strike signal: %s %s | edge=%.1f%% | our=%.1f%% vs market=%.1f%% | %s $%.0f %s in %.0fd",
+            logger.info("🎯 Strike signal: {} {} | edge={}%% | our={}%% vs market={}%% | {} ${} {} in {}d",
                         signal, title[:50], edge * 100, our_prob * 100, market_implied * 100,
                         parsed["asset"], parsed["strike"], parsed["direction"], days_left)
 
@@ -532,7 +532,7 @@ class StrikeProbabilityCalculator:
         if markets is None:
             markets = self._fetch_crypto_markets()
 
-        logger.info("Scanning %d markets for strike probability signals", len(markets))
+        logger.info("Scanning {} markets for strike probability signals", len(markets))
 
         results = []
         for market in markets:
@@ -541,13 +541,13 @@ class StrikeProbabilityCalculator:
                 if scored and scored["signal"] != "SKIP":
                     results.append(scored)
             except Exception as e:
-                logger.debug("Error scoring market: %s — %s", 
+                logger.debug("Error scoring market: {} — {}", 
                            (market.get("title") or market.get("question", ""))[:40], e)
 
         # Sort by edge descending
         results.sort(key=lambda x: x["edge"], reverse=True)
 
-        logger.info("Strike scan complete: %d signals from %d markets", len(results), len(markets))
+        logger.info("Strike scan complete: {} signals from {} markets", len(results), len(markets))
         return results
 
     def _fetch_crypto_markets(self) -> List[dict]:
@@ -573,7 +573,7 @@ class StrikeProbabilityCalculator:
                             seen_ids.add(mid)
                             markets.append(m)
             except Exception as e:
-                logger.debug("Failed to fetch markets for query '%s': %s", query, e)
+                logger.debug("Failed to fetch markets for query '{}': {}", query, e)
 
         # Also try the events endpoint for crypto
         try:
@@ -590,9 +590,9 @@ class StrikeProbabilityCalculator:
                             seen_ids.add(mid)
                             markets.append(m)
         except Exception as e:
-            logger.debug("Failed to fetch crypto events: %s", e)
+            logger.debug("Failed to fetch crypto events: {}", e)
 
-        logger.debug("Fetched %d crypto markets from Gamma API", len(markets))
+        logger.debug("Fetched {} crypto markets from Gamma API", len(markets))
         return markets
 
 

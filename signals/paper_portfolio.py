@@ -32,7 +32,6 @@ try:
 except ImportError:
     HAS_MOMENTUM = False
 from loguru import logger
-import logging
 
 # ── META-LABELING (López de Prado inspired, Mar 13 2026) ────────────
 # Predicts P(profit | signal features) using trained logistic regression.
@@ -68,7 +67,7 @@ def meta_label_score(side, entry_price, confidence, edge_pct, archetype):
     
     ARCHETYPES = ["weather", "entertainment", "geopolitical", "election", "price_above",
                   "sports_winner", "sports_single_game", "social_count", "deadline_binary",
-                  "ai_model", "other"]
+                  "ai_model", "options", "other"]
     
     arch = (archetype or "other").lower()
     arch_idx = next((i for i, a in enumerate(ARCHETYPES) if a in arch), len(ARCHETYPES) - 1)
@@ -100,7 +99,7 @@ import math
 import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 
 
 BASE_DIR = Path(__file__).parent.parent
@@ -120,6 +119,7 @@ CORRELATION_GROUPS = {
     "financial_price": "finance",
     "entertainment": "entertainment", "ai_model": "culture",
     "social_count": "social_count", "weather": "weather",
+    "options": "options",
     "parlay": "other", "other": "other",
 }
 
@@ -302,11 +302,19 @@ def _get_dynamic_kelly(conn, confidence: float = 0.60) -> Dict[str, Any]:
     drawdown_pct = (peak - bankroll) / peak if peak > 0 else 0
 
     # ── Layer 1: Rolling WR sets the safety floor ─────────────────
+    # Log pause/resume ONLY on state transition (this runs every ~30s; an
+    # unconditional warning here spammed the journal 112x/hour).
+    _paused_now = drawdown_pct >= DRAWDOWN_PAUSE_PCT
+    if _paused_now != _KELLY_PAUSE_STATE["paused"]:
+        if _paused_now:
+            logger.warning("🛑 KELLY PAUSED: drawdown={:.1%} >= threshold {:.0%}", drawdown_pct, DRAWDOWN_PAUSE_PCT)
+        else:
+            logger.info("✅ KELLY RESUMED: drawdown {:.1%} < threshold {:.0%}", drawdown_pct, DRAWDOWN_PAUSE_PCT)
+        _KELLY_PAUSE_STATE["paused"] = _paused_now
     if drawdown_pct >= DRAWDOWN_PAUSE_PCT:
         fraction = 0
         status = "paused"
         reason = f"Drawdown {drawdown_pct:.1%} >= {DRAWDOWN_PAUSE_PCT:.0%} — trading paused"
-        logger.warning("🛑 KELLY PAUSED: drawdown={}%% (threshold {}%%)", drawdown_pct * 100, DRAWDOWN_PAUSE_PCT * 100)
     elif rolling_trades < BOOTSTRAP_TRADES:
         # Bootstrap mode: seed WR assumption until enough data
         fraction = KELLY_FRACTION_BOOTSTRAP
@@ -373,6 +381,9 @@ KELLY_FRACTION_COLD = 1 / 12  # Half size when win rate drops
 KELLY_ROLLING_WINDOW = 20     # Trades to evaluate rolling WR
 KELLY_MIN_WR = 0.55           # Below this → downshift to KELLY_FRACTION_COLD
 DRAWDOWN_PAUSE_PCT = 0.30     # 30% drawdown → pause trading (raised from 15% — paper mode needs data)
+# Per-worker pause-state latch so the Kelly pause logs only on STATE TRANSITION
+# (entry/recovery) instead of every ~30s evaluation (was 112 log lines/hour).
+_KELLY_PAUSE_STATE = {"paused": False}
 BOOTSTRAP_TRADES = 20         # Minimum trades before trusting rolling stats
 BOOTSTRAP_WR = 0.57           # Seeded WR during bootstrap (Becker-validated)
 KELLY_FRACTION_BOOTSTRAP = 1 / 8  # Between cold (1/12) and normal (1/6)
@@ -385,8 +396,8 @@ ARCHETYPE_MIN_EDGE = {
 }
 MIN_PRICE = 0.05  # Price floor — reject garbage contracts below 5 cents
 MAX_PRICE = 0.95  # Price ceiling — reject near-certain markets (no edge)
-MIN_BET = 100.0  # Bootstrap: meaningful minimum bet size
-MAX_BET = 1000.0  # Scaled for $10K bankroll
+MIN_BET = 250.0  # Bootstrap: meaningful minimum bet size
+MAX_BET = 2500.0  # Scaled for $15K+ bankroll
 # Per-strategy max bet overrides (0W/4L strategies get capped)
 STRATEGY_MAX_BET = {
     'MispricedCategoryWhale': 200.0,  # Was losing $100-543/trade. Cap until WR improves.
@@ -402,7 +413,7 @@ ARCHETYPE_MIN_BET = {
 MAX_RESOLUTION_DAYS = 14  # Reject markets resolving >14 days out — capital drag
 
 # Archetype filters — data-driven from resolved trades
-ARCHETYPE_BLOCKLIST = {"sports_winner", "deadline_binary", "election", "social_count"}  # 0% WR. price_above removed — now has crypto_price_signal with VPS data
+ARCHETYPE_BLOCKLIST = {"sports_winner", "election"}  # K8/K9 killed. deadline_binary + social_count removed — K11 price gate handles deadline, social_count has 87.5% shadow WR
 ARCHETYPE_BOOST = {"sports_single_game": 1.3, "social_count": 1.3}  # Proven +180% blended ROI
 MIN_NO_IMPLIED_PROB = 0.35  # Minimum implied NO probability (1 - entry_price for NO bets)
 MIN_EXPIRY_HOURS = 72  # Minimum 3 days to resolution for crypto/price markets
@@ -556,7 +567,7 @@ def evaluate_signal(signal: dict) -> dict:
     # Circuit breaker: stop all new bets if daily P&L is too negative
     try:
         conn_check = _get_db()
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timezone
         today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0).isoformat()
         daily_closed = conn_check.execute(
             "SELECT COALESCE(SUM(pnl), 0) as daily_pnl FROM paper_positions WHERE closed_at >= ? AND status IN ('won','lost','stopped')",
@@ -722,7 +733,7 @@ def evaluate_signal(signal: dict) -> dict:
     # ── META-LABELING GATE ──────────────────────────────────────────────
     meta_score = meta_label_score(side, market_price, confidence, edge, early_archetype or "other")
     # Exempt new strategies from meta gate until they have 20+ trades of their own data
-    META_EXEMPT_STRATEGIES = {"crypto_price", "cross_platform_edge"}
+    META_EXEMPT_STRATEGIES = {"crypto_price", "cross_platform_edge", "weather"}
     if meta_score is not None and meta_score < 0.40 and strategy not in META_EXEMPT_STRATEGIES:
         logger.info("META GATE: Blocking {} — P(profit)={:.0%} (arch={}, side={}, disagree={:.0%})",
                     market_title[:40] if market_title else "?", meta_score, early_archetype or "other", side, disagreement)
@@ -751,7 +762,7 @@ def evaluate_signal(signal: dict) -> dict:
 
     # ─── Resolution Horizon Gate ──────────────────────────────
     # Reject markets that resolve too far in the future (capital drag)
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timezone
     end_date_str = signal.get("end_date") or signal.get("resolves_at") or signal.get("resolution_date") or ""
     days_out = None
     if end_date_str:
@@ -1159,6 +1170,17 @@ def open_position(signal: dict) -> dict:
                 entry_forecast_json = json.dumps(detail)
             except (TypeError, ValueError):
                 pass
+    elif archetype == "options":
+        ip = signal.get("implied_prob")
+        if ip is not None:
+            try:
+                entry_forecast_json = json.dumps({
+                    "type": "options_implied", "implied_prob": ip,
+                    "z_score": signal.get("z_score"),
+                    "trailing_obs": signal.get("trailing_obs"),
+                })
+            except (TypeError, ValueError):
+                pass
     conn.execute("""INSERT INTO paper_positions
         (opened_at, market_id, market_title, platform, side, entry_price, bet_size, potential_payout, confidence, edge_pct, status, archetype, strategy, market_slug, kelly_fraction, conviction_mult, entry_forecast_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)""",
@@ -1399,6 +1421,125 @@ def get_position_history(limit: int = 50) -> list:
     return [dict(r) for r in rows]
 
 
+def _route_live_weather(signal: dict, eval_result: dict) -> dict:
+    """Route an eligible weather signal through the risk governor + hybrid
+    maker→taker executor (Phase F).  Only called when live_config.mode() == "LIVE".
+
+    Builds a trade intent from the signal, asks the RiskGovernor to approve it,
+    and on approval hands off to execution.live_executor.execute_intent.
+
+    Returns the executor result dict (action ∈ maker_filled / taker_filled /
+    dropped / skipped_duplicate) or a synthetic {"action": "dropped", "reason": ...}
+    when the governor denies or the intent can't be built.  NEVER writes a
+    paper_positions row.
+    """
+    from datetime import datetime, timezone
+
+    from execution import live_config, live_db, live_executor
+    from execution.risk_governor import RiskGovernor
+
+    side_outcome = (signal.get("side") or signal.get("direction") or "YES").upper()
+    market_slug = signal.get("market_slug") or signal.get("slug") or signal.get("market_id") or "unknown"
+
+    # fair_price: the model's probability / fair value for the chosen outcome.
+    fair_price = (
+        signal.get("model_prob")
+        or signal.get("fair_price")
+        or signal.get("fair_value")
+        or signal.get("true_prob")
+    )
+    if fair_price is None:
+        mp = signal.get("market_price") or signal.get("entry_price") or signal.get("price") or 0.5
+        try:
+            mp = float(mp)
+        except (TypeError, ValueError):
+            mp = 0.5
+        if mp > 1:
+            mp = mp / 100.0
+        fair_price = mp if side_outcome == "YES" else (1.0 - mp)
+    fair_price = float(fair_price)
+
+    # size_usd: bet size from the existing sizing, capped at the live per-trade cap.
+    size_usd = float(eval_result.get("bet_size") or 0.0)
+    size_usd = min(size_usd, live_config.per_trade_cap())
+    if size_usd <= 0:
+        return {"action": "dropped", "reason": "size_usd <= 0 after cap"}
+
+    net_edge_taker = float(signal.get("net_edge_taker_pct", 0) or 0) / 100.0
+
+    # token_id: prefer an explicit field; otherwise resolve from the condition id.
+    token_id = signal.get("token_id")
+    if not token_id:
+        cond = signal.get("market_id") or signal.get("condition_id")
+        if cond:
+            try:
+                from odds.poly_executable_edge import condition_id_to_token_ids
+
+                toks = condition_id_to_token_ids(cond)
+                if toks:
+                    token_id = toks[0] if side_outcome == "YES" else toks[1]
+            except Exception as exc:
+                logger.warning("_route_live_weather: token-id resolution failed: {}", exc)
+    if not token_id:
+        return {"action": "dropped", "reason": "no token_id resolvable for live order"}
+
+    # On the CLOB we always BUY the chosen outcome token (YES-token or NO-token).
+    clob_side = "BUY"
+
+    tick_size = signal.get("tick_size")
+    if tick_size is None:
+        try:
+            from execution import clob_client
+
+            tick_size = clob_client.get_tick_size(token_id)
+        except Exception as exc:
+            logger.warning("_route_live_weather: tick-size lookup failed, default 0.01: {}", exc)
+            tick_size = 0.01
+    tick_size = float(tick_size)
+
+    neg_risk = bool(signal.get("neg_risk", False))
+
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    client_order_ref = f"wx-{date_str}-{market_slug}-{side_outcome}"
+
+    intent = {
+        "size_usd": size_usd,
+        "market_id": token_id,
+        "token_id": token_id,
+        "side": clob_side,
+        "fair_price": fair_price,
+    }
+
+    # I2: own the connection for the whole intent and ALWAYS close it — otherwise
+    # we leak one SQLite connection per signal per scan.
+    conn = live_db.connect()
+    try:
+        governor = RiskGovernor(conn, mode="LIVE")
+        decision = governor.check(intent)
+        if not decision.allowed:
+            logger.info("_route_live_weather: governor denied: {}", decision.reason)
+            return {"action": "dropped", "reason": f"governor: {decision.reason}"}
+
+        return live_executor.execute_intent(
+            conn,
+            governor,
+            token_id=token_id,
+            side=clob_side,
+            fair_price=fair_price,
+            size_usd=size_usd,
+            tick_size=tick_size,
+            neg_risk=neg_risk,
+            net_edge_taker=net_edge_taker,
+            client_order_ref=client_order_ref,
+            category="weather",
+        )
+    finally:
+        try:
+            conn.close()
+        except Exception as exc:
+            logger.warning("_route_live_weather: conn.close() failed: {}", exc)
+
+
 def process_signals(signals: list) -> dict:
     """Process a batch of signals, open positions for eligible ones."""
     results = []
@@ -1420,6 +1561,50 @@ def process_signals(signals: list) -> dict:
         }
         
         if eval_result["eligible"]:
+            # ── LIVE routing (Phase F): weather signals go through the risk
+            # governor + hybrid maker→taker executor instead of the paper
+            # open_position path. PAPER mode (default) and all non-weather
+            # archetypes fall through UNCHANGED to the existing paper path.
+            from execution import live_config
+
+            sig_archetype = (sig.get("archetype") or "").lower()
+            if live_config.mode() == "LIVE" and sig_archetype == "weather":
+                # I4: isolate the LIVE branch — one bad intent must NOT crash the
+                # whole scan loop, and must NOT fall through to the paper
+                # open_position path (that would double-trade). On any exception
+                # we log it and SKIP this signal, then continue with the rest.
+                try:
+                    live_res = _route_live_weather(sig, eval_result)
+                except Exception as exc:
+                    logger.exception(
+                        "process_signals[LIVE]: _route_live_weather raised for {} — "
+                        "skipping signal (NOT falling through to paper open_position): {}",
+                        market_title[:50], exc,
+                    )
+                    skipped += 1
+                    entry["action"] = "skipped"
+                    entry["reason"] = f"live_routing_error: {exc}"
+                    entry["live_action"] = "error"
+                    results.append(entry)
+                    continue
+
+                action = live_res.get("action")
+                if action in ("maker_filled", "taker_filled"):
+                    opened += 1
+                    entry["action"] = "opened"
+                else:
+                    skipped += 1
+                    entry["action"] = "skipped"
+                    entry["reason"] = live_res.get("reason", action or "live_routing")
+                entry["live_action"] = action
+                results.append(entry)
+                logger.info(
+                    "process_signals[LIVE]: {} side={} → {} ({})",
+                    market_title[:50], sig.get("side", "?"), action,
+                    (live_res.get("reason") or "")[:80],
+                )
+                continue
+
             result = open_position(sig)
             if result.get("opened"):
                 opened += 1
@@ -1431,9 +1616,14 @@ def process_signals(signals: list) -> dict:
         else:
             skipped += 1
             entry["action"] = "skipped"
-        
+
         results.append(entry)
-    
+        logger.info(
+            "process_signals: {} side={} edge={:.1f}% bet=${:.0f} → {} ({})",
+            market_title[:50], sig.get("side", "?"), (entry["edge"] or 0) * 100,
+            entry["bet_size"] or 0, entry["action"], (entry["reason"] or "")[:80],
+        )
+
     status = get_portfolio_status()
     
     return {
@@ -1508,6 +1698,11 @@ def _fetch_live_positions() -> dict:
             data = _fetch(f"{KALSHI_API}/markets/{market_id}")
             if data:
                 market = data.get("market", data)
+                # Fractional-trading markets null out the legacy integer-cent
+                # fields; price lives in last_price_dollars (string, 0-1 scale).
+                cp = market.get("last_price_dollars")
+                if cp not in (None, ""):
+                    return float(cp), ""
                 cp = market.get("last_price")
                 if cp and cp > 1:
                     cp = cp / 100
@@ -2010,11 +2205,45 @@ def resolve_open_positions() -> dict:
             data = _fetch(f"{KALSHI_API}/markets/{market_id}")
             if data:
                 market = data.get("market", data)
-                result = market.get("result", "")
-                if result:
+                result = (market.get("result") or "").strip().lower()
+                if result in ("yes", "no"):
                     outcome = result.upper()
+                elif result == "void" or (result and market.get("status") == "settled"):
+                    # Voided/scratched market: return stake, never book as a
+                    # loss (result.upper() != side used to book voids as full
+                    # losses). Fixed 2026-06-10.
+                    conn.execute(
+                        """UPDATE paper_positions SET status='stopped', closed_at=?,
+                        exit_price=?, pnl=0, close_reason='auto-resolved: VOID'
+                        WHERE id=?""",
+                        (datetime.now(timezone.utc).isoformat(),
+                         pos["entry_price"], pos["id"]))
+                    conn.commit()
+                    continue
 
         if not outcome:
+            # Zombie guard (2026-06-10 QA): kalshi_weather_fade rows whose
+            # market 404s or settles without a yes/no result would otherwise
+            # stay open FOREVER -- the stop evaluator deliberately skips this
+            # archetype (hold-to-resolution), so nothing else can close them,
+            # and they pin the date-exposure cap. These markets settle the day
+            # after the event; >3 days past event date = unresolvable. Refund
+            # the stake (pnl=0) rather than guess an outcome.
+            if (pos["archetype"] or "") == "kalshi_weather_fade":
+                try:
+                    from signals.kalshi_weather_fade import ticker_event_date
+                    ev = ticker_event_date(market_id)
+                except Exception:
+                    ev = None
+                if ev and (datetime.now(timezone.utc).date() - ev).days > 3:
+                    conn.execute(
+                        """UPDATE paper_positions SET status='stopped', closed_at=?,
+                        exit_price=?, pnl=0, close_reason='auto-resolved: UNRESOLVABLE (>3d past event)'
+                        WHERE id=?""",
+                        (datetime.now(timezone.utc).isoformat(),
+                         pos["entry_price"], pos["id"]))
+                    conn.commit()
+                    logger.warning("Zombie fade row refunded: {}", market_id)
             continue
 
         entry_price = pos["entry_price"]

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Polyclawd — Weather Ensemble Dashboard</title>
+<title>Polyclawd — Kalshi Weather Fade (Paper)</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
 <style>
@@ -43,13 +43,15 @@
   .badge-yes { background: rgba(239, 68, 68, 0.15); color: var(--red); }
   .badge-won { background: rgba(16, 185, 129, 0.15); color: var(--green); }
   .badge-lost { background: rgba(239, 68, 68, 0.15); color: var(--red); }
-  .badge-bracket { background: rgba(59, 130, 246, 0.15); color: var(--accent); }
-  .badge-threshold { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
-  .badge-exact { background: rgba(6, 182, 212, 0.15); color: var(--cyan); }
   .badge-open { background: rgba(139, 92, 246, 0.15); color: var(--purple); }
   .badge-stopped { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
+  .badge-paper { background: rgba(139, 92, 246, 0.18); color: var(--purple); border: 1px solid var(--purple); }
+  .badge-entered { background: rgba(16, 185, 129, 0.15); color: var(--green); }
+  .badge-skipped { background: rgba(148, 163, 184, 0.15); color: var(--dim); }
+  .badge-dryrun { background: rgba(6, 182, 212, 0.15); color: var(--cyan); }
+  .badge-longshot { background: rgba(59, 130, 246, 0.15); color: var(--accent); }
+  .badge-favorite { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
   .chart-wrap { position: relative; height: 250px; }
-  .chart-wrap-tall { position: relative; height: 400px; }
   .refresh-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
   .refresh-timer { font-size: 0.75rem; color: var(--dim); }
   .header-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
@@ -70,6 +72,8 @@
   .section { display: none; }
   .section.active { display: block; }
   .last-updated { font-size: 0.7rem; color: var(--dim); margin-top: 8px; }
+  .notice { background: rgba(139,92,246,0.08); border: 1px solid var(--purple); border-radius: 10px; padding: 10px 14px; font-size: 0.78rem; color: var(--dim); margin-bottom: 16px; }
+  .notice b { color: var(--text); }
   .source-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
   .source-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
   .source-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
@@ -92,7 +96,6 @@
   @media (max-width: 768px) {
     .grid-2, .grid-3 { grid-template-columns: 1fr; }
     .grid-4 { grid-template-columns: repeat(2, 1fr); }
-    .chart-wrap-tall { height: 250px; }
     .chart-wrap { height: 200px; }
     h1 { font-size: 1.2rem; }
     .subtitle { font-size: 0.75rem; }
@@ -100,7 +103,6 @@
     .tag { font-size: 0.6rem; padding: 2px 6px; }
     .stat-value { font-size: 1.4rem; }
     .refresh-bar { flex-direction: column; gap: 8px; align-items: flex-start; }
-    .tab-bar { overflow-x: auto; -webkit-overflow-scrolling: touch; }
     .tab { white-space: nowrap; font-size: 0.75rem; padding: 6px 10px; }
     .nav-links { gap: 8px; flex-wrap: wrap; }
     .section-title { font-size: 0.85rem; }
@@ -123,13 +125,12 @@
 <div class="refresh-bar">
   <div>
     <div class="header-row">
-      <h1>🌡️ Weather Ensemble</h1>
-      <span class="tag">Phase 3: Late Entry + Calibrated</span>
-      <span class="tag" style="background:rgba(16,185,129,0.15);color:var(--green)" id="tag-sources">11 Sources</span>
-      <span class="tag" style="background:rgba(16,185,129,0.15);color:var(--green)">31 Cities</span>
-      <span class="tag" style="background:rgba(139,92,246,0.15);color:var(--purple)">Bias Corrected</span>
+      <h1>🌡️ Kalshi Weather Fade</h1>
+      <span class="badge badge-paper">PAPER</span>
+      <span class="tag">Validated 2026-06-10 · holdout-replicated</span>
+      <span class="tag" style="background:rgba(16,185,129,0.15);color:var(--green)" id="tag-sources">Ensemble</span>
     </div>
-    <div class="subtitle">Paper trading performance & forecast accuracy — auto-refreshes every 60s</div>
+    <div class="subtitle">Day-ahead favorite-longshot fade on Kalshi temperature brackets — evening entries, hold to resolution. Auto-refreshes every 60s.</div>
   </div>
   <div style="text-align:right">
     <div class="refresh-timer" id="timer">Refreshing...</div>
@@ -137,131 +138,81 @@
   </div>
 </div>
 
+<div class="notice">
+  <b>Strategy switchover 2026-06-10:</b> the Polymarket day-ahead weather strategy was retired
+  (no edge — Weather-Edge-Analysis-Jun2026). Its trade history remains on the
+  <a href="/polyclawd/portfolio.html" style="color:var(--accent)">portfolio page</a>.
+  This strategy fades Kalshi day-ahead longshots (buy NO, YES mid &lt; 0.15) and buys evening
+  favorites (YES mid 0.50–0.70), simulated at executable asks with fees netted. Paper only —
+  gates: depth census → realized shadow → live.
+</div>
+
 <div class="nav-links">
   <a href="/polyclawd/portfolio.html">← Portfolio</a>
+  <a href="/polyclawd/baseball.html">⚾ Baseball</a>
+  <a href="/polyclawd/options.html">📈 Options</a>
   <a href="/polyclawd/analysis.html">Analysis</a>
 </div>
 
 <!-- Tab Navigation -->
 <div class="tab-bar">
-  <div class="tab active" onclick="switchTab('trading')">📈 Trading</div>
-  <div class="tab" onclick="switchTab('accuracy')">🎯 Forecast Accuracy</div>
-  <div class="tab" onclick="switchTab('calibration')">📐 Calibration</div>
+  <div class="tab active" onclick="switchTab('fade')">📉 Fade Overview</div>
+  <div class="tab" onclick="switchTab('sheet')">📋 Edge Sheet</div>
   <div class="tab" onclick="switchTab('ensemble')">🔬 Ensemble Health</div>
 </div>
 
-<!-- ===================== TRADING TAB ===================== -->
-<div class="section active" id="tab-trading">
+<!-- ===================== FADE OVERVIEW TAB ===================== -->
+<div class="section active" id="tab-fade">
 
-<!-- Hero Stats -->
 <div class="grid grid-4" id="hero-stats">
-  <div class="card">
-    <div class="stat-value neutral">$0</div>
-    <div class="stat-label">Total P&L</div>
-  </div>
-  <div class="card">
-    <div class="stat-value neutral">—</div>
-    <div class="stat-label">Win Rate</div>
-  </div>
-  <div class="card">
-    <div class="stat-value" id="open-count">0</div>
-    <div class="stat-label">Open Positions</div>
-  </div>
-  <div class="card">
-    <div class="stat-value" id="bankroll-val">$10,000</div>
-    <div class="stat-label">Bankroll</div>
-  </div>
-</div>
-
-<!-- System Config -->
-<div class="card" style="margin-bottom:16px">
-  <div class="section-title">⚙️ Active Config</div>
-  <div class="config-row" style="display:flex;flex-wrap:wrap;gap:10px 16px;font-size:0.82rem">
-    <div><span style="color:var(--dim)">Stop-Loss:</span> <span class="positive">30%</span></div>
-    <div><span style="color:var(--dim)">Min Bet:</span> <span style="color:var(--cyan)">$500</span></div>
-    <div><span style="color:var(--dim)">Min Edge:</span> <span class="positive">20%</span></div>
-    <div><span style="color:var(--dim)">Entry Window:</span> <span style="color:var(--cyan)">3-24h</span></div>
-    <div><span style="color:var(--dim)">Daily Cap:</span> <span class="negative">-$2,000</span></div>
-    <div><span style="color:var(--dim)">Scan:</span> <span style="color:var(--dim)">30 min</span></div>
-    <div><span style="color:var(--dim)">Min Sources:</span> <span style="color:var(--dim)">2</span></div>
-    <div><span style="color:var(--dim)">Calibration:</span> <span id="calibration-info" class="positive">Isotonic</span></div>
-    <div id="daily-pnl-indicator"></div>
-  </div>
-</div>
-
-<!-- Charts Row -->
-<div class="grid grid-2">
-  <div class="card">
-    <div class="section-title">📈 Equity Curve</div>
-    <div class="chart-wrap" id="equity-wrap"><canvas id="equityChart"></canvas></div>
-  </div>
-  <div class="card">
-    <div class="section-title">🏙️ P&L by City</div>
-    <div class="chart-wrap" id="city-wrap"><canvas id="cityChart"></canvas></div>
-  </div>
-</div>
-
-<!-- Open Positions -->
-<div class="card" style="margin-bottom:16px">
-  <div class="section-title">📡 Open Positions <span id="pos-count" style="font-size:0.75rem;color:var(--dim)"></span></div>
-  <div id="open-positions"></div>
-</div>
-
-<!-- Segments + Price Buckets -->
-<div class="grid grid-2">
-  <div class="card">
-    <div class="section-title">📊 Performance by Segment</div>
-    <div id="segments-table"><div class="empty-state">No resolved trades yet</div></div>
-  </div>
-  <div class="card">
-    <div class="section-title">💰 Win Rate by Entry Price</div>
-    <div id="buckets-table"><div class="empty-state">No resolved trades yet</div></div>
-  </div>
-</div>
-
-<!-- Recent Trades -->
-<div class="card" style="margin-bottom:16px">
-  <div class="section-title">🕐 Recent Trades</div>
-  <div id="recent-trades" style="overflow-x:auto;-webkit-overflow-scrolling:touch"><div class="empty-state">No resolved trades yet — positions will appear here when they close</div></div>
-</div>
-
-</div>
-
-<!-- ===================== ACCURACY TAB ===================== -->
-<div class="section" id="tab-accuracy">
-
-<div class="card" style="margin-bottom:16px">
-  <div class="section-title">🎯 Forecast Accuracy — MAE by City</div>
-  <div class="subtitle" style="margin-bottom:12px">Open-Meteo historical forecasts vs TWC actuals. 40 dates per city. Lower = better forecasting = bigger edge.</div>
-  <div class="chart-wrap-tall"><canvas id="accuracyChart"></canvas></div>
+  <div class="card"><div class="stat-value">—</div><div class="stat-label">Net P&amp;L</div></div>
+  <div class="card"><div class="stat-value">—</div><div class="stat-label">Win Rate</div></div>
+  <div class="card"><div class="stat-value">—</div><div class="stat-label">Resolved</div></div>
+  <div class="card"><div class="stat-value">—</div><div class="stat-label">Open / Exposure</div></div>
 </div>
 
 <div class="grid grid-2">
   <div class="card">
-    <div class="section-title">📋 City Calibration Detail</div>
-    <div id="accuracy-table"></div>
+    <div class="section-title">📈 Equity Curve (realized)</div>
+    <div class="chart-wrap"><canvas id="equity-chart"></canvas></div>
   </div>
   <div class="card">
-    <div class="section-title">🗺️ City Tiers</div>
-    <div id="city-tiers"></div>
+    <div class="section-title">🏙️ P&amp;L by City</div>
+    <div class="chart-wrap"><canvas id="city-chart"></canvas></div>
   </div>
 </div>
 
-</div>
-
-<!-- ===================== CALIBRATION TAB ===================== -->
-<div class="section" id="tab-calibration">
-
 <div class="card" style="margin-bottom:16px">
-  <div class="section-title">📐 Empirical RMSE by City × Horizon</div>
-  <div class="subtitle">RMSE captures both bias and variance. Used in <code>prob_in_range()</code> for probability calculation. Higher RMSE = wider uncertainty = fewer trades.</div>
-  <div id="empirical-std-table"></div>
+  <div class="section-title">🎯 Tier Performance</div>
+  <div class="table-wrap" id="tier-table"><div class="empty-state">No data yet</div></div>
 </div>
 
 <div class="card" style="margin-bottom:16px">
-  <div class="section-title">📊 Bias by City</div>
-  <div class="subtitle">Systematic forecast error. Positive = forecast too low (actual hotter). Negative = forecast too high (actual colder). Corrected in real-time.</div>
-  <div class="chart-wrap-tall"><canvas id="biasChart"></canvas></div>
+  <div class="section-title">📂 Open Positions <span class="badge badge-paper">PAPER</span></div>
+  <div class="table-wrap" id="open-table"><div class="empty-state">No open positions</div></div>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">🕑 Recent Trades</div>
+  <div class="table-wrap" id="trades-table"><div class="empty-state">No resolved trades yet</div></div>
+</div>
+
+</div>
+
+<!-- ===================== EDGE SHEET TAB ===================== -->
+<div class="section" id="tab-sheet">
+
+<div class="grid grid-4" id="sheet-stats">
+  <div class="card"><div class="stat-value">—</div><div class="stat-label">Last Scan</div></div>
+  <div class="card"><div class="stat-value">—</div><div class="stat-label">Scanned</div></div>
+  <div class="card"><div class="stat-value">—</div><div class="stat-label">Entered</div></div>
+  <div class="card"><div class="stat-value">—</div><div class="stat-label">Date Exposure Cap</div></div>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">📋 Candidates — last scan <span class="last-updated" id="sheet-window"></span></div>
+  <div class="subtitle" style="margin-bottom:10px">Every bracket evaluated in the evening window, with skip reasons + book depth (the live depth census)</div>
+  <div class="table-wrap" id="sheet-table"><div class="empty-state">No scan yet — the scanner runs in each city's local 19:30–20:30 window</div></div>
 </div>
 
 </div>
@@ -300,22 +251,30 @@
 </div>
 
 <script>
-const API = '/polyclawd/api/weather/dashboard';
+const FADE_API = '/polyclawd/api/weather/kalshi-fade/dashboard';
 const ENSEMBLE_API = '/polyclawd/api/signals/weather/ensemble-status';
+const SHEET_URL = 'kalshi_fade_sheet.json';
 let charts = {};
 let refreshInterval = 60;
 let countdown = refreshInterval;
-let lastData = null;
 
 function pnlClass(v) { return v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral'; }
 function pnlSign(v) { return v > 0 ? '+' : ''; }
-function pct(w, n) { return n > 0 ? (w/n*100).toFixed(0) + '%' : '—'; }
+function money(v) { return (v < 0 ? '-' : '') + '$' + Math.abs(v).toFixed(2); }
 function truncate(s, n) { return s && s.length > n ? s.slice(0, n) + '…' : s || ''; }
 function fmtTime(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
-  const h = d.getHours(), m = d.getMinutes();
-  return `${d.getMonth()+1}/${d.getDate()} ${h}:${m.toString().padStart(2,'0')}`;
+  return `${d.getMonth()+1}/${d.getDate()} ${d.getHours()}:${d.getMinutes().toString().padStart(2,'0')}`;
+}
+function tierBadge(t) {
+  if (t === 'kalshi_fade_longshot_no') return '<span class="badge badge-longshot">LONGSHOT NO</span>';
+  if (t === 'kalshi_fade_favorite_yes') return '<span class="badge badge-favorite">FAVORITE YES</span>';
+  return t || '—';
+}
+function statusBadge(s) {
+  const cls = { won: 'badge-won', lost: 'badge-lost', open: 'badge-open', stopped: 'badge-stopped' }[s] || 'badge-skipped';
+  return `<span class="badge ${cls}">${(s || '—').toUpperCase()}</span>`;
 }
 
 function switchTab(name) {
@@ -325,343 +284,152 @@ function switchTab(name) {
   document.getElementById('tab-' + name).classList.add('active');
 }
 
-async function load() {
+// ---------------- Fade Overview ----------------
+async function loadFade() {
   try {
-    const res = await fetch(API);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const res = await fetch(FADE_API);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     const d = await res.json();
-    lastData = d;
-    
-    document.getElementById('api-status').innerHTML = 
-      `<span class="status-dot status-live"></span>Live — ${new Date().toLocaleTimeString()}`;
-    
-    renderHero(d.totals, d.open_positions);
-    const calEl = document.getElementById('calibration-info');
-    if (calEl && d.calibration && d.calibration.n_brackets) {
-      calEl.textContent = `Isotonic (${d.calibration.n_brackets.toLocaleString()} brackets)`;
-    }
-    renderEquity(d.equity_curve);
-    renderCityChart(d.city_pnl);
-    renderSegments(d.segments);
-    renderBuckets(d.price_buckets);
-    renderAccuracy(d.forecast_accuracy);
-    renderBiasChart(d.forecast_accuracy);
-    renderCityTiers(d.forecast_accuracy);
-    renderEmpiricalStd(d.empirical_std);
-    renderOpen(d.open_positions);
-    renderRecent(d.recent_trades);
-  } catch(e) {
-    console.error('Dashboard load failed:', e);
-    document.getElementById('api-status').innerHTML = 
-      `<span class="status-dot status-stale"></span>Error: ${e.message}`;
+    document.getElementById('api-status').innerHTML =
+      `<span class="status-dot status-live"></span>live · ${fmtTime(d.ts)}`;
+    renderHero(d);
+    renderEquity(d.equity_curve || []);
+    renderCity(d.city_pnl || []);
+    renderTiers(d.tier_breakdown || []);
+    renderPositions('open-table', d.open_positions || [], true);
+    renderPositions('trades-table', d.recent_trades || [], false);
+  } catch (e) {
+    document.getElementById('api-status').innerHTML =
+      '<span class="status-dot status-stale"></span>offline';
+    console.error('Fade load:', e);
   }
 }
 
-function renderHero(t, positions) {
-  const openCount = positions ? positions.length : 0;
-  const ocEl = document.getElementById('open-count');
-  if (ocEl) ocEl.textContent = openCount;
-  
-  if (!t || !t.total || t.total === 0) {
-    // Fresh portfolio — show clean state
-    document.getElementById('hero-stats').innerHTML = `
-      <div class="card">
-        <div class="stat-value neutral">$0</div>
-        <div class="stat-label">Total P&L</div>
-      </div>
-      <div class="card">
-        <div class="stat-value neutral">—</div>
-        <div class="stat-label">0 Trades Resolved</div>
-      </div>
-      <div class="card">
-        <div class="stat-value" style="color:var(--cyan)">${openCount}</div>
-        <div class="stat-label">Open Positions</div>
-      </div>
-      <div class="card">
-        <div class="stat-value">$10,000</div>
-        <div class="stat-label">Bankroll</div>
-      </div>
-    `;
-    return;
-  }
-  
-  const wr = t.total > 0 ? (t.wins / t.total * 100).toFixed(0) : 0;
-  const wrClass = wr >= 55 ? 'positive' : wr >= 45 ? 'neutral' : 'negative';
+function renderHero(d) {
+  const t = d.totals || {};
+  const exp = Object.values(d.exposure_by_event_date || {}).reduce((a, b) => a + b, 0);
   document.getElementById('hero-stats').innerHTML = `
-    <div class="card">
-      <div class="stat-value ${pnlClass(t.total_pnl)}">${pnlSign(t.total_pnl)}$${Math.abs(t.total_pnl).toLocaleString(undefined,{maximumFractionDigits:0})}</div>
-      <div class="stat-label">Total P&L</div>
-    </div>
-    <div class="card">
-      <div class="stat-value ${wrClass}">${wr}%</div>
-      <div class="stat-label">${t.wins}W / ${t.losses}L (${t.total} trades)</div>
-    </div>
-    <div class="card">
-      <div class="stat-value" style="color:var(--cyan)">${openCount}</div>
-      <div class="stat-label">Open Positions</div>
-    </div>
-    <div class="card">
-      <div class="stat-value positive">${pnlSign(t.best_trade)}$${t.best_trade}</div>
-      <div class="stat-label">Best Trade</div>
-    </div>
-  `;
+    <div class="card"><div class="stat-value ${pnlClass(t.total_pnl)}">${pnlSign(t.total_pnl)}${money(t.total_pnl || 0)}</div>
+      <div class="stat-label">Net P&amp;L (fees: ${money(t.fees_paid || 0)})</div></div>
+    <div class="card"><div class="stat-value">${t.win_rate != null ? t.win_rate + '%' : '—'}</div>
+      <div class="stat-label">Win Rate (${t.wins || 0}W / ${t.losses || 0}L)</div></div>
+    <div class="card"><div class="stat-value">${t.resolved || 0}</div><div class="stat-label">Resolved</div></div>
+    <div class="card"><div class="stat-value">${t.open_positions || 0} / ${money(exp)}</div>
+      <div class="stat-label">Open / Exposure (cap ${money(d.date_exposure_cap || 0)}/date)</div></div>`;
 }
 
 function renderEquity(curve) {
-  const ctx = document.getElementById('equityChart').getContext('2d');
+  const ctx = document.getElementById('equity-chart');
   if (charts.equity) charts.equity.destroy();
-  if (!curve || !curve.length) {
-    document.getElementById('equity-wrap').innerHTML = '<div class="empty-state" style="height:220px;display:flex;align-items:center;justify-content:center">Equity curve will appear after first resolved trade</div>';
-    return;
-  }
-  document.getElementById('equity-wrap').innerHTML = '<canvas id="equityChart"></canvas>';
-  const newCtx = document.getElementById('equityChart').getContext('2d');
-  charts.equity = new Chart(newCtx, {
+  charts.equity = new Chart(ctx, {
     type: 'line',
-    data: {
-      labels: curve.map(p => { const d = new Date(p.date); return (d.getMonth()+1)+'/'+d.getDate(); }),
-      datasets: [{
-        data: curve.map(p => p.pnl),
-        borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)',
-        fill: true, tension: 0.3, pointRadius: 2, borderWidth: 2,
-      }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
-      scales: {
-        x: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: '#1e293b' } },
-        y: { ticks: { color: '#64748b', callback: v => '$'+v }, grid: { color: '#1e293b' } }
-      }
-    }
+    data: { labels: curve.map(p => p.date),
+      datasets: [{ data: curve.map(p => p.pnl), borderColor: '#3b82f6',
+        backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.25, pointRadius: 2 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } },
+      scales: { x: { ticks: { color: '#94a3b8', maxTicksLimit: 8 }, grid: { color: '#1e293b' } },
+                y: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } } } }
   });
 }
 
-function renderCityChart(cities) {
-  const ctx = document.getElementById('cityChart').getContext('2d');
+function renderCity(rows) {
+  const ctx = document.getElementById('city-chart');
   if (charts.city) charts.city.destroy();
-  if (!cities || !cities.length) {
-    document.getElementById('city-wrap').innerHTML = '<div class="empty-state" style="height:220px;display:flex;align-items:center;justify-content:center">City P&L will appear after resolved trades</div>';
+  charts.city = new Chart(ctx, {
+    type: 'bar',
+    data: { labels: rows.map(r => r.city),
+      datasets: [{ data: rows.map(r => r.pnl),
+        backgroundColor: rows.map(r => r.pnl >= 0 ? 'rgba(16,185,129,0.6)' : 'rgba(239,68,68,0.6)') }] },
+    options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: { x: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } },
+                y: { ticks: { color: '#94a3b8' }, grid: { display: false } } } }
+  });
+}
+
+function renderTiers(tiers) {
+  const el = document.getElementById('tier-table');
+  if (!tiers.length) { el.innerHTML = '<div class="empty-state">No data yet</div>'; return; }
+  let html = '<table><tr><th>Tier</th><th>Resolved</th><th>Win Rate</th><th>P&amp;L</th><th>Open</th></tr>';
+  for (const t of tiers) {
+    html += `<tr><td>${tierBadge(t.tier)}</td><td>${t.n}</td><td>${t.win_rate}%</td>
+      <td class="${pnlClass(t.pnl)}">${pnlSign(t.pnl)}${money(t.pnl)}</td><td>${t.open}</td></tr>`;
+  }
+  el.innerHTML = html + '</table>';
+}
+
+function renderPositions(elId, rows, isOpen) {
+  const el = document.getElementById(elId);
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty-state">${isOpen ? 'No open positions' : 'No resolved trades yet'}</div>`;
     return;
   }
-  document.getElementById('city-wrap').innerHTML = '<canvas id="cityChart"></canvas>';
-  const newCtx = document.getElementById('cityChart').getContext('2d');
-  const sorted = [...cities].sort((a,b) => b.pnl - a.pnl);
-  charts.city = new Chart(newCtx, {
-    type: 'bar',
-    data: {
-      labels: sorted.map(c => c.city),
-      datasets: [{ data: sorted.map(c => c.pnl), backgroundColor: sorted.map(c => c.pnl >= 0 ? 'rgba(16,185,129,0.7)' : 'rgba(239,68,68,0.7)'), borderRadius: 4 }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false, indexAxis: 'y',
-      plugins: { legend: { display: false } },
-      scales: {
-        x: { ticks: { color: '#64748b', callback: v => '$'+v }, grid: { color: '#1e293b' } },
-        y: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { display: false } }
-      }
-    }
-  });
-}
-
-function renderSegments(segs) {
-  const el = document.getElementById('segments-table');
-  if (!segs || !segs.length) { el.innerHTML = '<div class="empty-state">No resolved trades yet</div>'; return; }
-  let html = '<table><tr><th>Type</th><th>Side</th><th>Trades</th><th>WR</th><th>P&L</th><th>Avg Edge</th></tr>';
-  for (const s of segs) {
-    const typeBadge = s.market_type === 'bracket' ? 'badge-bracket' : s.market_type === 'exact' ? 'badge-exact' : 'badge-threshold';
+  let html = `<table><tr><th>Market</th><th>Tier</th><th>Side</th><th>Event</th>
+    <th>Fill</th><th>Depth</th><th>Bet</th><th>${isOpen ? 'Max Win' : 'P&L'}</th><th>Status</th></tr>`;
+  for (const p of rows) {
+    const last = isOpen
+      ? `<td class="positive">+${money(p.potential_payout || 0)}</td>`
+      : `<td class="${pnlClass(p.pnl)}">${pnlSign(p.pnl)}${money(p.pnl || 0)}</td>`;
     html += `<tr>
-      <td><span class="badge ${typeBadge}">${s.market_type}</span></td>
-      <td><span class="badge ${s.side === 'NO' ? 'badge-no' : 'badge-yes'}">${s.side}</span></td>
-      <td>${s.wins}W/${s.n - s.wins}L</td>
-      <td class="${s.wins/s.n >= 0.5 ? 'positive' : 'negative'}">${pct(s.wins, s.n)}</td>
-      <td class="${pnlClass(s.pnl)}">${pnlSign(s.pnl)}$${Math.abs(s.pnl).toFixed(0)}</td>
-      <td>${(s.avg_edge * 100).toFixed(1)}%</td>
-    </tr>`;
+      <td title="${p.title || ''}">${truncate(p.title || p.market_id, 44)}</td>
+      <td>${tierBadge(p.tier)}</td>
+      <td><span class="badge badge-${(p.side || '').toLowerCase()}">${p.side}</span></td>
+      <td>${p.event_date || '—'}</td>
+      <td>${p.exec_price != null ? p.exec_price.toFixed(2) : '—'}</td>
+      <td>${p.depth != null ? Math.round(p.depth) : '—'}</td>
+      <td>${money(p.bet_size || 0)}</td>
+      ${last}
+      <td>${statusBadge(p.status)}</td></tr>`;
   }
   el.innerHTML = html + '</table>';
 }
 
-function renderBuckets(buckets) {
-  const el = document.getElementById('buckets-table');
-  if (!buckets || !buckets.length) { el.innerHTML = '<div class="empty-state">No resolved trades yet</div>'; return; }
-  let html = '<table><tr><th>Price</th><th>Side</th><th>Trades</th><th>WR</th><th>P&L</th></tr>';
-  for (const b of buckets) {
+// ---------------- Edge Sheet ----------------
+async function loadSheet() {
+  try {
+    const res = await fetch(SHEET_URL + '?t=' + Date.now());
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    renderSheet(await res.json());
+  } catch (e) {
+    document.getElementById('sheet-table').innerHTML =
+      '<div class="empty-state">No edge sheet yet — first scan runs in tonight\'s entry window</div>';
+  }
+}
+
+function renderSheet(s) {
+  const cfg = s.config || {};
+  document.getElementById('sheet-stats').innerHTML = `
+    <div class="card"><div class="stat-value" style="font-size:1.1rem">${fmtTime(s.generated_at)}</div>
+      <div class="stat-label">Last Scan${cfg.dry_run ? ' (dry run)' : ''}</div></div>
+    <div class="card"><div class="stat-value">${s.scanned || 0}</div><div class="stat-label">Scanned</div></div>
+    <div class="card"><div class="stat-value ${s.entered ? 'positive' : ''}">${s.entered || 0}</div><div class="stat-label">Entered</div></div>
+    <div class="card"><div class="stat-value">${money(cfg.date_exposure_cap || 0)}</div><div class="stat-label">Date Exposure Cap</div></div>`;
+  document.getElementById('sheet-window').textContent =
+    (s.window_series || []).length ? `· in-window: ${(s.window_series || []).join(', ')}` : '· no city in window';
+  const rows = s.candidates || [];
+  const el = document.getElementById('sheet-table');
+  if (!rows.length) { el.innerHTML = '<div class="empty-state">No candidates in last scan</div>'; return; }
+  let html = `<table><tr><th>Ticker</th><th>Tier</th><th>Mid</th><th>Exec</th><th>Spread</th>
+    <th>Depth</th><th>Bet</th><th>Action</th><th>Reason</th></tr>`;
+  const order = { entered: 0, dry_run: 1, candidate: 2, skipped: 3 };
+  rows.sort((a, b) => (order[a.action] ?? 9) - (order[b.action] ?? 9));
+  for (const c of rows) {
+    const aCls = c.action === 'entered' ? 'badge-entered' : c.action === 'dry_run' ? 'badge-dryrun' : 'badge-skipped';
     html += `<tr>
-      <td>${b.bucket}</td>
-      <td><span class="badge ${b.side === 'NO' ? 'badge-no' : 'badge-yes'}">${b.side}</span></td>
-      <td>${b.wins}W/${b.n - b.wins}L</td>
-      <td class="${b.wins/b.n >= 0.5 ? 'positive' : 'negative'}">${pct(b.wins, b.n)}</td>
-      <td class="${pnlClass(b.pnl)}">${pnlSign(b.pnl)}$${Math.abs(b.pnl).toFixed(0)}</td>
-    </tr>`;
+      <td title="${c.title || ''}">${c.ticker}</td>
+      <td>${c.tier ? tierBadge(c.tier) : '—'}</td>
+      <td>${c.mid != null ? c.mid.toFixed(3) : '—'}</td>
+      <td>${c.exec_price != null ? c.exec_price.toFixed(2) : '—'}</td>
+      <td>${c.spread != null ? c.spread.toFixed(2) : '—'}</td>
+      <td>${c.depth != null ? Math.round(c.depth) : '—'}</td>
+      <td>${c.bet_size != null ? money(c.bet_size) : '—'}</td>
+      <td><span class="badge ${aCls}">${c.action.toUpperCase()}</span></td>
+      <td style="color:var(--dim)">${c.skip_reason || ''}</td></tr>`;
   }
   el.innerHTML = html + '</table>';
 }
 
-function renderAccuracy(acc) {
-  const el = document.getElementById('accuracy-table');
-  if (!acc || !acc.length) { el.innerHTML = '<div class="empty-state">No forecast data</div>'; return; }
-  
-  const sorted = [...acc].sort((a,b) => a.mae - b.mae);
-  let html = '<div style="max-height:500px;overflow-y:auto"><table><tr><th>City</th><th>Dates</th><th>MAE</th><th>Bias</th><th>Status</th></tr>';
-  for (const a of sorted) {
-    const maeClass = a.mae <= 2 ? 'positive' : a.mae <= 4 ? 'neutral' : 'negative';
-    const biasClass = Math.abs(a.bias) <= 1 ? 'positive' : Math.abs(a.bias) <= 3 ? 'neutral' : 'negative';
-    const status = a.n >= 30 ? '<span style="color:var(--green)">✅ Active</span>' : `<span style="color:var(--amber)">${a.n}/30</span>`;
-    html += `<tr>
-      <td style="text-transform:capitalize;font-weight:500">${a.city}</td>
-      <td>${a.n}</td>
-      <td class="${maeClass}">${a.mae.toFixed(1)}°F</td>
-      <td class="${biasClass}">${a.bias > 0 ? '+' : ''}${a.bias.toFixed(1)}°F</td>
-      <td>${status}</td>
-    </tr>`;
-  }
-  el.innerHTML = html + '</table></div>';
-  
-  // Accuracy chart
-  const ctx = document.getElementById('accuracyChart').getContext('2d');
-  if (charts.accuracy) charts.accuracy.destroy();
-  const maeColors = sorted.map(a => a.mae <= 2 ? 'rgba(16,185,129,0.7)' : a.mae <= 4 ? 'rgba(245,158,11,0.7)' : 'rgba(239,68,68,0.7)');
-  charts.accuracy = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: sorted.map(a => a.city),
-      datasets: [{ label: 'MAE (°F)', data: sorted.map(a => a.mae), backgroundColor: maeColors, borderRadius: 4 }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false, indexAxis: 'y',
-      plugins: { legend: { display: false } },
-      scales: {
-        x: { ticks: { color: '#64748b', callback: v => v+'°F' }, grid: { color: '#1e293b' }, title: { display: true, text: 'Mean Absolute Error (°F)', color: '#64748b' } },
-        y: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { display: false } }
-      }
-    }
-  });
-}
-
-function renderBiasChart(acc) {
-  if (!acc || !acc.length) return;
-  const ctx = document.getElementById('biasChart').getContext('2d');
-  if (charts.bias) charts.bias.destroy();
-  const sorted = [...acc].sort((a,b) => a.bias - b.bias);
-  const biasColors = sorted.map(a => a.bias >= 0 ? 'rgba(239,68,68,0.6)' : 'rgba(59,130,246,0.6)');
-  charts.bias = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: sorted.map(a => a.city),
-      datasets: [{ label: 'Bias (°F)', data: sorted.map(a => a.bias), backgroundColor: biasColors, borderRadius: 4 }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false, indexAxis: 'y',
-      plugins: { 
-        legend: { display: false },
-        tooltip: { callbacks: { label: (ctx) => { const v = ctx.raw; return v >= 0 ? `+${v.toFixed(1)}°F (forecast too low)` : `${v.toFixed(1)}°F (forecast too high)`; } } }
-      },
-      scales: {
-        x: { ticks: { color: '#64748b', callback: v => (v>0?'+':'')+v+'°F' }, grid: { color: '#1e293b' }, title: { display: true, text: 'Bias: red = forecast too low, blue = forecast too high', color: '#64748b', font: { size: 10 } } },
-        y: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { display: false } }
-      }
-    }
-  });
-}
-
-function renderCityTiers(acc) {
-  if (!acc || !acc.length) return;
-  const sorted = [...acc].sort((a,b) => a.mae - b.mae);
-  const tiers = [
-    { label: '🟢 Excellent (<1.5°F)', cities: sorted.filter(a => a.mae < 1.5) },
-    { label: '🟢 Good (1.5-2.5°F)', cities: sorted.filter(a => a.mae >= 1.5 && a.mae < 2.5) },
-    { label: '🟡 Fair (2.5-4°F)', cities: sorted.filter(a => a.mae >= 2.5 && a.mae < 4) },
-    { label: '🔴 Poor (>4°F)', cities: sorted.filter(a => a.mae >= 4) },
-  ];
-  let html = '';
-  for (const t of tiers) {
-    if (!t.cities.length) continue;
-    html += `<div style="margin-bottom:12px">
-      <div style="font-size:0.85rem;font-weight:600;margin-bottom:4px">${t.label}</div>
-      <div style="display:flex;flex-wrap:wrap;gap:4px">`;
-    for (const c of t.cities) {
-      html += `<span class="badge" style="background:rgba(255,255,255,0.05);color:var(--text);text-transform:capitalize">${c.city} <span style="color:var(--dim)">${c.mae.toFixed(1)}</span></span>`;
-    }
-    html += '</div></div>';
-  }
-  document.getElementById('city-tiers').innerHTML = html;
-}
-
-function renderEmpiricalStd(data) {
-  const el = document.getElementById('empirical-std-table');
-  if (!data || !data.length) { el.innerHTML = '<div class="empty-state">No empirical data</div>'; return; }
-  
-  const byCity = {};
-  for (const r of data) {
-    if (!byCity[r.city]) byCity[r.city] = {};
-    byCity[r.city][r.horizon] = r;
-  }
-  
-  const horizons = ['0-6h', '6-24h', '24-48h', '48h+'];
-  let html = '<div style="max-height:600px;overflow-y:auto"><table><tr><th>City</th>';
-  for (const h of horizons) html += '<th>' + h + '</th>';
-  html += '</tr>';
-  
-  for (const [city, buckets] of Object.entries(byCity).sort((a,b) => a[0].localeCompare(b[0]))) {
-    html += `<tr><td style="text-transform:capitalize;font-weight:500">${city}</td>`;
-    for (const h of horizons) {
-      const b = buckets[h];
-      if (!b) { html += '<td style="color:var(--dim)">—</td>'; continue; }
-      const std = b.std_err_f != null ? b.std_err_f.toFixed(1) : '—';
-      const stdColor = b.std_err_f <= 2 ? 'var(--green)' : b.std_err_f <= 4 ? 'var(--amber)' : 'var(--red)';
-      const active = b.n_dates >= 30;
-      html += `<td><span style="color:${active ? stdColor : 'var(--dim)'}">${std}°F</span> <span style="font-size:0.65rem;color:var(--dim)">(${b.n_dates}d)</span></td>`;
-    }
-    html += '</tr>';
-  }
-  el.innerHTML = html + '</table></div>';
-}
-
-function renderOpen(positions) {
-  const el = document.getElementById('open-positions');
-  const pcEl = document.getElementById('pos-count');
-  if (pcEl) pcEl.textContent = positions && positions.length ? `(${positions.length})` : '';
-  if (!positions || !positions.length) { el.innerHTML = '<div class="empty-state">No open weather positions — scans every 30 min</div>'; return; }
-  let html = '<table><tr><th>Market</th><th>Type</th><th>Side</th><th>Entry</th><th>Bet</th><th>Edge</th><th>Opened</th></tr>';
-  for (const p of positions) {
-    const typeCls = p.market_type === 'bracket' ? 'badge-bracket' : p.market_type === 'threshold' ? 'badge-threshold' : 'badge-exact';
-    html += `<tr>
-      <td title="${p.market_title}">${truncate(p.market_title, 50)}</td>
-      <td><span class="badge ${typeCls}">${p.market_type || '—'}</span></td>
-      <td><span class="badge ${p.side === 'NO' ? 'badge-no' : 'badge-yes'}">${p.side}</span></td>
-      <td>${(p.entry_price * 100).toFixed(1)}¢</td>
-      <td>$${p.bet_size ? p.bet_size.toFixed(0) : '—'}</td>
-      <td class="positive">${(p.edge_pct * 100).toFixed(1)}%</td>
-      <td style="color:var(--dim);font-size:0.75rem">${fmtTime(p.opened_at)}</td>
-    </tr>`;
-  }
-  el.innerHTML = html + '</table>';
-}
-
-function renderRecent(trades) {
-  const el = document.getElementById('recent-trades');
-  if (!trades || !trades.length) { el.innerHTML = '<div class="empty-state">No resolved trades yet — positions will appear here when they close</div>'; return; }
-  let html = '<table><tr><th>Market</th><th>Type</th><th>Side</th><th>Entry</th><th>Bet</th><th>P&L</th><th>Edge</th><th>Result</th></tr>';
-  for (const t of trades) {
-    const statusBadge = t.status === 'won' ? 'badge-won' : t.status === 'stopped' ? 'badge-stopped' : 'badge-lost';
-    const typeCls = t.market_type === 'bracket' ? 'badge-bracket' : t.market_type === 'threshold' ? 'badge-threshold' : 'badge-exact';
-    html += `<tr>
-      <td title="${t.market_title}">${truncate(t.market_title, 50)}</td>
-      <td><span class="badge ${typeCls}">${t.market_type || '—'}</span></td>
-      <td><span class="badge ${t.side === 'NO' ? 'badge-no' : 'badge-yes'}">${t.side}</span></td>
-      <td>${(t.entry_price * 100).toFixed(1)}¢</td>
-      <td>$${t.bet_size ? t.bet_size.toFixed(0) : '—'}</td>
-      <td class="${pnlClass(t.pnl)}">${pnlSign(t.pnl)}$${Math.abs(t.pnl).toFixed(0)}</td>
-      <td>${t.edge_pct ? (t.edge_pct * 100).toFixed(1) + '%' : '—'}</td>
-      <td><span class="badge ${statusBadge}">${t.status}</span></td>
-    </tr>`;
-  }
-  el.innerHTML = html + '</table>';
-}
-
-// ── Ensemble Health Tab ──────────────────────────────────────────────
-
+// ---------------- Ensemble Health (carried over) ----------------
 async function loadEnsemble() {
   try {
     const res = await fetch(ENSEMBLE_API);
@@ -671,7 +439,6 @@ async function loadEnsemble() {
     renderSourceCards(d.sources);
     renderSourceDist(d.source_distribution);
     renderCityCoverage(d.city_coverage, d.sources);
-    // Update header tag
     const tag = document.getElementById('tag-sources');
     if (tag && d.summary) tag.textContent = `${d.summary.active} of ${d.summary.total_sources} Sources`;
   } catch(e) { console.error('Ensemble load:', e); }
@@ -780,11 +547,12 @@ function renderCityCoverage(coverage, sources) {
 
 function tick() {
   countdown--;
-  if (countdown <= 0) { load(); loadEnsemble(); countdown = refreshInterval; }
+  if (countdown <= 0) { loadFade(); loadSheet(); loadEnsemble(); countdown = refreshInterval; }
   document.getElementById('timer').textContent = `Refresh in ${countdown}s`;
 }
 
-load();
+loadFade();
+loadSheet();
 loadEnsemble();
 setInterval(tick, 1000);
 </script>

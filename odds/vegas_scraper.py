@@ -5,6 +5,7 @@ Scrapes odds from VegasInsider and compares with Polymarket
 
 import requests
 import asyncio
+from loguru import logger
 
 # Resilient fetch wrapper
 try:
@@ -59,7 +60,7 @@ def _scrape_vegasinsider_sync() -> dict:
             if r.status_code != 200:
                 raise RuntimeError(f"VegasInsider soccer returned {r.status_code}")
             return r
-        resp = resilient_call("vegas", _fetch_soccer, retries=1, backoff_base=1.0) if HAS_RESILIENT else requests.get("https://www.vegasinsider.com/soccer/odds/futures/", headers=headers, timeout=15)
+        resp = resilient_call("vegas", _fetch_soccer, retries=2, backoff_base=2.0) if HAS_RESILIENT else requests.get("https://www.vegasinsider.com/soccer/odds/futures/", headers=headers, timeout=30)
         if resp and resp.status_code == 200:
             text = resp.text
             now = datetime.utcnow().isoformat()
@@ -99,7 +100,7 @@ def _scrape_vegasinsider_sync() -> dict:
                         ))
                         
     except Exception as e:
-        print(f"Error scraping VegasInsider futures: {e}")
+        logger.error(f"Error scraping VegasInsider futures: {e}")
     
     # UCL specific page
     try:
@@ -135,7 +136,7 @@ def _scrape_vegasinsider_sync() -> dict:
                 results["ucl"] = ucl_teams[:12]
                 
     except Exception as e:
-        print(f"Error scraping UCL page: {e}")
+        logger.error(f"Error scraping UCL page: {e}")
     
     return results
 
@@ -168,7 +169,7 @@ def save_cache(data: dict):
         with open(CACHE_FILE, 'w') as f:
             json.dump(cache, f, default=lambda x: x.__dict__ if hasattr(x, '__dict__') else str(x))
     except Exception as e:
-        print(f"Error saving cache: {e}")
+        logger.error(f"Error saving cache: {e}")
 
 async def get_vegas_odds(force_refresh: bool = False) -> dict[str, list[VegasOdds]]:
     """Get Vegas odds, using cache if available"""
@@ -288,7 +289,7 @@ def _scrape_vegasinsider_nfl_sync() -> Dict[str, List[VegasOdds]]:
                     pass
                     
     except Exception as e:
-        print(f"Error scraping VegasInsider NFL futures: {e}")
+        logger.error(f"Error scraping VegasInsider NFL futures: {e}")
     
     # AFC Championship page
     try:
@@ -322,7 +323,7 @@ def _scrape_vegasinsider_nfl_sync() -> Dict[str, List[VegasOdds]]:
                     pass
                     
     except Exception as e:
-        print(f"Error scraping VegasInsider AFC odds: {e}")
+        logger.error(f"Error scraping VegasInsider AFC odds: {e}")
     
     # NFC Championship page
     try:
@@ -356,7 +357,7 @@ def _scrape_vegasinsider_nfl_sync() -> Dict[str, List[VegasOdds]]:
                     pass
                     
     except Exception as e:
-        print(f"Error scraping VegasInsider NFC odds: {e}")
+        logger.error(f"Error scraping VegasInsider NFC odds: {e}")
     
     return results
 
@@ -392,7 +393,7 @@ def save_nfl_cache(data: dict):
         with open(NFL_CACHE_FILE, 'w') as f:
             json.dump(cache, f, default=lambda x: x.__dict__ if hasattr(x, '__dict__') else str(x))
     except Exception as e:
-        print(f"Error saving NFL cache: {e}")
+        logger.error(f"Error saving NFL cache: {e}")
 
 
 async def get_nfl_vegas_odds(force_refresh: bool = False) -> Dict[str, List[VegasOdds]]:
@@ -451,7 +452,7 @@ async def get_nfl_odds_with_fallback() -> Dict[str, List[VegasOdds]]:
         if data and any(len(v) > 0 for v in data.values()):
             return data
     except Exception as e:
-        print(f"Error getting NFL Vegas odds: {e}")
+        logger.error(f"Error getting NFL Vegas odds: {e}")
     
     return NFL_FALLBACK_ODDS
 
@@ -509,7 +510,7 @@ async def get_vegas_odds_with_fallback() -> dict[str, list[VegasOdds]]:
         if data and any(len(v) > 0 for v in data.values()):
             return data
     except Exception as e:
-        print(f"Error getting Vegas odds: {e}")
+        logger.error(f"Error getting Vegas odds: {e}")
     
     return FALLBACK_ODDS
 
@@ -604,7 +605,7 @@ def _scrape_vegasinsider_nba_sync() -> Dict[str, List[VegasOdds]]:
                     pass
                     
     except Exception as e:
-        print(f"Error scraping VegasInsider NBA futures: {e}")
+        logger.error(f"Error scraping VegasInsider NBA futures: {e}")
     
     return results
 
@@ -638,7 +639,7 @@ async def get_nba_vegas_odds(force_refresh: bool = False) -> Dict[str, List[Vega
         if data and any(len(v) > 0 for v in data.values()):
             return data
     except Exception as e:
-        print(f"Error getting NBA Vegas odds: {e}")
+        logger.error(f"Error getting NBA Vegas odds: {e}")
     return NBA_FALLBACK_ODDS
 
 
@@ -698,7 +699,7 @@ def _scrape_vegasinsider_mlb_sync() -> Dict[str, List[VegasOdds]]:
                     pass
                     
     except Exception as e:
-        print(f"Error scraping VegasInsider MLB futures: {e}")
+        logger.error(f"Error scraping VegasInsider MLB futures: {e}")
     
     return results
 
@@ -752,7 +753,7 @@ def _scrape_vegasinsider_nhl_sync() -> Dict[str, List[VegasOdds]]:
                     pass
                     
     except Exception as e:
-        print(f"Error scraping VegasInsider NHL futures: {e}")
+        logger.error(f"Error scraping VegasInsider NHL futures: {e}")
     
     return results
 
@@ -784,18 +785,18 @@ async def get_all_vegas_futures() -> Dict:
 
 if __name__ == "__main__":
     async def test():
-        print("Fetching Vegas odds...")
+        logger.debug("Fetching Vegas odds...")
         odds = await get_vegas_odds_with_fallback()
         
         for league, teams in odds.items():
-            print(f"\n=== {league.upper()} ===")
+            logger.info(f"\n=== {league.upper()} ===")
             for o in teams[:5]:
-                print(f"  {o.team}: {o.american_odds:+d} ({o.implied_prob:.1%})")
+                logger.info(f"  {o.team}: {o.american_odds:+d} ({o.implied_prob:.1%})")
         
-        print("\n" + "="*50)
-        print("\nFetching NBA futures...")
+        logger.info("\n" + "="*50)
+        logger.debug("\nFetching NBA futures...")
         nba = await get_nba_vegas_odds()
         for team in nba.get("nba_champion", [])[:5]:
-            print(f"  {team.team}: {team.american_odds:+d}")
+            logger.info(f"  {team.team}: {team.american_odds:+d}")
     
     asyncio.run(test())

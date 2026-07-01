@@ -20,6 +20,7 @@ from xml.etree import ElementTree
 from pathlib import Path
 import html
 import time
+from loguru import logger
 
 # ============================================================================
 # Configuration
@@ -85,7 +86,8 @@ def fetch_google_news(query: str, max_results: int = 10) -> List[Dict]:
                     "%a, %d %b %Y %H:%M:%S"
                 )
                 age_minutes = (datetime.now() - pub_dt).total_seconds() / 60
-            except:
+            except Exception as _e:
+                print(f"[news] warn: {_e}")
                 age_minutes = 999
             
             articles.append({
@@ -193,7 +195,8 @@ def fetch_cryptopanic(symbol: str = "BTC") -> List[Dict]:
             try:
                 pub_dt = datetime.fromisoformat(published.replace('Z', '+00:00'))
                 age_minutes = (datetime.now(pub_dt.tzinfo) - pub_dt).total_seconds() / 60
-            except:
+            except Exception as _e:
+                print(f"[news] warn: {_e}")
                 age_minutes = 999
             
             articles.append({
@@ -447,17 +450,17 @@ def test_keyword_extraction():
         "Will OpenAI release GPT-5 before July?",
     ]
     
-    print("Dynamic Keyword Extraction Test:")
-    print("-" * 60)
+    logger.info("Dynamic Keyword Extraction Test:")
+    logger.info("-" * 60)
     for title in test_cases:
         kws = extract_keywords(title)
-        print(f"{title[:50]:50} → {kws}")
+        logger.info(f"{title[:50]:50} → {kws}")
 
 
 if __name__ == "__main__":
     # Add test for dynamic extraction
     test_keyword_extraction()
-    print()
+    logger.info()
     
     # Original tests...
 
@@ -472,7 +475,8 @@ def load_news_cache() -> Dict:
         if CACHE_FILE.exists():
             with open(CACHE_FILE) as f:
                 return json.load(f)
-    except:
+    except Exception as _e:
+        print(f"[news] warn: {_e}")
         pass
     return {"seen_articles": [], "last_check": None}
 
@@ -485,7 +489,8 @@ def save_news_cache(cache: Dict):
         cache["last_check"] = datetime.now().isoformat()
         with open(CACHE_FILE, "w") as f:
             json.dump(cache, f)
-    except:
+    except Exception as _e:
+        print(f"[news] warn: {_e}")
         pass
 
 
@@ -596,7 +601,8 @@ def check_news_for_market(market: Dict) -> Optional[Dict]:
         try:
             confidence = boost_confidence_by_keywords(confidence, keywords)
             record_keyword_usage(keywords, market_id)  # Track usage
-        except:
+        except Exception as _e:
+            print(f"[news] warn: {_e}")
             pass
     
     if confidence < MIN_CONFIDENCE:
@@ -721,24 +727,24 @@ def get_trending_reddit_signals(category: str = "crypto") -> List[Dict]:
 # ============================================================================
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("NEWS SIGNAL SOURCE TEST")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("NEWS SIGNAL SOURCE TEST")
+    logger.info("=" * 60)
     
     # Test Google News
-    print("\n1. Google News (Bitcoin):")
+    logger.info("\n1. Google News (Bitcoin):")
     articles = fetch_google_news("bitcoin", max_results=5)
     for a in articles[:3]:
-        print(f"   [{a['age_minutes']:.0f}m] {a['title'][:60]}")
+        logger.info(f"   [{a['age_minutes']:.0f}m] {a['title'][:60]}")
     
     # Test Reddit
-    print("\n2. Reddit (r/cryptocurrency):")
+    logger.info("\n2. Reddit (r/cryptocurrency):")
     posts = fetch_reddit_posts("cryptocurrency")
     for p in posts[:3]:
-        print(f"   [{p['score']} pts] {p['title'][:50]}")
+        logger.info(f"   [{p['score']} pts] {p['title'][:50]}")
     
     # Test sentiment
-    print("\n3. Sentiment Analysis:")
+    logger.info("\n3. Sentiment Analysis:")
     test_headlines = [
         "Bitcoin surges past $100,000 as ETF inflows hit record",
         "Crypto market crashes amid regulatory fears",
@@ -746,10 +752,10 @@ if __name__ == "__main__":
     ]
     for headline in test_headlines:
         s = analyze_sentiment(headline)
-        print(f"   {s['sentiment']:8} ({s['confidence']:2}): {headline[:45]}")
+        logger.info(f"   {s['sentiment']:8} ({s['confidence']:2}): {headline[:45]}")
     
     # Test market signal
-    print("\n4. Market Signal Test:")
+    logger.info("\n4. Market Signal Test:")
     test_market = {
         "title": "Will Bitcoin hit $150,000 by end of 2025?",
         "id": "btc-150k-2025",
@@ -757,9 +763,9 @@ if __name__ == "__main__":
     }
     signal = check_news_for_market(test_market)
     if signal:
-        print(f"   Signal: {signal['side']} @ {signal['confidence']}%")
-        print(f"   Reason: {signal['reasoning']}")
+        logger.info(f"   Signal: {signal['side']} @ {signal['confidence']}%")
+        logger.info(f"   Reason: {signal['reasoning']}")
     else:
-        print("   No signal (no fresh breaking news)")
+        logger.info("   No signal (no fresh breaking news)")
     
-    print("\n" + "=" * 60)
+    logger.info("\n" + "=" * 60)

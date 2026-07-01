@@ -10,7 +10,6 @@ Outputs: expected edge per cycle, Kelly sizing, drawdown profiles, win rate.
 """
 
 import json
-import logging
 import math
 import os
 import random
@@ -20,8 +19,8 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from loguru import logger
 
-logger = logging.getLogger("hf_backtest")
 
 DB_PATH = os.getenv("HF_DB_PATH",
     str(Path(__file__).parent.parent / "storage" / "shadow_trades.db"))
@@ -426,20 +425,20 @@ if __name__ == "__main__":
     import pprint
     logging.basicConfig(level=logging.INFO)
     
-    print("=" * 60)
-    print("HF Monte Carlo Backtester — Phase 4")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("HF Monte Carlo Backtester — Phase 4")
+    logger.info("=" * 60)
     
     report = full_backtest_report(starting_balance=134.0, num_simulations=500)
     
     for strat, result in report["report"].items():
-        print(f"\n📊 Strategy: {strat}")
-        print(f"  Median final: ${result['median_final_balance']:,.2f}")
-        print(f"  P5-P95 range: ${result['p5_final_balance']:,.2f} — ${result['p95_final_balance']:,.2f}")
-        print(f"  Win rate: {result['median_win_rate_pct']}%")
-        print(f"  Sharpe: {result['sharpe_estimate']}")
-        print(f"  Max DD (median): {result['median_max_drawdown_pct']}%")
-        print(f"  Ruin prob: {result['ruin_probability_pct']}%")
-        print(f"  Kelly: {result['optimal_kelly_fraction']} (half: {result['half_kelly_fraction']})")
+        logger.info(f"\n📊 Strategy: {strat}")
+        logger.info(f"  Median final: ${result['median_final_balance']:,.2f}")
+        logger.info(f"  P5-P95 range: ${result['p5_final_balance']:,.2f} — ${result['p95_final_balance']:,.2f}")
+        logger.info(f"  Win rate: {result['median_win_rate_pct']}%")
+        logger.info(f"  Sharpe: {result['sharpe_estimate']}")
+        logger.info(f"  Max DD (median): {result['median_max_drawdown_pct']}%")
+        logger.info(f"  Ruin prob: {result['ruin_probability_pct']}%")
+        logger.info(f"  Kelly: {result['optimal_kelly_fraction']} (half: {result['half_kelly_fraction']})")
     
-    print(f"\n📦 Data quality: {report['data_quality']['assessment']}")
+    logger.info(f"\n📦 Data quality: {report['data_quality']['assessment']}")

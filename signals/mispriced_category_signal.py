@@ -18,8 +18,8 @@ v3 improvements:
 import json
 import time
 import urllib.request
-from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any, Optional
+from datetime import datetime, timezone
+from typing import List, Dict, Any
 import re
 from pathlib import Path
 from loguru import logger
@@ -131,7 +131,11 @@ def classify_archetype(title: str) -> str:
     if re.search(r'(by|before|end of|on)\s+(january|february|march|april|may|june|july|august|september|october|november|december|\d{4})', t):
         return 'deadline_binary'
 
-    # Sports winner / championship
+    # Sports tournament advancement (distinct from per-game winner)
+    if re.search(r'(advance|qualify|knockout|group stage|round of 16|quarterfinal|semifinal|make the)', t):
+        return 'sports_tournament'
+
+    # Sports winner / championship (per-game or outright winner)
     if re.search(r'(win|winner|champion|cup|league|playoffs|finals|medal)', t):
         return 'sports_winner'
 
@@ -150,9 +154,12 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     """
     archetype = classify_archetype(title)
 
-    # K3: Any trade below 30c (hard kill — 20% WR, n=10)
-    if price_cents < 30:
-        return True, f"K3: entry {price_cents}c < 30c floor (20% WR)", archetype
+    # K3: Any trade below 15c (hard kill — extremely low-prob markets)
+    # Was 30c but killed legitimate 15-29c markets (WC advancement, futures)
+    # 15c still filters true longshots while allowing mid-range value bets
+    # Exempt: weather (extreme temp bands), social_count (multi-outcome), sports_tournament
+    if price_cents < 15 and archetype not in ("weather", "social_count", "sports_tournament"):
+        return True, f"K3: entry {price_cents}c < 15c floor", archetype
 
     # K1: Intraday up/down — coin flip (50% NO WR, n=15,570)
     if archetype == 'intraday_updown':
@@ -169,19 +176,23 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     if archetype == 'directional':
         return True, "K5: directional dip/crash (70% NO WR, n=390 — low sample)", archetype
 
-    # K2: price_above + cheap entry (hard kill — 20% WR, n=5)
-    # Defense-in-depth: MIN_ENTRY_PRICE=50 already blocks <50c,
-    # but this catches the specific archetype for future YES-side logic
-    if archetype == 'price_above' and price_cents < 45:
-        return True, "K2: price_above cheap entry <45c (20% WR)", archetype
+    # K2: price_above — hard kill at ANY price (2026-06-06 upgrade from <45c gate)
+    # Shadow analysis N=11: 27% WR, -$3.73 total. Crypto price predictions not calibrated.
+    # All 11 entries across the full 45-99c range lost. No edge zone found.
+    if archetype == 'price_above':
+        return True, "K2: price_above (27% WR, n=11, -$3.73 — crypto price predictions uncalibrated)", archetype
 
     # K7: Game totals — 52% NO WR population, 41% traded WR (n=10,999). Coin flip after fees.
     if archetype == 'game_total':
         return True, "K7: game_total (52% NO WR population, n=10,999 — no edge after fees)", archetype
 
-    # K8: sports_winner — 0/4 shadow wins at 88.1% avg conf, Brier 0.776 (2026-04-10 baseline)
-    if archetype == 'sports_winner':
-        return True, "K8: sports_winner (0/4 shadow, Brier 0.776)", archetype
+    # K8: sports_winner — downgraded from hard kill to soft gate (2026-06-20)
+    # Was: 0/4 shadow wins, Brier 0.776. But n=4 is too small for a hard kill
+    # (95% CI: [0%, 60%]). Let through to shadow trading, penalize confidence.
+    # The confidence penalty is applied downstream in calculate_signal_confidence.
+    # if archetype == 'sports_winner':
+    #     return True, "K8: sports_winner (0/4 shadow, Brier 0.776)", archetype
+    pass  # K8 soft-gated: sports_winner passes through with 30% confidence penalty
 
     # K9: election — 0/15 shadow wins, 0% WR. All NO bets on markets that resolved YES.
     if archetype == 'election':
@@ -191,15 +202,21 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
     if archetype == 'ai_model':
         return True, "K10: ai_model (0/10 shadow, 0% WR)", archetype
 
-    # K11: MAX_ENTRY_PRICE gate — NO bets on markets priced >70c YES lose 83% of the time.
-    # Affects deadline_binary (3% WR >70c vs 82% WR <=70c) and geopolitical (9% WR >70c vs 42% WR <=70c).
-    if price_cents > 70 and archetype in ('deadline_binary', 'geopolitical'):
-        return True, f"K11: {archetype} entry {price_cents}c > 70c MAX_ENTRY_PRICE (3-9% WR above 70c)", archetype
+    # K11: deadline_binary — hard kill at ANY price (2026-06-06 upgrade from >70c gate)
+    # Shadow analysis N=10: 10% WR, -$7.01 total, avg entry 89c. Pattern: buy near-certain events that flip.
+    # Was only gated >70c but even in-zone (45-70c) the archetype has no edge.
+    if archetype == 'deadline_binary':
+        return True, "K11: deadline_binary (10% WR, n=10, -$7.01 — near-certain events that flip)", archetype
+
+    # K12: geopolitical — hard kill at ANY price (2026-06-06 upgrade from >70c gate)
+    # Shadow analysis N=9: 11% WR, -$4.08 total, 0 wins in last 6. High noise, no model edge.
+    if archetype == 'geopolitical':
+        return True, "K12: geopolitical (11% WR, n=9, -$4.08 — 0 wins in last 6, no edge)", archetype
 
     # K6: Kill sports (efficient) and truly unknown archetypes
-    # Allow: geopolitical, deadline_binary, social_count, weather, entertainment, parlay, financial_price
-    # KILLED: election (K9), ai_model (K10)
-    ALLOWED_NEW = {'geopolitical', 'deadline_binary', 'social_count', 'weather', 'entertainment', 'parlay', 'financial_price'}
+    # Allow: social_count, weather, entertainment, parlay, financial_price
+    # KILLED: election (K9), ai_model (K10), deadline_binary (K11), geopolitical (K12)
+    ALLOWED_NEW = {'social_count', 'weather', 'entertainment', 'parlay', 'financial_price'}
     # Sports: allow through with warning flag (unverified — no sharp odds cross-ref yet)
     # if archetype in ('sports_winner', 'sports_single_game'):
     #     return True, "K6: sports — efficient market", archetype
@@ -269,7 +286,7 @@ POLYMARKET_EFFICIENT_TAGS = {
 
 # Thresholds
 MIN_VOLUME_KALSHI = 5000        # Contracts
-MIN_VOLUME_POLYMARKET = 50000   # Dollars — Becker: $50K+ vol = 67% NO WR (vs 59% at $25K)
+MIN_VOLUME_POLYMARKET = 25000   # Dollars — lowered from $50K. Becker: $25K = 59% NO WR, still profitable
 WHALE_VOLUME_KALSHI = 10000     # Contracts
 WHALE_VOLUME_POLYMARKET = 100000 # Dollars
 CONTESTED_LOW = 10              # Cents/pct — lowered from 15 to allow cheap NOs
@@ -522,6 +539,10 @@ def calculate_signal_confidence(
 
     confidence = min(95, confidence)
 
+    # K8 soft gate: penalize sports_winner by 30% (was hard kill, n=4 too small)
+    if category and classify_archetype(category) == "sports_winner":
+        confidence *= 0.70
+
     return {
         "confidence": round(confidence, 1),
         "edge_score": round(edge_score, 1),
@@ -617,6 +638,7 @@ def _is_mispriced_polymarket(market: Dict) -> tuple:
         "parlay":             (0.25, "dynamic"),    # Multi-leg — high NO WR expected
         "financial_price":    (0.15, "tech"),        # Non-crypto price thresholds
         "game_total":         (0.12, "sports"),      # Over/under totals
+        "sports_tournament":  (0.15, "sports"),      # Tournament advancement/knockout — less efficient than per-game
     }
     if archetype in ARCHETYPE_EDGES:
         edge, tier = ARCHETYPE_EDGES[archetype]
@@ -710,14 +732,32 @@ def scan_kalshi_signals() -> List[Dict]:
         )
 
         if not cat_info and not is_dynamic_mispriced:
-            continue
+            # Archetype fallback: if market doesn't match MISPRICED_CATEGORIES
+            # or dynamic keywords, try archetype classification (mirrors PM scanner)
+            market_title = market.get("title", ticker)
+            archetype_fb = classify_archetype(market_title)
+            ARCHETYPE_EDGES_KX = {
+                "daily_updown": 0.15, "price_above": 0.12, "price_range": 0.25,
+                "ai_model": 0.20, "entertainment": 0.20, "social_count": 0.12,
+                "weather": 0.15, "sports_tournament": 0.15, "parlay": 0.25,
+                "financial_price": 0.15, "deadline_binary": 0.12,
+            }
+            if archetype_fb in ARCHETYPE_EDGES_KX:
+                cat_info = {"error": ARCHETYPE_EDGES_KX[archetype_fb], "tier": "archetype"}
+            else:
+                continue
 
         category_edge = cat_info["error"] if cat_info else 0.15
         if category_edge * 100 < MIN_EDGE_PCT:
             continue
 
-        volume = market.get("volume", 0)
-        price = market.get("last_price", market.get("yes_bid", 50))
+        # Fractional markets null legacy cents/volume; *_fp/_dollars first
+        volume = float(market.get("volume_fp") or market.get("volume", 0) or 0)
+        _lp_d = market.get("last_price_dollars") or market.get("yes_bid_dollars")
+        if _lp_d not in (None, ""):
+            price = float(_lp_d) * 100
+        else:
+            price = market.get("last_price") or market.get("yes_bid") or 50
         close_time_str = market.get("close_time", "")
 
         if volume < MIN_VOLUME_KALSHI:
@@ -742,6 +782,11 @@ def scan_kalshi_signals() -> List[Dict]:
         should_kill, kill_reason, archetype = _check_kill_rules(market_title, price)
         if should_kill:
             logger.info(f"Kill rule: {kill_reason} — {market_title[:80]}")
+            continue
+
+        # K13: MAX_ENTRY_PRICE=70c — NO win rate 16.7% at YES>70c (n=24), vs 29.2% at ≤70c
+        if price > 70:
+            logger.info(f"K13: YES@{price:.0f}c > 70c gate (NO WR=16.7%) — {market_title[:80]}")
             continue
 
         conf = calculate_signal_confidence(
@@ -892,6 +937,11 @@ def scan_polymarket_signals() -> List[Dict]:
             logger.info(f"Kill rule: {kill_reason} — {market_question[:80]}")
             continue
 
+        # K13: MAX_ENTRY_PRICE=70c — NO win rate 16.7% at YES>70c (n=24), vs 29.2% at ≤70c
+        if price_cents > 70:
+            logger.info(f"K13: YES@{price_cents}c > 70c gate (NO WR=16.7%) — {market_question[:80]}")
+            continue
+
         conf = calculate_signal_confidence(
             category_edge=edge,
             volume=int(volume),
@@ -943,6 +993,32 @@ def scan_polymarket_signals() -> List[Dict]:
                 "total_backtested_trades": 155152,
             },
         })
+
+    # --- Entry-cost reality check (tailored; this is a category win-rate signal,
+    # not a price edge). We BUY NO, so the real entry cost is the NO ask walked to
+    # size; surface it + whether the NO side has depth to fill ($100).
+    try:
+        from odds import poly_executable_edge as pee
+    except Exception:
+        pee = None
+    if pee is not None:
+        for sig in signals:
+            cid = sig.get("market_id")
+            if not cid or sig.get("side") != "NO" or sig.get("price") is None:
+                continue
+            p_no = 1.0 - float(sig["price"])  # displayed NO price
+            try:
+                ex = pee.executable_edge(p_no, "NO", condition_id=cid,
+                                         outcome_index=1, target_usd=100.0)
+            except Exception:
+                ex = {"available": False}
+            if ex.get("available"):
+                sig["no_entry_price"] = (round(ex["executable_price"] * 100, 1)
+                                         if ex["executable_price"] is not None else None)
+                sig["entry_slippage_bps"] = ex["slippage_bps"]
+                sig["book_spread_pct"] = (round(ex["spread"] * 100, 1)
+                                          if ex["spread"] is not None else None)
+                sig["tradeable"] = bool(ex["reason"] in ("full", "resized"))
 
     return signals
 
@@ -1068,7 +1144,6 @@ def get_mispriced_category_signals() -> Dict[str, Any]:
 # ============================================================================
 
 if __name__ == "__main__":
-    import sys
 
     logging.basicConfig(level=logging.INFO)
 

@@ -14,13 +14,12 @@ Kill conditions:
 """
 
 import json
-import logging
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict, field
+from loguru import logger
 
-logger = logging.getLogger(__name__)
 
 # In-memory state (resets on service restart — fine for Phase 2)
 _trade_log: List[Dict] = []
@@ -388,16 +387,16 @@ def clear_overrides() -> Dict:
 # ============================================================================
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("HF Risk Gate — Phase 2")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("HF Risk Gate — Phase 2")
+    logger.info("=" * 60)
     
     result = evaluate_risk_gate()
-    print(f"\n{result.summary}")
-    print(f"Trading allowed: {'✅' if result.trading_allowed else '🛑'}")
-    print(f"Hard blocks: {result.hard_blocks} | Soft warnings: {result.soft_warnings}")
+    logger.info(f"\n{result.summary}")
+    logger.info(f"Trading allowed: {'✅' if result.trading_allowed else '🛑'}")
+    logger.warning(f"Hard blocks: {result.hard_blocks} | Soft warnings: {result.soft_warnings}")
     
-    print("\nChecks:")
+    logger.info("\nChecks:")
     for check in result.checks:
         icon = "✅" if check.passed else ("🛑" if check.severity == "hard" else "⚠️")
-        print(f"  {icon} [{check.name}] {check.message}")
+        logger.info(f"  {icon} [{check.name}] {check.message}")

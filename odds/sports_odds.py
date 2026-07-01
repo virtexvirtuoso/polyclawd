@@ -7,7 +7,6 @@ and compares against Polymarket single-game markets for edge detection.
 """
 
 import json
-import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -15,8 +14,8 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import httpx
+from loguru import logger
 
-logger = logging.getLogger(__name__)
 
 # Resilient fetch wrapper
 try:
@@ -342,18 +341,18 @@ def get_sports_odds_summary(sports: List[str] = None) -> Dict:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
-    print("=== Sports Odds (ActionNetwork) ===\n")
+    logger.info("=== Sports Odds (ActionNetwork) ===\n")
     for sport in ["nba", "nhl"]:
         games = fetch_action_odds(sport)
-        print(f"{sport.upper()}: {len(games)} games")
+        logger.info(f"{sport.upper()}: {len(games)} games")
         for g in games[:3]:
-            print(f"  {g.away_team} @ {g.home_team}")
-            print(f"    ML: {g.away_ml}/{g.home_ml}  Prob: {g.away_implied_prob:.1%}/{g.home_implied_prob:.1%}  Spread: {g.spread}  Books: {g.num_books}")
-        print()
+            logger.info(f"  {g.away_team} @ {g.home_team}")
+            logger.info(f"    ML: {g.away_ml}/{g.home_ml}  Prob: {g.away_implied_prob:.1%}/{g.home_implied_prob:.1%}  Spread: {g.spread}  Books: {g.num_books}")
+        logger.info()
     
-    print("=== Polymarket Edge Scan ===")
+    logger.info("=== Polymarket Edge Scan ===")
     for sport in ["nba"]:
         edges = find_polymarket_sports_edges(sport, min_edge=3.0)
-        print(f"\n{sport.upper()} edges: {len(edges)}")
+        logger.info(f"\n{sport.upper()} edges: {len(edges)}")
         for e in edges[:5]:
-            print(f"  {e['edge_pct']:.1f}% {e['side']} {e['team']} | Sharp: {e['sharp_prob']:.1f}% Poly: {e['polymarket_prob']:.1f}% | {e['game']}")
+            logger.info(f"  {e['edge_pct']:.1f}% {e['side']} {e['team']} | Sharp: {e['sharp_prob']:.1f}% Poly: {e['polymarket_prob']:.1f}% | {e['game']}")

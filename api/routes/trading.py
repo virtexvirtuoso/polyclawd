@@ -8,6 +8,7 @@ This router consolidates all trading-related endpoints:
 - /paper/* - Paper Polymarket trading
 """
 import json
+import sqlite3
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -629,3 +630,40 @@ async def execute_paper_trade_manual(
         "price": price,
         "new_balance": balance_data["usdc"]
     }
+
+
+# ============================================================================
+# Resolution Cluster Risk Endpoint
+# ============================================================================
+
+@router.get("/portfolio/resolution-cluster")
+async def portfolio_resolution_cluster():
+    """Get portfolio resolution-date clustering analysis — detect concentration risk.
+
+    Groups open positions by their resolution date and identifies windows
+    where 4+ positions resolve on the same day or single-day exposure
+    exceeds 20% of portfolio balance.
+    """
+    try:
+        from services.resolution_cluster import compute_resolution_clusters
+
+        # Query open positions from shadow_trades.db
+        db_path = Path(__file__).resolve().parent.parent.parent / "storage" / "shadow_trades.db"
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM paper_positions WHERE status='open'"
+        ).fetchall()
+        conn.close()
+
+        positions = [dict(r) for r in rows]
+        result = compute_resolution_clusters(positions)
+        return result
+    except ImportError:
+        raise HTTPException(
+            status_code=501,
+            detail="resolution_cluster service not available; run pip-install",
+        )
+    except Exception as e:
+        logger.exception(f"Resolution cluster analysis failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

@@ -14,9 +14,11 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import httpx
+
+from odds.edge_math import net_arb_edge
 
 logger = logging.getLogger(__name__)
 
@@ -226,8 +228,13 @@ def fetch_kalshi_active(limit: int = 500) -> List[Dict]:
                     continue
                 seen_tickers.add(ticker)
                 
-                vol = m.get("volume", 0) or 0
-                last_price = m.get("last_price", 0) or 0
+                # Fractional markets null legacy cents/volume; *_fp/_dollars first
+                vol = float(m.get("volume_fp") or m.get("volume", 0) or 0)
+                _lp_d = m.get("last_price_dollars")
+                if _lp_d not in (None, ""):
+                    last_price = float(_lp_d) * 100
+                else:
+                    last_price = m.get("last_price", 0) or 0
                 if vol >= MIN_VOLUME and 5 <= last_price <= 95:
                     # Use event title if market title is multi-outcome gibberish
                     title = m.get("title", "") or event_title
@@ -395,6 +402,21 @@ def find_arb_opportunities(
                 buy_price = km["price_yes"]
                 sell_price = pm["price_yes"]
             
+            sell_platform = "kalshi" if buy_platform == "polymarket" else "polymarket"
+            
+            # Compute fee-adjusted net edge
+            net_edge = net_arb_edge(
+                buy_price=buy_price,
+                sell_price=sell_price,
+                buy_platform=buy_platform,
+                sell_platform=sell_platform,
+                estimated_slippage=0.005,
+            )
+            
+            # Gate on net edge (after fees) >= min_spread
+            if net_edge["net_edge_pp"] < min_spread:
+                continue
+            
             opportunities.append({
                 "kalshi_title": km["title"][:100],
                 "kalshi_id": km["id"],
@@ -406,17 +428,19 @@ def find_arb_opportunities(
                 "poly_volume": pm["volume"],
                 "poly_slug": pm.get("slug", ""),
                 "spread_pp": round(spread, 1),
+                "net_edge_pp": net_edge["net_edge_pp"],
                 "similarity": round(sim, 3),
                 "shared_tokens": shared_count,
                 "direction": arb_direction,
                 "buy_platform": buy_platform,
+                "sell_platform": sell_platform,
                 "buy_price": round(buy_price * 100, 1),
                 "sell_price": round(sell_price * 100, 1),
                 "min_volume": min(km["volume"], pm["volume"]),
             })
     
-    # Sort by spread descending, filter top results
-    opportunities.sort(key=lambda x: x["spread_pp"], reverse=True)
+    # Sort by net edge descending (fee-adjusted)
+    opportunities.sort(key=lambda x: x["net_edge_pp"], reverse=True)
     
     # Deduplicate: keep best spread per unique pair (both sides)
     seen_pairs = set()
@@ -427,7 +451,56 @@ def find_arb_opportunities(
             seen_pairs.add(pair_key)
             unique.append(opp)
     
-    return unique[:MAX_RESULTS]
+    result = unique[:MAX_RESULTS]
+
+    # --- Spread-after-slippage variant (tailored; arb is a platform SPREAD, not
+    # a model-prob edge). Recompute the spread using the executable price of the
+    # Polymarket leg: lift the ASK when buying Poly, hit the BID when selling Poly.
+    # A displayed spread can vanish once the Poly leg is priced at the book.
+    try:
+        from odds import poly_executable_edge as pee
+        from odds import polymarket_clob as clob
+    except Exception:
+        pee = clob = None
+    if pee is not None and clob is not None:
+        for opp in result:
+            cid = opp.get("poly_id")
+            toks = pee.condition_id_to_token_ids(cid) if cid else None
+            if not toks:
+                continue
+            try:
+                book = clob.get_orderbook(toks[0])  # YES token
+            except Exception:
+                book = None
+            if not book or not book.bids or not book.asks:
+                continue
+            best_ask = book.asks[0].price
+            best_bid = book.bids[0].price
+            if opp["buy_platform"] == "polymarket":
+                # buy Poly YES @ ask, sell Kalshi @ its YES
+                effective_buy = best_ask
+                effective_sell = opp["sell_price"] / 100.0
+            else:
+                # sell Poly YES @ bid, buy Kalshi @ its YES
+                effective_buy = opp["buy_price"] / 100.0
+                effective_sell = best_bid
+            realized = (effective_sell - effective_buy) * 100.0
+            opp["poly_exec_price"] = round(best_ask if opp["buy_platform"] == "polymarket" else best_bid, 1)
+            opp["book_spread_pp"] = round(book.spread * 100, 1)
+            opp["book_realized_spread_pp"] = round(realized, 1)
+            
+            # Fee-adjust the book-realized spread
+            book_net = net_arb_edge(
+                buy_price=effective_buy,
+                sell_price=effective_sell,
+                buy_platform=opp["buy_platform"],
+                sell_platform=opp["sell_platform"],
+                estimated_slippage=0.0,  # Already using executable prices
+            )
+            opp["book_net_edge_pp"] = book_net["net_edge_pp"]
+            opp["book_tradeable"] = bool(book_net["net_edge_pp"] >= min_spread)
+
+    return result
 
 
 def scan_cross_platform_arb() -> Dict:
@@ -469,13 +542,24 @@ def scan_cross_platform_arb() -> Dict:
             kalshi_age or 0, poly_age or 0
         )
     
+    # Fee-adjustment metadata for documentation
+    fee_assumptions = {
+        "polymarket": 0.02,
+        "kalshi": 0.01,
+        "slippage": 0.005,
+        "note": "Polymarket ~2%% on net winnings, Kalshi ~1%% per contract. Both CLOBs — no bookmaker vig. Slippage 0.5pp estimated."
+    }
+    
     result = {
         "kalshi_markets": len(kalshi),
         "poly_markets": len(poly),
         "arb_opportunities": len(arbs),
         "arbs": arbs,
         "avg_spread": round(sum(a["spread_pp"] for a in arbs) / max(len(arbs), 1), 1),
+        "avg_net_edge": round(sum(a["net_edge_pp"] for a in arbs) / max(len(arbs), 1), 1),
         "max_spread": arbs[0]["spread_pp"] if arbs else 0,
+        "max_net_edge": arbs[0]["net_edge_pp"] if arbs else 0,
+        "fee_assumptions": fee_assumptions,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "sources_used": sources_used,
         "source_freshness": source_freshness,
@@ -497,8 +581,12 @@ if __name__ == "__main__":
     print(f"Arb opportunities: {result['arb_opportunities']}")
     print(f"Avg spread: {result['avg_spread']}pp")
     print(f"Max spread: {result['max_spread']}pp")
+    print(f"Avg net edge: {result['avg_net_edge']}pp")
+    print(f"Max net edge: {result['max_net_edge']}pp")
+    print(f"Fee assumptions: {result['fee_assumptions']['note']}")
     
     for arb in result["arbs"][:10]:
         print(f"\n  K: {arb['kalshi_title'][:70]}")
         print(f"  P: {arb['poly_title'][:70]}")
-        print(f"  Kalshi: {arb['kalshi_price']}¢ | Poly: {arb['poly_price']}¢ | Spread: {arb['spread_pp']}pp | Sim: {arb['similarity']}")
+        print(f"  Kalshi: {arb['kalshi_price']}¢ | Poly: {arb['poly_price']}¢ | "
+              f"Spread: {arb['spread_pp']}pp | Net Edge: {arb['net_edge_pp']}pp | Sim: {arb['similarity']}")

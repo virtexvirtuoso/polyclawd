@@ -1,6 +1,4 @@
 """Tests for P0 bug fixes: Kelly variable odds, PRAGMA busy_timeout, Sharpe Bessel's correction."""
-import sqlite3
-import pytest
 from config.scaling_phases import calculate_position_size
 
 

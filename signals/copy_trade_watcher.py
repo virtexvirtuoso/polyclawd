@@ -8,15 +8,14 @@ Uses Polymarket data-api.polymarket.com endpoints.
 """
 
 import json
-import logging
 import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import httpx
+from loguru import logger
 
-logger = logging.getLogger(__name__)
 
 DATA_API = "https://data-api.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
@@ -307,22 +306,22 @@ def get_copy_trade_signals() -> Dict:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
-    print("=== Copy-Trade Watcher ===\n")
+    logger.info("=== Copy-Trade Watcher ===\n")
     
     whales = discover_whales()
-    print(f"Whales found: {len(whales)}")
+    logger.info(f"Whales found: {len(whales)}")
     for w in whales[:5]:
-        print(f"  {w['name']:14}  vol={w['volume']:>8.0f}  trades={w['trades']:>3}  markets={w['markets']}")
+        logger.info(f"  {w['name']:14}  vol={w['volume']:>8.0f}  trades={w['trades']:>3}  markets={w['markets']}")
     
     if whales:
         print(f"\nScanning positions for top {min(10, len(whales))} whales...")
         whale_data = scan_whale_positions(whales[:10])
-        print(f"Scanned: {whale_data['whales_scanned']}")
-        print(f"Markets: {whale_data['markets_with_activity']}")
+        logger.info(f"Scanned: {whale_data['whales_scanned']}")
+        logger.info(f"Markets: {whale_data['markets_with_activity']}")
         
         # Show top whale markets
         top_markets = sorted(whale_data["markets"].values(), key=lambda m: m["whale_count"], reverse=True)
-        print(f"\nTop whale markets:")
+        logger.info(f"\nTop whale markets:")
         for m in top_markets[:15]:
             q = m["question"][:55] if m["question"] else m["condition_id"][:20]
-            print(f"  {m['consensus']:12} {m['whale_count']}W sz={m['total_size']:>6.0f}  {q}")
+            logger.info(f"  {m['consensus']:12} {m['whale_count']}W sz={m['total_size']:>6.0f}  {q}")

@@ -8,6 +8,7 @@ import urllib.request
 from datetime import datetime
 from typing import List, Dict, Optional
 from dataclasses import dataclass
+from loguru import logger
 
 MANIFOLD_API = "https://api.manifold.markets/v0"
 
@@ -53,7 +54,7 @@ def fetch_markets(limit: int = 100, sort: str = "liquidity") -> List[Dict]:
             return data
         return []
     except Exception as e:
-        print(f"Manifold fetch error: {e}")
+        logger.error(f"Manifold fetch error: {e}")
         return []
 
 def search_markets(query: str, limit: int = 20) -> List[Dict]:
@@ -65,7 +66,7 @@ def search_markets(query: str, limit: int = 20) -> List[Dict]:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
-        print(f"Manifold search error: {e}")
+        logger.error(f"Manifold search error: {e}")
         return []
 
 def get_market(market_id: str) -> Optional[Dict]:
@@ -243,7 +244,7 @@ def get_bets(
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
-        print(f"Manifold bets error: {e}")
+        logger.error(f"Manifold bets error: {e}")
         return []
 
 
@@ -311,7 +312,7 @@ def get_top_traders(limit: int = 20) -> List[Dict]:
         return sorted_traders
         
     except Exception as e:
-        print(f"Error getting top traders: {e}")
+        logger.error(f"Error getting top traders: {e}")
         return []
 
 
@@ -391,17 +392,17 @@ def get_market_bets_flow(market_id: str) -> Dict:
 if __name__ == "__main__":
     import asyncio
     
-    print("Testing Manifold integration...")
+    logger.info("Testing Manifold integration...")
     summary = get_manifold_summary()
-    print(f"Markets: {summary['markets_fetched']}")
-    print(f"Total liquidity: ${summary['total_liquidity']:,}")
-    print("\nTop markets:")
+    logger.info(f"Markets: {summary['markets_fetched']}")
+    logger.info(f"Total liquidity: ${summary['total_liquidity']:,}")
+    logger.info("\nTop markets:")
     for m in summary['top_markets'][:5]:
-        print(f"  {m['probability']}% - {m['question']}")
+        logger.info(f"  {m['probability']}% - {m['question']}")
     
-    print("\n" + "="*50)
-    print("\nTesting bets endpoint...")
+    logger.info("\n" + "="*50)
+    logger.info("\nTesting bets endpoint...")
     bets = get_bets(limit=5)
-    print(f"Recent bets: {len(bets)}")
+    logger.info(f"Recent bets: {len(bets)}")
     for b in bets[:3]:
-        print(f"  {b.get('outcome')}: ${b.get('amount', 0):.0f}")
+        logger.info(f"  {b.get('outcome')}: ${b.get('amount', 0):.0f}")

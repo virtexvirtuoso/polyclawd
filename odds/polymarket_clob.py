@@ -4,7 +4,7 @@ Direct access to orderbook depth and price history
 """
 
 import json
-import urllib.request
+import urllib.request  # noqa: F401 (converge w/ VPS copy)
 from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass
@@ -173,16 +173,22 @@ def get_price_history(
         if not data or "history" not in data:
             return []
         
-        return [
-            {
-                "timestamp": h.get("t"),
-                "open": float(h.get("o", 0)),
-                "high": float(h.get("h", 0)),
-                "low": float(h.get("l", 0)),
-                "close": float(h.get("c", 0)),
-            }
-            for h in data["history"]
-        ]
+        # Polymarket /prices-history returns {t, p} price points (NOT OHLC).
+        # Map price -> close (and o/h/l) so callers get a usable series;
+        # fall back to OHLC keys if a variant ever returns them.
+        out = []
+        for h in data["history"]:
+            p = h.get("p")
+            if p is not None:
+                price = float(p)
+                out.append({"timestamp": h.get("t"), "open": price, "high": price,
+                            "low": price, "close": price, "price": price})
+            else:
+                c = float(h.get("c", 0))
+                out.append({"timestamp": h.get("t"), "open": float(h.get("o", 0)),
+                            "high": float(h.get("h", 0)), "low": float(h.get("l", 0)),
+                            "close": c, "price": c})
+        return out
         
     except Exception as e:
         print(f"Price history error: {e}")
@@ -325,6 +331,7 @@ def size_to_book(
     max_slip_bps: float = 50.0,
     min_usd: float = 15.0,
     max_spread: float = 0.05,
+    book: Optional[OrderBook] = None,
 ) -> FillEstimate:
     """Walk the Polymarket CLOB order book to size a position adaptively.
 
@@ -342,14 +349,14 @@ def size_to_book(
     Returns FillEstimate with ok=False and reason="skip:..." when the
     market is not tradeable at acceptable quality.
     """
-    # Resolve token id if only slug given
-    if not token_id and market_slug:
-        outcome = "Yes" if str(side).upper() == "YES" else "No"
-        token_id = get_token_id_for_market(market_slug, outcome)
-    if not token_id:
-        return FillEstimate(False, 0, 0, 0, 0, 0, 0, "skip:no_token_id")
-
-    book = get_orderbook(token_id)
+    # Use a pre-fetched book (e.g. live WS book) if provided; else fetch via REST.
+    if book is None:
+        if not token_id and market_slug:
+            outcome = "Yes" if str(side).upper() == "YES" else "No"
+            token_id = get_token_id_for_market(market_slug, outcome)
+        if not token_id:
+            return FillEstimate(False, 0, 0, 0, 0, 0, 0, "skip:no_token_id")
+        book = get_orderbook(token_id)
     if not book:
         return FillEstimate(False, 0, 0, 0, 0, 0, 0, "skip:no_book")
 
@@ -472,6 +479,65 @@ async def get_clob_summary(market_id: str = None) -> Dict:
             print(f"Error: {e}")
     
     return result
+
+
+def get_recent_trades(token_id: str, limit: int = 500) -> list:
+    """
+    Fetch recent trades for a CLOB token from Polymarket /trades endpoint.
+
+    Requires API key auth via env vars:
+        POLYMARKET_CLOB_API_KEY
+        POLYMARKET_CLOB_SECRET
+
+    Args:
+        token_id: The CLOB token ID
+        limit: Max trades to return (default 500, max 2000 per CLOB spec)
+
+    Returns:
+        List of trade dicts: {"price", "size", "side", "timestamp", "maker_address"}
+        Returns empty list on auth failure or other errors.
+    """
+    import os as _os
+
+    api_key = _os.environ.get("POLYMARKET_CLOB_API_KEY")
+    api_secret = _os.environ.get("POLYMARKET_CLOB_SECRET")
+
+    if not api_key or not api_secret:
+        print("Warning: POLYMARKET_CLOB_API_KEY / SECRET not set — cannot fetch trades")
+        return []
+
+    try:
+        url = f"{CLOB_API}/trades?token_id={token_id}&limit={min(limit, 2000)}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Polyclawd/2.0",
+            "POLYMARKET_CLOB_API_KEY": api_key,
+            "POLYMARKET_CLOB_SECRET": api_secret,
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = json.loads(resp.read().decode())
+
+        # Polymarket /trades returns an array of trade objects.
+        # Normalize fields to our schema.
+        out = []
+        for t in raw if isinstance(raw, list) else raw.get("data", []):
+            out.append({
+                "price": float(t.get("price", 0)),
+                "size": float(t.get("size", 0)),
+                "side": str(t.get("side", "BUY")).upper(),
+                "timestamp": int(t.get("timestamp", 0)),
+                "maker_address": t.get("maker_address", "") or t.get("maker", ""),
+            })
+        return out
+
+    except urllib.error.HTTPError as e:
+        if e.code == 401 or e.code == 403:
+            print("Warning: Polymarket CLOB /trades auth failed (HTTP %d) — check API keys" % e.code)
+        else:
+            print(f"Warning: Polymarket CLOB /trades HTTP error: {e.code}")
+        return []
+    except Exception as e:
+        print(f"Warning: Polymarket CLOB /trades fetch error: {e}")
+        return []
 
 
 if __name__ == "__main__":

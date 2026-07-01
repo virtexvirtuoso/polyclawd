@@ -1,0 +1,23 @@
+# /etc/systemd/system/polyclawd-ws.service
+# Polyclawd Phase 3 — Polymarket CLOB market-channel WebSocket streamer.
+# Publishes live book/trade/status to memcached:11211 (poly:book/trade/ws:status).
+# Decoupled from polyclawd-api (separate process — never blocks the API event loop).
+# No consumers read it until P3.4; safe to run.
+[Unit]
+Description=Polyclawd Polymarket WebSocket Streamer
+After=network.target polyclawd-api.service
+
+[Service]
+Type=simple
+User=linuxuser
+Group=linuxuser
+WorkingDirectory=/var/www/virtuosocrypto.com/polyclawd
+Environment=PATH=/var/www/virtuosocrypto.com/polyclawd/venv/bin:/usr/bin:/usr/local/bin
+Environment=POLY_WS_PORT=8423
+ExecStart=/var/www/virtuosocrypto.com/polyclawd/venv/bin/python3 -m services.poly_ws --seconds 0
+Restart=always
+RestartSec=10
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

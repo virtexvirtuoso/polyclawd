@@ -20,6 +20,7 @@ import re
 import os
 import base64
 import time
+from loguru import logger
 
 try:
     from .smart_matcher import create_signature, signatures_match, match_markets
@@ -123,7 +124,7 @@ def _get_auth_headers() -> dict:
         # jwt library not installed
         return {"Accept": "application/json"}
     except Exception as e:
-        print(f"Kalshi auth error: {e}")
+        logger.error(f"Kalshi auth error: {e}")
         return {"Accept": "application/json"}
 
 def _fetch_kalshi_series_sync(limit: int = 200) -> List[dict]:
@@ -165,7 +166,7 @@ def _fetch_kalshi_series_sync(limit: int = 200) -> List[dict]:
             else:
                 break
         except Exception as e:
-            print(f"Error fetching series: {e}")
+            logger.error(f"Error fetching series: {e}")
             break
     
     # Fall back to demo if prod fails
@@ -251,7 +252,7 @@ def _fetch_all_kalshi_markets_sync(
             else:
                 break
         except Exception as e:
-            print(f"Error fetching markets page {page}: {e}")
+            logger.error(f"Error fetching markets page {page}: {e}")
             break
     
     # Fall back to demo if prod fails
@@ -300,10 +301,17 @@ def _is_entertainment_market(text: str) -> bool:
 
 def _extract_odds_from_market(market: dict) -> dict:
     """Extract yes/no prices and convert to odds format."""
-    yes_bid = market.get("yes_bid", 0) or 0
-    yes_ask = market.get("yes_ask", 0) or 0
-    no_bid = market.get("no_bid", 0) or 0
-    no_ask = market.get("no_ask", 0) or 0
+    def _cents(base):
+        # Fractional markets null legacy cents fields; *_dollars first
+        d = market.get(f"{base}_dollars")
+        if d not in (None, ""):
+            return float(d) * 100
+        return market.get(base, 0) or 0
+
+    yes_bid = _cents("yes_bid")
+    yes_ask = _cents("yes_ask")
+    no_bid = _cents("no_bid")
+    no_ask = _cents("no_ask")
     
     # Use midpoint for display, or ask price
     yes_price = (yes_bid + yes_ask) / 2 if yes_bid and yes_ask else yes_ask or yes_bid
@@ -311,7 +319,7 @@ def _extract_odds_from_market(market: dict) -> dict:
     
     # Also check last_price field
     if not yes_price:
-        yes_price = market.get("last_price", 0) or 0
+        yes_price = _cents("last_price")
     if not no_price and yes_price:
         no_price = 100 - yes_price
     
@@ -322,9 +330,9 @@ def _extract_odds_from_market(market: dict) -> dict:
         "yes_ask": yes_ask,
         "no_bid": no_bid,
         "no_ask": no_ask,
-        "volume": market.get("volume", 0) or 0,
-        "volume_24h": market.get("volume_24h", 0) or 0,
-        "open_interest": market.get("open_interest", 0) or 0,
+        "volume": float(market.get("volume_fp") or market.get("volume", 0) or 0),
+        "volume_24h": float(market.get("volume_24h_fp") or market.get("volume_24h", 0) or 0),
+        "open_interest": float(market.get("open_interest_fp") or market.get("open_interest", 0) or 0),
     }
 
 
@@ -426,7 +434,7 @@ def _fetch_polymarket_sync() -> List[dict]:
         )
         return resp.json() if resp.status_code == 200 else []
     except Exception as e:
-        print(f"Error fetching Polymarket: {e}")
+        logger.error(f"Error fetching Polymarket: {e}")
         return []
 
 def find_polymarket_matches(kalshi_title: str, poly_events: List[dict], kalshi_category: str = "") -> List[Dict]:
@@ -858,18 +866,18 @@ async def get_kalshi_all_markets() -> dict:
 
 if __name__ == "__main__":
     async def test():
-        print("Fetching Kalshi vs Polymarket comparison...")
+        logger.debug("Fetching Kalshi vs Polymarket comparison...")
         comparison = await get_kalshi_polymarket_comparison()
         
-        print(f"\nKalshi markets: {comparison['total_kalshi_markets']}")
-        print(f"Polymarket events: {comparison['total_polymarket_events']}")
-        print(f"Overlapping: {comparison['overlapping_markets']}")
-        print(f"\nCategories: {comparison['categories']}")
+        logger.info(f"\nKalshi markets: {comparison['total_kalshi_markets']}")
+        logger.info(f"Polymarket events: {comparison['total_polymarket_events']}")
+        logger.info(f"Overlapping: {comparison['overlapping_markets']}")
+        logger.info(f"\nCategories: {comparison['categories']}")
         
-        print("\nTop overlaps:")
+        logger.info("\nTop overlaps:")
         for o in comparison['overlaps'][:15]:
-            print(f"  • [{o['match_category']}] {o['kalshi_title'][:50]}")
-            print(f"    Poly: {o['polymarket_price']}¢ - {o['polymarket_question'][:50] if o['polymarket_question'] else 'N/A'}")
-            print()
+            logger.info(f"  • [{o['match_category']}] {o['kalshi_title'][:50]}")
+            logger.info(f"    Poly: {o['polymarket_price']}¢ - {o['polymarket_question'][:50] if o['polymarket_question'] else 'N/A'}")
+            logger.info()
     
     asyncio.run(test())

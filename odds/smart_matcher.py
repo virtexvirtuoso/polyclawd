@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional, List, Set, Tuple
 from datetime import datetime
+from loguru import logger
 
 @dataclass
 class MarketSignature:
@@ -457,15 +458,15 @@ if __name__ == "__main__":
         ("Bitcoin to $100k", "Ethereum to $10k"),
     ]
     
-    print("Testing market matching:\n")
+    logger.info("Testing market matching:\n")
     for text1, text2 in test_pairs:
         sig1 = create_signature(text1)
         sig2 = create_signature(text2)
         match, conf, reason = signatures_match(sig1, sig2)
         
         status = "✅ MATCH" if match else "❌ NO MATCH"
-        print(f"{status} ({conf:.2f})")
-        print(f"  1: {text1}")
-        print(f"  2: {text2}")
-        print(f"  Reason: {reason}")
-        print()
+        logger.info(f"{status} ({conf:.2f})")
+        logger.info(f"  1: {text1}")
+        logger.info(f"  2: {text2}")
+        logger.info(f"  Reason: {reason}")
+        logger.info()

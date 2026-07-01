@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Polyclawd — Soccer Edge Dashboard</title>
+<style>
+  :root{--bg:#0b1020;--card:#141a2e;--card2:#1b2236;--border:#27304a;--dim:#8b95b0;
+        --text:#e6ebf5;--green:#10b981;--red:#ef4444;--amber:#f59e0b;--accent:#6c5ce7;}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;padding:20px;max-width:1200px;margin:0 auto}
+  a{color:var(--accent);text-decoration:none}
+  .hero{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px}
+  h1{font-size:26px}.sub{color:var(--dim);font-size:13px;margin-top:4px}
+  .nav{margin-bottom:16px;font-size:13px}.nav a{margin-right:14px;color:var(--dim)}.nav a:hover{color:var(--text)}
+  .status{text-align:right;font-size:12px;color:var(--dim)}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px}
+  .dot.live{background:var(--green);box-shadow:0 0 6px var(--green)}
+  .dot.stale{background:var(--amber)}.dot.err{background:var(--red)}
+  .tabs{display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap}
+  .tab{padding:8px 14px;background:var(--card);border:1px solid var(--border);border-radius:8px;cursor:pointer;font-size:13px}
+  .tab.active{background:var(--accent);border-color:var(--accent)}
+  .pane{display:none}.pane.active{display:block}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px;margin-bottom:16px}
+  .ttl{font-weight:600;margin-bottom:10px;font-size:15px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--border)}
+  th{color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  .pos{color:var(--green)}.neg{color:var(--red)}
+  .badge{padding:2px 7px;border-radius:6px;font-size:11px;font-weight:600}
+  .badge.buy{background:rgba(16,185,129,.15);color:var(--green)}
+  .badge.sell{background:rgba(239,68,68,.15);color:var(--red)}
+  .badge.yes{background:rgba(16,185,129,.18);color:var(--green)}
+  .badge.no{background:rgba(239,68,68,.18);color:var(--red)}
+  .badge.live{background:rgba(6,182,212,.15);color:#06b6d4}
+  .badge.ok{background:rgba(16,185,129,.15);color:var(--green)}
+  .badge.thin{background:rgba(245,158,11,.15);color:var(--amber)}
+  .empty{color:var(--dim);padding:14px;text-align:center;font-style:italic}
+  .bar{height:8px;background:var(--card2);border-radius:4px;overflow:hidden;margin-top:6px}
+  .bar>span{display:block;height:100%;background:var(--accent)}
+  .stat{display:inline-block;margin-right:22px}.stat b{font-size:20px;display:block}
+  .scroll{overflow-x:auto}
+  .heroval{font-size:40px;font-weight:700;line-height:1.1}
+  .wc-banner{background:linear-gradient(90deg,rgba(108,92,231,.18),rgba(16,185,129,.10));border:1px solid var(--accent);border-radius:12px;padding:14px 18px;margin-bottom:16px}
+  .verdict{margin-top:8px;font-size:13px}
+</style>
+</head>
+<body>
+<div class="nav">
+  <a href="index.html">← Home</a><a href="baseball.html">⚾ Baseball</a>
+  <a href="soccer.html" style="color:var(--text)">⚽ Soccer</a><a href="ufc.html">🥊 UFC</a>
+  <a href="weather.html">🌡️ Weather</a><a href="options.html">📈 Options</a>
+  <a href="portfolio.html">💼 Portfolio</a>
+</div>
+<div class="hero">
+  <div><h1>⚽ Soccer Edge — 🌍 World Cup 2026</h1>
+    <div class="sub">Shin-devigged sharp-book odds (Pinnacle / Betfair) vs Polymarket &amp; Kalshi — per-match 3-way &amp; World Cup futures. Executable-edge gated, CLV-tracked.</div></div>
+  <div class="status" id="status"><span class="dot" id="dot"></span><span id="statustxt">loading…</span><div id="credits" style="margin-top:4px"></div><div id="freshness" style="margin-top:2px"></div></div>
+</div>
+<div class="tabs">
+  <div class="tab active" data-pane="worldcup">🌍 World Cup</div>
+  <div class="tab" data-pane="matches">Matches</div>
+  <div class="tab" data-pane="futures">Futures</div>
+  <div class="tab" data-pane="calibration">📊 Calibration</div>
+  <div class="tab" data-pane="shadow">💾 Shadow</div>
+  <div class="tab" data-pane="system">⚙️ System</div>
+</div>
+
+<div class="pane active" id="worldcup">
+  <div class="wc-banner"><b>🌍 World Cup 2026 command center.</b> <span class="sub" style="display:inline">Betfair is the sharp reference for outrights · per-match 3-way devigged off Pinnacle · Kalshi cross-venue spread below.</span></div>
+  <div class="card"><div class="ttl">🏆 WC Winner — Outright Board</div><div class="sub" style="margin-bottom:10px">Betfair sharp book vs Polymarket. Sorted by edge.</div><div class="scroll" id="wc-outright-body"><div class="empty">loading…</div></div></div>
+  <div class="card"><div class="ttl">📋 WC Winner — Fair-value board</div><div class="sub" style="margin-bottom:10px">Every matched Betfair↔Polymarket pair, no edge floor — fair value even when nothing is tradeable (the outright market is efficient). Favorites first; Diff = PM − Betfair (|Diff| ≥ 3pp ≈ where an edge would appear).</div><div class="scroll" id="wc-board-body"><div class="empty">loading…</div></div></div>
+  <div class="card"><div class="ttl">⚽ WC Matches — 3-way (upcoming, soonest first)</div><div class="scroll" id="wc-matches-body"><div class="empty">loading…</div></div></div>
+  <div class="card"><div class="ttl">🎰 Kalshi WC venue — cross-venue spread</div><div class="sub" id="kalshi-note" style="margin-bottom:10px"></div><div class="scroll" id="kalshi-wc-body"><div class="empty">loading…</div></div></div>
+</div>
+<div class="pane" id="matches"><div class="card"><div class="ttl">Per-match edges (Home / Draw / Away)</div><div class="scroll" id="matches-body"><div class="empty">loading…</div></div></div></div>
+<div class="pane" id="futures"><div class="card"><div class="ttl">Outright / futures edges</div><div class="scroll" id="futures-body"><div class="empty">loading…</div></div></div></div>
+<div class="pane" id="calibration">
+  <div class="card"><div class="ttl">📈 CLV vs PM close</div><div id="clv-hero"><div class="empty">loading…</div></div></div>
+  <div class="card"><div class="ttl">Per-strategy performance</div><div class="sub" style="margin-bottom:10px">Green highlight = n ≥ 30 (kill-rule threshold reached).</div><div class="scroll" id="strat-body"><div class="empty">loading…</div></div></div>
+  <div class="card"><div class="ttl">Edge-bucket calibration</div><div class="sub" style="margin-bottom:10px">Does realized win% rise with stated edge?</div><div class="scroll" id="calib-body"><div class="empty">loading…</div></div></div>
+</div>
+<div class="pane" id="shadow"><div class="card"><div class="ttl">💾 Shadow Trade Collection</div>
+  <div class="sub" style="margin-bottom:10px">Only tradeable, fee-adjusted edges are logged at the executable price. Need 30 resolved per strategy before kill rules apply.</div>
+  <div id="shadow-body"><div class="empty">loading…</div></div></div></div>
+<div class="pane" id="system"><div class="card"><div class="ttl">⚙️ System</div><div id="system-body"><div class="empty">loading…</div></div></div></div>
+
+<script>
+const MATCH='/polyclawd/api/soccer/match-edge', FUT='/polyclawd/api/soccer/futures-edge',
+      DASH='/polyclawd/api/soccer/dashboard', CRED='/polyclawd/api/odds-api/credits',
+      CALIB='/polyclawd/api/soccer/calibration', KWC='/polyclawd/api/soccer/kalshi-wc',
+      WCBOARD='/polyclawd/api/soccer/wc-board';
+const $=id=>document.getElementById(id);
+let _anyLive=false;  // true when any edge has a live WS book → poll faster
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.pane').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active'); $(t.dataset.pane).classList.add('active');
+});
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const num=v=>(v==null||v===''||isNaN(v))?null:Number(v);
+function kfmt(v){ const n=num(v); if(n==null) return '—'; if(Math.abs(n)>=1000) return '$'+(n/1000).toFixed(1)+'k'; return '$'+n.toFixed(0); }
+function fmtKick(iso){ if(!iso) return '—'; const d=new Date(iso); if(isNaN(d)) return '—';
+  return d.toLocaleString([], {weekday:'short',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }
+function pickLabel(mt){ const m=(mt||'').toLowerCase();
+  if(m.includes('home')) return 'Home'; if(m.includes('draw')) return 'Draw'; if(m.includes('away')) return 'Away'; return mt||''; }
+function fillBadge(e){
+  const fu=num(e.fillable_usd), sp=num(e.book_spread_pct);
+  if(fu!=null&&fu>=100&&sp!=null&&sp<=4) return '<span class="badge ok" title="Fillable ≥ $100 and spread ≤ 4¢">✓</span>';
+  return '<span class="badge thin" title="Thin: low fill size or wide spread">thin</span>';
+}
+function sortByAbsEdge(arr){ return arr.slice().sort((a,b)=>Math.abs(num(b.edge_pct)||0)-Math.abs(num(a.edge_pct)||0)); }
+// Full edge table with executability columns (A)
+function edgeRows(edges){
+  if(!edges||!edges.length) return '<div class="empty">No edges ≥ threshold right now.</div>';
+  const rows=sortByAbsEdge(edges);
+  let h='<table><thead><tr><th>Event</th><th>Pick</th><th class="num">Book%</th><th class="num">Poly</th>'+
+        '<th class="num">Edge</th><th class="num">Exec edge</th><th class="num">Spread</th><th class="num">Fillable</th><th>OK</th>'+
+        '<th class="num">Rec size</th><th>Dir</th></tr></thead><tbody>';
+  for(const e of rows){
+    const dir=(e.direction||'').toLowerCase(), ee=num(e.executable_edge), ep=num(e.edge_pct), sp=num(e.book_spread_pct);
+    h+=`<tr><td>${esc(e.event)}</td><td>${esc(e.participant)} <span style="color:var(--dim)">${esc(e.market_type)}</span></td>`+
+       `<td class="num">${e.book_prob??''}</td><td class="num">${e.polymarket_price??''}¢</td>`+
+       `<td class="num ${(ep||0)>=0?'pos':'neg'}">${ep!=null?(ep>0?'+':'')+ep+'%':'—'}</td>`+
+       `<td class="num ${(ee||0)>0?'pos':'neg'}">${ee!=null?(ee>0?'+':'')+ee+'%':'—'}${e.live_book===true?' <span class="badge live" title="Executable edge from the live WebSocket order book">live</span>':''}</td>`+
+       `<td class="num">${sp!=null?sp+'¢':'—'}</td>`+
+       `<td class="num">${kfmt(e.fillable_usd)} ${fillBadge(e)}</td>`+
+       `<td>${e.tradeable?'✅':'—'}</td>`+
+       `<td class="num">${kfmt(e.rec_size_usd)}</td>`+
+       `<td><span class="badge ${dir==='buy'?'buy':'sell'}">${esc(e.direction)}</span></td></tr>`;
+  }
+  return h+'</tbody></table>';
+}
+// WC outright board (B1)
+function wcOutrightRows(edges){
+  if(!edges||!edges.length) return '<div class="empty">No World Cup outright edges right now.</div>';
+  const rows=sortByAbsEdge(edges);
+  let h='<table><thead><tr><th>Team</th><th class="num">Betfair%</th><th class="num">PM%</th>'+
+        '<th class="num">Edge</th><th class="num">Exec edge</th><th class="num">Fillable</th><th>Dir</th></tr></thead><tbody>';
+  for(const e of rows){
+    const dir=(e.direction||'').toLowerCase(), ee=num(e.executable_edge), ep=num(e.edge_pct);
+    h+=`<tr><td>${esc(e.participant||e.event)}</td>`+
+       `<td class="num">${e.book_prob??''}</td><td class="num">${e.polymarket_price??''}¢</td>`+
+       `<td class="num ${(ep||0)>=0?'pos':'neg'}">${ep!=null?(ep>0?'+':'')+ep+'%':'—'}</td>`+
+       `<td class="num ${(ee||0)>0?'pos':'neg'}">${ee!=null?(ee>0?'+':'')+ee+'%':'—'}</td>`+
+       `<td class="num">${kfmt(e.fillable_usd)} ${fillBadge(e)}</td>`+
+       `<td><span class="badge ${dir==='buy'?'buy':'sell'}">${esc(e.direction)}</span></td></tr>`;
+  }
+  return h+'</tbody></table>';
+}
+// WC fair-value board — ALL matched PM<->Betfair pairs (no edge floor), favorites first
+function wcBoardRows(edges){
+  if(!edges||!edges.length) return '<div class="empty">Fair-value board populates after the daily futures scan.</div>';
+  const rows=edges.slice().sort((a,b)=>(num(b.book_prob)||0)-(num(a.book_prob)||0));
+  let h='<table><thead><tr><th>Team</th><th class="num">Betfair%</th><th class="num">PM%</th>'+
+        '<th class="num">Diff</th><th class="num">Exec</th><th class="num">Fillable</th></tr></thead><tbody>';
+  for(const e of rows){
+    const bp=num(e.book_prob), pp=num(e.polymarket_price);
+    const diff=(bp!=null&&pp!=null)?Math.round((pp-bp)*10)/10:null;
+    const dcls=diff!=null&&Math.abs(diff)>=3?(diff>0?'pos':'neg'):'';
+    h+=`<tr><td>${esc(e.participant||e.event)}</td>`+
+       `<td class="num">${bp??'—'}</td><td class="num">${pp!=null?pp+'¢':'—'}</td>`+
+       `<td class="num ${dcls}">${diff!=null?(diff>0?'+':'')+diff:'—'}</td>`+
+       `<td class="num">${e.executable_price!=null?e.executable_price+'¢':'—'}</td>`+
+       `<td class="num">${kfmt(e.fillable_usd)}</td></tr>`;
+  }
+  return h+'</tbody></table>';
+}
+// WC matches (B2) — sorted by kickoff ascending
+function wcMatchRows(edges){
+  if(!edges||!edges.length) return '<div class="empty">No upcoming World Cup matches with edges yet.</div>';
+  const rows=edges.slice().sort((a,b)=>{
+    const ta=Date.parse(a.commence_time||'')||Infinity, tb=Date.parse(b.commence_time||'')||Infinity; return ta-tb;});
+  let h='<table><thead><tr><th>Kickoff</th><th>Event</th><th>Pick</th><th class="num">Book%</th><th class="num">PM%</th>'+
+        '<th class="num">Edge</th><th class="num">Fillable</th></tr></thead><tbody>';
+  for(const e of rows){
+    const ep=num(e.edge_pct);
+    h+=`<tr><td>${esc(fmtKick(e.commence_time))}</td><td>${esc(e.event)}</td><td>${esc(pickLabel(e.market_type))}</td>`+
+       `<td class="num">${e.book_prob??''}</td><td class="num">${e.polymarket_price??''}¢</td>`+
+       `<td class="num ${(ep||0)>=0?'pos':'neg'}">${ep!=null?(ep>0?'+':'')+ep+'%':'—'}</td>`+
+       `<td class="num">${kfmt(e.fillable_usd)} ${fillBadge(e)}</td></tr>`;
+  }
+  return h+'</tbody></table>';
+}
+// Kalshi WC (B3) — with client-side PM cross-venue join
+function kalshiWcRows(markets, pmEdges){
+  if(!markets||!markets.length) return '';
+  // build a team→edge lookup from PM edges (participant substring)
+  const pm=(pmEdges||[]).map(e=>({team:String(e.participant||'').toLowerCase(),edge:num(e.edge_pct),dir:e.direction,pmp:e.polymarket_price}))
+                        .filter(x=>x.team);
+  let h='<table><thead><tr><th>Market</th><th class="num">Kalshi mid</th><th class="num">Last</th><th>Close</th><th>PM cross-venue</th></tr></thead><tbody>';
+  for(const m of markets){
+    const title=String(m.title||m.ticker||'').toLowerCase();
+    const hit=pm.find(p=>p.team.length>2 && title.includes(p.team));
+    let cross='—';
+    if(hit){ const ep=hit.edge;
+      cross=`<span class="badge ${(hit.dir||'').toLowerCase()==='buy'?'buy':'sell'}">${esc(hit.dir)}</span> `+
+            `PM ${hit.pmp??'?'}¢ <span class="${(ep||0)>=0?'pos':'neg'}">${ep!=null?(ep>0?'+':'')+ep+'%':''}</span>`; }
+    h+=`<tr><td>${esc(m.title||m.ticker)}</td>`+
+       `<td class="num">${m.mid!=null?m.mid+'%':'—'}</td>`+
+       `<td class="num">${m.last!=null?m.last:'—'}</td>`+
+       `<td>${esc(m.close_time||'')}</td><td>${cross}</td></tr>`;
+  }
+  return h+'</tbody></table>';
+}
+function renderShadow(d,calib){
+  if(!d){return '<div class="empty">no data</div>';}
+  const r=d.resolved||{}, c=d.collection||{resolved:0,target:30,pct:0};
+  let h=`<div style="margin-bottom:12px"><span class="stat"><b>${d.open_count||0}</b>open</span>`+
+        `<span class="stat"><b>${r.total||0}</b>resolved</span>`+
+        `<span class="stat"><b>${r.win_rate||0}%</b>win rate</span>`+
+        `<span class="stat"><b class="${(r.total_pnl||0)>=0?'pos':'neg'}">${r.total_pnl||0}</b>P&amp;L</span></div>`;
+  h+=`<div class="sub">Kill-rule progress: ${c.resolved}/${c.target}</div><div class="bar"><span style="width:${c.pct||0}%"></span></div>`;
+  const clv=calib&&calib.clv;
+  if(clv&&clv.n){
+    const a=num(clv.avg_clv_pp);
+    h+=`<div class="sub" style="margin-top:10px">CLV vs PM close: <b class="${(a||0)>0?'pos':'neg'}">${a!=null?(a>0?'+':'')+a+'pp':'—'}</b> · `+
+       `${clv.clv_positive_pct??'?'}% positive (n=${clv.n})</div>`;
+  }
+  if(d.open_trades&&d.open_trades.length){
+    h+='<div class="ttl" style="margin-top:16px">Open</div><table><thead><tr><th>Market</th><th>Side</th><th class="num">Entry</th><th class="num">Conf</th></tr></thead><tbody>';
+    for(const t of d.open_trades) h+=`<tr><td>${esc(t.market)}</td><td><span class="badge ${ (t.side||'').toLowerCase()==='yes'?'yes':'no'}">${esc(t.side)}</span></td><td class="num">${t.entry_price??''}</td><td class="num">${t.confidence??''}</td></tr>`;
+    h+='</tbody></table>';
+  }
+  return h;
+}
+// Calibration tab (C)
+function renderClvHero(calib){
+  if(!calib||!calib.clv){return '<div class="empty">Accumulating — needs resolved trades with closes.</div>';}
+  const clv=calib.clv, a=num(clv.avg_clv_pp), n=clv.n||0;
+  let verdict;
+  if(a!=null&&a>0) verdict='✅ PM converging to the sharp line we faded — edge looks real.';
+  else if(a!=null&&a<=0&&n>=20) verdict='⚠️ PM not converging — lean kill.';
+  else verdict='⏳ Too few closes yet.';
+  let h=`<div class="heroval ${(a||0)>0?'pos':'neg'}">${a!=null?(a>0?'+':'')+a+'pp':'—'}</div>`+
+        `<div class="sub">avg CLV vs PM close · ${clv.clv_positive_pct??'?'}% positive · n=${n}</div>`+
+        `<div class="verdict">${verdict}</div>`;
+  const t=calib.totals;
+  if(t) h+=`<div class="sub" style="margin-top:8px">Resolved ${t.resolved||0} · ${t.wins||0} wins · ${t.win_pct??'?'}% win rate</div>`;
+  return h;
+}
+const STRAT_LABEL={soccer_match_3way:'Match 3-way',soccer_futures:'WC Futures'};
+function renderStrat(calib){
+  const rows=calib&&calib.by_strategy;
+  if(!rows||!rows.length) return '<div class="empty">Accumulating — needs resolved trades.</div>';
+  let h='<table><thead><tr><th>Strategy</th><th class="num">n</th><th class="num">Win%</th><th class="num">Avg P&amp;L</th>'+
+        '<th class="num">CLV n</th><th class="num">Avg CLV</th></tr></thead><tbody>';
+  for(const s of rows){
+    const ready=(s.n||0)>=30, ac=num(s.avg_clv_pp), pnl=num(s.avg_pnl);
+    h+=`<tr${ready?' style="background:rgba(16,185,129,.08)"':''}><td>${esc(STRAT_LABEL[s.strategy]||s.strategy)}</td>`+
+       `<td class="num ${ready?'pos':''}">${s.n||0}</td><td class="num">${s.win_pct??'—'}%</td>`+
+       `<td class="num ${(pnl||0)>=0?'pos':'neg'}">${pnl!=null?pnl:'—'}</td>`+
+       `<td class="num">${s.clv_n??'—'}</td>`+
+       `<td class="num ${(ac||0)>0?'pos':'neg'}">${ac!=null?(ac>0?'+':'')+ac+'pp':'—'}</td></tr>`;
+  }
+  return h+'</tbody></table>';
+}
+function renderCalib(calib){
+  const rows=calib&&calib.calibration;
+  if(!rows||!rows.length) return '<div class="empty">Accumulating — needs resolved trades.</div>';
+  let h='<table><thead><tr><th>Edge bucket</th><th class="num">n</th><th class="num">Win%</th><th class="num">Avg CLV</th></tr></thead><tbody>';
+  for(const b of rows){
+    const lo=num(b.edge_bucket), ac=num(b.avg_clv_pp), wp=num(b.win_pct);
+    const label=lo!=null?`${lo}-${lo+3}pp`:esc(b.edge_bucket);
+    h+=`<tr><td>${label}</td><td class="num">${b.n||0}</td>`+
+       `<td class="num">${wp!=null?wp+'%':'—'}</td>`+
+       `<td class="num ${(ac||0)>0?'pos':'neg'}">${ac!=null?(ac>0?'+':'')+ac+'pp':'—'}</td></tr>`;
+  }
+  return h+'</tbody></table>';
+}
+function isWC(e){ return (e&&(e.event||'')).toLowerCase().includes('world cup'); }
+async function load(){
+  try{
+    const [m,f,d,cr,calib,kwc,wb]=await Promise.all(
+      [fetch(MATCH),fetch(FUT),fetch(DASH),fetch(CRED),fetch(CALIB),fetch(KWC),fetch(WCBOARD)]
+        .map(p=>p.then(r=>r.json()).catch(()=>({}))));
+    const me=(m.edges||[]),fe=(f.edges||[]);
+    _anyLive=[...me,...fe].some(x=>x&&x.live_book===true);
+    const liveN=[...me,...fe].filter(x=>x&&x.live_book===true).length;
+    // A — full edge tables
+    $('matches-body').innerHTML=edgeRows(me);
+    $('futures-body').innerHTML=edgeRows(fe);
+    // B1 — WC outrights from futures (outright market_type / empty, or event mentions World Cup)
+    const wcOut=fe.filter(e=>{const mt=(e.market_type||'').toLowerCase();
+      return isWC(e)||mt==='outright'||mt===''; });
+    $('wc-outright-body').innerHTML=wcOutrightRows(wcOut);
+    // B1b — fair-value board (all matched pairs, no edge floor)
+    $('wc-board-body').innerHTML=wcBoardRows(wb.edges||[]);
+    // B2 — WC matches from match-edge
+    const wcMatch=me.filter(isWC);
+    $('wc-matches-body').innerHTML=wcMatchRows(wcMatch);
+    // B3 — Kalshi WC venue + cross-venue join against all PM edges
+    const kmarkets=kwc.markets||[];
+    $('kalshi-note').textContent=kwc.note||'';
+    $('kalshi-wc-body').innerHTML=kmarkets.length
+      ? kalshiWcRows(kmarkets,[...fe,...me])
+      : `<div class="empty">${esc(kwc.note||'No Kalshi World Cup markets available.')}</div>`;
+    // C — calibration / CLV
+    $('clv-hero').innerHTML=renderClvHero(calib);
+    $('strat-body').innerHTML=renderStrat(calib);
+    $('calib-body').innerHTML=renderCalib(calib);
+    // D — shadow (with CLV summary line)
+    $('shadow-body').innerHTML=renderShadow(d,calib);
+    // status
+    const cached=m.cached||f.cached;
+    $('dot').className='dot '+(cached?'live':'stale');
+    $('statustxt').textContent=cached?`${me.length+fe.length} edges${liveN?` · ${liveN} WS live`:''} · ${new Date().toLocaleTimeString()}`:'cache cold — scanner not run';
+    // credits — denominator from cr.budget, % used, amber<20k red<5k
+    const rem=cr&&cr.remaining!=null?num(cr.remaining):null, bud=cr&&cr.budget!=null?num(cr.budget):100000;
+    if(rem!=null){
+      const used=bud?Math.round((1-rem/bud)*100):0;
+      const cls=rem<5000?'neg':(rem<20000?'':'');
+      const col=rem<5000?'var(--red)':(rem<20000?'var(--amber)':'var(--dim)');
+      $('credits').innerHTML=`<span style="color:${col}">Odds API: ${rem.toLocaleString()} / ${bud.toLocaleString()} (${used}% used)</span>`;
+    } else { $('credits').textContent=''; }
+    // freshness line
+    $('freshness').textContent=`match ${m.cached?'warm':'cold'} · futures ${f.cached?'warm':'cold'} · upd ${new Date().toLocaleTimeString()}`;
+    // system
+    $('system-body').innerHTML=`<div>Match cache: ${m.cached?'warm':'cold'} (${me.length} edges)</div>`+
+      `<div>Futures cache: ${f.cached?'warm':'cold'} (${fe.length} edges)</div>`+
+      `<div>Kalshi WC markets: ${kmarkets.length}</div>`+
+      `<div>Credits: ${rem!=null?rem.toLocaleString():'?'} / ${bud.toLocaleString()}${rem!=null&&bud?` (${Math.round((1-rem/bud)*100)}% used)`:''}</div>`+
+      `<div class="sub" style="margin-top:8px">Last update: ${new Date().toLocaleString()}</div>`+
+      `<div class="sub" style="margin-top:4px">${esc(m.hint||f.hint||'')}</div>`;
+  }catch(e){ $('dot').className='dot err'; $('statustxt').textContent='error: '+e; }
+}
+// Adaptive poll: 5s while any match/futures book is live (WS), 60s otherwise.
+async function loop(){ await load(); setTimeout(loop, _anyLive?5000:60000); }
+loop();
+</script>
+</body>
+</html>

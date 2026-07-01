@@ -11,12 +11,12 @@ IC thresholds:
 
 import sqlite3
 import time
+from loguru import logger
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
 
@@ -240,13 +240,15 @@ def calculate_ic(source: str, window_days: int = 30, db_path: str = None) -> dic
 
     ic = _spearman_rank_correlation(confidences, outcomes)
 
-    # Determine status
-    if abs(ic) < IC_KILL:
-        status = "KILL"
-    elif abs(ic) < IC_WARN:
-        status = "WARN"
+    # Determine status (negative IC is actively harmful)
+    if ic < 0:
+        status = "KILL"  # actively wrong
+    elif ic < IC_KILL:
+        status = "KILL"  # noise
+    elif ic < IC_WARN:
+        status = "WARN"  # marginal
     else:
-        status = "OK"
+        status = "OK"    # alpha
 
     # Store measurement
     try:

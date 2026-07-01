@@ -10,14 +10,13 @@ Signal source for Polyclawd pipeline.
 """
 
 import json
-import logging
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import httpx
+from loguru import logger
 
-logger = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 
@@ -267,14 +266,14 @@ def check_spread_compression(markets: List[Dict], window_minutes: int = 10) -> D
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     result = get_basket_arb_signals()
-    print(f"\n=== Basket Arb Scanner ===")
-    print(f"Total signals: {result['total']}")
-    print(f"Basket arbs: {result['basket_arb_count']}")
-    print(f"YES/NO arbs: {result['yes_no_arb_count']}")
+    logger.info(f"\n=== Basket Arb Scanner ===")
+    logger.info(f"Total signals: {result['total']}")
+    logger.info(f"Basket arbs: {result['basket_arb_count']}")
+    logger.info(f"YES/NO arbs: {result['yes_no_arb_count']}")
     for sig in result["signals"][:10]:
         if sig["type"] == "basket_arb":
-            print(f"\n🎯 BASKET: {sig['event_title'][:60]}")
-            print(f"   {sig['num_outcomes']} outcomes, cost=${sig['total_cost']:.4f}, net={sig['net_profit_pct']:.2f}%")
+            logger.info(f"\n🎯 BASKET: {sig['event_title'][:60]}")
+            logger.info(f"   {sig['num_outcomes']} outcomes, cost=${sig['total_cost']:.4f}, net={sig['net_profit_pct']:.2f}%")
         else:
-            print(f"\n💰 YES+NO: {sig['market_title'][:60]}")
-            print(f"   YES={sig['yes_price']:.4f} NO={sig['no_price']:.4f} cost=${sig['total_cost']:.4f} net={sig['net_profit_pct']:.2f}%")
+            logger.info(f"\n💰 YES+NO: {sig['market_title'][:60]}")
+            logger.info(f"   YES={sig['yes_price']:.4f} NO={sig['no_price']:.4f} cost=${sig['total_cost']:.4f} net={sig['net_profit_pct']:.2f}%")

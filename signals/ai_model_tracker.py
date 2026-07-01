@@ -16,7 +16,6 @@ Feeds into mispriced_category as a sub-signal for tech/AI markets.
 """
 
 import json
-import logging
 import re
 import time
 import urllib.request
@@ -24,8 +23,8 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
+from loguru import logger
 
-logger = logging.getLogger(__name__)
 
 # ============================================================================
 # Configuration
@@ -159,7 +158,10 @@ def fetch_arena_leaderboard() -> List[Dict[str, Any]]:
         with urllib.request.urlopen(req, timeout=60) as resp:
             html = resp.read().decode("utf-8", errors="replace")
 
-        models = _parse_arena_html(html)
+        models = _parse_arena_rsc(html)
+        if not models:
+            logger.warning("Arena RSC parse empty — falling back to legacy HTML parser")
+            models = _parse_arena_html(html)
 
         if not models:
             logger.warning("No models parsed from Arena HTML — layout may have changed")
@@ -176,6 +178,47 @@ _MODEL_KEYWORDS = [
     "glm", "ernie", "kimi", "mistral", "o1-", "o3-", "o4-",
     "chatgpt", "moonshot",
 ]
+
+
+def _parse_arena_rsc(html: str) -> List[Dict[str, Any]]:
+    """Parse the classic text-arena leaderboard from arena.ai's Next.js RSC payload.
+
+    Each entry is structured (escaped) JSON with rank, model name, Elo rating, vote
+    count and CI bounds — far more robust than scraping rendered HTML. First
+    occurrence of each model = the overall leaderboard (its best/overall rank).
+    """
+    entry_re = re.compile(
+        r'\\"rank\\":(\d+),\\"rankUpper\\":\d+,\\"rankLower\\":\d+,'
+        r'\\"modelKey\\":\\"[^"\\]+\\",\\"modelDisplayName\\":\\"([^"\\]+)\\",'
+        r'\\"rating\\":([\d.]+),\\"ratingUpper\\":([\d.]+),\\"ratingLower\\":([\d.]+),'
+        r'\\"votes\\":(\d+),\\"modelOrganization\\":\\"([^"\\]+)\\"'
+    )
+    # The overall leaderboard is the FIRST entries[] block; later blocks are
+    # category leaderboards (image/webdev/vision/...) each with their own rank-1,
+    # which would otherwise yield duplicate ranks. Slice to the first block only
+    # (entries have no nested arrays, so the first '}]' closes the array).
+    start = html.find(r'\"entries\":[')
+    if start == -1:
+        return []
+    end = html.find("}]", start)
+    block = html[start:end + 2] if end != -1 else html[start:]
+
+    models: List[Dict[str, Any]] = []
+    seen = set()
+    for m in entry_re.finditer(block):
+        rank, name, rating, r_up, r_low, votes, org = m.groups()
+        if name in seen:
+            continue
+        seen.add(name)
+        models.append({
+            "model_name": name,
+            "company": org,
+            "overall_rank": int(rank),
+            "arena_score": float(rating),
+            "ci_margin": round((float(r_up) - float(r_low)) / 2, 2),
+            "vote_count": int(votes),
+        })
+    return models
 
 
 def _parse_arena_html(html: str) -> List[Dict[str, Any]]:
@@ -679,35 +722,34 @@ def main():
     """CLI for testing the AI model tracker."""
     import sys
 
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     cmd = sys.argv[1] if len(sys.argv) > 1 else "summary"
 
     if cmd == "summary":
         summary = get_arena_summary()
-        print(json.dumps(summary, indent=2))
+        logger.info(json.dumps(summary, indent=2))
 
     elif cmd == "snapshot":
         models = fetch_arena_leaderboard()
         result = snapshot_leaderboard(models)
-        print(result)
+        logger.info(result)
 
     elif cmd == "trends":
         days = int(sys.argv[2]) if len(sys.argv) > 2 else 7
         trends = get_score_trends(days)
-        print(json.dumps(trends, indent=2))
+        logger.info(json.dumps(trends, indent=2))
 
     elif cmd == "signals":
         signals = generate_ai_model_signals()
-        print(json.dumps(signals, indent=2))
+        logger.info(json.dumps(signals, indent=2))
 
     elif cmd == "history":
         company = sys.argv[2] if len(sys.argv) > 2 else "Anthropic"
         history = get_score_history(company)
-        print(json.dumps(history, indent=2))
+        logger.info(json.dumps(history, indent=2))
 
     else:
-        print(f"Usage: {sys.argv[0]} [summary|snapshot|trends|signals|history <company>]")
+        logger.info(f"Usage: {sys.argv[0]} [summary|snapshot|trends|signals|history <company>]")
 
 
 if __name__ == "__main__":

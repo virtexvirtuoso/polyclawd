@@ -39,5 +39,20 @@ storage/
 tests/baseline_snapshots/
 tests/load/
 odds/vegas_cache.json
+odds/vegas_nfl_cache.json
+cache/
 mcp/MCP_OPTIMIZATION.md
 mcp/polyrouter/
+
+# cleanup 2026-05-29 — keep installers / scratch / editor junk out of the repo
+scratch/
+*.pkg
+*.whl
+*.tar.gz
+docs/screenshots/
+.idea/
+*.swp
+*.swo
+
+# MCP tool-discovery cache (machine state, not source)
+mcp/.tool_cache.json

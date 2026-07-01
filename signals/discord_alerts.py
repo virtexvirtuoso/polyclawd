@@ -323,6 +323,35 @@ def alert_edge_batch(signals: list) -> bool:
     })
 
 
+# ── MLB Prop Alerts ──────────────────────────────────────────────────────
+
+def alert_mlb_prop_batch(rows: list) -> bool:
+    """Batched MLB prop-edge alert — lineup-confirmed OVER edges from the scout."""
+    if not rows:
+        return False
+    fields = []
+    for r in rows[:8]:
+        edge = r.get("edge_pct", 0)
+        fields.append({
+            "name": f"\u26be {r.get('player', '?')} — {r.get('stat_label', '')} o{r.get('prop_line', '?')} (+{edge:.0f}pp)",
+            "value": (f"hit **{r.get('hit_rate_pct', 0):.0f}%** (L{r.get('games_sampled', '?')}) "
+                      f"vs book {r.get('book_over_pct', 0):.0f}% · "
+                      f"{r.get('away_team', '')[:14]} @ {r.get('home_team', '')[:14]}"),
+            "inline": False,
+        })
+    return _send([{
+        "title": f"\u26be MLB Prop Edges ({len(rows)}) — lineup-confirmed",
+        "color": COLOR_BLUE,
+        "fields": fields,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "MLB Prop Scout · shadow-logged"},
+    }], alert_type="mlb_prop_batch", alert_meta={
+        "count": len(rows),
+        "props": [{"player": r.get("player"), "market": r.get("market"),
+                   "edge": r.get("edge_pct")} for r in rows[:8]],
+    })
+
+
 # ── Scorecard & Milestones ───────────────────────────────────────────────
 
 def alert_scorecard(strategy: str, n: int, brier: float, win_rate: float,
@@ -588,6 +617,48 @@ def alert_tweet_pace(handle: str, market_title: str, side: str,
 
 # ── Whale Wall Alerts ────────────────────────────────────────────────────
 
+def alert_whale_scan(alert: dict) -> bool:
+    """Alert from thin-market whale scanner (Kalshi weather + Polymarket props)."""
+    sev = alert.get("severity", "LOW")
+    score = alert.get("score", 0)
+    platform = alert.get("platform", "?")
+    market = alert.get("market", "?")
+    reasons = alert.get("reasons", "")
+    
+    emoji = "🚨" if sev == "CRITICAL" else "⚠️" if sev == "HIGH" else "🐟"
+    plat_icon = "📊" if platform == "kalshi" else "🔵"
+    
+    description = f"Score: **{score}/10** | {reasons}"
+    
+    if platform == "kalshi":
+        url = f"https://kalshi.com/markets/{market.split('-')[0]}"
+    else:
+        url = f"https://polymarket.com/event/{market}"
+    description += f"\n[View Market]({url})"
+    
+    fields = []
+    if "best_bid" in alert:
+        fields.append({"name": "Bid/Ask", "value": f"{alert['best_bid']:.3f} / {alert['best_ask']:.3f}", "inline": True})
+    if "current_price" in alert:
+        fields.append({"name": "Price", "value": f"{alert['current_price']:.3f}", "inline": True})
+    if "bid_depth" in alert:
+        bid = alert["bid_depth"]
+        ask = alert["ask_depth"]
+        ratio = alert.get("ratio", 0)
+        fields.append({"name": "Depth", "value": f"{bid:.0f}B / {ask:.0f}A ({ratio:.1f}x)", "inline": True})
+    
+    title_short = alert.get("title", market)[:70]
+    
+    return _send([{
+        "title": f"{emoji} {plat_icon} {sev} Whale — {title_short}",
+        "description": description,
+        "color": COLOR_ORANGE if sev == "CRITICAL" else COLOR_CYAN,
+        "fields": fields,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": f"Whale Shark — {platform}"},
+    }], alert_type="whale_scan", alert_meta=alert)
+
+
 def alert_whale_wall(market_title: str, side: str, imbalance_ratio: float,
                      bid_depth: float, ask_depth: float,
                      bid_walls: int = 0, ask_walls: int = 0,
@@ -709,6 +780,33 @@ def alert_election_report(report: dict) -> bool:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "footer": {"text": f"Election Tracker | {summary.get('total_markets', 0)} markets"},
     }], alert_type="election_report", alert_meta={"total": summary.get("total_markets", 0)})
+
+
+# ── Odds API Credits ─────────────────────────────────────────────────────
+
+def alert_credits_low(remaining: int, watermark: int, used: Optional[int] = None,
+                      **kwargs) -> bool:
+    """Alert when the Odds API real credit balance drops below the low watermark.
+    Latched by the caller (odds.the_odds_api) so it fires once per crossing."""
+    pct = (remaining / 100000 * 100) if remaining is not None else 0
+    fields = [
+        {"name": "Remaining", "value": f"**{remaining:,}**", "inline": True},
+        {"name": "Watermark", "value": f"{watermark:,}", "inline": True},
+        {"name": "Plan Used", "value": f"~{100 - pct:.0f}% of 100K", "inline": True},
+    ]
+    if used is not None:
+        fields.append({"name": "Used", "value": f"{used:,}", "inline": True})
+    return _send([{
+        "title": "\U0001FA99 Odds API Credits Low",
+        "description": f"Real balance **{remaining:,}** is below the {watermark:,} watermark — "
+                       f"paid scans reserved for critical priority below {5000:,}.",
+        "color": COLOR_RED if remaining < watermark // 2 else COLOR_ORANGE,
+        "fields": fields,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "Odds API Budget"},
+    }], alert_type="credits_low", alert_meta={
+        "remaining": remaining, "watermark": watermark, "used": used,
+    })
 
 
 # ── Test ─────────────────────────────────────────────────────────────────

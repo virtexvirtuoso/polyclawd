@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "polyclawd": {
+      "command": "python3",
+      "args": ["/Users/ffv_macmini/Desktop/polyclawd/mcp/server.py"]
+    }
+  }
+}

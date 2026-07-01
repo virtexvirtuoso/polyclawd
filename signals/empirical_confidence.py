@@ -8,55 +8,61 @@ Data-driven. Self-improving. Honest.
 
 import sqlite3
 import re
-import logging
+import time
 from typing import Dict, Tuple, Optional
+from loguru import logger
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
 
 # ─── Archetype Classification ────────────────────────────────────────
 
 _INTRADAY_RE = re.compile(
-    r'\d+[:\d]*\s*(am|pm)|'
-    r'\b(5m|15m|30m|1h|4h)\b|'
-    r'(am|pm)\s*(to|-|–)\s*(am|pm)',
-    re.IGNORECASE
+    r"\d+[:\d]*\s*(am|pm)|"
+    r"\b(5m|15m|30m|1h|4h)\b|"
+    r"(am|pm)\s*(to|-|–)\s*(am|pm)",
+    re.IGNORECASE,
 )
 
 # Import full archetype classifier (14 archetypes) from mispriced_category_signal
 try:
-    from mispriced_category_signal import classify_archetype
+    from signals.mispriced_category_signal import classify_archetype
 except ImportError:
-    # Fallback if import fails
-    def classify_archetype(title: str) -> str:
-        """Minimal fallback classifier."""
-        if not title: return "other"
-        t = title.lower()
-        if 'up or down' in t: return 'daily_updown'
-        if 'above' in t or 'below' in t: return 'price_above'
-        if 'between' in t or 'range' in t: return 'price_range'
-        return 'other'
-
+    try:
+        from mispriced_category_signal import classify_archetype
+    except ImportError:
+        # Fallback if both imports fail
+        def classify_archetype(title: str) -> str:
+            """Minimal fallback classifier."""
+            if not title:
+                return "other"
+            t = title.lower()
+            if "up or down" in t:
+                return "daily_updown"
+            if "above" in t or "below" in t:
+                return "price_above"
+            if "between" in t or "range" in t:
+                return "price_range"
+            return "other"
 
 
 def price_zone(price: float) -> str:
     """Classify entry price into zone."""
     if price < 0.30:
-        return 'garbage'
+        return "garbage"
     elif price < 0.45:
-        return 'cheap'
+        return "cheap"
     elif price < 0.55:
-        return 'mid_low'
+        return "mid_low"
     elif price < 0.65:
-        return 'mid'
+        return "mid"
     elif price < 0.75:
-        return 'sweet'
+        return "sweet"
     elif price < 0.85:
-        return 'premium'
+        return "premium"
     else:
-        return 'expensive'
+        return "expensive"
 
 
 # ─── Price Zone Modifiers (NO-side, from 10K+ Kalshi trades backtest) ──
@@ -64,70 +70,133 @@ def price_zone(price: float) -> str:
 # Kelly sizing already captures the payoff asymmetry through cost basis.
 
 PRICE_ZONE_MODIFIERS = {
-    'garbage':   0.55,   # <30¢ YES — K3 kills these anyway
-    'cheap':     0.75,   # 30-45¢ YES — extrapolated, no direct data
-    'mid_low':   0.90,   # 45-55¢ YES — extrapolated, near mid
-    'mid':       1.00,   # 55-65¢ YES → 45.5% NO WR (reference, n=4,401)
-    'sweet':     0.83,   # 65-75¢ YES → 37.7% NO WR (n=2,812)
-    'premium':   0.66,   # 75-85¢ YES → 30.1% NO WR (n=1,958)
-    'expensive': 0.51,   # 85-92¢ YES → 23.3% NO WR (n=1,363)
+    "garbage": 0.55,  # <15¢ YES — K3 kills these anyway
+    "cheap": 0.75,  # 30-45¢ YES — extrapolated, no direct data
+    "mid_low": 0.90,  # 45-55¢ YES — extrapolated, near mid
+    "mid": 1.00,  # 55-65¢ YES → 45.5% NO WR (reference, n=4,401)
+    "sweet": 0.83,  # 65-75¢ YES → 37.7% NO WR (n=2,812)
+    "premium": 0.66,  # 75-85¢ YES → 30.1% NO WR (n=1,958)
+    "expensive": 0.51,  # 85-92¢ YES → 23.3% NO WR (n=1,363)
 }
 
 # ─── Empirical NO Win Rates (159K markets: 110K Kalshi + 49K Polymarket) ───
 BECKER_NO_WIN_RATES = {
-    'daily_updown':      0.463,  # n=887 (Poly only)
-    'intraday_updown':   0.504,  # n=15,570 (Poly only — coin flip confirmed)
-    'price_above':       0.593,  # n=3,763 (Kalshi 166 + Poly 3,597)
-    'price_range':       0.566,  # n=31,982 (Kalshi only — was 0.886 Becker)
-    'ai_model':          0.741,  # n=54 (Kalshi 45 + Poly 9)
-    'geopolitical':      0.686,  # n=315 (Kalshi 2 + Poly 313)
-    'election':          0.639,  # n=794 (Kalshi 557 + Poly 237)
-    'sports_winner':     0.567,  # n=27,642 (Kalshi 25,208 + Poly 2,434)
-    'sports_single_game':0.560,  # n=6,309 (Kalshi 1,850 + Poly 4,459)
-    'entertainment':     0.711,  # n=114 (Kalshi 68 + Poly 46)
-    'deadline_binary':   0.694,  # n=9,062 (Kalshi 5,704 + Poly 3,358)
-    'social_count':      0.941,  # n=1,773 (Poly only — NO almost always wins)
-    'weather':           0.853,  # n=68 (Kalshi 6 + Poly 62)
-    'directional':       0.697,  # n=390 (Poly only)
-    'other':             0.638,  # n=36,480 (Kalshi 20,828 @ 66.8% + Poly 15,652 @ 55.8%)
-    'parlay':            0.937,  # n=4,251 Kalshi (93.7% NO WR — multi-leg bets almost always fail)
-    'financial_price':   0.646,  # n=18,356 Kalshi + 21 Poly (64.6% NO WR)
-    'game_total':        0.521,  # n=10,999 Kalshi (52.1% NO WR — near coin flip after fees)
+    "daily_updown": 0.463,  # n=887 (Poly only)
+    "intraday_updown": 0.504,  # n=15,570 (Poly only — coin flip confirmed)
+    "price_above": 0.593,  # n=3,763 (Kalshi 166 + Poly 3,597)
+    "price_range": 0.566,  # n=31,982 (Kalshi only — was 0.886 Becker)
+    "ai_model": 0.741,  # n=54 (Kalshi 45 + Poly 9)
+    "geopolitical": 0.686,  # n=315 (Kalshi 2 + Poly 313)
+    "election": 0.639,  # n=794 (Kalshi 557 + Poly 237)
+    "sports_winner": 0.567,  # n=27,642 (Kalshi 25,208 + Poly 2,434)
+    "sports_single_game": 0.560,  # n=6,309 (Kalshi 1,850 + Poly 4,459)
+    "entertainment": 0.711,  # n=114 (Kalshi 68 + Poly 46)
+    "deadline_binary": 0.694,  # n=9,062 (Kalshi 5,704 + Poly 3,358)
+    "social_count": 0.941,  # n=1,773 (Poly only — NO almost always wins)
+    "weather": 0.853,  # n=68 (Kalshi 6 + Poly 62)
+    "directional": 0.697,  # n=390 (Poly only)
+    "other": 0.638,  # n=36,480 (Kalshi 20,828 @ 66.8% + Poly 15,652 @ 55.8%)
+    "parlay": 0.937,  # n=4,251 Kalshi (93.7% NO WR — multi-leg bets almost always fail)
+    "financial_price": 0.646,  # n=18,356 Kalshi + 21 Poly (64.6% NO WR)
+    "game_total": 0.521,  # n=10,999 Kalshi (52.1% NO WR — near coin flip after fees)
 }
 
 # ─── Duration Modifier (empirical: 97K tradeable markets, blended Kalshi+Poly) ──
 # Baseline: 61.4% NO WR across all tradeable durations.
 # Modifier = bucket NO WR / baseline. Platform gap <9pp on all buckets.
 DURATION_MODIFIERS = {
-    'daily':    0.94,   # 0-1d: 57.8% NO (n=51,425)
-    'short':    1.00,   # 2-3d: 61.7% NO (n=18,030) — baseline
-    'weekly':   1.15,   # 4-7d: 70.8% NO (n=13,502) — sweet spot confirmed
-    'biweekly': 1.06,   # 8-14d: 65.2% NO (n=10,471)
-    'monthly':  1.08,   # 15-30d: 66.1% NO (n=3,614)
-    'quarterly':1.15,   # 31-90d: no data in <=30d filter, keep Becker
-    'long':     1.10,   # >90d: no data in <=30d filter, keep Becker
+    "daily": 0.94,  # 0-1d: 57.8% NO (n=51,425)
+    "short": 1.00,  # 2-3d: 61.7% NO (n=18,030) — baseline
+    "weekly": 1.15,  # 4-7d: 70.8% NO (n=13,502) — sweet spot confirmed
+    "biweekly": 1.06,  # 8-14d: 65.2% NO (n=10,471)
+    "monthly": 1.08,  # 15-30d: 66.1% NO (n=3,614)
+    "quarterly": 1.15,  # 31-90d: no data in <=30d filter, keep Becker
+    "long": 1.10,  # >90d: no data in <=30d filter, keep Becker
 }
+
 
 def classify_duration(days_to_close: float) -> str:
     """Classify market duration for Becker modifier."""
     if days_to_close <= 1:
-        return 'daily'
+        return "daily"
     elif days_to_close <= 3:
-        return 'short'
+        return "short"
     elif days_to_close <= 7:
-        return 'weekly'
+        return "weekly"
     elif days_to_close <= 14:
-        return 'biweekly'
+        return "biweekly"
     elif days_to_close <= 30:
-        return 'monthly'
+        return "monthly"
     elif days_to_close <= 90:
-        return 'quarterly'
+        return "quarterly"
     else:
-        return 'long'
+        return "long"
 
+
+# ─── Calibration Adjustment (per-archetype, from 48 paper + 33 shadow trades) ─
+# Blanket calibration was too aggressive — killed profitable weather 63-73% bin.
+# Per-archetype approach: cap overconfident bins, preserve what works.
+# Updated 2026-03-08. Revisit when sample > 200.
+
+# Archetype confidence caps — max confidence the system will assign.
+# Based on actual WR by archetype+confidence bin.
+# ── Archetype Confidence Caps (recalibrated Mar 16 from actual performance) ──
+# Becker priors were 50-60pp too optimistic vs our actual WR.
+# Caps now anchored to actual shadow+paper WR with conservative bias.
+# Only weather and social_count have proven profitable.
+ARCHETYPE_CONFIDENCE_CAPS = {
+    "weather": 0.70,  # Proven: 55.6% WR in sweet spot. Keep.
+    "social_count": 0.75,  # 50% WR (n=2), Becker 94.1%. Trust Becker partially.
+    "geopolitical": 0.30,  # 12.5% actual WR (n=8). Becker 68.6% is wildly wrong for us.
+    "election": 0.25,  # 0% actual WR (n=6). Near-kill.
+    "deadline_binary": 0.25,  # 9.1% actual WR (n=11). Becker 69.4% is fantasy.
+    "price_above": 0.30,  # 9.1% actual WR (n=11). Becker 59.3% broken.
+    "sports_winner": 0.25,  # 0% actual WR (n=8). Already blocked, but defense in depth.
+    "sports_single_game": 0.45,  # 100% WR (n=1) — tiny sample. Conservative.
+    "sports_tournament": 0.50,  # New archetype (2026-06-20). No shadow data. Moderate cap — 30d shadow eval.
+    "entertainment": 0.30,  # 0% actual WR (n=2). Becker 71.1% not realized.
+    "ai_model": 0.30,  # 0% actual WR (n=1). Conservative.
+    "financial_price": 0.40,  # No data. Conservative.
+    "parlay": 0.30,  # Parlays are traps.
+    "other": 0.30,  # 0% actual WR (n=8). Was 50%, way too generous.
+}
+
+
+# High-confidence penalty: if raw conf > cap, apply diminishing returns
+# instead of hard clamp — preserves signal ordering
+
+
+_champion_cache = None
+_champion_cache_at = 0.0
+_CHAMPION_TTL = 300.0  # seconds; promotions propagate within 5 min without restart
+
+def _active_champion():
+    """Indirection so tests can monkeypatch; loads champion lazily with a 5-min TTL cache."""
+    global _champion_cache, _champion_cache_at
+    now = time.monotonic()
+    if _champion_cache is None or (now - _champion_cache_at) > _CHAMPION_TTL:
+        from signals.calibration_champion import load_champion
+        _champion_cache = load_champion()
+        _champion_cache_at = now
+    return _champion_cache
+
+
+def apply_calibration(raw_confidence: float, archetype: str = "other") -> float:
+    """Apply per-archetype soft cap, then the learned champion calibration map.
+
+    Champion identity/missing -> behavior is exactly the legacy soft-cap (§9C)."""
+    from signals.calibration_champion import apply_champion
+    cap = ARCHETYPE_CONFIDENCE_CAPS.get(archetype, 0.60)
+    if raw_confidence <= cap:
+        capped = raw_confidence
+    else:
+        excess = raw_confidence - cap
+        capped = cap + excess * 0.15
+    return apply_champion(capped, archetype, champion=_active_champion())
 
 
 # ─── Kill Rules ──────────────────────────────────────────────────────
+
 
 def check_kill_rules(title: str, entry_price: float, side: str, signal_archetype: str = None) -> Tuple[bool, str]:
     """Hard reject losing combos. Returns (killed, reason)."""
@@ -135,35 +204,36 @@ def check_kill_rules(title: str, entry_price: float, side: str, signal_archetype
     # entry_price here is always the YES market price (0-1)
     price_cents = int(entry_price * 100)
 
-    # K3: Anything below 30¢ — exempt weather (multi-outcome categorical, low prices are normal)
-    if price_cents < 30 and archetype != "weather":
-        return True, f"K3: entry {price_cents}¢ < 30¢ floor (20% WR historically)"
+    # K3: Anything below 15¢ — exempt weather, social_count, sports_tournament
+    if price_cents < 15 and archetype not in ("weather", "social_count", "sports_tournament"):
+        return True, f"K3: entry {price_cents}¢ < 15¢ floor"
 
     # K1: Intraday up/down — any side (coin flip minus fees)
-    if archetype == 'intraday_updown':
+    if archetype == "intraday_updown":
         return True, "K1: intraday up/down (50% NO WR, n=15,570 — no edge after fees)"
 
     # K4: Price range — only kill YES side (57% NO WR, n=31,982)
-    if archetype == 'price_range' and side == 'YES':
+    if archetype == "price_range" and side == "YES":
         return True, "K4: price_range YES side (43% WR, n=31,982)"
     # price_range NO passes through — 57% NO WR
 
     # K5: Directional dip/crash longshots
-    if archetype == 'directional':
+    if archetype == "directional":
         return True, "K5: directional dip/crash bet (70% NO WR but low n=390, unreliable)"
 
     # K2: price_above + cheap YES
-    if archetype == 'price_above' and side == 'YES' and price_cents < 45:
+    if archetype == "price_above" and side == "YES" and price_cents < 45:
         return True, "K2: price_above cheap YES (20% WR)"
 
     # K6: Unknown archetype
-    if archetype == 'other':
+    if archetype == "other":
         return True, "K6: unclassified archetype — don't trade unknowns"
 
     return False, ""
 
 
 # ─── Empirical WR Lookup ─────────────────────────────────────────────
+
 
 def _load_resolved_trades() -> list:
     """Load all resolved trades from DB for WR calculation."""
@@ -174,24 +244,32 @@ def _load_resolved_trades() -> list:
         trades = []
 
         # Shadow trades
-        for t in db.execute("SELECT market, side, entry_price, outcome, platform FROM shadow_trades WHERE resolved=1").fetchall():
-            trades.append({
-                "title": t["market"] or "",
-                "side": t["side"] or "?",
-                "price": t["entry_price"] or 0,
-                "won": t["side"] == t["outcome"],
-                "platform": t["platform"] or "unknown",
-            })
+        for t in db.execute(
+            "SELECT market, side, entry_price, outcome, platform FROM shadow_trades WHERE resolved=1"
+        ).fetchall():
+            trades.append(
+                {
+                    "title": t["market"] or "",
+                    "side": t["side"] or "?",
+                    "price": t["entry_price"] or 0,
+                    "won": t["side"] == t["outcome"],
+                    "platform": t["platform"] or "unknown",
+                }
+            )
 
         # Paper trades
-        for t in db.execute("SELECT market_title, side, entry_price, status, platform FROM paper_positions WHERE status IN ('won','lost')").fetchall():
-            trades.append({
-                "title": t["market_title"] or "",
-                "side": t["side"],
-                "price": t["entry_price"],
-                "won": t["status"] == "won",
-                "platform": t["platform"] or "unknown",
-            })
+        for t in db.execute(
+            "SELECT market_title, side, entry_price, status, platform FROM paper_positions WHERE status IN ('won','lost')"
+        ).fetchall():
+            trades.append(
+                {
+                    "title": t["market_title"] or "",
+                    "side": t["side"],
+                    "price": t["entry_price"],
+                    "won": t["status"] == "won",
+                    "platform": t["platform"] or "unknown",
+                }
+            )
 
         db.close()
         return trades
@@ -221,7 +299,7 @@ def _compute_wr_table(trades: list) -> Dict[str, Dict]:
 
 def bayesian_smooth(prior_wr: float, bucket_wr: float, n: int, prior_weight: int = 5) -> float:
     """Bayesian smoothing with conjugate beta prior.
-    
+
     prior_weight controls how much we trust the prior vs data.
     As n grows, bucket data dominates.
     """
@@ -236,6 +314,7 @@ def bayesian_smooth(prior_wr: float, bucket_wr: float, n: int, prior_weight: int
 _wr_cache = None
 _wr_cache_count = 0
 
+
 def calculate_empirical_confidence(
     title: str,
     side: str,
@@ -245,7 +324,7 @@ def calculate_empirical_confidence(
     override_archetype: str = None,
 ) -> Dict:
     """Calculate honest win probability from empirical data.
-    
+
     Returns:
         {
             "confidence": float (0-1),  # Our estimated P(win)
@@ -295,11 +374,11 @@ def calculate_empirical_confidence(
     if total_resolved < 30:
         prior_weight = 10  # Conservative
     elif total_resolved < 100:
-        prior_weight = 5   # Balanced
+        prior_weight = 5  # Balanced
     elif total_resolved < 300:
-        prior_weight = 3   # Data-driven
+        prior_weight = 3  # Data-driven
     else:
-        prior_weight = 1   # Empirical
+        prior_weight = 1  # Empirical
 
     # Look up archetype|side WR
     key = f"{archetype}|{side}"
@@ -309,10 +388,11 @@ def calculate_empirical_confidence(
 
     # Also check the more specific archetype|side|zone bucket
     zone_key = f"{archetype}|{side}|{zone}"
-    zone_trades = [t for t in trades 
-                   if classify_archetype(t["title"]) == archetype 
-                   and t["side"] == side 
-                   and price_zone(t["price"]) == zone]
+    zone_trades = [
+        t
+        for t in trades
+        if classify_archetype(t["title"]) == archetype and t["side"] == side and price_zone(t["price"]) == zone
+    ]
     zone_n = len(zone_trades)
     zone_wr = sum(t["won"] for t in zone_trades) / zone_n if zone_n > 0 else base_wr
 
@@ -339,11 +419,15 @@ def calculate_empirical_confidence(
     # days_to_close passed as parameter (default 7.0)  # default to weekly
     dur_bucket = classify_duration(days_to_close)
     dur_mod = DURATION_MODIFIERS.get(dur_bucket, 1.0)
-    
+
     confidence = smoothed * zone_mod * dur_mod
 
-    # Cap at 92% — nothing is certain
-    confidence = min(0.92, max(0.08, confidence))
+    # Apply per-archetype calibration cap (soft ceiling on overconfidence)
+    raw_confidence = confidence
+    confidence = apply_calibration(confidence, archetype=archetype)
+
+    # Cap at 85% — nothing is certain (tightened from 92% on Mar 16 audit)
+    confidence = min(0.85, max(0.08, confidence))
 
     # Calculate honest edge
     if side == "YES":
@@ -369,6 +453,8 @@ def calculate_empirical_confidence(
         "killed": False,
         "kill_reason": "",
         "breakdown": {
+            "raw_confidence": round(raw_confidence, 4),
+            "calibration_applied": round(raw_confidence - confidence, 4) if raw_confidence != confidence else 0,
             "archetype_wr": round(arch_wr, 4),
             "overall_wr": round(overall_wr, 4),
             "bucket_key": key,
@@ -382,50 +468,118 @@ def calculate_empirical_confidence(
     }
 
 
+def calibrated_confidence_oos(title: str, side: str, price: float, train_trades: list) -> float:
+    """OOS-safe confidence in [0,100]. Fit ONLY on train_trades (data strictly
+    earlier than the trade being scored). Shrinks to the bot's own realized rate."""
+    archetype = classify_archetype(title)
+    wr_table = _compute_wr_table(train_trades)
+
+    key = f"{archetype}|{side}"
+    bucket = wr_table.get(key, {"wins": 0, "total": 0, "wr": 0.5})
+    base_wr, n = bucket["wr"], bucket["total"]
+
+    arch_trades = [t for t in train_trades if classify_archetype(t["title"]) == archetype]
+    own_arch_n = len(arch_trades)
+    own_arch_wr = (sum(int(t["won"]) for t in arch_trades) / own_arch_n) if own_arch_n else None
+
+    # Prefer the bot's OWN realized archetype rate; borrow Becker only when starved (<10)
+    if own_arch_n >= 10:
+        prior = own_arch_wr
+    else:
+        prior = BECKER_NO_WIN_RATES.get(archetype, 0.55)
+
+    # Shrink the bucket toward the prior; weight prior heavily when n is small
+    prior_weight = 10 if n < 30 else (5 if n < 100 else 3)
+    wr = bayesian_smooth(prior, base_wr, n, prior_weight=prior_weight)
+    return round(max(0.0, min(1.0, wr)) * 100, 1)
+
+
 # ─── Calibration Audit ───────────────────────────────────────────────
 
+
 def calibration_audit() -> Dict:
-    """Check if predicted confidence matches actual win rates.
-    
-    Perfect calibration: 70% confidence trades win 70% of the time.
+    """Check if predicted confidence matches actual win rates — measured OOS.
+
+    Splits resolved trades chronologically (70/30 positional cut, since DB trade
+    dicts lack resolved_at). Scores the held-out test slice with
+    calibrated_confidence_oos(train) — zero in-sample look-ahead.
+    Falls back to in-sample when the test slice has fewer than 8 trades.
+
+    API contract (keys preserved for dashboard consumers):
+      total_trades          -- number of test-slice trades scored
+      avg_calibration_error -- ECE * 100, rounded to 1 dp (legacy scale)
+      calibrated            -- bool, True when ECE <= 0.10
+      buckets               -- list of per-confidence-decile dicts (legacy shape)
+
+    New additive keys (won't break existing callers):
+      oos_ece, n_train, n_test, mode
     """
-    trades = _load_resolved_trades()
-    if not trades:
+    from signals.calibration_core import expected_calibration_error
+
+    all_trades = _load_resolved_trades()
+    if not all_trades:
         return {"error": "No resolved trades", "buckets": []}
 
-    # Calculate empirical confidence for each historical trade
-    results = []
-    for t in trades:
-        ec = calculate_empirical_confidence(t["title"], t["side"], t["price"])
-        if not ec["killed"]:
-            results.append({
-                "confidence": ec["confidence"],
-                "won": t["won"],
-            })
+    # Positional 70/30 split (DB rows arrive in chronological insertion order)
+    cut = int(len(all_trades) * 0.7)
+    train = all_trades[:cut]
+    test = all_trades[cut:]
+    mode = "oos"
 
-    # Bin by confidence decile
+    if len(test) < 8:
+        train = all_trades
+        test = all_trades
+        mode = "in_sample_fallback"
+
+    results = []
+    for t in test:
+        if mode == "oos":
+            conf = calibrated_confidence_oos(t["title"], t["side"], t["price"], train) / 100.0
+        else:
+            ec = calculate_empirical_confidence(t["title"], t["side"], t["price"])
+            if ec["killed"]:
+                continue
+            conf = ec["confidence"]
+        results.append({"confidence": conf, "won": int(t["won"])})
+
+    if not results:
+        return {"total_trades": 0, "avg_calibration_error": 0.0, "calibrated": False, "buckets": []}
+
+    preds = [r["confidence"] for r in results]
+    outcomes = [r["won"] for r in results]
+    oos_ece = expected_calibration_error(preds, outcomes)
+
+    # Per-decile buckets (legacy shape preserved)
     buckets = []
-    for lo_pct in range(30, 95, 10):
+    for lo_pct in range(0, 100, 10):
         lo = lo_pct / 100
         hi = (lo_pct + 10) / 100
         bucket = [r for r in results if lo <= r["confidence"] < hi]
         if bucket:
-            predicted = (lo + hi) / 2
+            predicted = sum(r["confidence"] for r in bucket) / len(bucket)
             actual = sum(r["won"] for r in bucket) / len(bucket)
             miscalibration = actual - predicted
-            buckets.append({
-                "range": f"{lo_pct}-{lo_pct+10}%",
-                "predicted_wr": round(predicted * 100, 1),
-                "actual_wr": round(actual * 100, 1),
-                "miscalibration": round(miscalibration * 100, 1),
-                "n": len(bucket),
-                "calibrated": abs(miscalibration) < 0.10,
-            })
+            buckets.append(
+                {
+                    "range": f"{lo_pct}-{lo_pct + 10}%",
+                    "predicted_wr": round(predicted * 100, 1),
+                    "actual_wr": round(actual * 100, 1),
+                    "miscalibration": round(miscalibration * 100, 1),
+                    "n": len(bucket),
+                    "calibrated": abs(miscalibration) < 0.10,
+                }
+            )
 
-    overall_error = sum(abs(b["miscalibration"]) for b in buckets) / len(buckets) if buckets else 0
+    avg_cal_error = round(oos_ece * 100, 1)
     return {
+        # Legacy keys (API contract)
         "total_trades": len(results),
-        "avg_calibration_error": round(overall_error, 1),
-        "calibrated": overall_error < 10,
+        "avg_calibration_error": avg_cal_error,
+        "calibrated": oos_ece <= 0.10,
         "buckets": buckets,
+        # New additive keys
+        "oos_ece": oos_ece,
+        "n_train": len(train),
+        "n_test": len(test),
+        "mode": mode,
     }
