@@ -20,6 +20,7 @@ Called from scheduler tick_5min. Only snapshots open PM positions where
 the market resolves within the next 30 minutes (and hasn't been snapshotted).
 """
 import json
+from db import connect as db_connect
 import sqlite3
 import urllib.request
 from datetime import datetime, timezone
@@ -39,7 +40,7 @@ WINDOW_LATE_S  = 300    # 5 min before (don't snapshot too close — market may 
 
 
 def _ensure_columns():
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = db_connect(str(DB_PATH))
     conn.execute("PRAGMA journal_mode=WAL")
     existing = {row[1] for row in conn.execute("PRAGMA table_info(paper_positions)")}
     for col, typ in [
@@ -119,7 +120,7 @@ def run_once():
     """Snapshot CLV for open PM positions approaching resolution."""
     _ensure_columns()
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = db_connect(str(DB_PATH))
     conn.execute("PRAGMA journal_mode=WAL")
     rows = conn.execute("""
         SELECT id, market_id, market_slug, side, entry_price
@@ -138,7 +139,7 @@ def run_once():
     now = datetime.now(timezone.utc)
     snapshotted = 0
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = db_connect(str(DB_PATH))
     conn.execute("PRAGMA journal_mode=WAL")
 
     for pos_id, market_id, market_slug, side, entry_price in rows:

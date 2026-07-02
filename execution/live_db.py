@@ -6,6 +6,7 @@ callers can inject a test DB (tmp file or :memory:).
 """
 
 import sqlite3
+from db import connect as db_connect
 from pathlib import Path
 
 # Canonical prod DB path — same file the rest of the app uses.
@@ -196,7 +197,7 @@ def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), check_same_thread=False, timeout=10)
+    conn = db_connect(str(path), check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")

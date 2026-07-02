@@ -11,6 +11,7 @@ Uses signal_snapshots table for price history.
 """
 
 from loguru import logger
+from db import connect as db_connect
 import logging
 import sqlite3
 from datetime import datetime, timezone, timedelta
@@ -29,7 +30,7 @@ MIN_DATA_POINTS = 2        # Need at least 2 snapshots for trend
 
 
 def _get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = db_connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")

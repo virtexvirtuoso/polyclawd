@@ -20,6 +20,7 @@ Current gates (weather):
 See vault: Health-Gates-Framework-Apr2026, Source-Health-Schema-Audit-2026-05-01.
 """
 from __future__ import annotations
+from db import connect as db_connect
 
 import json
 import logging
@@ -43,7 +44,7 @@ _last_logged_state: dict[str, str] = {}
 
 
 def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(DB_PATH)
+    c = db_connect(DB_PATH)
     c.row_factory = sqlite3.Row
     return c
 

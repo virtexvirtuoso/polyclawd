@@ -2,6 +2,7 @@
 """SQLite-backed election trend storage for fast time-series queries."""
 
 import sqlite3
+from db import connect as db_connect
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -12,7 +13,7 @@ DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 def _get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = db_connect(str(DB_PATH), timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.row_factory = sqlite3.Row

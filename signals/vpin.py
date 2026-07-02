@@ -34,6 +34,8 @@ from typing import Dict, List, Optional
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from db import connect as db_connect  # noqa: E402
+
 logger = logging.getLogger("vpin")
 
 # Constants
@@ -51,7 +53,7 @@ BACKTEST_MIN_ACCURACY = 55.0  # % — Andersen-Bondarenko gate
 
 def _ensure_db():
     """Create vpin_snapshots.db schema if not present."""
-    conn = sqlite3.connect(str(VPIN_DB_PATH))
+    conn = db_connect(str(VPIN_DB_PATH))
     try:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS vpin_snapshots (
@@ -90,7 +92,7 @@ def _save_vpin_snapshot(
 ):
     """Store a VPIN snapshot for later backtesting."""
     _ensure_db()
-    conn = sqlite3.connect(str(VPIN_DB_PATH))
+    conn = db_connect(str(VPIN_DB_PATH))
     try:
         now = time.time()
         conn.execute(
@@ -107,7 +109,7 @@ def _save_vpin_snapshot(
 def _load_vpin_snapshots(limit: int = 500) -> list:
     """Load stored VPIN snapshots for backtesting."""
     _ensure_db()
-    conn = sqlite3.connect(str(VPIN_DB_PATH))
+    conn = db_connect(str(VPIN_DB_PATH))
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
@@ -122,7 +124,7 @@ def _load_vpin_snapshots(limit: int = 500) -> list:
 def _update_price_1h_later(slug: str, ts: float, price_1h: float):
     """Backfill price_1h_later and direction_match for a snapshot."""
     _ensure_db()
-    conn = sqlite3.connect(str(VPIN_DB_PATH))
+    conn = db_connect(str(VPIN_DB_PATH))
     try:
         # Find the snapshot closest to ts+1h for this slug
         target_ts = ts + 3600

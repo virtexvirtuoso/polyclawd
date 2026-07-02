@@ -36,6 +36,8 @@ from typing import Optional
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_DIR)
 
+from db import connect as db_connect  # noqa: E402
+
 GAMMA_API = "https://gamma-api.polymarket.com"
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 DB_PATH = os.path.join(PROJECT_DIR, "storage", "shadow_trades.db")
@@ -309,7 +311,7 @@ def _send_alert(message: str) -> bool:
 
 
 def _alert_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn = db_connect(DB_PATH, timeout=10)
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(
         """

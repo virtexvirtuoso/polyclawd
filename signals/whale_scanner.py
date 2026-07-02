@@ -54,6 +54,8 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from db import connect as db_connect  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent
@@ -463,7 +465,7 @@ def get_db(path: Optional[Path] = None) -> sqlite3.Connection:
     """SQLite connection (WAL) with whale tables ensured."""
     db_path = Path(path) if path else DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=10)
+    conn = db_connect(str(db_path), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")

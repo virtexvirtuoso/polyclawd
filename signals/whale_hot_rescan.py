@@ -9,6 +9,7 @@ Side effect: If live price is >0.90 or <0.10, adds "_resolved_live" flag
 This is a lightweight pass — ~1 API call per hot market, <200ms each.
 """
 import sqlite3
+from db import connect as db_connect
 import json
 import time
 import logging
@@ -60,7 +61,7 @@ def run_hot_rescan():
     if not db_path.exists():
         return {"hot": 0, "refreshed": 0, "resolved": 0}
 
-    conn = sqlite3.connect(str(db_path), timeout=10)
+    conn = db_connect(str(db_path), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")

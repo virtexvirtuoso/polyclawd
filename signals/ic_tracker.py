@@ -10,6 +10,7 @@ IC thresholds:
 """
 
 import sqlite3
+from db import connect as db_connect
 import time
 from loguru import logger
 import logging
@@ -26,7 +27,7 @@ IC_WARN = 0.05
 
 def _get_conn(db_path: str = None) -> sqlite3.Connection:
     """Get SQLite connection with WAL mode and busy timeout."""
-    conn = sqlite3.connect(db_path or str(DB_PATH), timeout=10)
+    conn = db_connect(db_path or str(DB_PATH), timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn

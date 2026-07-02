@@ -25,6 +25,8 @@ from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from db import connect as db_connect  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent
@@ -41,7 +43,7 @@ ALERT_COOLDOWN_S = 3600  # 1 hour per market per wallet
 def get_meta_db(path: Optional[Path] = None) -> sqlite3.Connection:
     db_path = Path(path) if path else META_DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=30)
+    conn = db_connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")

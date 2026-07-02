@@ -10,6 +10,7 @@ Uses Student-t distribution (df=4) for fat tails + momentum overlay.
 """
 
 import json
+from db import connect as db_connect
 from loguru import logger
 import logging
 import math
@@ -58,7 +59,7 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 
 
 def _get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = db_connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
@@ -94,7 +95,7 @@ class StrikeProbabilityCalculator:
         self.db_path = db_path or str(DB_PATH)
 
     def _get_db(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10)
+        conn = db_connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")

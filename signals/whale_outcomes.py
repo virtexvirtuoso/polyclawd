@@ -34,6 +34,8 @@ from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from db import connect as db_connect  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent
@@ -52,7 +54,7 @@ GIVE_UP_AFTER = 35 * 24 * 3600   # stop chasing resolution after 35 days
 def get_meta_db(path: Optional[Path] = None) -> sqlite3.Connection:
     db_path = Path(path) if path else META_DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=30)
+    conn = db_connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
@@ -187,7 +189,7 @@ def ingest_new_alerts(meta: sqlite3.Connection,
                       alerts_db_path: Optional[Path] = None) -> int:
     """Copy alerts not yet tracked into whale_outcomes with their at-alert
     price and (Kalshi) direction. PM direction resolves on first backfill."""
-    src = sqlite3.connect(f"file:{alerts_db_path or ALERTS_DB_PATH}?mode=ro", uri=True)
+    src = db_connect(f"file:{alerts_db_path or ALERTS_DB_PATH}?mode=ro", uri=True)
     src.row_factory = sqlite3.Row
     last = meta.execute("SELECT COALESCE(MAX(alert_id),0) FROM whale_outcomes").fetchone()[0]
     rows = src.execute("SELECT * FROM whale_alerts WHERE id > ? ORDER BY id LIMIT 2000",
@@ -266,7 +268,7 @@ def backfill(meta: sqlite3.Connection) -> dict:
         direction = r["direction"]
         if r["platform"] == "polymarket" and direction is None and info.get("outcomes"):
             try:
-                payload = json.loads(sqlite3.connect(
+                payload = json.loads(db_connect(
                     f"file:{ALERTS_DB_PATH}?mode=ro", uri=True).execute(
                     "SELECT payload FROM whale_alerts WHERE id=?",
                     (r["alert_id"],)).fetchone()[0] or "{}")

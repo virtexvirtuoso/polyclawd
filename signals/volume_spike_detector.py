@@ -7,6 +7,7 @@ Uses existing signal_snapshots table for historical volume baselines.
 """
 
 from loguru import logger
+from db import connect as db_connect
 import logging
 import sqlite3
 from datetime import datetime, timezone, timedelta
@@ -26,7 +27,7 @@ MIN_VOLUME = 100         # Ignore markets with trivially low volume
 
 
 def _get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = db_connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")

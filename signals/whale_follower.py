@@ -36,6 +36,8 @@ from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from db import connect as db_connect  # noqa: E402
+
 from signals.whale_scanner import _ticker_event_date, _today_et  # noqa: E402
 from signals.whale_outcomes import (  # noqa: E402
     get_meta_db,
@@ -432,7 +434,7 @@ def _entry_price(
 def open_new_follows(meta: sqlite3.Connection, alerts_db_path: Optional[Path] = None) -> dict:
     """Scan new alerts, qualify via INFO, record synthetic entries."""
     now = time.time()
-    src = sqlite3.connect(f"file:{alerts_db_path or ALERTS_DB_PATH}?mode=ro", uri=True)
+    src = db_connect(f"file:{alerts_db_path or ALERTS_DB_PATH}?mode=ro", uri=True)
     src.row_factory = sqlite3.Row
     # Cursor must advance past stale rows even when nothing is entered, or the
     # scan window pins to the oldest ENTRY_BATCH alerts forever (bug found

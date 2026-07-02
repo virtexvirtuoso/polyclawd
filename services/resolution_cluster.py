@@ -4,6 +4,7 @@ When 4+ positions resolve on the same day, max drawdown is concentrated.
 Tags each position with resolution_date_source: "explicit" | "estimated" | "unknown".
 """
 import json
+from db import connect as db_connect
 import logging
 import re
 import sqlite3
@@ -52,7 +53,7 @@ WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6
 
 def _get_db() -> sqlite3.Connection:
     """Open read-only connection to shadow_trades.db."""
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5)
+    conn = db_connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5)
     conn.row_factory = sqlite3.Row
     return conn
 
