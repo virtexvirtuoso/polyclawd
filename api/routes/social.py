@@ -3,6 +3,7 @@ Social Count API — serve Musk tweet and Trump Truth Social data
 Updated: 2026-03-20
 """
 from fastapi import APIRouter, HTTPException
+from db import connect as db_connect
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,7 +15,7 @@ DB_PATH = Path(__file__).parent.parent.parent / "storage" / "shadow_trades.db"
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = db_connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 

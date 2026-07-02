@@ -7,6 +7,7 @@ All endpoints are defined in api/routes/ modules.
 """
 
 import logging
+from db import connect as db_connect
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -189,7 +190,7 @@ async def visitor_log(request: Request):
 
     db_path = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = db_connect(str(db_path))
         conn.execute("""CREATE TABLE IF NOT EXISTS visitor_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT, ip TEXT, page TEXT,
@@ -259,7 +260,7 @@ async def get_visitor_log(limit: int = 50):
 
     db_path = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = db_connect(str(db_path))
         conn.execute("""CREATE TABLE IF NOT EXISTS visitor_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT, ip TEXT, page TEXT,

@@ -3,6 +3,7 @@ Activity feed with in-memory ring buffer and SQLite persistence.
 Provides a real-time event log for the Polyclawd API.
 """
 import json
+from db import connect as db_connect
 import sqlite3
 import threading
 import time
@@ -24,7 +25,7 @@ DB_PATH = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
 def _init_db():
     """Initialize the activity_log table if it doesn't exist."""
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with db_connect(DB_PATH) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS activity_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,7 +90,7 @@ def emit_event(
     
     # Persist to SQLite (non-blocking approach)
     try:
-        with sqlite3.connect(DB_PATH, timeout=5.0) as conn:
+        with db_connect(DB_PATH, timeout=5.0) as conn:
             conn.execute(
                 """
                 INSERT INTO activity_log (timestamp, event_type, severity, title, detail, data_json)
@@ -131,7 +132,7 @@ def get_events(
         List of event dictionaries
     """
     try:
-        with sqlite3.connect(DB_PATH, timeout=5.0) as conn:
+        with db_connect(DB_PATH, timeout=5.0) as conn:
             conn.row_factory = sqlite3.Row
             
             query = "SELECT * FROM activity_log WHERE 1=1"

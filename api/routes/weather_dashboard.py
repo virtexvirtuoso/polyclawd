@@ -4,6 +4,7 @@ Serves data for /static/weather.html dashboard.
 """
 
 from datetime import datetime, timezone, timedelta
+from db import connect as db_connect
 from fastapi import APIRouter
 from loguru import logger
 import sqlite3
@@ -15,7 +16,7 @@ DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__)
 
 
 def _get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = db_connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
