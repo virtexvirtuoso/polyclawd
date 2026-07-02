@@ -30,6 +30,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 os.chdir(PROJECT_ROOT)
 
+from services import task_state
+
 DB_PATH = PROJECT_ROOT / "storage" / "shadow_trades.db"
 HEALTH_URL = "http://127.0.0.1:8420/health"
 SERVICE_NAME = "polyclawd-api"
@@ -135,7 +137,7 @@ TICK_TASKS = {
     "5min": [
         "health_check", "stop_evaluator", "price_logger", "book_logger",
         "shadow_resolution", "paper_resolution", "equity_snapshot",
-        "resolution_scanner", "mlb_props_scratch", "dashboard_warm",
+        "position_sync", "resolution_scanner", "mlb_props_scratch", "dashboard_warm",
         "weather_reeval", "weather_fast_scan", "weather_shift_alerts",
         "tweet_pace_alerts", "calibration_check", "insider_scan",
         "poly_delta", "manifold_shadow", "clv_snapshot",
@@ -235,6 +237,17 @@ def task_equity_snapshot():
     snap = snapshot_equity()
     logger.debug("Equity snapshot: $%.2f (realized $%.2f, unrealized $%.2f)",
                  snap.get("equity", 0), snap.get("realized", 0), snap.get("unrealized", 0))
+
+
+def task_position_sync():
+    """Sync live positions: check for market resolutions + wallet balance."""
+    from scripts.position_sync import run as _run
+    result = _run()
+    resolved = result.get("resolved", 0)
+    new = result.get("new", 0)
+    if resolved > 0 or new > 0:
+        logger.info("position_sync: %d resolved, %d new positions detected", resolved, new)
+
 
 
 def task_hf_signals():
@@ -799,7 +812,8 @@ def task_arb_scan():
 
 def task_resolution_edge_scan():
     """Resolution-source edge scan for weather markets.
-    NWS edge for Kalshi, TWC edge for Polymarket. 30min cadence."""
+    NWS edge for Kalshi, TWC edge for Polymarket. 30min cadence.
+    Logs shadow trades for all PM signals, executes when in LIVE mode."""
     try:
         from signals.weather_resolution_edge import scan_resolution_edges
         signals = scan_resolution_edges()
@@ -807,13 +821,70 @@ def task_resolution_edge_scan():
         if signals:
             logger.info("resolution_edge: %d signals (%d HIGH)", len(signals), len(high))
         if high:
-            # Alert on HIGH conviction edges
             for s in high:
                 logger.info("resolution_edge HIGH: %s %s edge=%+.1fpp %s (thr=%.0f)",
                             s["city"], s["resolution_source"], s["edge_pp"],
                             s["direction"], s["threshold_f"])
+
+        # Log shadow trades for all PM weather resolution signals
+        pm_signals = [s for s in signals if s.get("platform") == "polymarket" and s.get("condition_id")]
+        if pm_signals:
+            from signals.shadow_tracker import log_shadow_trade
+            logged = 0
+            for s in pm_signals:
+                shadow_signal = _weather_signal_to_shadow(s)
+                if shadow_signal and log_shadow_trade(shadow_signal):
+                    logged += 1
+            if logged:
+                logger.info("resolution_edge: logged %d/%d PM shadow trades", logged, len(pm_signals))
+
+            # Execute tradeable PM weather edges in LIVE mode
+            from execution.weather_executor import execute_tradeable_weather_edges
+            result = execute_tradeable_weather_edges(pm_signals)
+            if result.get("filled", 0) > 0:
+                logger.info("resolution_edge: weather executor filled %d/%d",
+                            result["filled"], len(pm_signals))
     except Exception as e:
         logger.debug("resolution_edge_scan: %s", e)
+
+
+def _weather_signal_to_shadow(s: dict) -> dict:
+    """Convert a weather resolution edge signal dict to shadow_trade format."""
+    direction = s.get("direction", "buy_no")
+    side = "NO" if direction == "buy_no" else "YES"
+    market_price = s.get("market_price", 0.5)
+    twc_implied = s.get("twc_implied_prob", 0.5)
+    edge_pp = s.get("edge_pp", 0)
+    horizon_hours = s.get("horizon_hours", 24)
+
+    if direction == "buy_no":
+        confidence = (1.0 - twc_implied) * 100
+    else:
+        confidence = twc_implied * 100
+
+    bracket_low = s.get("bracket_low_f")
+    bracket_high = s.get("bracket_high_f")
+    if bracket_low and bracket_high:
+        market_desc = f"{s['city']} {bracket_low:.0f}-{bracket_high:.0f}F"
+    else:
+        market_desc = f"{s['city']} {s.get('threshold_f', 0):.0f}F"
+
+    return {
+        "market_id": s.get("condition_id", ""),
+        "market": s.get("market_title", market_desc)[:200],
+        "category": "weather_resolution",
+        "category_tier": s.get("conviction_tier", "LOW"),
+        "platform": "polymarket",
+        "side": side,
+        "price": market_price,
+        "confidence": confidence,
+        "confirmations": 1,
+        "days_to_close": max(0.5, horizon_hours / 24),
+        "volume": 0,
+        "reasoning": f"TWC={s.get('twc_forecast_f','?')}F RMSE={s.get('twc_rmse','?')} edge={edge_pp:+.1f}pp tier={s.get('conviction_tier','?')}",
+        "archetype": "weather_resolution",
+        "strategy": "twc_resolution_edge",
+    }
 
 
 def task_stale_line_scan():
@@ -1196,14 +1267,29 @@ def task_dashboard_warm():
 
 
 def task_soccer_match_scan():
-    """Soccer/WC: refresh the per-match 3-way edge cache (~every 2h) so the
-    dashboard stays live through the tournament. Odds-API spend is gated upstream
-    (odds_api_fetch.can_make_call + sports_edge_scan credit floor)."""
+    """Soccer/WC: refresh the per-match 3-way edge cache (~every 2h) and
+    execute tradeable edges when in LIVE mode."""
     import asyncio
 
     from scripts.sports_edge_scan import run
+    from odds.soccer_match_edge import find_soccer_match_edges
+    from execution.soccer_executor import execute_tradeable_soccer_edges
 
+    # 1. Find + enrich edges (same as before)
+    edges = asyncio.run(find_soccer_match_edges(min_edge=0.03))
+
+    # 2. Cache for dashboard
     asyncio.run(run(["soccer_match"]))
+
+    # 3. Execute tradeable edges in LIVE mode
+    if edges:
+        tradeable = [e for e in edges if getattr(e, "tradeable", False)]
+        if tradeable:
+            logger.info("soccer_match_scan: %d tradeable edges found", len(tradeable))
+            result = execute_tradeable_soccer_edges(tradeable)
+            logger.info("soccer_match_scan: execution result %s", result)
+        else:
+            logger.debug("soccer_match_scan: %d edges, none tradeable", len(edges))
 
 
 def task_soccer_futures_scan():
@@ -1629,9 +1715,7 @@ async def tick_5min():
             await run_in_thread(_run_safe, name, _task_fn(name))
         # Gated tasks — run every Nth tick
         for name, every_n in TICK_TASKS["5min_gated"].items():
-            key = f"{name}_n"
-            _state[key] = _state.get(key, 0) + 1
-            if _state[key] % every_n == 0:
+            if task_state.should_run_safe(name, every_n * 300):
                 await run_in_thread(_run_safe, name, _task_fn(name))
         logger.debug("5-min tick complete")
         await asyncio.sleep(300)
@@ -1679,9 +1763,7 @@ async def tick_30min():
             await run_in_thread(_run_safe, name, _task_fn(name))
         # Gated tasks — run every Nth tick
         for name, every_n in TICK_TASKS["30min_gated"].items():
-            key = f"{name}_n"
-            _state[key] = _state.get(key, 0) + 1
-            if _state[key] % every_n == 0:
+            if task_state.should_run_safe(name, every_n * 1800):
                 await run_in_thread(_run_safe, name, _task_fn(name))
         logger.info("30-min tick complete")
         await asyncio.sleep(1800)
