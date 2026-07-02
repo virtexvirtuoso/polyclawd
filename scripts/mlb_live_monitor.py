@@ -31,6 +31,7 @@ from typing import Dict, List, Optional, Tuple
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
+from odds.monitor_gate import gated_fetch_json, LIVE_BOOKS
 
 from scripts.alert_formatter import send_telegram
 
@@ -42,11 +43,14 @@ CLOB_BOOK      = "https://clob.polymarket.com/book"
 
 ODDS_API_KEY   = os.environ.get("ODDS_API_KEY", "")
 LINE_DRIFT_PP  = 8.0     # pp shift to fire drift alert (MLB swings more than soccer)
+BLOWOUT_RUN_DIFF = 5     # if lead >= this, suppress drift alert (game effectively over)
+BLOWOUT_LATE_INNING = 7  # in 7th+ inning, lower blowout threshold to 4 runs
+BLOWOUT_LATE_DIFF = 4
 WHALE_SIZE     = 30000   # CLOB book wall threshold (lower liquidity than WC)
 WHALE_DEDUP_S  = 1800    # suppress re-alert for same wall within 30 min
 EDGE_FLOOR     = 0.02    # close shadow trade if edge drops below 2pp
 PM_GAP_PP      = 6.0     # min pp gap between PM and Vegas to flag in alerts
-PM_STALE_PP    = 35.0    # gap above this = stale pre-game CLOB orders, not actionable
+PM_STALE_PP    = 35.0    # gap above this = Endgame MM not active / no live in-game liquidity
 
 DB_PATH  = BASE_DIR / "storage" / "shadow_trades.db"
 MC_HOST, MC_PORT = "localhost", 11211
@@ -299,8 +303,8 @@ def fetch_pinnacle(home: str, away: str) -> Optional[Dict[str, float]]:
     """
     if not ODDS_API_KEY:
         return None
-    data = _get(ODDS_API_BASE, {
-        "apiKey": ODDS_API_KEY, "regions": "us,uk",
+    data = gated_fetch_json(ODDS_API_BASE, {
+        "apiKey": ODDS_API_KEY, "bookmakers": LIVE_BOOKS,
         "markets": "h2h", "oddsFormat": "decimal",
     })
     if not data:
@@ -392,13 +396,60 @@ def fetch_poly_event(home: str, away: str) -> Optional[Dict]:
 def fetch_pm_sdk_moneyline(home: str, away: str) -> Dict[str, Tuple]:
     """
     Fallback when Gamma API has no full-game moneyline.
-    Queries PM US SDK for baseball_team_full_game_winner markets with live BBO prices.
     Returns {label: (slug, mid_price, liquid)} — slug used as token_id placeholder.
+
+    Strategy 1 (primary): Direct slug construction — aec-mlb-{away_abbr}-{home_abbr}-{date}.
+      Bypasses SDK search pagination (moneyline is market #62 of 85; search returns ~8 per event).
+      BBO on the YES token gives the live away-wins probability; home = 1 - away.
+
+    Strategy 2 (fallback): SDK search by team names.
+      Used when abbreviations are unknown; iterates ev.markets but may miss the moneyline.
     """
+    from datetime import timedelta
     try:
         from polymarket_us import PolymarketUS
         c = PolymarketUS()
-        resp = c.search.query({"query": "mlb game winner"})
+
+        # ── Strategy 1: direct slug ──────────────────────────────────────────
+        away_abbr = _team_abbr(away)
+        home_abbr = _team_abbr(home)
+        if away_abbr and home_abbr:
+            # PM US slugs are dated by the ET *game date*, not UTC. After 00:00 UTC
+            # (20:00 ET) the UTC date runs a day ahead, which 404s every live game
+            # (root of the 2026-07-01 23:57 UTC 404 storm). A live game is dated
+            # today-ET or — for late west-coast games past midnight ET —
+            # yesterday-ET. Never tomorrow: that's a different (pre-game) market.
+            from zoneinfo import ZoneInfo
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+            today_et = now_et.strftime("%Y-%m-%d")
+            yesterday_et = (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
+            for game_date in [today_et, yesterday_et]:
+                slug = f"aec-mlb-{away_abbr}-{home_abbr}-{game_date}"
+                try:
+                    bbo = c.markets.bbo(slug)
+                    md = bbo.get("marketData", {})
+                    best_bid = float((md.get("bestBid") or {}).get("value", 0) or 0)
+                    best_ask = float((md.get("bestAsk") or {}).get("value", 1) or 1)
+                    last_trade = md.get("lastTradePx")
+                    if best_bid > 0 and best_ask < 1 and best_ask > best_bid:
+                        away_price = (best_bid + best_ask) / 2  # YES = away team wins
+                        home_price = 1.0 - away_price
+                        liquid = last_trade is not None
+                        if not liquid:
+                            print(f"[mlb_monitor] SDK slug {slug}: lastTradePx=None, stale", flush=True)
+                        else:
+                            print(f"[mlb_monitor] SDK direct slug hit: {slug} away={away_price:.2f}", flush=True)
+                        return {
+                            "away": (slug, away_price, liquid),
+                            "home": (slug, home_price, liquid),
+                        }
+                    else:
+                        print(f"[mlb_monitor] SDK slug {slug}: empty BBO (bid={best_bid:.2f} ask={best_ask:.2f})", flush=True)
+                except Exception as e:
+                    print(f"[mlb_monitor] SDK BBO slug {slug} failed: {e}", flush=True)
+
+        # ── Strategy 2: SDK search fallback ─────────────────────────────────
+        resp = c.search.query({"query": f"{away} {home} mlb"})
         events = resp if isinstance(resp, list) else resp.get("events", resp.get("results", []))
         for ev in events:
             title = ev.get("title", "").lower()
@@ -420,15 +471,17 @@ def fetch_pm_sdk_moneyline(home: str, away: str) -> Dict[str, Tuple]:
                         continue
                 if len(prices) < 2:
                     continue
-                # Get live BBO
                 try:
                     bbo = c.markets.bbo(slug)
                     md = bbo.get("marketData", {})
                     best_bid = float((md.get("bestBid") or {}).get("value", 0) or 0)
                     best_ask = float((md.get("bestAsk") or {}).get("value", 1) or 1)
+                    last_trade = md.get("lastTradePx")
                     if best_bid > 0 and best_ask < 1 and best_ask > best_bid:
                         first_price = (best_bid + best_ask) / 2
-                        liquid = True
+                        liquid = last_trade is not None
+                        if not liquid:
+                            print(f"[mlb_monitor] SDK BBO {slug}: lastTradePx=None, stale", flush=True)
                     else:
                         first_price = float(prices[0])
                         liquid = False
@@ -436,7 +489,6 @@ def fetch_pm_sdk_moneyline(home: str, away: str) -> Dict[str, Tuple]:
                     first_price = float(prices[0])
                     liquid = False
                 second_price = 1.0 - first_price
-                # First team in title is the YES/first outcome
                 parts = title.split(" vs")
                 first_team = parts[0].strip()
                 if _nmatch(away, first_team):
@@ -446,6 +498,46 @@ def fetch_pm_sdk_moneyline(home: str, away: str) -> Dict[str, Tuple]:
     except Exception as e:
         print(f"[mlb_monitor] SDK moneyline fallback failed: {e}", flush=True)
     return {}
+
+
+_MLB_ABBR: Dict[str, str] = {
+    # PM US uses "az" for Arizona (verified live 2026-07-02: aec-mlb-sf-az-… = 200, sf-ari = 404)
+    "arizona diamondbacks": "az", "diamondbacks": "az", "d-backs": "az",
+    "atlanta braves": "atl", "braves": "atl",
+    "baltimore orioles": "bal", "orioles": "bal",
+    "boston red sox": "bos", "red sox": "bos",
+    "chicago cubs": "chc", "cubs": "chc",
+    "chicago white sox": "cws", "white sox": "cws",
+    "cincinnati reds": "cin", "reds": "cin",
+    "cleveland guardians": "cle", "guardians": "cle",
+    "colorado rockies": "col", "rockies": "col",
+    "detroit tigers": "det", "tigers": "det",
+    "houston astros": "hou", "astros": "hou",
+    "kansas city royals": "kc", "royals": "kc",
+    "los angeles angels": "laa", "angels": "laa",
+    "los angeles dodgers": "lad", "dodgers": "lad",
+    "miami marlins": "mia", "marlins": "mia",
+    "milwaukee brewers": "mil", "brewers": "mil",
+    "minnesota twins": "min", "twins": "min",
+    "new york mets": "nym", "mets": "nym",
+    "new york yankees": "nyy", "yankees": "nyy",
+    # PM US uses "ath" for the Athletics (verified live 2026-07-02: aec-mlb-lad-ath-… = 200, lad-oak = 404)
+    "oakland athletics": "ath", "athletics": "ath", "a's": "ath",
+    "philadelphia phillies": "phi", "phillies": "phi",
+    "pittsburgh pirates": "pit", "pirates": "pit",
+    "san diego padres": "sd", "padres": "sd",
+    "san francisco giants": "sf", "giants": "sf",
+    "seattle mariners": "sea", "mariners": "sea",
+    "st. louis cardinals": "stl", "cardinals": "stl",
+    "tampa bay rays": "tb", "rays": "tb",
+    "texas rangers": "tex", "rangers": "tex",
+    "toronto blue jays": "tor", "blue jays": "tor",
+    "washington nationals": "was", "nationals": "was",
+}
+
+
+def _team_abbr(name: str) -> Optional[str]:
+    return _MLB_ABBR.get(name.lower().strip())
 
 
 _ML_NOISE = {"spread", "o/u", "over", "under", "inning", "extra innings", "will there", "first inning", "run scored", "strikeout", "home run", "hit", "rbi"}
@@ -657,7 +749,7 @@ def check_run_trigger(conn: sqlite3.Connection, game: Dict,
             if not liquid:
                 lines.append(f"  🔒 <b>{name} wins</b>: Polymarket {poly_p:.0%}  (illiquid — no live orders)")
             elif abs(gap) >= PM_STALE_PP:
-                lines.append(f"  ⏸ <b>{name} wins</b>: Polymarket {poly_p:.0%}  (stale pre-game orders, not actionable)")
+                lines.append(f"  ⏸ <b>{name} wins</b>: Polymarket {poly_p:.0%}  (stale — Endgame not active, no live in-game liquidity)")
             elif abs(gap) >= PM_GAP_PP:
                 direction = "cheaper" if gap > 0 else "pricier"
                 action = "BUY" if gap > 0 else "SELL"
@@ -672,22 +764,11 @@ def check_run_trigger(conn: sqlite3.Connection, game: Dict,
         lines.append("💰 <b>Polymarket hasn't adjusted yet:</b>")
         lines.extend(trade_signals)
 
-    # Post-run whale depth check — parallel book fetches
+    # Whale walls disabled — resting orders, not executed trades; actual trade
+    # flow alerts come from sport_whale_trades.py. The old book prefetch here was
+    # dead code AND passed SDK slug placeholders as CLOB token_ids (/book requires
+    # numeric ERC-1155 ids → guaranteed 404). Removed 2026-07-02.
     walls_found: List[str] = []
-    if tokens:
-        run_labels = [(lbl, nm) for lbl, nm in [("home", home), ("away", away)] if lbl in tokens]
-        book_futures = {lbl: _EXECUTOR.submit(fetch_book, tokens[lbl][0]) for lbl, _ in run_labels}
-        for label, name in run_labels:
-            try:
-                book = book_futures[label].result(timeout=15)
-            except Exception:
-                book = None
-            if not book:
-                continue
-            current_mid = tokens[label][1]
-            # Whale walls disabled — resting orders, not executed trades.
-            # Actual trade flow alerts come from sport_whale_trades.py.
-            pass
 
     # Only send TG alerts when there's actionable edge (PM gap or whale wall)
     # Runs and pitcher changes are still tracked in DB snapshots above
@@ -742,7 +823,10 @@ def check_line_drift(conn: sqlite3.Connection, game: Dict,
             any_drift = True
 
         label = "home" if _nmatch(outcome, home) else "away"
-        poly_p = tokens[label][1] if label in tokens else None
+        tok = tokens.get(label)
+        # Only use PM price when token is confirmed liquid (SDK live market).
+        # Illiquid tokens (DH mismatch, SDK gap guard fired) show "—" not a stale number.
+        poly_p = tok[1] if tok and (len(tok) < 3 or tok[2]) else None
         gap = (prob - poly_p) * 100 if poly_p is not None else None
 
         outcome_data.append({
@@ -755,6 +839,14 @@ def check_line_drift(conn: sqlite3.Connection, game: Dict,
             VALUES (?, ?, ?, ?, ?)
         """, (gid, outcome, prob, now_ts, current_status))
     conn.commit()
+
+    # Blowout gate: suppress drift alert if game is effectively over
+    # Athletics 3-9 Dodgers in Bottom 9th doesn't need an alert
+    run_diff = abs(hs - as_)
+    is_late = any(x in detail.lower() for x in ["7th", "8th", "9th", "10th", "11th", "12th", "13th"])
+    blowout_threshold = BLOWOUT_LATE_DIFF if is_late else BLOWOUT_RUN_DIFF
+    if run_diff >= blowout_threshold:
+        any_drift = False
 
     if not any_drift:
         return
@@ -779,7 +871,7 @@ def check_line_drift(conn: sqlite3.Connection, game: Dict,
 
         if d["poly"] is not None and d["gap"] is not None:
             if abs(d["gap"]) >= PM_STALE_PP:
-                lines.append(f"   Polymarket: {d['poly']:.0%}  ⏸ stale pre-game orders")
+                lines.append(f"   Polymarket: {d['poly']:.0%}  ⏸ stale — Endgame not active")
             elif abs(d["gap"]) >= PM_GAP_PP:
                 direction = "cheaper" if d["gap"] > 0 else "pricier"
                 action = "BUY" if d["gap"] > 0 else "SELL"
@@ -823,7 +915,10 @@ def check_edge_inversion(conn: sqlite3.Connection, game: Dict,
         if not label or label not in tokens:
             continue
 
-        current_poly = tokens[label][1]
+        tok = tokens[label]
+        if len(tok) >= 3 and not tok[2]:
+            continue  # illiquid token (DH mismatch / SDK gap guard) — skip edge eval
+        current_poly = tok[1]
         team = home if label == "home" else away
         pin_prob = next((v for k, v in pin.items() if _nmatch(k, team)), 0)
         current_edge = pin_prob - current_poly
@@ -893,15 +988,45 @@ def main() -> None:
         tokens = extract_tokens(ev, home, away) if ev else {}
         sdk_source = False
 
-        # SDK fallback: Gamma API doesn't expose all PM US game markets
-        if not tokens:
-            tokens = fetch_pm_sdk_moneyline(home, away)
+        # Primary price source: SDK — CLOB is dead during live MLB games.
+        # Gamma+CLOB path is kept as fallback only when SDK returns nothing.
+        sdk_tokens = fetch_pm_sdk_moneyline(home, away)
+        if sdk_tokens and any(v[2] for v in sdk_tokens.values()):
+            sdk_source = True
+            if tokens:
+                # Gamma found the event: keep its token IDs (used for WS/whale
+                # detection), but replace stale Gamma prices with live SDK prices.
+                for label, (slug, price, liquid) in sdk_tokens.items():
+                    if label in tokens:
+                        gamma_tid = tokens[label][0]
+                        tokens[label] = (gamma_tid, price, liquid)
+            else:
+                tokens = sdk_tokens
+            print(f"[mlb_monitor] SDK live prices (primary): {home} vs {away}", flush=True)
+        elif not tokens:
+            # No Gamma event either — use SDK even if not fully liquid
+            tokens = sdk_tokens if sdk_tokens else {}
             sdk_source = bool(tokens)
             if sdk_source:
-                print(f"[mlb_monitor] SDK moneyline fallback: {home} vs {away}", flush=True)
+                print(f"[mlb_monitor] SDK fallback (no Gamma): {home} vs {away}", flush=True)
+
+        # SDK gap guard: >15pp off Vegas = SDK market not tracked by Endgame MMs, no live liquidity
+        SDK_STALE_PP = 15.0
+        if sdk_source and tokens and pin:
+            for label, name in [("home", home), ("away", away)]:
+                if label not in tokens:
+                    continue
+                pin_p = next((v for k, v in pin.items() if _nmatch(k, name)), None)
+                if pin_p is None:
+                    continue
+                td = tokens[label]
+                gap = abs((pin_p - td[1]) * 100)
+                if gap > SDK_STALE_PP:
+                    tokens[label] = (td[0], td[1], False)
+                    print(f"[mlb_monitor] SDK stale guard: {name} gap={gap:.0f}pp vs Vegas, illiquid", flush=True)
 
         if tokens and not sdk_source:
-            # SDK tokens already have live BBO prices — skip CLOB refresh
+            # SDK unavailable — fall back to CLOB refresh on Gamma token IDs
             mc_register_tokens([tokens[lbl][0] for lbl in tokens])
             tokens = refresh_clob_prices(tokens)
 

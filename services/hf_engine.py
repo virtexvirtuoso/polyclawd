@@ -3,7 +3,8 @@ HF Latency Engine — Phase 3
 
 Persistent service that:
 1. Streams real-time BTC/ETH prices from Binance WebSocket
-2. Polls Chainlink oracle prices on Polygon (every ~500ms)
+2. Polls Chainlink oracle prices on Polygon (every ~2s; Polygon block time
+   is ~2.1s, so the on-chain aggregator cannot update faster than that)
 3. Detects latency divergence (Binance moved but oracle hasn't updated)
 4. Generates directional signals when delta > threshold
 5. Logs all events to SQLite for backtesting
@@ -46,19 +47,40 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 # ============================================================================
 
 BINANCE_WS = "wss://stream.binance.com:9443/ws"
-POLYGON_RPC_LIST = [
+# Public Polygon RPC rotation pool. Every entry verified to answer
+# eth_call(latestRoundData) from the VPS on 2026-07-01. The env override is
+# prepended and the list deduped, so a duplicate env value can no longer
+# collapse the pool to a single endpoint (root cause of the drpc 429 storm).
+POLYGON_RPC_LIST = list(dict.fromkeys([
     os.getenv("POLYGON_RPC", "https://polygon-bor-rpc.publicnode.com"),
+    "https://polygon-bor-rpc.publicnode.com",
     "https://polygon.drpc.org",
-]
+    "https://gateway.tenderly.co/public/polygon",
+]))
 POLYGON_RPC = POLYGON_RPC_LIST[0]
-_rpc_index = 0  # current active RPC
-_rpc_consecutive_errors = 0
+_rpc_index = 0  # round-robin cursor (advances every request to spread load)
+_rpc_cooldown_until: Dict[str, float] = {}  # url -> unix ts endpoint usable again
+_rpc_error_streak: Dict[str, int] = {}      # url -> consecutive failures
+RPC_BACKOFF_BASE = 10.0   # seconds; doubles per consecutive failure
+RPC_BACKOFF_CAP = 300.0   # max cooldown per endpoint
+ORACLE_POLL_INTERVAL = 2.0  # seconds; sub-block-time polling only burns quota
 
-# Chainlink Price Feed Aggregator contracts on Polygon
+# Chainlink Price Feed Aggregator contracts on Polygon (verified live 2026-06-24)
 CHAINLINK_FEEDS = {
-    "BTC": "0xc907E116054Ad103354f2D350FD2514433D57F6f",
-    "ETH": "0xF9680D99D6C9589e2a93a78A04A279e509205945",
+    "BTC":  "0xc907E116054Ad103354f2D350FD2514433D57F6f",
+    "ETH":  "0xF9680D99D6C9589e2a93a78A04A279e509205945",
+    "SOL":  "0x10C8264C0935b3B9870013e057f330Ff3e9C56dC",
+    "XRP":  "0x785ba89291f676b5386652eB12b30cF361020694",
+    "DOGE": "0xbaf9327b6564454F4a3364C33eFeEf032b4b4444",
+    # BNB/HYPE: settle via Chainlink Data Streams (off-chain), no on-chain aggregator on Polygon
+    # BNB: monitored via Binance WS with window-start reference instead of oracle comparison
+    # HYPE: not on Binance spot (no HYPEUSDT), cannot monitor
 }
+
+# Assets without on-chain Chainlink feed — use window-start Binance price as reference
+# PM still settles via Chainlink Data Streams; arb mechanism is momentum vs window open
+ORACLE_LESS_ASSETS = {"BNB"}
+WINDOW_SECONDS = 300  # 5-min window boundary for ref price reset
 
 # latestRoundData() selector
 LATEST_ROUND_DATA = "0xfeaf968c"
@@ -67,9 +89,11 @@ LATEST_ROUND_DATA = "0xfeaf968c"
 LATENCY_THRESHOLD_PCT = 0.3   # Min % divergence to flag
 LATENCY_THRESHOLD_HIGH = 0.8  # High-conviction threshold
 ORACLE_STALE_SECONDS = 30     # Oracle considered stale if > this
+SIGNAL_DEDUP_SECONDS = 5      # Min gap between DB writes for same asset+direction
+PAPER_BET_SIZE = 10.0         # Fixed paper trade size ($)
 
-# Binance streams
-BINANCE_STREAMS = ["btcusdt@trade", "ethusdt@trade"]
+# Binance streams — oracle assets + BNB (no on-chain oracle, uses window-ref momentum signal)
+BINANCE_STREAMS = ["btcusdt@trade", "ethusdt@trade", "solusdt@trade", "xrpusdt@trade", "dogeusdt@trade", "bnbusdt@trade"]
 
 # State persistence
 DB_PATH = os.getenv("HF_DB_PATH", 
@@ -96,6 +120,9 @@ class PriceState:
     divergence_pct: float = 0.0
     latency_signal: str = "NONE"  # NONE, UP, DOWN
     signal_strength: str = "none"  # none, low, medium, high
+    # Window-reference tracking for oracle-less assets (BNB)
+    ref_price: float = 0.0        # Binance price at start of current 5-min window
+    ref_window_ts: int = 0        # Unix timestamp of current window boundary
 
 
 @dataclass
@@ -114,42 +141,89 @@ class LatencyEvent:
 
 # Global state
 _state: Dict[str, PriceState] = {
-    "BTC": PriceState(asset="BTC"),
-    "ETH": PriceState(asset="ETH"),
+    "BTC":  PriceState(asset="BTC"),
+    "ETH":  PriceState(asset="ETH"),
+    "SOL":  PriceState(asset="SOL"),
+    "XRP":  PriceState(asset="XRP"),
+    "DOGE": PriceState(asset="DOGE"),
+    "BNB":  PriceState(asset="BNB"),   # window-ref momentum signal (no on-chain oracle)
 }
 _recent_events: deque = deque(maxlen=200)
 _stats = {
     "binance_ticks": 0,
     "oracle_polls": 0,
     "latency_signals": 0,
+    "paper_trades_opened": 0,
+    "paper_trades_resolved": 0,
     "started_at": None,
     "last_binance_tick": None,
     "last_oracle_poll": None,
     "errors": 0,
 }
 
+# Dedup: track last DB write time per asset+direction
+# key = f"{asset}:{direction}", value = unix timestamp of last write
+_last_db_signal: Dict[str, float] = {}
+
+# Open paper trades: asset -> {trade_id, market_id, direction, entry_oracle_price, end_time}
+_open_paper_trades: Dict[str, dict] = {}
+
 
 # ============================================================================
 # Chainlink Oracle Poller
 # ============================================================================
 
+def _pick_rpc() -> str:
+    """Round-robin over the pool, skipping endpoints in backoff cooldown."""
+    global _rpc_index
+    now = time.time()
+    n = len(POLYGON_RPC_LIST)
+    for _ in range(n):
+        url = POLYGON_RPC_LIST[_rpc_index % n]
+        _rpc_index = (_rpc_index + 1) % n
+        if _rpc_cooldown_until.get(url, 0.0) <= now:
+            return url
+    # Every endpoint is cooling down — use the one that recovers soonest
+    return min(POLYGON_RPC_LIST, key=lambda u: _rpc_cooldown_until.get(u, 0.0))
+
+
+def _rpc_failed(rpc_url: str) -> None:
+    """Apply exponential-backoff cooldown to a failing endpoint."""
+    streak = _rpc_error_streak.get(rpc_url, 0) + 1
+    _rpc_error_streak[rpc_url] = streak
+    cooldown = min(RPC_BACKOFF_BASE * (2 ** (streak - 1)), RPC_BACKOFF_CAP)
+    _rpc_cooldown_until[rpc_url] = time.time() + cooldown
+    logger.warning(f"RPC {rpc_url} cooling down {cooldown:.0f}s (streak {streak})")
+
+
+def _rpc_succeeded(rpc_url: str) -> None:
+    _rpc_error_streak[rpc_url] = 0
+    _rpc_cooldown_until[rpc_url] = 0.0
+
+
 async def poll_chainlink_oracle(asset: str) -> Optional[Dict]:
-    """Poll Chainlink price feed on Polygon via JSON-RPC."""
+    """Poll Chainlink price feed on Polygon via JSON-RPC.
+
+    Rotates across POLYGON_RPC_LIST per request; a failing endpoint gets an
+    exponential-backoff cooldown so a rate-limited RPC is never burst-retried.
+    At most 2 attempts per poll, 1s apart — the next poll cycle (2s later)
+    retries on a different endpoint anyway.
+    """
     contract = CHAINLINK_FEEDS.get(asset)
     if not contract:
         return None
-    
+
     payload = json.dumps({
         "jsonrpc": "2.0",
         "method": "eth_call",
         "params": [{"to": contract, "data": LATEST_ROUND_DATA}, "latest"],
         "id": 1,
     })
-    
-    global _rpc_index, _rpc_consecutive_errors
 
-    for attempt in range(len(POLYGON_RPC_LIST)):
-        rpc_url = POLYGON_RPC_LIST[_rpc_index]
+    for attempt in range(2):
+        if attempt:
+            await asyncio.sleep(1.0)  # never burst-retry within the same second
+        rpc_url = _pick_rpc()
         try:
             proc = await asyncio.create_subprocess_exec(
                 "curl", "-s", "-X", "POST", rpc_url,
@@ -163,26 +237,22 @@ async def poll_chainlink_oracle(asset: str) -> Optional[Dict]:
 
             output = stdout.decode().strip()
             if not output:
-                logger.warning(f"Empty response from {rpc_url}, retrying...")
+                logger.warning(f"Empty response from {rpc_url}")
+                _rpc_failed(rpc_url)
                 continue
             result = json.loads(output)
 
-            # Check for RPC error (quota exceeded, unauthorized, etc.)
+            # RPC-level error (quota exceeded, unauthorized, etc.)
             if result.get("error"):
                 err_msg = result["error"].get("message", "")
                 logger.warning(f"RPC error on {rpc_url}: {err_msg}")
-                _rpc_consecutive_errors += 1
-                if _rpc_consecutive_errors >= 3:
-                    _rpc_index = (_rpc_index + 1) % len(POLYGON_RPC_LIST)
-                    _rpc_consecutive_errors = 0
-                    logger.warning(f"Switching RPC to {POLYGON_RPC_LIST[_rpc_index]}")
-                    continue
-                return None
+                _rpc_failed(rpc_url)
+                continue
 
             hex_data = result.get("result", "")
-
             if not hex_data or len(hex_data) < 322:
-                return None
+                _rpc_failed(rpc_url)
+                continue
 
             # Decode: (roundId, answer, startedAt, updatedAt, answeredInRound)
             data = hex_data[2:]
@@ -193,7 +263,7 @@ async def poll_chainlink_oracle(asset: str) -> Optional[Dict]:
 
             price = answer / 1e8  # Chainlink uses 8 decimals
 
-            _rpc_consecutive_errors = 0
+            _rpc_succeeded(rpc_url)
             return {
                 "price": price,
                 "updated_at": updated_at,
@@ -203,23 +273,18 @@ async def poll_chainlink_oracle(asset: str) -> Optional[Dict]:
         except Exception as e:
             logger.error(f"Chainlink poll error ({asset}) on {rpc_url}: {e}")
             _stats["errors"] += 1
-            _rpc_consecutive_errors += 1
-            if _rpc_consecutive_errors >= 3:
-                _rpc_index = (_rpc_index + 1) % len(POLYGON_RPC_LIST)
-                _rpc_consecutive_errors = 0
-                logger.warning(f"Switching RPC to {POLYGON_RPC_LIST[_rpc_index]}")
-                continue
-            return None
+            _rpc_failed(rpc_url)
+            continue
 
     return None
 
 
 async def oracle_poller_loop():
-    """Continuously poll Chainlink oracles every ~500ms."""
+    """Continuously poll Chainlink oracles every ~2s (block-time bound)."""
     logger.info("🔗 Starting Chainlink oracle poller...")
     
     while True:
-        for asset in ["BTC", "ETH"]:
+        for asset in list(CHAINLINK_FEEDS.keys()):
             try:
                 result = await poll_chainlink_oracle(asset)
                 if result:
@@ -237,7 +302,7 @@ async def oracle_poller_loop():
                 logger.error(f"Oracle poller error ({asset}): {e}")
                 _stats["errors"] += 1
         
-        await asyncio.sleep(0.5)  # Poll every 500ms
+        await asyncio.sleep(ORACLE_POLL_INTERVAL)  # ~block time; faster is wasted quota
 
 
 # ============================================================================
@@ -264,11 +329,13 @@ async def binance_ws_loop():
                         ts = data.get("T", 0)  # Trade time in ms
                         
                         # Map to our asset names
-                        if symbol == "BTCUSDT":
-                            asset = "BTC"
-                        elif symbol == "ETHUSDT":
-                            asset = "ETH"
-                        else:
+                        _symbol_map = {
+                            "BTCUSDT": "BTC", "ETHUSDT": "ETH",
+                            "SOLUSDT": "SOL", "XRPUSDT": "XRP",
+                            "DOGEUSDT": "DOGE", "BNBUSDT": "BNB",
+                        }
+                        asset = _symbol_map.get(symbol)
+                        if not asset:
                             continue
                         
                         state = _state[asset]
@@ -298,38 +365,72 @@ async def binance_ws_loop():
 # ============================================================================
 
 def _check_divergence(asset: str):
-    """Check if Binance and oracle prices have diverged significantly."""
+    """Check if prices have diverged significantly.
+    
+    For oracle assets (BTC/ETH/SOL/XRP/DOGE): Binance vs Chainlink on-chain aggregator.
+    For oracle-less assets (BNB): Binance vs window-start reference price.
+    """
     state = _state[asset]
     
-    if state.binance_price <= 0 or state.oracle_price <= 0:
+    if state.binance_price <= 0:
         return
-    
-    # Calculate divergence
-    divergence = (state.binance_price - state.oracle_price) / state.oracle_price * 100
+
+    if asset in ORACLE_LESS_ASSETS:
+        # ── Window-reference momentum signal ──
+        now_int = int(time.time())
+        window_ts = (now_int // WINDOW_SECONDS) * WINDOW_SECONDS
+        if state.ref_price <= 0 or state.ref_window_ts != window_ts:
+            # New window — reset reference price
+            state.ref_price = state.binance_price
+            state.ref_window_ts = window_ts
+            state.divergence_pct = 0.0
+            state.latency_signal = "NONE"
+            state.signal_strength = "none"
+            return
+        divergence = (state.binance_price - state.ref_price) / state.ref_price * 100
+        # Pseudo oracle_price for event logging
+        state.oracle_price = state.ref_price
+        state.oracle_updated_at = window_ts
+    else:
+        if state.oracle_price <= 0:
+            return
+        # ── Standard oracle latency arb ──
+        divergence = (state.binance_price - state.oracle_price) / state.oracle_price * 100
+
     state.divergence_pct = round(divergence, 4)
-    
     abs_div = abs(divergence)
-    
-    # Check oracle staleness
+
+    # Staleness check: oracle-less assets use window boundary (always fresh within window)
     now = time.time()
-    oracle_age = now - state.oracle_updated_at if state.oracle_updated_at > 0 else 999
-    
+    if asset in ORACLE_LESS_ASSETS:
+        oracle_age = 0  # window ref is always fresh
+    else:
+        oracle_age = now - state.oracle_updated_at if state.oracle_updated_at > 0 else 999
+
     # Determine signal
     if abs_div >= LATENCY_THRESHOLD_PCT:
         direction = "UP" if divergence > 0 else "DOWN"
-        
+
         if abs_div >= LATENCY_THRESHOLD_HIGH:
             strength = "high"
         elif abs_div >= LATENCY_THRESHOLD_PCT * 2:
             strength = "medium"
         else:
             strength = "low"
-        
+
         # Only signal if oracle isn't too stale (otherwise it's not latency, it's a dead feed)
         if oracle_age < ORACLE_STALE_SECONDS:
             state.latency_signal = direction
             state.signal_strength = strength
-            
+
+            # ── Dedup: only write to DB once per SIGNAL_DEDUP_SECONDS per asset+direction ──
+            dedup_key = f"{asset}:{direction}"
+            last_write = _last_db_signal.get(dedup_key, 0.0)
+            if now - last_write < SIGNAL_DEDUP_SECONDS:
+                return  # skip — same signal burst, don't spam DB
+
+            _last_db_signal[dedup_key] = now
+
             event = LatencyEvent(
                 asset=asset,
                 binance_price=state.binance_price,
@@ -345,7 +446,7 @@ def _check_divergence(asset: str):
             _recent_events.append(asdict(event))
             _stats["latency_signals"] += 1
             
-            # Log high-strength events
+            # Log medium/high events
             if strength in ("medium", "high"):
                 logger.info(
                     f"🎯 LATENCY SIGNAL [{asset}] {direction} "
@@ -355,12 +456,219 @@ def _check_divergence(asset: str):
             
             # Persist to DB
             _log_event_to_db(event)
+
+            # ── Auto paper trade on medium+ signals ──
+            if strength in ("medium", "high") and asset not in _open_paper_trades:
+                _trigger_paper_trade(event)
         else:
             state.latency_signal = "STALE"
             state.signal_strength = "none"
     else:
         state.latency_signal = "NONE"
         state.signal_strength = "none"
+
+
+# ============================================================================
+# Paper Trade Engine
+# ============================================================================
+
+_ASSET_NAME_MAP = {
+    "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
+    "XRP": "xrp", "DOGE": "dogecoin", "BNB": "bnb",
+}
+
+def _find_active_hf_market(asset: str, prefer_duration: str = "5min") -> Optional[dict]:
+    """Query Gamma API for the nearest closing 5-min or 15-min UP/DOWN market for this asset.
+    
+    Falls back to 15-min if no 5-min market found, and vice versa.
+    Returns the market with the soonest end date (i.e., most actionable window).
+    """
+    import urllib.request, urllib.parse
+    asset_lower = asset.lower()
+    name = _ASSET_NAME_MAP.get(asset, asset_lower)
+
+    duration_checks = {
+        "5min":  lambda slug, q: "updown-5m" in slug or "5-minute" in q or "5min" in q or "5 minute" in q,
+        "15min": lambda slug, q: "updown-15m" in slug or "15-minute" in q or "15min" in q or "15 minute" in q,
+    }
+    # Prefer requested duration, fallback to the other
+    order = [prefer_duration, "15min" if prefer_duration == "5min" else "5min"]
+
+    try:
+        q = urllib.parse.quote(f"{name} up or down")
+        url = f"https://gamma-api.polymarket.com/markets?active=true&closed=false&_q={q}&limit=40&order=endDate&ascending=true"
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd-HF/1.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            markets = json.loads(resp.read().decode())
+
+        for dur in order:
+            check = duration_checks[dur]
+            for m in markets:
+                q_text = (m.get("question") or "").lower()
+                slug = (m.get("slug") or "").lower()
+                if check(slug, q_text):
+                    if name in q_text or asset_lower in q_text or asset_lower in slug:
+                        logger.debug(f"Found {dur} market for {asset}: {m.get('slug')}")
+                        return m
+    except Exception as e:
+        logger.debug(f"HF market lookup failed for {asset}: {e}")
+    return None
+
+
+def _trigger_paper_trade(event: LatencyEvent):
+    """Find active 5-min market and log a paper trade entry."""
+    market = _find_active_hf_market(event.asset)
+    if not market:
+        logger.debug(f"No 5min market found for {event.asset}, skipping paper trade")
+        return
+
+    market_id = market.get("id") or market.get("conditionId", "")
+    question = market.get("question", "")
+    end_time = market.get("endDate") or market.get("end_date") or ""
+
+    # PM YES price = outcomePrices[0] if list, else bestAsk
+    out_prices = market.get("outcomePrices")
+    if isinstance(out_prices, list) and len(out_prices) >= 2:
+        try:
+            yes_price = float(out_prices[0])
+        except (ValueError, TypeError):
+            yes_price = 0.5
+    else:
+        yes_price = float(market.get("bestAsk") or market.get("lastTradePrice") or 0.5)
+
+    edge_pct = abs(yes_price - 0.5) * 100  # distance from 50¢
+
+    try:
+        db = _get_db()
+        cur = db.execute(
+            """INSERT INTO hf_paper_trades
+               (market_id, asset, direction, trigger_type, strength, confidence,
+                edge_pct, bet_size, entry_price, entry_oracle_price,
+                market_question, market_end_time, opened_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (market_id, event.asset, event.direction, "latency_arb", event.strength,
+             abs(event.divergence_pct),  # confidence = divergence %
+             edge_pct, PAPER_BET_SIZE, yes_price, event.oracle_price,
+             question, end_time, event.detected_at),
+        )
+        db.commit()
+        trade_id = cur.lastrowid
+        _open_paper_trades[event.asset] = {
+            "trade_id": trade_id,
+            "direction": event.direction,
+            "entry_oracle_price": event.oracle_price,
+            "end_time": end_time,
+            "market_id": market_id,
+        }
+        _stats["paper_trades_opened"] += 1
+        logger.info(
+            f"📝 PAPER TRADE #{trade_id} [{event.asset}] {event.direction} "
+            f"entry={yes_price:.3f} div={event.divergence_pct:+.3f}% "
+            f"closes={end_time}"
+        )
+    except Exception as e:
+        logger.error(f"Paper trade log error: {e}")
+
+
+def _resolve_from_pm_market(market_id: str, direction: str) -> Optional[str]:
+    """Poll Gamma API for actual PM market outcome.
+    
+    Returns 'WIN', 'LOSS', or None (not yet resolved).
+    outcomes: ["Up", "Down"] → outcomePrices[0]="1" means UP won.
+    """
+    import urllib.request
+    try:
+        url = f"https://gamma-api.polymarket.com/markets/{market_id}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd-HF/1.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            m = json.loads(r.read())
+
+        prices = m.get("outcomePrices")
+        if not isinstance(prices, list) or len(prices) < 2:
+            return None
+
+        up_price = float(prices[0])
+        down_price = float(prices[1])
+
+        # Resolved when one side = 1.0 exactly
+        if up_price == 1.0 and down_price == 0.0:
+            pm_outcome = "UP"
+        elif down_price == 1.0 and up_price == 0.0:
+            pm_outcome = "DOWN"
+        else:
+            return None  # Still trading, not settled
+
+        return "WIN" if pm_outcome == direction else "LOSS"
+
+    except Exception as e:
+        logger.debug(f"PM resolution poll error ({market_id}): {e}")
+        return None
+
+
+async def paper_trade_resolution_loop():
+    """Every 60s resolve expired paper trades by comparing oracle prices."""
+    logger.info("📊 Starting paper trade resolution loop...")
+    await asyncio.sleep(30)  # let engine warm up first
+
+    while True:
+        try:
+            now_ts = time.time()
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            # Resolve open in-memory trades whose window has passed
+            for asset, trade in list(_open_paper_trades.items()):
+                end_time_str = trade.get("end_time", "")
+                if not end_time_str:
+                    continue
+                try:
+                    # Parse end_time (ISO or epoch)
+                    if isinstance(end_time_str, (int, float)):
+                        end_ts = float(end_time_str)
+                    else:
+                        from datetime import datetime as _dt
+                        dt = _dt.fromisoformat(end_time_str.replace("Z", "+00:00"))
+                        end_ts = dt.timestamp()
+                except Exception:
+                    continue
+
+                if now_ts < end_ts:
+                    continue  # not expired yet
+
+                # Market window closed — poll PM for actual outcome
+                direction = trade["direction"]
+                outcome = _resolve_from_pm_market(trade["market_id"], direction)
+
+                if outcome is None:
+                    # Market not yet resolved by PM — check again next cycle
+                    # Give up after 15 min past end_ts to avoid stale open trades
+                    if now_ts - end_ts > 900:
+                        outcome = "UNRESOLVED"
+                    else:
+                        continue
+
+                pnl = PAPER_BET_SIZE * 0.9 if outcome == "WIN" else (-PAPER_BET_SIZE if outcome == "LOSS" else 0.0)
+
+                try:
+                    db = _get_db()
+                    db.execute(
+                        "UPDATE hf_paper_trades SET outcome=?, pnl=?, resolved_at=? WHERE id=?",
+                        (outcome, pnl, now_iso, trade["trade_id"])
+                    )
+                    db.commit()
+                    _stats["paper_trades_resolved"] += 1
+                    logger.info(
+                        f"✅ RESOLVED #{trade['trade_id']} [{asset}] {direction} "
+                        f"→ {outcome} (PM ground truth) pnl=${pnl:+.2f}"
+                    )
+                except Exception as e:
+                    logger.error(f"Resolution DB error: {e}")
+
+                del _open_paper_trades[asset]
+
+        except Exception as e:
+            logger.error(f"Resolution loop error: {e}")
+
+        await asyncio.sleep(60)
 
 
 # ============================================================================
@@ -375,6 +683,7 @@ def _get_db():
     if _db_conn is None:
         _db_conn = sqlite3.connect(DB_PATH)
         _db_conn.execute("PRAGMA journal_mode=WAL")
+        _db_conn.execute("PRAGMA busy_timeout=5000")  # 5s: enough for transient locks, fast-fail if stuck
         _db_conn.execute("""
             CREATE TABLE IF NOT EXISTS hf_latency_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -393,6 +702,12 @@ def _get_db():
             CREATE INDEX IF NOT EXISTS idx_hf_events_asset_time 
             ON hf_latency_events(asset, detected_at)
         """)
+        # Ensure entry_oracle_price column exists (added post-initial schema)
+        try:
+            _db_conn.execute("ALTER TABLE hf_paper_trades ADD COLUMN entry_oracle_price REAL")
+            _db_conn.commit()
+        except Exception:
+            pass  # column already exists
         _db_conn.commit()
     return _db_conn
 
@@ -452,6 +767,30 @@ async def http_handler(reader, writer):
                         "oracle_price": state.oracle_price,
                     })
             body = json.dumps({"signals": signals, "count": len(signals)})
+        elif path == "/paper_trades":
+            try:
+                db = _get_db()
+                rows = db.execute(
+                    """SELECT id, asset, direction, strength, confidence, entry_price,
+                              entry_oracle_price, market_end_time, outcome, pnl, opened_at, resolved_at
+                       FROM hf_paper_trades ORDER BY id DESC LIMIT 50"""
+                ).fetchall()
+                cols = ["id","asset","direction","strength","confidence","entry_price",
+                        "entry_oracle_price","market_end_time","outcome","pnl","opened_at","resolved_at"]
+                trades = [dict(zip(cols, r)) for r in rows]
+                resolved = [t for t in trades if t["outcome"]]
+                wins = sum(1 for t in resolved if t["outcome"] == "WIN")
+                body = json.dumps({
+                    "open": len(_open_paper_trades),
+                    "total": len(trades),
+                    "resolved": len(resolved),
+                    "wins": wins,
+                    "win_rate": round(wins / len(resolved), 3) if resolved else None,
+                    "total_pnl": round(sum(t["pnl"] or 0 for t in resolved), 2),
+                    "trades": trades,
+                })
+            except Exception as e:
+                body = json.dumps({"error": str(e)})
         else:
             body = json.dumps({
                 "service": "Polyclawd HF Latency Engine",
@@ -609,6 +948,7 @@ async def main():
         oracle_poller_loop(),
         start_http_server(),
         trigger_evaluation_loop(),
+        paper_trade_resolution_loop(),
     )
 
 
