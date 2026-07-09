@@ -351,7 +351,8 @@ def execute_intent(
     for oid in maker_order_ids:
         if not oid:
             continue
-        status = _safe_get_order(oid)
+        # Use retry poll: CLOB may return size_matched=0 briefly after fill.
+        status = _poll_until_settled(oid, label="C1-post-wait")
         matched = _matched_shares_of(status)
         if matched > 0:
             maker_filled_shares += matched
@@ -410,13 +411,15 @@ def execute_intent(
     for oid in maker_order_ids:
         if not oid:
             continue
-        already_matched = _matched_shares_of(_safe_get_order(oid))
+        # Snapshot matched count BEFORE cancel (use retry poll for same reason).
+        already_matched = _matched_shares_of(_poll_until_settled(oid, label="C2-pre-cancel"))
         try:
             clob_client.cancel(oid)
         except Exception as exc:
             logger.warning("execute_intent: cancel({}) raised; re-polling to confirm: {}", oid, exc)
-        # Re-poll ONCE to learn the post-cancel truth.
-        status = _safe_get_order(oid)
+        # Re-poll with retry: cancel and fill can race; CLOB may transiently
+        # report size_matched=0 even when the fill landed before the cancel.
+        status = _poll_until_settled(oid, label="C2-post-cancel")
         post_cancel_matched = _matched_shares_of(status)
         late_fill = post_cancel_matched - already_matched
         if late_fill > 1e-9:
@@ -584,6 +587,48 @@ def _safe_get_order(order_id: str) -> dict | None:
     except Exception as exc:
         logger.warning("execute_intent: get_order({}) failed: {}", order_id, exc)
         return None
+
+
+# Retry constants for fill-confirmation polls.
+# The CLOB can report status=MATCHED before size_matched is non-zero —
+# we retry briefly to avoid treating a confirmed fill as zero.
+_FILL_CONFIRM_RETRIES = 3
+_FILL_CONFIRM_SLEEP = 1.5  # seconds between retries
+
+
+def _poll_until_settled(order_id: str, *, label: str = "") -> dict | None:
+    """Poll get_order until size_matched > 0 or a terminal state is reached.
+
+    Addresses the CLOB race where status=MATCHED is returned before
+    size_matched is updated.  Retries up to _FILL_CONFIRM_RETRIES times
+    with _FILL_CONFIRM_SLEEP between each attempt.
+
+    Terminal early-exit conditions (no further retries):
+      - size_matched > 0  (fill confirmed)
+      - status in {CANCELED, CANCELLED, EXPIRED}  (no fill possible)
+
+    Falls through and returns the last status dict (or None) when retries
+    are exhausted without confirmation.
+    """
+    status = _safe_get_order(order_id)
+    for attempt in range(_FILL_CONFIRM_RETRIES):
+        if status is None:
+            break
+        matched = _matched_shares_of(status)
+        label_str = f"[{label}] " if label else ""
+        raw = str(status.get("status", "")).strip().upper()
+        if matched > 0:
+            break  # fill confirmed
+        if raw in ("CANCELED", "CANCELLED", "EXPIRED"):
+            break  # definitely not filled
+        # Status may be MATCHED/LIVE with size_matched still 0 — retry
+        logger.debug(
+            "{}poll_until_settled: oid={} attempt={}/{} status={} matched=0 — retrying",
+            label_str, order_id, attempt + 1, _FILL_CONFIRM_RETRIES, raw,
+        )
+        time.sleep(_FILL_CONFIRM_SLEEP)
+        status = _safe_get_order(order_id)
+    return status
 
 
 def _parse_taker_fill(
@@ -761,7 +806,7 @@ def execute_exit(
     timeout = float(live_config.maker_wait_secs())
     _wait_for_maker_fill(maker_oid, timeout)
 
-    status_after_wait = _safe_get_order(maker_oid)
+    status_after_wait = _poll_until_settled(maker_oid, label="exit-C1-post-wait")
     maker_filled_shares = _matched_shares_of(status_after_wait)
 
     maker_pnl = 0.0
@@ -807,13 +852,13 @@ def execute_exit(
         }
 
     # ── Step 3: cancel resting maker, re-poll to confirm (C2) ────────────────
-    already_matched_pre_cancel = _matched_shares_of(_safe_get_order(maker_oid))
+    already_matched_pre_cancel = _matched_shares_of(_poll_until_settled(maker_oid, label="exit-C2-pre-cancel"))
     try:
         clob_client.cancel(maker_oid)
     except Exception as exc:
         logger.warning("execute_exit: cancel({}) raised; re-polling: {}", maker_oid, exc)
 
-    status_post_cancel = _safe_get_order(maker_oid)
+    status_post_cancel = _poll_until_settled(maker_oid, label="exit-C2-post-cancel")
     post_cancel_matched = _matched_shares_of(status_post_cancel)
     cancel_window_fill = post_cancel_matched - already_matched_pre_cancel
 
