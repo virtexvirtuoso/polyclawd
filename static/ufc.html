@@ -3,10 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
 <title>Polyclawd — UFC Edge Dashboard</title>
 <style>
-  :root{--bg:#0b1020;--card:#141a2e;--card2:#1b2236;--border:#27304a;--dim:#8b95b0;
-        --text:#e6ebf5;--green:#10b981;--red:#ef4444;--amber:#f59e0b;--accent:#e1474d;}
+  :root{--bg:var(--pc-bg);--card:var(--pc-panel);--card2:var(--pc-raised);--border:var(--pc-line);--dim:var(--pc-dim);
+        --text:var(--pc-ink);--green:var(--pc-up);--red:var(--pc-down);--amber:var(--pc-warn);--accent:var(--pc-accent);}
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;padding:20px;max-width:1200px;margin:0 auto}
   a{color:var(--accent);text-decoration:none}
@@ -39,15 +40,16 @@
   .bar{height:8px;background:var(--card2);border-radius:4px;overflow:hidden;margin-top:6px}
   .bar>span{display:block;height:100%;background:var(--accent)}
   .stat{display:inline-block;margin-right:22px}.stat b{font-size:20px;display:block}
+
+  /* ── Probability Bureau adoption (css/polyclawd.css) ── */
+  body{font-family:var(--pc-mono);background:var(--pc-bg);color:var(--pc-ink)}
+  body > *{position:relative;z-index:1}
+  *{border-radius:0!important;box-shadow:none!important;text-shadow:none!important}
+  h1,h2,h3,h4,.stat-value,.card-value,.page-title,.kpi-value,.big-num{font-family:var(--pc-disp);font-weight:400;letter-spacing:.03em}
+  .tab.active,.btn-primary{color:#0d0d0b}
 </style>
 </head>
-<body>
-<div class="nav">
-  <a href="index.html">← Home</a><a href="baseball.html">⚾ Baseball</a>
-  <a href="soccer.html">⚽ Soccer</a><a href="ufc.html" style="color:var(--text)">🥊 UFC</a>
-  <a href="weather.html">🌡️ Weather</a><a href="options.html">📈 Options</a>
-  <a href="portfolio.html">💼 Portfolio</a>
-</div>
+<body data-pc-section="UFC">
 <div class="hero">
   <div><h1>🥊 UFC Edge</h1>
     <div class="sub">Shin-devigged sharp-book fighter moneylines vs Polymarket. Method/round props are listed for manual review (no reliable API line).</div></div>
@@ -136,5 +138,6 @@ async function load(){
 async function loop(){ await load(); setTimeout(loop, _anyLive?5000:60000); }
 loop();
 </script>
+<script src="polyclawd-shell.js" defer></script>
 </body>
 </html>

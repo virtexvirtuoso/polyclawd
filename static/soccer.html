@@ -3,10 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
 <title>Polyclawd — Soccer Edge Dashboard</title>
 <style>
-  :root{--bg:#0b1020;--card:#141a2e;--card2:#1b2236;--border:#27304a;--dim:#8b95b0;
-        --text:#e6ebf5;--green:#10b981;--red:#ef4444;--amber:#f59e0b;--accent:#6c5ce7;}
+  :root{--bg:var(--pc-bg);--card:var(--pc-panel);--card2:var(--pc-raised);--border:var(--pc-line);--dim:var(--pc-dim);
+        --text:var(--pc-ink);--green:var(--pc-up);--red:var(--pc-down);--amber:var(--pc-warn);--accent:var(--pc-accent);}
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;padding:20px;max-width:1200px;margin:0 auto}
   a{color:var(--accent);text-decoration:none}
@@ -44,15 +45,16 @@
   .heroval{font-size:40px;font-weight:700;line-height:1.1}
   .wc-banner{background:linear-gradient(90deg,rgba(108,92,231,.18),rgba(16,185,129,.10));border:1px solid var(--accent);border-radius:12px;padding:14px 18px;margin-bottom:16px}
   .verdict{margin-top:8px;font-size:13px}
+
+  /* ── Probability Bureau adoption (css/polyclawd.css) ── */
+  body{font-family:var(--pc-mono);background:var(--pc-bg);color:var(--pc-ink)}
+  body > *{position:relative;z-index:1}
+  *{border-radius:0!important;box-shadow:none!important;text-shadow:none!important}
+  h1,h2,h3,h4,.stat-value,.card-value,.page-title,.kpi-value,.big-num{font-family:var(--pc-disp);font-weight:400;letter-spacing:.03em}
+  .tab.active,.btn-primary{color:#0d0d0b}
 </style>
 </head>
-<body>
-<div class="nav">
-  <a href="index.html">← Home</a><a href="baseball.html">⚾ Baseball</a>
-  <a href="soccer.html" style="color:var(--text)">⚽ Soccer</a><a href="ufc.html">🥊 UFC</a>
-  <a href="weather.html">🌡️ Weather</a><a href="options.html">📈 Options</a>
-  <a href="portfolio.html">💼 Portfolio</a>
-</div>
+<body data-pc-section="Soccer">
 <div class="hero">
   <div><h1>⚽ Soccer Edge — 🌍 World Cup 2026</h1>
     <div class="sub">Shin-devigged sharp-book odds (Pinnacle / Betfair) vs Polymarket &amp; Kalshi — per-match 3-way &amp; World Cup futures. Executable-edge gated, CLV-tracked.</div></div>
@@ -329,5 +331,6 @@ async function load(){
 async function loop(){ await load(); setTimeout(loop, _anyLive?5000:60000); }
 loop();
 </script>
+<script src="polyclawd-shell.js" defer></script>
 </body>
 </html>

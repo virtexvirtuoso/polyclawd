@@ -3,10 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
 <title>Whale Follow — Paper Strategy — Polyclawd</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
   --abyss:#0a0a0f; --panel:#0e0f16; --panel2:#11131c; --border:#1d2030;
@@ -79,9 +78,21 @@ tr.verdict-ready td{background:rgba(78,205,196,.05)}
 
 .note{margin-top:14px;font-size:10.5px;color:var(--faint);line-height:1.7;border-top:1px solid var(--border);padding-top:10px}
 .note b{color:var(--dim)}
+
+  :root{
+    --abyss:var(--pc-bg); --panel:var(--pc-panel); --panel2:var(--pc-raised); --border:var(--pc-line);
+    --text:var(--pc-ink); --dim:var(--pc-dim); --faint:var(--pc-faint);
+    --crit:var(--pc-crit); --high:var(--pc-warn); --low:var(--pc-chart-4); --gold:var(--pc-gold);
+    --yes:var(--pc-up); --no:var(--pc-down); --blue:var(--pc-chart-4);
+  }
+  /* ── Probability Bureau adoption (css/polyclawd.css) ── */
+  body{font-family:var(--pc-mono);background:var(--pc-bg);color:var(--pc-ink)}
+  body > *{position:relative;z-index:1}
+  *{border-radius:0!important;box-shadow:none!important;text-shadow:none!important;filter:none!important}
+  h1,h2,h3,h4,.stat-value,.card-value,.page-title,.kpi-value,.big-num{font-family:var(--pc-disp);font-weight:400;letter-spacing:.03em}
 </style>
 </head>
-<body>
+<body data-pc-section="Whale follow">
 <header>
   <h1>WHALE<em>//</em>FOLLOW</h1>
   <span class="paper">paper · shadow only</span>
@@ -389,6 +400,6 @@ load();
 setInterval(load, 60000);
 window.addEventListener('resize', load);
 </script>
-<script src="whale-nav.js" defer></script>
+<script src="polyclawd-shell.js" defer></script>
 </body>
 </html>

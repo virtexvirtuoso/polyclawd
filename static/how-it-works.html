@@ -3,15 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
 <title>How Polyclawd Works</title>
 <script src="auth.js"></script>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
   :root, [data-theme="dark"] {
-    --bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a26;--border:#2a2a3a;
-    --accent:#6c5ce7;--accent2:#a29bfe;--green:#00c853;--red:#ff5252;
-    --orange:#ffab40;--cyan:#18ffff;--text:#e8e8f0;--text2:#8888a0;--gold:#ffd700;
-    --noise-opacity:0.03;--shadow:rgba(0,0,0,0.3);
+    --bg:var(--pc-bg);--surface:var(--pc-panel);--surface2:var(--pc-raised);--border:var(--pc-line);
+    --accent:var(--pc-accent);--accent2:var(--pc-accent-ink);--green:var(--pc-up);--red:var(--pc-down);
+    --orange:var(--pc-warn);--cyan:var(--pc-chart-4);--text:var(--pc-ink);--text2:var(--pc-dim);--gold:var(--pc-gold);
+    --noise-opacity:0;--shadow:transparent;
   }
   [data-theme="light"] {
     --bg:#f5f5f8;--surface:#ffffff;--surface2:#eeeef2;--border:#d8d8e0;
@@ -111,13 +111,19 @@
     .pipe-step{font-size:12px;padding:8px 12px}
     table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
   }
+
+  /* ── Probability Bureau adoption (css/polyclawd.css) ── */
+  body{font-family:var(--pc-mono);background:var(--pc-bg);color:var(--pc-ink)}
+  body > *{position:relative;z-index:1}
+  *{border-radius:0!important;box-shadow:none!important;text-shadow:none!important}
+  h1,h2,h3,h4,.stat-value,.card-value,.page-title,.kpi-value,.big-num{font-family:var(--pc-disp);font-weight:400;letter-spacing:.03em}
+  .tab.active,.btn-primary{color:#0d0d0b}
 </style>
 </head>
-<body>
+<body data-pc-section="How it works">
 <div class="noise"></div>
 <div class="container">
 
-  <div style="display:flex;gap:8px;flex-wrap:wrap"><a href="portfolio.html" class="nav-link">← Portfolio</a><a href="analysis.html" class="nav-link">Analysis</a><a href="social.html" class="nav-link">Social Tracker</a><a href="elections.html" class="nav-link">Elections</a></div>
 
   <header>
     <button class="theme-toggle" onclick="cycleTheme()" title="Toggle theme">🌓</button>
@@ -324,5 +330,6 @@ function cycleTheme(){
 }
 (function(){const t=localStorage.getItem('theme');if(t){document.documentElement.setAttribute('data-theme',t);const labels={'auto':'🌓','light':'☀️','dark':'🌙'};document.addEventListener('DOMContentLoaded',()=>{const btn=document.querySelector('.theme-toggle');if(btn)btn.textContent=labels[t]||'🌓'});}})();
 </script>
+<script src="polyclawd-shell.js" defer></script>
 </body>
 </html>

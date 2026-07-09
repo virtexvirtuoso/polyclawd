@@ -3,10 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
 <title>WHALE SHARK — Size-Anomaly Surveillance</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;700;800&family=Big+Shoulders:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 /* ════════════════════════════════════════════════════════════════
    WHALE SHARK — surveillance instrument, not a dashboard.
@@ -437,9 +436,22 @@ footer.tape{
   .contact.enter,.sev-critical.enter::after{animation:none}
   *{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}
 }
+
+  :root{
+    --bg:var(--pc-bg); --bg2:var(--pc-bg); --panel:var(--pc-panel); --panel2:var(--pc-raised);
+    --line:var(--pc-line); --line2:var(--pc-line-2); --ink:var(--pc-ink); --dim:var(--pc-dim); --faint:var(--pc-faint);
+    --crit:var(--pc-crit); --crit-deep:#3a0d14; --high:var(--pc-warn); --low:var(--pc-low); --low-tint:var(--pc-chart-4);
+    --bid:var(--pc-up); --ask:var(--pc-down); --gold:var(--pc-gold); --gold-deep:#5a4a14;
+    --mono:var(--pc-mono); --disp:var(--pc-disp);
+  }
+  /* ── Probability Bureau adoption (css/polyclawd.css) ── */
+  body{font-family:var(--pc-mono);background:var(--pc-bg);color:var(--pc-ink)}
+  body > *{position:relative;z-index:1}
+  *{border-radius:0!important;box-shadow:none!important;text-shadow:none!important;filter:none!important}
+  h1,h2,h3,h4,.stat-value,.card-value,.page-title,.kpi-value,.big-num{font-family:var(--pc-disp);font-weight:400;letter-spacing:.03em}
 </style>
 </head>
-<body>
+<body data-pc-section="Whales">
 
 <header class="chrome">
   <div class="brand">
@@ -901,7 +913,6 @@ setInterval(pollStats, STATS_MS);
 setInterval(pollWallets, WALLETS_MS);
 setInterval(tick, 1000);
 </script>
-<script src="whale-hub.js" defer></script>
-<script src="whale-nav.js" defer></script>
+<script src="polyclawd-shell.js" defer></script>
 </body>
 </html>

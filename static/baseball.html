@@ -3,15 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
 <title>Polyclawd — Baseball Edge Dashboard</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
 <style>
   :root {
-    --bg: #0a0e17; --card: #111827; --border: #1e293b;
-    --text: #e2e8f0; --dim: #94a3b8; --accent: #3b82f6;
-    --green: #10b981; --red: #ef4444; --amber: #f59e0b;
-    --cyan: #06b6d4; --purple: #8b5cf6;
+    --bg: var(--pc-bg); --card: var(--pc-panel); --border: var(--pc-line);
+    --text: var(--pc-ink); --dim: var(--pc-dim); --accent: var(--pc-accent);
+    --green: var(--pc-up); --red: var(--pc-down); --amber: var(--pc-warn);
+    --cyan: var(--pc-chart-4); --purple: var(--pc-chart-5);
   }
   * { margin: 0; padding: 0; box-sizing: border-box; } html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
   body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); padding: 20px; padding-left: max(20px, env(safe-area-inset-left)); padding-right: max(20px, env(safe-area-inset-right)); max-width: 1400px; margin: 0 auto; }
@@ -203,9 +203,16 @@
     th { font-size: 0.55rem; padding: 4px 3px; }
     td { padding: 4px 3px; }
   }
+
+  /* ── Probability Bureau adoption (css/polyclawd.css) ── */
+  body{font-family:var(--pc-mono);background:var(--pc-bg);color:var(--pc-ink)}
+  body > *{position:relative;z-index:1}
+  *{border-radius:0!important;box-shadow:none!important;text-shadow:none!important}
+  h1,h2,h3,h4,.stat-value,.card-value,.page-title,.kpi-value,.big-num{font-family:var(--pc-disp);font-weight:400;letter-spacing:.03em}
+  .tab.active,.btn-primary{color:#0d0d0b}
 </style>
 </head>
-<body>
+<body data-pc-section="Baseball">
 
 <div class="hero-banner">
   <div class="hero-scrim">
@@ -225,12 +232,6 @@
   </div>
 </div>
 
-<div class="nav-links">
-  <a href="/polyclawd/portfolio.html">← Portfolio</a>
-  <a href="/polyclawd/weather.html">🌡️ Weather</a>
-  <a href="/polyclawd/options.html">📈 Options</a>
-  <a href="/polyclawd/analysis.html">Analysis</a>
-</div>
 
 <!-- Tab Navigation -->
 <div class="tab-bar">
@@ -1799,5 +1800,6 @@ async function tick() {
 load();
 setInterval(tick, 1000);
 </script>
+<script src="polyclawd-shell.js" defer></script>
 </body>
 </html>

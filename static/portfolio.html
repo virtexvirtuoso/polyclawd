@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
 <title>Virtuoso Prediction</title>
 <script src="auth.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
@@ -11,16 +12,15 @@
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
 <script src="https://unpkg.com/lucide@latest"></script>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
   /* Dark mode (default) */
   :root, [data-theme="dark"] {
-    --bg:#0a0a0f;--surface:#111118;--surface2:#161620;--border:#1f1f2e;
-    --accent:#6c5ce7;--accent2:#a29bfe;--green:#00d68f;--red:#f65164;
-    --orange:#f0a050;--cyan:#4ecdc4;--text:#e8e8f0;--text2:#6b6b85;--gold:#ffd700;
-    --noise-opacity:0.03;--shadow:rgba(0,0,0,0.3);
-    --card-bg:linear-gradient(135deg, rgba(17,17,24,0.8), rgba(22,22,32,0.6));
-    --card-border:rgba(255,255,255,0.04);--card-inset:rgba(255,255,255,0.03);
-    --chart-bg:rgba(10,10,15,0.5);
+    --bg:var(--pc-bg);--surface:var(--pc-panel);--surface2:var(--pc-raised);--border:var(--pc-line);
+    --accent:var(--pc-accent);--accent2:var(--pc-accent-ink);--green:var(--pc-up);--red:var(--pc-down);
+    --orange:var(--pc-warn);--cyan:var(--pc-chart-4);--text:var(--pc-ink);--text2:var(--pc-dim);--gold:var(--pc-gold);
+    --noise-opacity:0;--shadow:transparent;
+    --card-bg:var(--pc-panel);
+    --card-border:var(--pc-line);--card-inset:var(--pc-line);
+    --chart-bg:var(--pc-bg);
   }
   /* Light mode */
   [data-theme="light"] {
@@ -438,13 +438,19 @@
     .stat-card:active{border-color:var(--accent)}
     .section-card:active{border-color:var(--accent)}
   }
+
+  /* ── Probability Bureau adoption (css/polyclawd.css) ── */
+  body{font-family:var(--pc-mono);background:var(--pc-bg);color:var(--pc-ink)}
+  body > *{position:relative;z-index:1}
+  *{border-radius:0!important;box-shadow:none!important;text-shadow:none!important}
+  h1,h2,h3,h4,.stat-value,.card-value,.page-title,.kpi-value,.big-num{font-family:var(--pc-disp);font-weight:400;letter-spacing:.03em}
+  .tab.active,.btn-primary{color:#0d0d0b}
 </style>
 </head>
-<body>
+<body data-pc-section="Portfolio">
 <div class="noise"></div>
 <div class="container">
 
-<nav style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px 0;gap:8px"><div style="display:flex;gap:8px;flex-wrap:wrap"><a href="analysis.html" class="nav-link"><i data-lucide="arrow-left" style="width:14px;height:14px;vertical-align:-2px"></i> Analysis</a><a href="how-it-works.html" class="nav-link">How It Works</a><a href="weather.html" class="nav-link">🌡️ Weather</a><a href="baseball.html" class="nav-link">⚾ Baseball</a><a href="options.html" class="nav-link">📈 Options</a><a href="elections.html" class="nav-link">Elections</a></div><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode" aria-label="Toggle theme" id="themeBtn"><i data-lucide="moon" style="width:16px;height:16px"></i></button></nav>
 <header>
   <div class="logo">Virtuoso</div>
   <h1>Prediction</h1>
@@ -1657,5 +1663,6 @@ loadAll();
 loadLiquiditySizing();
 startAutoRefresh();
 </script>
+<script src="polyclawd-shell.js" defer></script>
 </body>
 </html>

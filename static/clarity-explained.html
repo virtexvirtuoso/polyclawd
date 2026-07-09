@@ -3,33 +3,33 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
 <title>CLARITY, Explained · Polyclawd</title>
 <meta name="description" content="The crypto market structure bill explained in plain English — what it does, where it is, and why it's stuck.">
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Spectral:ital,wght@0,400;0,600;1,400&display=swap');
 
   :root {
-    --bg: #FAF8F5;
-    --surface: #FFFFFF;
-    --surface2: #F5F2EE;
-    --surface3: #EFEAE2;
-    --border: #E2DDD6;
-    --border-light: #EDE9E3;
-    --rule: #D8D2C8;
-    --ink: #1C1B17;
-    --text: #2D2D2D;
-    --text2: #6B6558;
-    --text3: #8A8275;
-    --text4: #A69F90;
-    --terracotta: #C75B39;
-    --terracotta-dark: #A84725;
-    --gold: #D4A843;
-    --gold-dark: #B8923E;
-    --pos-green: #4A8B5C;
-    --neg-red: #C25B4A;
-    --shadow-sm: 0 1px 2px rgba(28, 27, 23, 0.04);
-    --shadow: 0 1px 3px rgba(28, 27, 23, 0.06), 0 1px 2px rgba(28, 27, 23, 0.04);
-    --shadow-lg: 0 4px 12px rgba(28, 27, 23, 0.08), 0 1px 3px rgba(28, 27, 23, 0.06);
+    --bg: var(--pc-bg);
+    --surface: var(--pc-panel);
+    --surface2: var(--pc-raised);
+    --surface3: var(--pc-raised);
+    --border: var(--pc-line);
+    --border-light: var(--pc-line-2);
+    --rule: var(--pc-line-2);
+    --ink: var(--pc-ink);
+    --text: var(--pc-ink);
+    --text2: var(--pc-dim);
+    --text3: var(--pc-faint);
+    --text4: var(--pc-faint);
+    --terracotta: var(--pc-accent);
+    --terracotta-dark: var(--pc-accent-ink);
+    --gold: var(--pc-gold);
+    --gold-dark: var(--pc-gold);
+    --pos-green: var(--pc-up);
+    --neg-red: var(--pc-down);
+    --shadow-sm: none;
+    --shadow: none;
+    --shadow-lg: none;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -407,9 +407,16 @@
 @media (max-width:780px){
   .doc-nav a, a.bill-cite{ display:inline-block; padding:6px 2px; }
 }
+
+  /* ── Probability Bureau adoption (css/polyclawd.css) ── */
+  body{font-family:var(--pc-mono);background:var(--pc-bg);color:var(--pc-ink)}
+  body > *{position:relative;z-index:1}
+  *{border-radius:0!important;box-shadow:none!important;text-shadow:none!important}
+  h1,h2,h3,h4,.stat-value,.card-value,.page-title,.kpi-value,.big-num{font-family:var(--pc-disp);font-weight:400;letter-spacing:.03em}
+  .tab.active,.btn-primary{color:#0d0d0b}
 </style>
 </head>
-<body>
+<body data-pc-section="Clarity explained">
 
 <div class="container">
 
@@ -648,5 +655,6 @@
 
 </div>
 
+<script src="polyclawd-shell.js" defer></script>
 </body>
 </html>

@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
 <title>Election Intelligence Brief · Polyclawd</title>
 <script src="/polyclawd/auth.js"></script>
 <script>
@@ -24,40 +25,39 @@ window.lucide = { createIcons: function(opts) {
 </script>
 <!-- Chart.js lazy-loaded by renderTrends() only when needed -->
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
 
   :root {
-    --bg: #FAF8F5;
-    --surface: #FFFFFF;
-    --surface2: #F5F2EE;
-    --border: #E2DDD6;
-    --border-light: #EDE9E3;
-    --text: #2D2D2D;
-    --text2: #7A7568;
-    --text3: #8A8275;
-    --terracotta: #C75B39;
-    --gold: #D4A843;
-    --olive: #6B8E6B;
-    --blue: #4A7FB5;
-    --rep-red: #B83A2E;
-    --rep-red-light: #E8564A;
-    --rep-bg: rgba(184, 58, 46, 0.08);
-    --dem-blue: #2B6CB0;
-    --dem-blue-light: #4A90D9;
-    --dem-bg: rgba(43, 108, 176, 0.08);
-    --tossup: #9B9B9B;
-    --green-score: #4A8B5C;
-    --gold-score: #B8923E;
-    --red-score: #B84A3E;
-    --shadow: rgba(45, 45, 45, 0.06);
+    --bg: var(--pc-bg);
+    --surface: var(--pc-panel);
+    --surface2: var(--pc-raised);
+    --border: var(--pc-line);
+    --border-light: var(--pc-line-2);
+    --text: var(--pc-ink);
+    --text2: var(--pc-dim);
+    --text3: var(--pc-faint);
+    --terracotta: var(--pc-accent);
+    --gold: var(--pc-gold);
+    --olive: var(--pc-up);
+    --blue: var(--pc-chart-4);
+    --rep-red: var(--pc-down);
+    --rep-red-light: var(--pc-down);
+    --rep-bg: rgba(228, 72, 77, 0.14);
+    --dem-blue: var(--pc-chart-4);
+    --dem-blue-light: var(--pc-chart-4);
+    --dem-bg: rgba(125, 155, 184, 0.16);
+    --tossup: var(--pc-dim);
+    --green-score: var(--pc-up);
+    --gold-score: var(--pc-gold);
+    --red-score: var(--pc-down);
+    --shadow: transparent;
     /* aliases for JS render functions */
-    --bg2: #F5F2EE;
-    --text1: #2D2D2D;
-    --accent: #C75B39;
-    --amber: #D4A843;
-    --pos-green: #5B9A6B;
-    --neg-red: #C25B4A;
-    --info-blue: #4A7FB5;
+    --bg2: var(--pc-raised);
+    --text1: var(--pc-ink);
+    --accent: var(--pc-accent);
+    --amber: var(--pc-warn);
+    --pos-green: var(--pc-up);
+    --neg-red: var(--pc-down);
+    --info-blue: var(--pc-chart-4);
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -1559,9 +1559,16 @@ window.lucide = { createIcons: function(opts) {
   .dim-label,.metric-label,.control-label,.tt-branch-name{ font-size:10px; }
   .surge-action,.tipping-bar-label,.tt-divergence-badge,.section-nav-pill{ font-size:10px; }
 }
+
+  /* ── Probability Bureau adoption (css/polyclawd.css) ── */
+  body{font-family:var(--pc-mono);background:var(--pc-bg);color:var(--pc-ink)}
+  body > *{position:relative;z-index:1}
+  *{border-radius:0!important;box-shadow:none!important;text-shadow:none!important}
+  h1,h2,h3,h4,.stat-value,.card-value,.page-title,.kpi-value,.big-num{font-family:var(--pc-disp);font-weight:400;letter-spacing:.03em}
+  .tab.active,.btn-primary{color:#0d0d0b}
 </style>
 </head>
-<body>
+<body data-pc-section="Elections">
 <div class="container">
 
   <!-- HEADER BAR -->
@@ -5404,5 +5411,6 @@ setInterval(() => {
   if (!document.hidden) fetchData();
 }, 5 * 60 * 1000);
 </script>
+<script src="polyclawd-shell.js" defer></script>
 </body>
 </html>
