@@ -260,18 +260,21 @@ def whale_follows(limit: int = Query(40, le=200)):
 
 
 @router.get("/whale/wallets")
-def whale_wallets(limit: int = Query(20, le=100)):
-    """Wallet ledger: smart wallets first, by realized PnL."""
+def whale_wallets(limit: int = Query(20, le=100), sort: str = Query("net_pnl")):
+    """Wallet ledger: smart wallets first, sorted by net_pnl or win_rate."""
     try:
         meta = _ro(META_DB)
     except sqlite3.OperationalError:
         return {"wallets": [], "smart_count": 0, "tracked": 0, "queued": 0}
+    sort_col = "net_pnl" if sort in ("net_pnl", "pnl") else (
+        "win_rate" if sort == "win_rate" else (
+        "closed_positions" if sort == "closed" else "net_pnl"))
     wallets = [
         dict(r)
         for r in meta.execute(
-            "SELECT wallet, name, closed_positions, wins, win_rate, realized_pnl,"
-            " smart, last_seen FROM pm_wallets"
-            " ORDER BY smart DESC, realized_pnl DESC LIMIT ?",
+            f"SELECT wallet, name, closed_positions, wins, win_rate, realized_pnl,"
+            f" net_pnl, concentration, smart, last_seen, refreshed FROM pm_wallets"
+            f" ORDER BY smart DESC, {sort_col} DESC LIMIT ?",
             (limit,),
         )
     ]
@@ -280,6 +283,48 @@ def whale_wallets(limit: int = Query(20, le=100)):
     queued = meta.execute("SELECT COUNT(*) FROM pm_wallet_seen").fetchone()[0]
     meta.close()
     return {"wallets": wallets, "smart_count": smart, "tracked": tracked, "queued": queued}
+
+
+@router.get("/whale/wallet/{wallet_addr}")
+def whale_wallet_detail(wallet_addr: str):
+    """Detail view for a single wallet: stats + recent PM trades."""
+    import urllib.request as _ur
+    try:
+        meta = _ro(META_DB)
+    except sqlite3.OperationalError:
+        return {"error": "db unavailable"}
+
+    row = meta.execute(
+        "SELECT * FROM pm_wallets WHERE wallet=?", (wallet_addr.lower(),)
+    ).fetchone()
+    meta.close()
+
+    wallet_data = dict(row) if row else {"wallet": wallet_addr, "name": "unknown"}
+
+    # Fetch recent trades from PM data-api
+    trades = []
+    try:
+        url = f"https://data-api.polymarket.com/trades?user={wallet_addr.lower()}&limit=50"
+        req = _ur.Request(url, headers={"User-Agent": "polyclawd/1.0"})
+        with _ur.urlopen(req, timeout=12) as r:
+            raw = json.loads(r.read().decode())
+        for t in raw:
+            size = float(t.get("size", 0) or 0)
+            price = float(t.get("price", 0) or 0)
+            trades.append({
+                "side": t.get("side", ""),
+                "size": size,
+                "price": price,
+                "volume_usdc": size * price,
+                "outcome": t.get("outcome", ""),
+                "title": t.get("title", ""),
+                "timestamp": t.get("timestamp", 0),
+                "slug": t.get("eventSlug", ""),
+            })
+    except Exception:
+        pass
+
+    return {"wallet": wallet_data, "trades": trades}
 
 
 # ── Live order book (for the dashboard's per-alert depth visualization) ─────
@@ -458,9 +503,15 @@ def whale_top(limit: int = Query(10, ge=1, le=50),
             "platform": r["platform"],
             "severity": r["severity"],
             "score": s,
+            "reasons": r["reasons"] or "",
             "direction": r["direction"],  # +1=YES, -1=NO, None=ambiguous
             "price": r["price_at_alert"],
+            "best_bid": r["price_at_alert"],  # alias for TG filter
             "flow_dollars": r["flow_dollars"],
+            "flow_yes": r["flow_yes"] or 0,
+            "flow_no": r["flow_no"] or 0,
+            "open_interest": r["total_volume"] or 0,
+            "volume": r["total_volume"] or 0,
             "wallet": wallet_short,
             "wallet_win_rate": r["wallet_win_rate"],
             "wallet_n": r["wallet_n"],

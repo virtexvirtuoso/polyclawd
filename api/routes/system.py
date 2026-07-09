@@ -23,11 +23,14 @@ _startup_time = datetime.now()
 
 
 @router.get("/health", response_model=HealthResponse)
+@router.get("/api/health", response_model=HealthResponse, include_in_schema=False)
 @limiter.limit("60/minute")
 async def health(request: Request) -> HealthResponse:
     """Health check endpoint.
 
     Returns basic health status for load balancers and monitoring.
+    Served at both /health and /api/health so monitors can't false-alarm on a
+    path mismatch (root cause of the 2026-06-20 'unreachable' incident).
     """
     return HealthResponse(
         status="healthy",

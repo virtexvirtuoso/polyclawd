@@ -1579,6 +1579,59 @@ async def get_shadow_performance():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+POLY_DELTA_VERDICT_THRESHOLD = 50
+
+
+@router.get("/signals/poly-delta-stats")
+async def get_poly_delta_stats():
+    """poly_delta adverse-selection readings + verdict-gate state.
+
+    gate_open flips true once >= POLY_DELTA_VERDICT_THRESHOLD Polymarket fills carry
+    a poly_delta_60 reading -- the point where the speed-edge (S2/S5) build/kill call
+    is statistically meaningful. avg poly_delta_60 > 0 => PM lagged in our favour
+    (real edge); < 0 => adverse selection.
+    """
+    try:
+        from shadow_tracker import get_db
+        conn = get_db()
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(shadow_trades)")}
+        if "poly_delta_60" not in cols:
+            conn.close()
+            return {
+                "populated_count": 0,
+                "threshold": POLY_DELTA_VERDICT_THRESHOLD,
+                "gate_open": False,
+                "overall_avg_poly_delta_60": None,
+                "by_strategy": {},
+            }
+        n = conn.execute(
+            "SELECT COUNT(*) FROM shadow_trades WHERE poly_delta_60 IS NOT NULL"
+        ).fetchone()[0]
+        by_strategy = {}
+        for row in conn.execute(
+            "SELECT COALESCE(strategy, '(none)') s, COUNT(*) c, AVG(poly_delta_60) a "
+            "FROM shadow_trades WHERE poly_delta_60 IS NOT NULL GROUP BY s"
+        ):
+            by_strategy[row[0]] = {
+                "n": row[1],
+                "avg_poly_delta_60": round(row[2], 4) if row[2] is not None else None,
+            }
+        overall = conn.execute(
+            "SELECT AVG(poly_delta_60) FROM shadow_trades WHERE poly_delta_60 IS NOT NULL"
+        ).fetchone()[0]
+        conn.close()
+        return {
+            "populated_count": n,
+            "threshold": POLY_DELTA_VERDICT_THRESHOLD,
+            "gate_open": n >= POLY_DELTA_VERDICT_THRESHOLD,
+            "overall_avg_poly_delta_60": round(overall, 4) if overall is not None else None,
+            "by_strategy": by_strategy,
+        }
+    except Exception as e:
+        logger.exception(f"poly-delta-stats failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/signals/shadow-resolve")
 async def trigger_shadow_resolution():
     """Manually trigger shadow trade resolution."""
@@ -3921,3 +3974,361 @@ async def get_consensus_disagreement_sport(
     except Exception as e:
         logger.exception(f"CE-5 consensus_disagreement/{sport_key} failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Phase 1C: Cross-Sport Calibration Endpoint ──────────────────────────────
+@router.get("/calibration/cross-sport")
+async def get_cross_sport_calibration():
+    """Unified calibration dashboard: edge-bucket hit rates, avg CLV, N resolved
+    per sport × strategy. Aggregates all sport resolvers + edge_scan_log."""
+    from starlette.concurrency import run_in_threadpool
+    import sqlite3
+    from pathlib import Path
+
+    DB = Path(__file__).parent.parent.parent / "storage" / "shadow_trades.db"
+
+    def _query():
+        conn = sqlite3.connect(str(DB), timeout=10)
+        conn.row_factory = sqlite3.Row
+
+        result = {"sports": {}, "scan_log": {}, "ce5_reconciliation": {}}
+
+        # 1. Per-sport shadow trade calibration
+        try:
+            rows = conn.execute("""
+                SELECT strategy,
+                       COUNT(*) as n,
+                       SUM(CASE WHEN resolved=1 THEN 1 ELSE 0 END) as resolved,
+                       SUM(CASE WHEN resolved=1 AND pnl > 0 THEN 1 ELSE 0 END) as wins,
+                       SUM(CASE WHEN resolved=1 AND pnl <= 0 THEN 1 ELSE 0 END) as losses,
+                       AVG(CASE WHEN resolved=1 THEN pnl END) as avg_pnl,
+                       AVG(confidence) as avg_confidence
+                FROM shadow_trades
+                WHERE strategy IN ('soccer_match_3way', 'soccer_futures',
+                                   'ufc_moneyline', 'baseball_moneyline', 'nfl_moneyline',
+                                   'baseball_spread', 'baseball_total')
+                GROUP BY strategy
+            """).fetchall()
+            for r in rows:
+                n_res = r["resolved"] or 0
+                wins = r["wins"] or 0
+                result["sports"][r["strategy"]] = {
+                    "total": r["n"],
+                    "resolved": n_res,
+                    "wins": wins,
+                    "losses": r["losses"] or 0,
+                    "win_pct": round(wins / n_res * 100, 1) if n_res > 0 else None,
+                    "avg_pnl": round(r["avg_pnl"], 4) if r["avg_pnl"] is not None else None,
+                    "avg_confidence": round(r["avg_confidence"], 1) if r["avg_confidence"] is not None else None,
+                }
+        except Exception as e:
+            result["sports_error"] = str(e)
+
+        # 2. Edge scan log — control sample by sport
+        try:
+            rows = conn.execute("""
+                SELECT sport,
+                       COUNT(*) as total_scanned,
+                       SUM(alerted) as alerted,
+                       COUNT(DISTINCT scanned_at) as scan_runs,
+                       AVG(edge_pct) as avg_edge,
+                       AVG(net_edge_pct) as avg_net_edge
+                FROM edge_scan_log
+                GROUP BY sport
+            """).fetchall()
+            for r in rows:
+                result["scan_log"][r["sport"]] = {
+                    "total_scanned": r["total_scanned"],
+                    "alerted": r["alerted"] or 0,
+                    "scan_runs": r["scan_runs"],
+                    "alert_rate_pct": round((r["alerted"] or 0) / r["total_scanned"] * 100, 1) if r["total_scanned"] > 0 else 0,
+                    "avg_edge_pct": round(r["avg_edge"] * 100, 1) if r["avg_edge"] is not None else None,
+                    "avg_net_edge_pct": round(r["avg_net_edge"] * 100, 1) if r["avg_net_edge"] is not None else None,
+                }
+        except Exception as e:
+            result["scan_log_error"] = str(e)
+
+        # 3. CE-5 reconciliation — how often do per-sport edges agree with CE-5?
+        try:
+            rows = conn.execute("""
+                SELECT
+                    SUM(CASE WHEN reasoning LIKE '%[CE5:agree]%' THEN 1 ELSE 0 END) as agree,
+                    SUM(CASE WHEN reasoning LIKE '%[CE5:disagree]%' THEN 1 ELSE 0 END) as disagree,
+                    COUNT(*) as total
+                FROM shadow_trades
+                WHERE strategy IN ('soccer_match_3way', 'soccer_futures',
+                                   'ufc_moneyline', 'baseball_moneyline', 'nfl_moneyline',
+                                   'baseball_spread', 'baseball_total')
+                AND reasoning LIKE '%[CE5:%'
+            """).fetchone()
+            if rows and rows["total"] > 0:
+                result["ce5_reconciliation"] = {
+                    "agree": rows["agree"] or 0,
+                    "disagree": rows["disagree"] or 0,
+                    "total_with_ce5_data": rows["total"],
+                    "agreement_rate_pct": round((rows["agree"] or 0) / rows["total"] * 100, 1),
+                }
+        except Exception as e:
+            result["ce5_error"] = str(e)
+
+        # 3b. CE-8 reconciliation
+        try:
+            rows = conn.execute("""
+                SELECT
+                    SUM(CASE WHEN reasoning LIKE '%[CE8:agree]%' THEN 1 ELSE 0 END) as agree,
+                    SUM(CASE WHEN reasoning LIKE '%[CE8:disagree]%' THEN 1 ELSE 0 END) as disagree,
+                    COUNT(*) as total
+                FROM shadow_trades
+                WHERE strategy IN ('soccer_match_3way', 'soccer_futures',
+                                   'ufc_moneyline', 'baseball_moneyline', 'nfl_moneyline',
+                                   'baseball_spread', 'baseball_total')
+                AND reasoning LIKE '%[CE8:%'
+            """).fetchone()
+            if rows and rows["total"] > 0:
+                result["ce8_reconciliation"] = {
+                    "agree": rows["agree"] or 0,
+                    "disagree": rows["disagree"] or 0,
+                    "total_with_ce8_data": rows["total"],
+                    "agreement_rate_pct": round((rows["agree"] or 0) / rows["total"] * 100, 1),
+                }
+        except Exception:
+            pass
+
+        # 4. Per-sport resolver calibration (from dedicated forecast tables)
+        for table, sport in [("soccer_forecast_log", "soccer"),
+                             ("ufc_forecast_log", "ufc"),
+                             ("baseball_forecast_log", "baseball")]:
+            try:
+                r = conn.execute(f"""
+                    SELECT COUNT(*) as n,
+                           SUM(predicted_correct) as wins,
+                           COUNT(clv_pct) as clv_n,
+                           AVG(clv_pct) as avg_clv,
+                           SUM(CASE WHEN clv_pct > 0 THEN 1 ELSE 0 END) as clv_pos
+                    FROM {table}
+                """).fetchone()
+                if r and r["n"] > 0:
+                    result["sports"][f"{sport}_resolver"] = {
+                        "resolved": r["n"],
+                        "wins": r["wins"] or 0,
+                        "win_pct": round((r["wins"] or 0) / r["n"] * 100, 1),
+                        "clv_n": r["clv_n"] or 0,
+                        "avg_clv_pp": round(r["avg_clv"], 1) if r["avg_clv"] is not None else None,
+                        "clv_positive_pct": round((r["clv_pos"] or 0) / r["clv_n"] * 100, 1) if r["clv_n"] else None,
+                    }
+            except Exception:
+                pass  # table may not exist yet
+
+        # 5. Phase 2 enrichment stats
+        try:
+            rows = conn.execute("""
+                SELECT sport, alert_tier,
+                       COUNT(*) as n,
+                       AVG(stats_score) as avg_score,
+                       SUM(stats_confirmation) as confirmed
+                FROM edge_enrichment
+                GROUP BY sport, alert_tier
+            """).fetchall()
+            enrichment = {}
+            for r in rows:
+                key = r["sport"]
+                if key not in enrichment:
+                    enrichment[key] = {}
+                enrichment[key][r["alert_tier"]] = {
+                    "n": r["n"],
+                    "avg_stats_score": round(r["avg_score"], 3) if r["avg_score"] is not None else None,
+                    "confirmed": r["confirmed"] or 0,
+                }
+            result["enrichment"] = enrichment
+        except Exception:
+            pass  # table may not exist yet
+
+        conn.close()
+        return result
+
+    return await run_in_threadpool(_query)
+
+
+@router.get("/calibration/price-movement")
+async def get_price_movement(sport: str = "baseball_mlb", hours: float = 24.0):
+    """Phase 4: Price movement snapshots + DK lag profile."""
+    from starlette.concurrency import run_in_threadpool
+
+    def _query():
+        try:
+            from odds.price_movement import dk_lag_profile
+            import sqlite3
+        except ImportError:
+            return {"error": "price_movement module not available"}
+
+        result = {"sport": sport, "lookback_hours": hours}
+
+        # Snapshot counts
+        try:
+            from odds.price_movement import DB_PATH
+            conn = sqlite3.connect(str(DB_PATH), timeout=10)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT COUNT(*) as n FROM price_movement_log WHERE sport=?",
+                (sport,),
+            ).fetchone()
+            result["total_snapshots"] = row["n"] if row else 0
+
+            # Recent events with movement data
+            events = conn.execute("""
+                SELECT event_id, participant, market_type,
+                       COUNT(*) as snapshots,
+                       MIN(consensus_fair) as min_fair,
+                       MAX(consensus_fair) as max_fair,
+                       MIN(snapshot_at) as first_seen,
+                       MAX(snapshot_at) as last_seen
+                FROM price_movement_log
+                WHERE sport=?
+                GROUP BY event_id, participant, market_type
+                ORDER BY last_seen DESC
+                LIMIT 20
+            """, (sport,)).fetchall()
+            result["recent_events"] = [
+                {
+                    "event_id": r["event_id"],
+                    "participant": r["participant"],
+                    "market_type": r["market_type"],
+                    "snapshots": r["snapshots"],
+                    "fair_range": f"{r['min_fair']:.3f}-{r['max_fair']:.3f}" if r["min_fair"] else "n/a",
+                    "first_seen": r["first_seen"],
+                    "last_seen": r["last_seen"],
+                }
+                for r in events
+            ]
+            conn.close()
+        except Exception as e:
+            result["error"] = str(e)
+
+        # DK lag profile
+        lag = dk_lag_profile(sport)
+        result["dk_lag"] = lag or "insufficient_data"
+
+        return result
+
+    return await run_in_threadpool(_query)
+
+
+@router.get("/calibration/book-weights")
+async def get_book_weights():
+    """Phase 3: Show sport-specific book weights and recalibration status."""
+    from starlette.concurrency import run_in_threadpool
+
+    def _query():
+        try:
+            from odds.book_weights import SPORT_WEIGHTS, compute_book_brier_scores
+        except ImportError:
+            return {"error": "book_weights module not available"}
+
+        result = {"weights": {}, "recalibration": {}}
+        for sport, weights in SPORT_WEIGHTS.items():
+            sorted_w = dict(sorted(weights.items(), key=lambda x: -x[1]))
+            result["weights"][sport] = sorted_w
+
+            brier = compute_book_brier_scores(sport)
+            if brier is None:
+                result["recalibration"][sport] = "insufficient_data"
+            else:
+                result["recalibration"][sport] = brier
+
+        return result
+
+    return await run_in_threadpool(_query)
+
+
+@router.get("/signals/weather-resolution-edge")
+async def weather_resolution_edge(city: str = None, platform: str = None):
+    """Return current resolution-source edge signals for weather markets.
+
+    Kalshi: NWS gridpoint forecast vs market (NWS = resolution source).
+    Polymarket: TWC forecast vs market (TWC = resolution source).
+    """
+    from starlette.concurrency import run_in_threadpool
+
+    def _scan():
+        try:
+            from signals.weather_resolution_edge import scan_resolution_edges
+            signals = scan_resolution_edges()
+
+            if city:
+                signals = [s for s in signals if s.get("city", "").lower() == city.lower()]
+            if platform:
+                signals = [s for s in signals if s.get("platform", "") == platform.lower()]
+
+            return {
+                "total": len(signals),
+                "high_conviction": sum(1 for s in signals if s.get("conviction_tier") == "HIGH"),
+                "signals": signals,
+            }
+        except Exception as e:
+            return {"error": str(e), "signals": []}
+
+    return await run_in_threadpool(_scan)
+
+
+@router.get("/weather/forecast-log")
+async def weather_forecast_log():
+    """Return forecast log stats + recent entries for the Resolution Edge dashboard tab."""
+    from starlette.concurrency import run_in_threadpool
+
+    def _query():
+        import sqlite3, os
+        db = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                          "storage", "shadow_trades.db")
+        try:
+            conn = sqlite3.connect(db)
+            conn.row_factory = sqlite3.Row
+
+            total = conn.execute("SELECT COUNT(*) FROM weather_forecast_log").fetchone()[0]
+            cities = conn.execute("SELECT COUNT(DISTINCT city) FROM weather_forecast_log").fetchone()[0]
+            resolved = conn.execute(
+                "SELECT COUNT(*) FROM weather_forecast_log WHERE actual_high_f IS NOT NULL"
+            ).fetchone()[0]
+
+            # Recent unique city/date entries (deduplicated)
+            recent = conn.execute("""
+                SELECT city, target_date,
+                       MAX(nws_forecast_high_f) as nws_forecast_high_f,
+                       MAX(twc_forecast_high_f) as twc_forecast_high_f,
+                       MAX(ensemble_forecast_f) as ensemble_forecast_f,
+                       MAX(ensemble_std_f) as ensemble_std_f,
+                       MAX(actual_high_f) as actual_high_f,
+                       MAX(nws_error_f) as nws_error_f,
+                       MAX(twc_error_f) as twc_error_f
+                FROM weather_forecast_log
+                GROUP BY city, target_date
+                ORDER BY target_date DESC, city
+                LIMIT 30
+            """).fetchall()
+
+            # NWS vs TWC disagreements (>3°F diff)
+            disagreements = conn.execute("""
+                SELECT city, target_date,
+                       MAX(nws_forecast_high_f) as nws_forecast_high_f,
+                       MAX(twc_forecast_high_f) as twc_forecast_high_f,
+                       MAX(actual_high_f) as actual_high_f
+                FROM weather_forecast_log
+                WHERE nws_forecast_high_f IS NOT NULL
+                  AND twc_forecast_high_f IS NOT NULL
+                GROUP BY city, target_date
+                HAVING ABS(MAX(nws_forecast_high_f) - MAX(twc_forecast_high_f)) > 3.0
+                ORDER BY ABS(MAX(nws_forecast_high_f) - MAX(twc_forecast_high_f)) DESC
+                LIMIT 15
+            """).fetchall()
+
+            conn.close()
+            return {
+                "total_rows": total,
+                "cities": cities,
+                "resolved": resolved,
+                "recent": [dict(r) for r in recent],
+                "disagreements": [dict(r) for r in disagreements],
+            }
+        except Exception as e:
+            return {"error": str(e), "total_rows": 0, "cities": 0, "recent": [], "disagreements": []}
+
+    return await run_in_threadpool(_query)

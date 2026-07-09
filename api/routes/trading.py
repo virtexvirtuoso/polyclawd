@@ -544,6 +544,55 @@ async def get_paper_status():
     }
 
 
+@router.get("/paper/polymarket/status")
+async def get_polymarket_paper_status():
+    """Polymarket paper trading account status (desk dashboard shape).
+
+    Restored 2026-06-22: this route was dropped during the router-registration
+    refactor (8e41855), which broke the desk dashboard — static/js/app.js calls it
+    in loadDashboard() and the 404 aborted the whole load. Reads the separate
+    Polymarket paper account at ~/.openclaw/paper-trading-polymarket/.
+    """
+    settings = get_settings()
+    poly_dir = Path.home() / ".openclaw" / "paper-trading-polymarket"
+
+    def _load(name, default):
+        try:
+            with open(poly_dir / name) as fh:
+                return json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return default
+
+    balance_data = _load("balance.json", {"usdc": settings.DEFAULT_BALANCE})
+    positions = _load("positions.json", [])
+    trades = _load("trades.json", [])
+    if isinstance(positions, dict):
+        positions = positions.get("positions", [])
+    if isinstance(trades, dict):
+        trades = trades.get("trades", [])
+
+    open_positions = [p for p in positions if p.get("status") != "resolved"]
+    resolved_positions = [p for p in positions if p.get("status") == "resolved"]
+    wins = len([p for p in resolved_positions if p.get("outcome") == "win"])
+    losses = len([p for p in resolved_positions if p.get("outcome") == "loss"])
+    total_pnl = sum((p.get("pnl", 0) or 0) for p in resolved_positions)
+
+    return {
+        "platform": "polymarket",
+        "balance": balance_data.get("usdc", settings.DEFAULT_BALANCE),
+        "total_invested": round(sum(p.get("cost_basis", 0) for p in open_positions), 2),
+        "open_positions": len(open_positions),
+        "resolved_count": len(resolved_positions),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(wins / max(1, wins + losses) * 100, 1),
+        "total_pnl": round(total_pnl, 2),
+        "total_trades": len(trades),
+        "positions": positions[-20:],
+        "trades": positions[-10:],  # dashboard renders position-shaped rows
+    }
+
+
 @router.get("/paper/positions")
 async def get_paper_positions():
     """Get paper trading positions."""
