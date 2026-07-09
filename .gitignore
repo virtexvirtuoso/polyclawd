@@ -29,6 +29,11 @@ fig
 output
 .tmp
 
+# Database files (runtime state, never commit)
+*.db
+*.db-shm
+*.db-wal
+
 # Untracked local artifacts
 .ralph-tui/
 CLAUDE.md
