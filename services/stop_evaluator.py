@@ -91,7 +91,22 @@ POST_LOCK_CONFIG = {
 
 # Cooldown: don't re-alert on same position within N minutes
 ALERT_COOLDOWN_MINUTES = 60
-_alert_cache = {}  # position_id → last_alert_ts
+_ALERT_CACHE_FILE = Path('/tmp/stop_alert_cache.json')
+
+def _load_alert_cache() -> dict:
+    try:
+        if _ALERT_CACHE_FILE.exists():
+            raw = json.loads(_ALERT_CACHE_FILE.read_text())
+            return {k: datetime.fromisoformat(v) for k, v in raw.items()}
+    except Exception:
+        pass
+    return {}
+
+def _save_alert_cache(cache: dict) -> None:
+    try:
+        _ALERT_CACHE_FILE.write_text(json.dumps({k: v.isoformat() for k, v in cache.items()}))
+    except Exception:
+        pass
 
 
 def _db():
@@ -187,10 +202,12 @@ def _post_lock_threshold(strategy, pos, now):
 def _should_alert(position_id):
     """Check cooldown — avoid spamming alerts for same position."""
     now = datetime.now(timezone.utc)
-    last = _alert_cache.get(position_id)
+    cache = _load_alert_cache()
+    last = cache.get(position_id)
     if last and (now - last).total_seconds() < ALERT_COOLDOWN_MINUTES * 60:
         return False
-    _alert_cache[position_id] = now
+    cache[position_id] = now
+    _save_alert_cache(cache)
     return True
 
 
@@ -295,15 +312,68 @@ def _close_live_position_early(live_pos_row, current_yes_price, reason, hard_cap
             )
 
             pnl = exit_result.get("pnl", 0.0)
+            exit_action = exit_result.get("action")
             logger.info(
                 "LIVE STOP-LOSS: market={} action={} shares={:.2f} @ {:.4f} pnl={:+.4f} reason={}",
                 market_id,
-                exit_result.get("action"),
+                exit_action,
                 exit_result.get("shares_sold", 0.0),
                 exit_result.get("exit_price", mark_price),
                 pnl,
                 reason,
             )
+
+            # Partial fill: update shares_held in live_positions
+            if exit_action == "partial_closed":
+                try:
+                    shares_sold = exit_result.get("shares_sold", 0.0)
+                    orig_shares = float(live_pos_row.get("shares", 0))
+                    remaining = max(0.0, orig_shares - shares_sold)
+                    conn_upd = live_db.connect()
+                    conn_upd.execute(
+                        "UPDATE live_positions SET shares=? WHERE id=?",
+                        (remaining, live_pos_row.get("id"))
+                    )
+                    conn_upd.commit()
+                    conn_upd.close()
+                    logger.info(
+                        "_close_live_position_early: partial_closed shares {} -> {} remaining",
+                        orig_shares, remaining
+                    )
+                except Exception as upd_exc:
+                    logger.warning("_close_live_position_early: partial shares update failed: {}", upd_exc)
+
+            # Instant Telegram alert on any real exit (not held_remainder)
+            if exit_action in ("maker_closed", "taker_closed", "partial_closed"):
+                try:
+                    from scripts.alert_formatter import send_telegram
+                    exit_price = exit_result.get("exit_price", mark_price)
+                    shares_sold = exit_result.get("shares_sold", 0.0)
+                    fee = exit_result.get("fee_paid", 0.0)
+                    entry_price = live_pos_row.get("entry_price", 0.0)
+                    market_title = live_pos_row.get("market_title", market_id[:24])
+                    pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+                    liq = exit_result.get("liquidity") or ("taker" if "taker" in exit_action else "maker")
+                    label = "PARTIAL EXIT" if exit_action == "partial_closed" else "LIVE EXIT"
+                    lines = [
+                        f"{pnl_emoji} <b>{label}</b> ({liq.upper()}) — {reason}",
+                        f"Market: {market_title}",
+                        f"Entry: {entry_price:.2f} → Exit: {exit_price:.2f} | Shares: {shares_sold:.2f}",
+                        f"PnL: ${pnl:+.2f} | Fee: ${fee:.4f}",
+                    ]
+                    send_telegram("\n".join(lines))
+                except Exception as tg_exc:
+                    logger.warning("_close_live_position_early: telegram exit alert failed: {}", tg_exc)
+
+            # Register exit cooldown — prevent re-entry within 2h on same token
+            if exit_action in ("maker_closed", "taker_closed", "partial_closed"):
+                try:
+                    token_id_str = live_pos_row.get("token_id", "")
+                    if token_id_str:
+                        from scripts.smart_wallet_fast_poll import register_exit_cooldown
+                        register_exit_cooldown(token_id_str)
+                except Exception:
+                    pass
 
             return {
                 "position_id": live_pos_row.get("id"),

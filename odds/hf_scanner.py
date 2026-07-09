@@ -27,6 +27,27 @@ except ImportError:
     HAS_RESILIENT = False
 
 
+
+# Cache token IDs that return 404 to avoid re-hitting dead CLOB endpoints
+_CLOB_404_CACHE: dict[str, float] = {}  # token_id -> timestamp
+_CLOB_404_TTL = 600  # 10 minutes
+
+def _is_token_dead(token_id: str) -> bool:
+    """Check if a CLOB token_id recently returned 404."""
+    ts = _CLOB_404_CACHE.get(token_id)
+    if ts is None:
+        return False
+    import time
+    if time.time() - ts > _CLOB_404_TTL:
+        del _CLOB_404_CACHE[token_id]
+        return False
+    return True
+
+def _mark_token_dead(token_id: str):
+    """Mark a CLOB token_id as dead (404)."""
+    import time
+    _CLOB_404_CACHE[token_id] = time.time()
+
 def _fetch_json(source: str, url: str, timeout: int = 15):
     """Fetch JSON with optional resilient wrapper."""
     def _do():
@@ -369,13 +390,25 @@ def scan_neg_vig(markets: List[HFMarket] = None, threshold: float = 0.99) -> Lis
             continue
         
         try:
+            # Skip tokens that recently returned 404
+            yes_token = market.clob_token_ids[0]
+            no_token = market.clob_token_ids[1]
+            if _is_token_dead(yes_token) or _is_token_dead(no_token):
+                continue
+
             # Fetch Yes orderbook (token 0)
-            yes_url = f"{CLOB_API}/book?token_id={market.clob_token_ids[0]}"
+            yes_url = f"{CLOB_API}/book?token_id={yes_token}"
             yes_book = _fetch_json("clob_yes", yes_url, timeout=8)
+            if yes_book is None:
+                _mark_token_dead(yes_token)
+                continue
             
             # Fetch No orderbook (token 1)
-            no_url = f"{CLOB_API}/book?token_id={market.clob_token_ids[1]}"
+            no_url = f"{CLOB_API}/book?token_id={no_token}"
             no_book = _fetch_json("clob_no", no_url, timeout=8)
+            if no_book is None:
+                _mark_token_dead(no_token)
+                continue
             
             # Get best asks (cheapest price to buy)
             yes_asks = yes_book.get("asks", [])
