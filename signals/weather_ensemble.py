@@ -509,7 +509,7 @@ def _fetch_weatherapi(lat: float, lon: float, date: str) -> Optional[dict]:
 # Free public API key, ICAO station codes, 5-day forecast + historical.
 # Double-weighted in ensemble because it IS the judge.
 
-TWC_API_KEY = "e1f10a1e78da46f5b10a1e78da96f525"  # Public key from WU website
+TWC_API_KEY = os.environ.get("TWC_API_KEY", "")  # was hardcoded; rotate + set in /etc/default/polyclawd
 
 # ICAO station codes for Polymarket weather cities
 # These match the stations in Polymarket market descriptions
@@ -1569,6 +1569,153 @@ def _ensure_source_rmse_table():
 _ensure_source_rmse_table()
 
 
+def _ensure_forecast_log_table():
+    """Create weather_forecast_log table for resolution-source edge validation."""
+    try:
+        conn = _sqlite3.connect(_DB_PATH)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS weather_forecast_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                horizon_hours REAL,
+                nws_forecast_high_f REAL,
+                twc_forecast_high_f REAL,
+                ensemble_forecast_f REAL,
+                ensemble_std_f REAL,
+                kalshi_price REAL,
+                pm_price REAL,
+                nws_edge_pp REAL,
+                twc_edge_pp REAL,
+                actual_high_f REAL,
+                nws_error_f REAL,
+                twc_error_f REAL,
+                ensemble_error_f REAL,
+                threshold_f REAL,
+                threshold_edge INTEGER DEFAULT 0,
+                platform TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(city, target_date, platform, threshold_f)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_wfl_city_date
+            ON weather_forecast_log(city, target_date)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_wfl_created
+            ON weather_forecast_log(created_at)
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug("weather_forecast_log table init: {}", e)
+
+_ensure_forecast_log_table()
+
+
+def log_forecast_for_edge(city: str, target_date: str, sources: dict,
+                          ensemble: dict, platform: str,
+                          market_price: float, threshold_f: float = None):
+    """Log a forecast snapshot for resolution-source edge validation.
+    
+    Records NWS + TWC individual forecasts alongside ensemble aggregate
+    and market price. Actuals backfilled next day via backfill_forecast_log_actuals().
+    """
+    try:
+        nws_high = None
+        twc_high = None
+        if "nws" in sources and sources["nws"]:
+            nws_high = sources["nws"].get("high_f")
+        if "weather_com" in sources and sources["weather_com"]:
+            twc_high = sources["weather_com"].get("high_f")
+
+        ens_mean = ensemble.get("high_mean_f")
+        ens_std = ensemble.get("high_std_f")
+
+        now = datetime.now(timezone.utc)
+        target = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+        horizon_hours = max(0, (target - now).total_seconds() / 3600)
+
+        threshold_edge = 0
+        if threshold_f is not None and ens_mean is not None:
+            threshold_edge = 1 if abs(ens_mean - threshold_f) < 2.0 else 0
+
+        # Use 0 instead of NULL for threshold_f to make UNIQUE constraint work
+        effective_threshold = threshold_f if threshold_f is not None else 0.0
+
+        conn = _sqlite3.connect(_DB_PATH)
+        conn.execute("""
+            INSERT OR REPLACE INTO weather_forecast_log
+            (city, target_date, horizon_hours, nws_forecast_high_f, twc_forecast_high_f,
+             ensemble_forecast_f, ensemble_std_f, kalshi_price, pm_price,
+             threshold_f, threshold_edge, platform)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            city.lower(), target_date, round(horizon_hours, 1),
+            nws_high, twc_high, ens_mean, ens_std,
+            market_price if platform == "kalshi" else None,
+            market_price if platform == "polymarket" else None,
+            effective_threshold, threshold_edge, platform,
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug("log_forecast_for_edge error: {}", e)
+
+
+def backfill_forecast_log_actuals():
+    """Backfill actual temperatures into weather_forecast_log rows missing actuals.
+    
+    Called from tick_weather or a daily cron. Uses TWC actuals (the PM resolution source).
+    """
+    try:
+        conn = _sqlite3.connect(_DB_PATH)
+        # Find rows needing actuals (past dates without actual_high_f)
+        rows = conn.execute("""
+            SELECT DISTINCT city, target_date FROM weather_forecast_log
+            WHERE actual_high_f IS NULL
+            AND target_date < date('now')
+        """).fetchall()
+
+        if not rows:
+            conn.close()
+            return 0
+
+        filled = 0
+        for city, target_date in rows:
+            # Try to get actual from source_city_rmse (already resolved)
+            actual_row = conn.execute("""
+                SELECT actual_high_f FROM source_city_rmse
+                WHERE city = ? AND target_date = ? AND actual_high_f IS NOT NULL
+                LIMIT 1
+            """, (city, target_date)).fetchone()
+
+            if actual_row:
+                actual = actual_row[0]
+                conn.execute("""
+                    UPDATE weather_forecast_log
+                    SET actual_high_f = ?,
+                        nws_error_f = CASE WHEN nws_forecast_high_f IS NOT NULL
+                                      THEN nws_forecast_high_f - ? ELSE NULL END,
+                        twc_error_f = CASE WHEN twc_forecast_high_f IS NOT NULL
+                                      THEN twc_forecast_high_f - ? ELSE NULL END,
+                        ensemble_error_f = CASE WHEN ensemble_forecast_f IS NOT NULL
+                                           THEN ensemble_forecast_f - ? ELSE NULL END
+                    WHERE city = ? AND target_date = ? AND actual_high_f IS NULL
+                """, (actual, actual, actual, actual, city, target_date))
+                filled += conn.execute("SELECT changes()").fetchone()[0]
+
+        conn.commit()
+        conn.close()
+        if filled:
+            logger.info("Backfilled {} weather_forecast_log rows with actuals", filled)
+        return filled
+    except Exception as e:
+        logger.debug("backfill_forecast_log_actuals error: {}", e)
+        return 0
+
+
 def log_source_forecasts(city: str, date: str, sources: dict):
     """Log individual source forecasts for later RMSE calculation.
     
@@ -1804,14 +1951,14 @@ def get_ensemble_status() -> dict:
         cal = conn.execute("""
             SELECT COUNT(*) AS n,
                    AVG(CAST(hit AS REAL)) * 100.0 AS hit_rate_pct
-            FROM backtest_brackets WHERE actual_high_f IS NOT NULL
+            FROM backtest_brackets WHERE actual_high_f IS NOT NULL AND yes_final_price IS NOT NULL AND volume > 0
         """).fetchone()
 
         by_comp = [dict(r) for r in conn.execute("""
             SELECT comparison, COUNT(*) AS n,
                    ROUND(100.0 * AVG(CAST(hit AS REAL)), 1) AS hit_pct,
                    ROUND(AVG(yes_final_price), 2) AS avg_market_price
-            FROM backtest_brackets WHERE actual_high_f IS NOT NULL
+            FROM backtest_brackets WHERE actual_high_f IS NOT NULL AND yes_final_price IS NOT NULL AND volume > 0
             GROUP BY comparison ORDER BY n DESC
         """)]
 

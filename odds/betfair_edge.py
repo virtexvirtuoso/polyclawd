@@ -13,7 +13,7 @@ import os
 from loguru import logger
 
 # The Odds API key
-ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "8f5b987dcee59ee4d05473290624411c")
+ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
 
 
 @dataclass
@@ -87,6 +87,10 @@ SPORT_MAPPINGS = {
     "icehockey_nhl_championship_winner": {"polymarket_search": "NHL Stanley Cup", "sport_name": "NHL"},
     "soccer_fifa_world_cup_winner": {"polymarket_search": "World Cup Winner", "sport_name": "World Cup"},
     "soccer_epl": {"polymarket_search": "Premier League", "sport_name": "EPL"},
+    "soccer_uefa_champs_league": {"polymarket_search": "Champions League", "sport_name": "UCL"},
+    "mma_mixed_martial_arts": {"polymarket_search": "UFC", "sport_name": "UFC"},
+    "tennis_atp_french_open": {"polymarket_search": "French Open", "sport_name": "Tennis"},
+    "tennis_atp_wimbledon": {"polymarket_search": "Wimbledon", "sport_name": "Tennis"},
     "politics_us_presidential_election_winner": {"polymarket_search": "President", "sport_name": "Politics"},
 }
 
