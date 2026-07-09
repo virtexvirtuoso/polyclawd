@@ -184,19 +184,19 @@ def _check_clob_resolution(condition_id: str) -> Optional[str]:
 
 
 def _get_unresolved_baseball_trades(conn: sqlite3.Connection) -> List[Dict]:
-    """Get all unresolved shadow trades with strategy=baseball_moneyline."""
+    """Get all unresolved shadow trades with baseball strategy."""
     try:
         rows = conn.execute("""
-            SELECT id, market_id, side, entry_price, market, category, reasoning
+            SELECT id, market_id, side, entry_price, market, category, reasoning,
+                   closing_yes_mid
             FROM shadow_trades
             WHERE resolved = 0
-              AND (strategy = 'baseball_moneyline'
+              AND (strategy LIKE 'baseball_%'
                    OR (category = 'baseball' AND side IN ('YES','NO')))
             ORDER BY timestamp ASC
         """).fetchall()
         return [dict(r) for r in rows]
     except sqlite3.OperationalError:
-        # shadow_trades table may not exist yet (first run, fresh DB)
         return []
 
 
@@ -306,14 +306,34 @@ def _clob_winner(market_id: str):
     return None
 
 
+def _capture_clv_mid(market_id: str) -> Optional[float]:
+    """Fetch the current YES midpoint from CLOB for CLV tracking.
+    Returns the YES mid price (0-1) or None on failure."""
+    data = _fetch_json(f"{CLOB_API}/markets/{market_id}", timeout=10)
+    if not data:
+        return None
+    tokens = data.get("tokens", [])
+    if not tokens:
+        return None
+    try:
+        # Token 0 = YES side
+        return float(tokens[0].get("price", 0))
+    except (ValueError, TypeError, IndexError):
+        return None
+
+
 def scan_resolved_baseball_games(batch_size: int = 200) -> Dict[str, Any]:
     """Resolve unresolved baseball shadow trades (moneyline/spread/total) against
     EACH trade's OWN Polymarket market via CLOB. No game-winner heuristic, no
     event-matching, no head-of-line batch cap (every trade is attempted each run;
     still-open markets are simply retried next cycle, never blocking newer rows).
+
+    Phase 3 addition: captures closing_yes_mid for CLV tracking on every cycle,
+    even before resolution. This builds the CLV dataset needed for per-book
+    weight optimization.
     """
     conn = get_db()
-    result = {"resolved": 0, "forecast_logged": 0, "skipped": 0, "errors": 0}
+    result = {"resolved": 0, "forecast_logged": 0, "skipped": 0, "errors": 0, "clv_captured": 0}
 
     trades = _get_unresolved_baseball_trades(conn)
     if not trades:
@@ -328,7 +348,18 @@ def scan_resolved_baseball_games(batch_size: int = 200) -> Dict[str, Any]:
 
         won = _clob_winner(market_id)
         if won is None:
-            result["skipped"] += 1            # market still open
+            # Market still open — capture CLV mid for closing line tracking
+            yes_mid = _capture_clv_mid(market_id)
+            if yes_mid is not None and 0.02 < yes_mid < 0.98:
+                try:
+                    conn.execute(
+                        "UPDATE shadow_trades SET closing_yes_mid=? WHERE id=?",
+                        (yes_mid, trade["id"]),
+                    )
+                    result["clv_captured"] += 1
+                except Exception:
+                    pass
+            result["skipped"] += 1
             time.sleep(RATE_DELAY)
             continue
         winner_name, winner_idx = won

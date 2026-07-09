@@ -390,6 +390,7 @@ CRITICAL_FLOW_USD  = 25000.0 # Telegram-delivered CRITICAL needs genuine whale
 NEAR_SETTLED_BID   = 0.95    # bid >= this: market effectively resolved YES
 NEAR_SETTLED_ASK   = 0.05    # ask <= this: effectively resolved NO
 NEAR_SETTLED_LAST  = 0.97    # last-trade fallback when no book snapshot
+PM_AGGREGATE_WHALE_USD = 50_000  # PM condition_id aggregate flow bypasses relative vol gate
 
 _MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
            "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
@@ -1506,6 +1507,19 @@ def scan_polymarket_flow(conn) -> list:
             elif max_single >= cat_t.get("whale_alert", CRITICAL_FLOW_USD):
                 score = max(score, 5)
                 reasons.append(f"whale_single_trade_${max_single:,.0f}")
+
+        # PM aggregate whale boost: $50K+ in one 5-min cycle is whale signal
+        # regardless of lifetime volume (relative vol gate can't fire on mature WC markets)
+        total_flow = flow.get("dollars", 0)
+        if total_flow >= PM_AGGREGATE_WHALE_USD and score < 8:
+            score = max(score, 8)
+            reasons.append(f"pm_agg_whale_${total_flow:,.0f}")
+
+        # Near-settled skip: last_price >= 0.97 or <= 0.03 = dust collection, not signal
+        last_price = flow.get("last_price", 0.5) or 0.5
+        if last_price >= NEAR_SETTLED_LAST or last_price <= (1 - NEAR_SETTLED_LAST):
+            logger.debug("PM near-settled skip: %s @ %.2f", slug, last_price)
+            continue
 
         if score >= ALERT_MIN_SCORE and slug not in dedup:
             is_smart = bool(sw and top_usd >= SMART_WALLET_MIN_USD)

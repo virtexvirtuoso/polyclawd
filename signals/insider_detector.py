@@ -391,16 +391,37 @@ def calculate_insider_score(trade: Dict, wallet_first_ts: Optional[float],
 # ── Main Scanner ────────────────────────────────────────────────────
 
 # Track already-processed tx hashes to avoid re-alerting
-_seen_txs: set = set()
+# File-backed so dedup survives scheduler restarts (in-memory set would reset
+# and re-fire every trade in the scan window on every restart).
+_SEEN_TXS_FILE = Path("/tmp/insider_seen_txs.json")
 _seen_txs_max = 10_000
+
+
+def _load_seen_txs() -> set:
+    try:
+        with open(_SEEN_TXS_FILE) as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def _save_seen_txs(seen: set) -> None:
+    try:
+        # Keep only the most recent N to bound file size
+        items = list(seen)[-_seen_txs_max:]
+        with open(_SEEN_TXS_FILE, "w") as f:
+            json.dump(items, f)
+    except Exception:
+        pass
+
 
 def scan_for_insiders() -> List[Dict]:
     """Main scan: fetch trades, filter large ones, score wallets.
     
     Returns list of scored insider candidates above threshold (40+).
     """
-    global _seen_txs
-    
+    _seen_txs = _load_seen_txs()
+
     trades = fetch_recent_trades(SCAN_LIMIT)
     if not trades:
         return []
@@ -423,9 +444,7 @@ def scan_for_insiders() -> List[Dict]:
         large_trades.append(t)
         _seen_txs.add(tx)
     
-    # Trim seen set
-    if len(_seen_txs) > _seen_txs_max:
-        _seen_txs = set(list(_seen_txs)[-5000:])
+    _save_seen_txs(_seen_txs)
     
     if not large_trades:
         logger.debug("Insider scan: 0 trades ≥${:,} (max=${:,.0f}, {} total)", MIN_TRADE_SIZE, max_size, len(trades))

@@ -83,6 +83,7 @@ PRICE_ZONE_MODIFIERS = {
 BECKER_NO_WIN_RATES = {
     "daily_updown": 0.463,  # n=887 (Poly only)
     "intraday_updown": 0.504,  # n=15,570 (Poly only — coin flip confirmed)
+    "intraday_updown_panic": 0.560,  # n=0 — conservative prior; microstructure-triggered only (cascade/smart_money_squeeze)
     "price_above": 0.593,  # n=3,763 (Kalshi 166 + Poly 3,597)
     "price_range": 0.566,  # n=31,982 (Kalshi only — was 0.886 Becker)
     "ai_model": 0.741,  # n=54 (Kalshi 45 + Poly 9)
@@ -154,6 +155,7 @@ ARCHETYPE_CONFIDENCE_CAPS = {
     "sports_winner": 0.25,  # 0% actual WR (n=8). Already blocked, but defense in depth.
     "sports_single_game": 0.45,  # 100% WR (n=1) — tiny sample. Conservative.
     "sports_tournament": 0.50,  # New archetype (2026-06-20). No shadow data. Moderate cap — 30d shadow eval.
+    "intraday_updown_panic": 0.65,  # Microstructure-triggered HF trades (cascade, smart_money_squeeze). No data yet — evaluate in 30d.
     "entertainment": 0.30,  # 0% actual WR (n=2). Becker 71.1% not realized.
     "ai_model": 0.30,  # 0% actual WR (n=1). Conservative.
     "financial_price": 0.40,  # No data. Conservative.

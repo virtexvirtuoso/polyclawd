@@ -80,6 +80,7 @@ def get_meta_db(path: Optional[Path] = None) -> sqlite3.Connection:
         ("source_category", "TEXT"), ("rank_at_seed", "INTEGER"),
         ("rank_last_seen", "INTEGER"), ("rank_scraped_at", "INTEGER"),
         ("is_bot", "INTEGER DEFAULT 0"),
+        ("skill_n", "INTEGER"), ("skill_ret", "REAL"), ("skill_p", "REAL"),
     ):
         try:
             conn.execute(f"ALTER TABLE pm_wallets ADD COLUMN {col} {typ}")
@@ -218,11 +219,17 @@ def fetch_wallet_stats(wallet: str) -> Optional[dict]:
     for page in range(POSITIONS_PAGE_CAP):
         d = _fetch_json(f"{PM_DATA_API}/positions?user={wallet}&limit=500&offset={page * 500}")
         if d is None:
-            return None if page == 0 else compute_stats(rows)
+            return None if page == 0 else _stats_with_skill(rows)
         rows.extend(d)
         if len(d) < 500:
             break
-    return compute_stats(rows)
+    return _stats_with_skill(rows)
+
+
+def _stats_with_skill(rows: list) -> dict:
+    st = compute_stats(rows)
+    st.update(skill_score(skill_returns(rows)))
+    return st
 
 
 def demote_stale_wallets(conn) -> dict:
@@ -256,8 +263,10 @@ def demote_stale_wallets(conn) -> dict:
         if stats is None:
             continue
 
-        # Check sliding WR
-        if stats["closed"] >= 20:
+        # Check sliding WR — but never WR-demote a wallet passing the
+        # sign-randomization skill gate: longshot specialists run low WR with
+        # strongly positive per-$ returns; WR is the wrong metric for them.
+        if stats["closed"] >= 20 and not skill_gate_ok(stats):
             wr = stats["wins"] / stats["closed"]
             if wr < WALLET_SLIDING_WR:
                 conn.execute("UPDATE pm_wallets SET smart=0 WHERE wallet=?", (wallet,))
@@ -375,7 +384,97 @@ def _alert_graduation(name: str, stats: dict, wr: float) -> None:
         pass  # Don't crash refresh on alert failure
 
 
+# ── Sign-randomization skill scoring (Gomez-Cram et al. 2026, SSRN 6617059) ──
+# Raw win-rate/PnL graduation is luck-confounded (longshot sprayers, hot streaks).
+# The randomization test scores a wallet's actual total probability-point return
+# against a null where every bet's side is a coin flip — a wallet's own variance
+# widens its own null instead of inflating its score.
+SKILL_MIN_N = 30     # resolved positions needed before the skill gate can pass
+SKILL_P_MAX = 0.05   # sign-randomization p-value threshold
+SKILL_SIMS = 10_000
+
+
+def skill_returns(rows: list) -> list:
+    """Per-position probability-point returns (settled − avgPrice) for RESOLVED
+    positions, using the same outcome-honest complete-rule as compute_stats.
+    realizedPnl>0 counts as a directional win even when sold early — consistent
+    with compute_stats. Open/ambiguous positions and rows without a usable
+    avgPrice are skipped."""
+    rets = []
+    for p in rows:
+        try:
+            px = float(p.get("avgPrice"))
+        except (TypeError, ValueError):
+            continue
+        if not (0.0 < px < 1.0):
+            continue
+        rp = p.get("realizedPnl") or 0
+        cur = p.get("currentValue") or 0
+        init = p.get("initialValue") or 0
+        if abs(rp) > 0.01:
+            # Realized (sold or redeemed): ACTUAL per-share return in probability
+            # points = realizedPnl x avgPrice / cost. Counting any realized win as
+            # a full s=1.0 booked a +3c scalp as +0.60 and inflated every
+            # high-volume wallet ~+0.4/bet (QA probe 2026-07-06) — that rule would
+            # have graduated scalpers wholesale. Redemption still books 1-avgPrice
+            # exactly; the sign-flip null stays valid (mirror side = -ret).
+            if init <= 0:
+                continue
+            rets.append(max(-1.0, min(1.0, rp * px / init)))
+            continue
+        if init > 1 and cur < 0.01 * init:
+            rets.append(0.0 - px)   # zombie: held to worthless resolution
+        elif init > 1 and cur >= 0.5 * init and p.get("redeemable"):
+            rets.append(1.0 - px)   # unredeemed winner
+        # else: still open / ambiguous — skip
+    return rets
+
+
+def skill_score(rets: list, sims: int = SKILL_SIMS) -> dict:
+    """p = P(null total ≥ actual total) under random sign flips. Deterministic
+    (fixed seed). Falls back to the normal approximation if numpy is missing."""
+    n = len(rets)
+    if n == 0:
+        return {"skill_n": 0, "skill_ret": None, "skill_p": None}
+    actual = float(sum(rets))
+    mean = actual / n
+    try:
+        import numpy as np
+
+        r = np.asarray(rets, dtype=np.float64)
+        # Deterministic per wallet but DECORRELATED across wallets — a single
+        # shared seed reuses one null sample fleet-wide, so its Monte-Carlo
+        # error biases every wallet's p the same direction (QA 2026-07-06
+        # measured 12% empirical FP at nominal 5% with 2k shared sims).
+        seed = (n * 1_000_003 + int(abs(actual) * 1e9)) % (2**63 - 1)
+        rng = np.random.default_rng(seed)
+        ge = done = 0
+        block = max(1, min(sims, 20_000_000 // max(n, 1)))
+        while done < sims:
+            b = min(block, sims - done)
+            signs = rng.integers(0, 2, size=(b, n)) * 2 - 1
+            ge += int((signs @ r >= actual).sum())
+            done += b
+        p = (ge + 1) / (sims + 1)
+    except Exception:
+        import math
+
+        sd = math.sqrt(sum(x * x for x in rets)) or 1e-9
+        p = 0.5 * math.erfc((actual / sd) / math.sqrt(2))
+    return {"skill_n": n, "skill_ret": mean, "skill_p": p}
+
+
+def skill_gate_ok(stats: dict) -> bool:
+    """True when the wallet passes the luck-controlled skill gate."""
+    return ((stats.get("skill_n") or 0) >= SKILL_MIN_N
+            and stats.get("skill_p") is not None
+            and stats["skill_p"] <= SKILL_P_MAX
+            and (stats.get("skill_ret") or 0) > 0)
+
+
 def is_smart(stats: dict) -> bool:
+    if skill_gate_ok(stats):
+        return True  # sign-randomization path — WR/PnL thresholds don't apply
     if stats["closed"] < SMART_MIN_CLOSED:
         return False
     wr = stats["wins"] / stats["closed"]
@@ -417,19 +516,22 @@ def refresh_wallets(conn, cap: int = 60) -> dict:
         conn.execute(
             "INSERT INTO pm_wallets (wallet, name, first_seen, last_seen,"
             " closed_positions, wins, win_rate, realized_pnl, net_pnl, zombies,"
-            " concentration, smart, refreshed)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            " concentration, smart, refreshed, skill_n, skill_ret, skill_p)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(wallet) DO UPDATE SET"
             "  name=excluded.name, last_seen=excluded.last_seen,"
             "  closed_positions=excluded.closed_positions, wins=excluded.wins,"
             "  win_rate=excluded.win_rate, realized_pnl=excluded.realized_pnl,"
             "  net_pnl=excluded.net_pnl, zombies=excluded.zombies,"
             "  concentration=excluded.concentration,"
-            "  smart=excluded.smart, refreshed=excluded.refreshed",
+            "  smart=excluded.smart, refreshed=excluded.refreshed,"
+            "  skill_n=excluded.skill_n, skill_ret=excluded.skill_ret,"
+            "  skill_p=excluded.skill_p",
             (row["wallet"], row["name"] or "", now, now,
              stats["closed"], stats["wins"], wr, stats["realized"],
              stats.get("net"), stats.get("zombies"),
-             stats.get("concentration", 0.0), smart, now))
+             stats.get("concentration", 0.0), smart, now,
+             stats.get("skill_n"), stats.get("skill_ret"), stats.get("skill_p")))
         refreshed += 1
 
     conn.execute("DELETE FROM pm_wallet_seen WHERE wallet IN"

@@ -19,6 +19,7 @@ Architecture:
 """
 
 import json
+from collections import Counter
 import logging
 import math
 import os
@@ -150,11 +151,11 @@ def _update_price_1h_later(slug: str, ts: float, price_1h: float):
 
 # ─── Trade Fetching ─────────────────────────────────────────────────────
 
-def _get_recent_trades(token_id: str, limit: int = 500) -> list:
+def _get_recent_trades(token_id: str, limit: int = 500, condition_id: str = "") -> list:
     """Fetch recent trades using the CLOB client.
     Falls back to our direct /trades implementation if available."""
     from odds.polymarket_clob import get_recent_trades as _clob_trades
-    return _clob_trades(token_id, limit=limit)
+    return _clob_trades(token_id, limit=limit, condition_id=condition_id)
 
 
 def _fetch_market_price(slug: str) -> Optional[float]:
@@ -191,7 +192,7 @@ def _fetch_liquid_markets(limit: int = 30) -> list:
 
 # ─── VPIN Core Computation ──────────────────────────────────────────────
 
-def compute_vpin(token_id: str, n_bars: int = DEFAULT_N_BARS) -> dict:
+def compute_vpin(token_id: str, n_bars: int = DEFAULT_N_BARS, condition_id: str = "") -> dict:
     """
     Compute VPIN for a single Polymarket CLOB token.
 
@@ -212,7 +213,7 @@ def compute_vpin(token_id: str, n_bars: int = DEFAULT_N_BARS) -> dict:
         vpin_class, buy_volume, sell_volume, total_volume
         Returns error dict on failure.
     """
-    trades = _get_recent_trades(token_id, limit=2000)
+    trades = _get_recent_trades(token_id, limit=2000, condition_id=condition_id)
     if not trades or len(trades) < DEFAULT_MIN_TRADES:
         return {
             "error": f"Insufficient trades: got {len(trades) if trades else 0}, need {DEFAULT_MIN_TRADES}",
@@ -373,6 +374,7 @@ def scan_top_markets_vpin(top_n: int = 20) -> list:
         return []
 
     results = []
+    snapshot_rows = []
     for m in markets:
         slug = m.get("slug", "")
         question = m.get("question", "")[:80]
@@ -384,7 +386,7 @@ def scan_top_markets_vpin(top_n: int = 20) -> list:
             logger.debug("Skipping %s: no token ID", slug)
             continue
 
-        result = compute_vpin(token_id)
+        result = compute_vpin(token_id, condition_id=m.get("conditionId", ""))
         if result.get("error"):
             logger.debug("VPIN skip %s: %s", slug, result["error"])
             continue
@@ -408,15 +410,32 @@ def scan_top_markets_vpin(top_n: int = 20) -> list:
         }
         results.append(entry)
 
-        # Store snapshot for backtesting
-        _save_vpin_snapshot(
+        # Snapshot deferred until after the sanity gate below
+        snapshot_rows.append(dict(
             slug=slug,
             token_id=token_id,
             vpin=result["vpin"],
             buy_pct=result["buy_pct"],
             n_trades=result["n_trades"],
             price_at_snap=price or 0.5,
-        )
+        ))
+
+    # Sanity gate: identical VPIN across most markets = dead input filter
+    # (2026-07-08: token_id passed as data-api `market` param was silently
+    # ignored, stamping one global-tape VPIN on all 30 markets)
+    if len(results) >= 5:
+        vpin_counts = Counter(r["vpin"] for r in results)
+        top_vpin, top_count = vpin_counts.most_common(1)[0]
+        if top_count > len(results) / 2:
+            logger.error(
+                "VPIN sanity gate: %d/%d markets share identical VPIN=%.4f — "
+                "input filter likely dead; skipping snapshot writes",
+                top_count, len(results), top_vpin,
+            )
+            snapshot_rows = []
+
+    for row in snapshot_rows:
+        _save_vpin_snapshot(**row)
 
     # Rank by VPIN descending
     results.sort(key=lambda x: x["vpin"], reverse=True)
@@ -463,7 +482,7 @@ def vpin_for_slug(slug: str) -> dict:
     if not token_id:
         return {"error": f"No token ID for {slug}", "slug": slug}
 
-    result = compute_vpin(token_id)
+    result = compute_vpin(token_id, condition_id=m.get("conditionId", ""))
     price = _fetch_market_price(slug)
 
     result["slug"] = slug

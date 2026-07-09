@@ -110,7 +110,7 @@ JSON_DIR = Path.home() / ".openclaw" / "paper-trading"
 # Archetypes that move together are grouped. Max N open positions per group.
 CORRELATION_GROUPS = {
     "price_above": "crypto", "price_range": "crypto", "crypto_price": "crypto",
-    "daily_updown": "crypto", "intraday_updown": "crypto",
+    "daily_updown": "crypto", "intraday_updown": "crypto", "intraday_updown_panic": "crypto",
     "directional": "crypto",
     "sports_single_game": "sports", "sports_winner": "sports",
     "game_total": "sports",

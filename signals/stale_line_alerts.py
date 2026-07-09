@@ -44,7 +44,7 @@ DRY_RUN = "--dry" in sys.argv
 
 SOFT_BOOKS = ["draftkings", "fanduel", "betmgm", "caesars", "betrivers"]
 MIN_EDGE_PP = 4.0
-COOLDOWN_MINUTES = 15
+COOLDOWN_MINUTES = 120  # must exceed the 30-min tick cadence or it never gates (15 was a no-op: persistent lines re-alerted every scan)
 EDGE_CHANGE_PP = 3.0  # re-alert inside cooldown if edge moves >= this
 MAX_ALERTS_PER_SCAN = 5
 NEAR_WINDOW_HOURS = 12  # only spend credits on events kicking off within this window

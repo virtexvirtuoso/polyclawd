@@ -174,8 +174,12 @@ def _refresh_gamma_cache():
     if now - _GAMMA_CACHE_TIME < _GAMMA_CACHE_TTL:
         return
     try:
+        now_utc = datetime.now(timezone.utc)
+        end_min = now_utc.strftime("%Y-%m-%dT00:00:00Z")
+        end_max = (now_utc + timedelta(days=2)).strftime("%Y-%m-%dT00:00:00Z")
         req = urllib.request.Request(
-            f"{GAMMA_API}/events?closed=false&tag_slug=baseball&limit=100",
+            f"{GAMMA_API}/events?closed=false&tag_slug=baseball&limit=100"
+            f"&end_date_min={end_min}&end_date_max={end_max}",
             headers={"User-Agent": "Polyclawd/2.0"},
         )
         with urllib.request.urlopen(req, timeout=15) as resp:

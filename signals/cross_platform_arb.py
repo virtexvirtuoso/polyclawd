@@ -503,6 +503,33 @@ def find_arb_opportunities(
     return result
 
 
+def _arb_to_shadow_signal(opp: dict) -> dict:
+    """Map a cross-platform arb opportunity -> directional buy-leg shadow signal.
+
+    We log the underpriced YES we would BUY on `buy_platform` (directional-leg
+    convention, NOT a locked 2-leg spread). `buy_price` is stored x100 in the opp.
+    """
+    is_poly = opp["buy_platform"] == "polymarket"
+    return {
+        "market_id": opp["poly_id"] if is_poly else opp["kalshi_id"],
+        "market": opp["poly_title"] if is_poly else opp["kalshi_title"],
+        "platform": opp["buy_platform"],
+        "side": "YES",
+        "price": round(opp["buy_price"] / 100.0, 4),
+        "confidence": round(min(0.95, 0.5 + opp.get("net_edge_pp", 0.0) / 100.0), 4),
+        "confirmations": 1,
+        "days_to_close": 7,
+        "volume": opp.get("min_volume", 0),
+        "category": "cross_platform",
+        "strategy": "cross_platform_arb",
+        "reasoning": (
+            f"x-arb buy-leg YES on {opp['buy_platform']} @ {opp['buy_price']}c "
+            f"(spread {opp.get('spread_pp')}pp, net-edge {opp.get('net_edge_pp')}pp "
+            f"vs {opp.get('sell_platform')})"
+        ),
+    }
+
+
 def scan_cross_platform_arb() -> Dict:
     """Main entry point: fetch markets from both platforms and find arb opportunities."""
     now = time.time()
@@ -542,12 +569,24 @@ def scan_cross_platform_arb() -> Dict:
             kalshi_age or 0, poly_age or 0
         )
     
+    # Shadow-log the directional buy leg of each opportunity (strategy=cross_platform_arb).
+    # Best-effort: logging must never break the scan. Resolution + poly_delta (Poly leg)
+    # accrue via the existing shadow pipeline; log_shadow_trade dedups per market.
+    try:
+        from signals.shadow_tracker import log_shadow_trade
+        for _opp in arbs:
+            if _opp.get("book_tradeable") is False:
+                continue
+            log_shadow_trade(_arb_to_shadow_signal(_opp))
+    except Exception as _e:
+        logger.debug(f"cross-arb shadow log skipped: {_e}")
+
     # Fee-adjustment metadata for documentation
     fee_assumptions = {
         "polymarket": 0.02,
         "kalshi": 0.01,
         "slippage": 0.005,
-        "note": "Polymarket ~2%% on net winnings, Kalshi ~1%% per contract. Both CLOBs — no bookmaker vig. Slippage 0.5pp estimated."
+        "note": "Display only; real per-leg taker fees via execution.fee_model SSOT (PM feeRate*p*(1-p), 0%% on winnings; Kalshi 0.07*p*(1-p)). Net edge computed in net_arb_edge."
     }
     
     result = {

@@ -433,7 +433,7 @@ def _markets_match(title_a: str, title_b: str) -> bool:
 
     # Structured matching via browser_bridge parser
     try:
-        from browser_bridge import _parse_market_title
+        from signals.browser_bridge import _parse_market_title
         a = _parse_market_title(title_a)
         b = _parse_market_title(title_b)
 

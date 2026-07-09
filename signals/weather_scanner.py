@@ -50,7 +50,7 @@ CITY_COORDS = {
     "dc": (38.91, -77.04, "America/New_York"),
     # International (Polymarket)
     "london": (51.51, -0.13, "Europe/London"),
-    "buenos aires": (34.60, -58.38, "America/Argentina/Buenos_Aires"),
+    "buenos aires": (-34.60, -58.38, "America/Argentina/Buenos_Aires"),
     "toronto": (43.65, -79.38, "America/Toronto"),
     "wellington": (-41.29, 174.78, "Pacific/Auckland"),
     "sydney": (-33.87, 151.21, "Australia/Sydney"),
@@ -1620,7 +1620,64 @@ def scan_all_weather() -> dict:
     
     all_signals = kalshi_signals + poly_signals
     all_signals.sort(key=lambda x: x.get("edge_pct", 0), reverse=True)
-    
+
+    # Log forecasts for resolution-source edge validation (Phase 0)
+    # Logs ALL active cities with markets — not just those above edge threshold.
+    # This accumulates the data needed to validate whether resolution-source edge works.
+    try:
+        from signals.weather_ensemble import log_forecast_for_edge, get_ensemble_forecast, backfill_forecast_log_actuals
+        logged = 0
+
+        # Log signals that passed the edge filter (with their platform + threshold)
+        for sig in all_signals:
+            city = sig.get("city", "")
+            target_date = sig.get("target_date", "")
+            platform = sig.get("platform", "")
+            market_price = sig.get("market_price", 0)
+            threshold_f = None
+            wd = sig.get("weather_detail", {})
+            if isinstance(wd, dict):
+                threshold_f = wd.get("threshold_f")
+            if not city or not target_date:
+                continue
+            ens_data = get_ensemble_forecast(city, target_date)
+            if not ens_data:
+                continue
+            log_forecast_for_edge(
+                city=city, target_date=target_date,
+                sources=ens_data.get("sources", {}),
+                ensemble=ens_data.get("ensemble", {}),
+                platform=platform, market_price=market_price,
+                threshold_f=threshold_f,
+            )
+            logged += 1
+
+        # Also log for all cities with active PM markets (regardless of edge)
+        # These are the baseline forecasts needed for validation.
+        active_cities = _discover_weather_cities()
+        tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
+        for city_slug in active_cities:
+            city_name = city_slug.replace('-', ' ')
+            ens_data = get_ensemble_forecast(city_name, tomorrow)
+            if not ens_data or ens_data.get("is_actual"):
+                continue
+            log_forecast_for_edge(
+                city=city_name, target_date=tomorrow,
+                sources=ens_data.get("sources", {}),
+                ensemble=ens_data.get("ensemble", {}),
+                platform="baseline", market_price=None,
+                threshold_f=None,
+            )
+            logged += 1
+
+        # Backfill actuals for past rows
+        backfill_forecast_log_actuals()
+
+        if logged:
+            logger.info("Forecast log: %d entries logged for resolution-source edge", logged)
+    except Exception as e:
+        logger.warning("Forecast logging error (non-fatal): %s", e)
+
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "total_signals": len(all_signals),

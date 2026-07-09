@@ -49,7 +49,10 @@ STATS_API_11 = "https://statsapi.mlb.com/api/v1.1"
 
 # ── Tunables (mirror the plan) ───────────────────────────────────────────────
 EDGE_THRESHOLD_PCT = 15.0       # alert when scout edge >= +15pp
-MIN_GAMES = 7                   # alert floor (plan: min_games >= 7)
+MIN_GAMES = 7                   # SCAN floor — keeps the control sample broad
+ALERT_MIN_GAMES = 15            # ALERT floor (audit 2026-07-07: n=7 hit rates
+#                                 predicted 75% vs 44% realized; at n=7 one 6/7
+#                                 streak inflates the estimate ~14pp vs ~7pp at n=15)
 ALERT_LAST_N = 20               # fetch up to 20 games so we can compute every
 #                                 candidate lookback (7/10/15/20) from one pull.
 LOOKBACK_WINDOWS = (7, 10, 15, 20)
@@ -142,6 +145,18 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_scan_log_player ON mlb_prop_scan_log(player, market);
         CREATE INDEX IF NOT EXISTS idx_prop_shadow_status ON mlb_prop_shadow(status);
+
+        -- Persistent alert dedup. The cooldown state used to live in the
+        -- scheduler's in-memory _state dict, so every scheduler restart reset
+        -- the 4h window and re-fired live alerts (Jun 19-22: 11 duplicate
+        -- Telegram fires, worst 5x in 90min). Audit 2026-07-07, rec 1.
+        CREATE TABLE IF NOT EXISTS prop_alert_dedup (
+            player TEXT NOT NULL,
+            market TEXT NOT NULL,
+            alerted_at REAL NOT NULL,
+            edge_at_alert REAL,
+            PRIMARY KEY (player, market)
+        );
         """
     )
     # Migrate: control-sample outcome columns (idempotent — added 2026-06-10 for
@@ -326,6 +341,41 @@ def capture_clv_close(game_pk: int, player: str, market: str,
         logger.debug(f"capture_clv_close failed: {e}")
 
 
+def _load_dedup_state() -> Dict[str, Dict]:
+    """Alert cooldown state from the shadow DB — survives scheduler restarts
+    (the in-memory _state version reset on restart and re-fired live alerts).
+    Same shape the scan loop always used: {"player|market": {ts, edge}}."""
+    try:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT player, market, alerted_at, edge_at_alert FROM prop_alert_dedup"
+        ).fetchall()
+        conn.close()
+        return {
+            f"{r['player']}|{r['market']}": {"ts": r["alerted_at"], "edge": r["edge_at_alert"] or 0}
+            for r in rows
+        }
+    except Exception as e:  # pragma: no cover
+        logger.debug(f"dedup state load failed: {e}")
+        return {}
+
+
+def _save_dedup_entry(player: str, market: str, ts: float, edge: float) -> None:
+    """Persist one fired alert's cooldown marker. Never raises."""
+    try:
+        conn = _db()
+        conn.execute(
+            "INSERT INTO prop_alert_dedup (player, market, alerted_at, edge_at_alert) "
+            "VALUES (?,?,?,?) ON CONFLICT(player, market) DO UPDATE SET "
+            "alerted_at=excluded.alerted_at, edge_at_alert=excluded.edge_at_alert",
+            (player, market, ts, edge),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:  # pragma: no cover
+        logger.debug(f"dedup state save failed: {e}")
+
+
 # ============================================================================
 # Scan + alert  (Task 4)  — fires only inside a window
 # ============================================================================
@@ -365,12 +415,9 @@ async def run_prop_alert_scan(now: Optional[datetime] = None) -> Dict:
     payload = await get_prop_scout(last_n=ALERT_LAST_N, min_edge=-0.99, min_games=MIN_GAMES)
     results = payload.get("results", [])
 
-    # Import dedup state lazily from the scheduler if present; else local dict.
-    try:
-        from services.scheduler import _state
-        prev_state = _state.setdefault("mlb_props_alert_state", {})
-    except Exception:
-        prev_state = {}
+    # Dedup state lives in the shadow DB so it survives scheduler restarts
+    # (in-memory _state reset on restart -> Jun 19-22 duplicate fires).
+    prev_state = _load_dedup_state()
 
     scanned = 0
     to_alert: List[Dict] = []
@@ -397,7 +444,7 @@ async def run_prop_alert_scan(now: Optional[datetime] = None) -> Dict:
             confirmed = False
 
         edge = row.get("edge_pct", 0) or 0
-        qualifies = edge >= EDGE_THRESHOLD_PCT and confirmed and (row.get("games_sampled", 0) >= MIN_GAMES)
+        qualifies = edge >= EDGE_THRESHOLD_PCT and confirmed and (row.get("games_sampled", 0) >= ALERT_MIN_GAMES)
 
         # Dedup / cooldown (mirror task_edge_alerts).
         will_alert = False
@@ -409,6 +456,7 @@ async def run_prop_alert_scan(now: Optional[datetime] = None) -> Dict:
             if hours_since >= COOLDOWN_HOURS or edge_moved or not prev:
                 will_alert = True
                 prev_state[key] = {"ts": ts, "edge": edge}
+                _save_dedup_entry(player, row.get("market") or "", ts, edge)
 
         # CONTROL SAMPLE: log EVERY scanned prop (calibration integrity).
         log_scan_row(row, lineup_confirmed=confirmed, alerted=will_alert,
@@ -416,8 +464,42 @@ async def run_prop_alert_scan(now: Optional[datetime] = None) -> Dict:
         scanned += 1
 
         if will_alert:
+            # Park/platoon/lineup enrichment
+            try:
+                from odds.mlb_enrichment import enrich_row
+                row = enrich_row(row, row.get("home_team", ""), row.get("away_team", ""))
+            except Exception:
+                pass
+            # Statcast xStats enrichment
+            try:
+                from odds.statcast import enrich_with_statcast
+                row = enrich_with_statcast(row)
+            except Exception:
+                pass
             log_prop_shadow(row, game_pk=game_pk, window_kind=wk)
             to_alert.append(row)
+            # Phase 2: stats enrichment — compute stats_score from hit rates
+            try:
+                from odds.sports_edge_common import log_enrichment
+                hr = row.get("hit_rate_pct", 0) or 0
+                book = row.get("book_over_pct", 0) or 0
+                games = row.get("games_sampled", 0) or 0
+                # stats_score: 0-1 composite (hit rate consistency + sample size)
+                hr_frac = min(hr / 100.0, 1.0) if hr > 0 else 0
+                size_bonus = min(games / 20.0, 1.0) * 0.2  # 0-0.2 for sample size
+                score = hr_frac * 0.8 + size_bonus
+                confirms = hr > book and games >= ALERT_MIN_GAMES
+                tier = "strong" if confirms and edge >= 15 else "speculative" if confirms else "fade"
+                log_enrichment(
+                    shadow_trade_id=None,  # prop shadows use mlb_prop_shadow, not shadow_trades
+                    sport="mlb_props",
+                    stats_score=score,
+                    stats_confirmation=confirms,
+                    alert_tier=tier,
+                    stats_detail=f"hr={hr}% book={book}% games={games} edge={edge}pp",
+                )
+            except Exception:
+                pass
 
     if to_alert:
         to_alert.sort(key=lambda r: r.get("edge_pct", 0), reverse=True)
@@ -548,7 +630,8 @@ def _mlb_get(url: str, timeout: int = 12) -> Optional[dict]:
 
 
 def _resolve_mlb_prop_from_statsapi(
-    game_pk: int, player_id: Optional[int], market: str, prop_line: float
+    game_pk: int, player_id: Optional[int], market: str, prop_line: float,
+    game_date: Optional[str] = None,
 ) -> Tuple[str, Optional[float], str]:
     """Grade ONE prop from the live feed/box score. Returns (status, result_stat, note).
 
@@ -574,6 +657,13 @@ def _resolve_mlb_prop_from_statsapi(
 
     if detailed in ("Postponed", "Cancelled", "Canceled"):
         return ("void", None, f"game {detailed.lower()}")
+    # Postponed games keep their gamePk but get RE-DATED to the makeup date with
+    # status 'Scheduled', so the branch above never fires for them. If the feed's
+    # official date is after the date we alerted for, the original game didn't
+    # happen -> void (props for the postponed date settle void, not carry over).
+    official = gd.get("datetime", {}).get("officialDate", "")
+    if game_date and official and official > game_date:
+        return ("void", None, f"postponed \u2014 rescheduled to {official}")
     if "Suspended" in detailed:
         return ("open", None, "suspended — awaiting completion")
     if abstract != "Final":
@@ -605,12 +695,13 @@ def resolve_open_prop_shadows() -> Dict:
     try:
         conn = _db()
         rows = conn.execute(
-            "SELECT id, game_pk, player_id, market, prop_line FROM mlb_prop_shadow "
+            "SELECT id, game_pk, game_date, player_id, market, prop_line FROM mlb_prop_shadow "
             "WHERE status='open' AND game_pk IS NOT NULL"
         ).fetchall()
         for r in rows:
             status, result_stat, note = _resolve_mlb_prop_from_statsapi(
-                r["game_pk"], r["player_id"], r["market"], r["prop_line"] or 0.5
+                r["game_pk"], r["player_id"], r["market"], r["prop_line"] or 0.5,
+                game_date=r["game_date"],
             )
             if status == "open":
                 counts["still_open"] += 1

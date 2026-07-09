@@ -814,6 +814,12 @@ async def scan_all_games_prop_composite(
     _CACHE["data"] = results
     _CACHE["ts"] = now
 
+    # Phase 2F: persist for reconciliation
+    try:
+        persist_ce8_results(results)
+    except Exception:
+        pass
+
     return results
 
 
@@ -828,6 +834,118 @@ async def main():
     logger.info("prop_composite: scanning all games...")
     results = await scan_all_games_prop_composite(force=True)
     print(json.dumps(results, indent=2, default=str))
+
+
+# ─── Phase 2F: DB persistence for CE-8/per-sport reconciliation ────────────
+_CE8_DB_INIT = False
+
+
+def _init_ce8_cache(conn):
+    global _CE8_DB_INIT
+    if _CE8_DB_INIT:
+        return
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS ce8_signal_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scanned_at TEXT NOT NULL,
+            event_title TEXT NOT NULL,
+            away_team TEXT,
+            home_team TEXT,
+            mc_away_prob REAL,
+            mc_home_prob REAL,
+            ml_away_prob REAL,
+            ml_home_prob REAL,
+            max_diff_pp REAL,
+            signal INTEGER DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_ce8_event ON ce8_signal_cache(event_title);
+    """)
+    _CE8_DB_INIT = True
+
+
+def persist_ce8_results(results: list) -> int:
+    """Write CE-8 composite results to DB for reconciliation."""
+    if not results:
+        return 0
+    try:
+        import sqlite3 as _sq
+        from pathlib import Path as _P
+        db = _P(__file__).parent.parent / "storage" / "shadow_trades.db"
+        conn = _sq.connect(str(db), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        _init_ce8_cache(conn)
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("DELETE FROM ce8_signal_cache WHERE scanned_at < datetime('now', '-24 hours')")
+        n = 0
+        for r in results:
+            if not r.get("sufficient_data"):
+                continue
+            mc = r.get("mc_result", {})
+            conn.execute(
+                """INSERT INTO ce8_signal_cache
+                   (scanned_at, event_title, away_team, home_team,
+                    mc_away_prob, mc_home_prob, ml_away_prob, ml_home_prob,
+                    max_diff_pp, signal)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (now, r.get("event", "")[:180],
+                 r.get("away_team", ""), r.get("home_team", ""),
+                 mc.get("mc_win_prob_away"), mc.get("mc_win_prob_home"),
+                 r.get("ml_away_prob"), r.get("ml_home_prob"),
+                 r.get("max_diff_pp", 0),
+                 1 if r.get("max_diff_pp", 0) >= 5 else 0),
+            )
+            n += 1
+        conn.commit()
+        conn.close()
+        return n
+    except Exception as e:
+        logger.debug(f"CE-8 persist failed: {e}")
+        return 0
+
+
+def check_ce8_agrees(event_title: str, participant: str, direction: str) -> Optional[bool]:
+    """Check if CE-8 prop composite agrees with the per-sport edge direction.
+    Returns True (MC simulation supports the bet), False (contradicts), None (no data)."""
+    try:
+        import sqlite3 as _sq
+        from pathlib import Path as _P
+        db = _P(__file__).parent.parent / "storage" / "shadow_trades.db"
+        conn = _sq.connect(str(db), timeout=5)
+        conn.row_factory = _sq.Row
+        _init_ce8_cache(conn)
+        rows = conn.execute(
+            """SELECT away_team, home_team, mc_away_prob, mc_home_prob,
+                      ml_away_prob, ml_home_prob
+               FROM ce8_signal_cache
+               WHERE (event_title LIKE ? OR away_team LIKE ? OR home_team LIKE ?)
+               AND scanned_at > datetime('now', '-6 hours')
+               ORDER BY scanned_at DESC LIMIT 1""",
+            (f"%{participant[:20]}%", f"%{participant[:20]}%", f"%{participant[:20]}%"),
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return None
+        r = rows[0]
+        # Determine which team the participant is
+        mc_prob = None
+        ml_prob = None
+        part_lower = participant.lower()
+        if part_lower in (r["away_team"] or "").lower():
+            mc_prob = r["mc_away_prob"]
+            ml_prob = r["ml_away_prob"]
+        elif part_lower in (r["home_team"] or "").lower():
+            mc_prob = r["mc_home_prob"]
+            ml_prob = r["ml_home_prob"]
+        if mc_prob is None or ml_prob is None:
+            return None
+        # CE-8 agrees if MC thinks the team is more likely to win than the moneyline says
+        # (i.e., MC sees value on the same side as the per-sport engine)
+        is_buy = direction.upper() in ("YES", "BUY")
+        mc_says_value = mc_prob > ml_prob
+        return mc_says_value == is_buy
+    except Exception:
+        return None
 
 
 if __name__ == "__main__":

@@ -160,6 +160,21 @@ def _strategy_emoji(strategy: str) -> str:
 
 # ── Position Alerts ──────────────────────────────────────────────────────
 
+def _strategy_record(strategy: str) -> str:
+    """Return W/L record string for a specific strategy from its resolution log."""
+    try:
+        from signals.resolution_logger import load_resolutions
+        records = load_resolutions(strategy)
+        if not records:
+            return "No resolutions yet"
+        wins = sum(1 for r in records if r.get("won"))
+        losses = len(records) - wins
+        wr = wins / len(records) * 100
+        return f"{wins}W/{losses}L ({wr:.0f}%)"
+    except Exception:
+        return "—"
+
+
 def alert_position_opened(market_title: str, side: str, entry_price: float,
                           bet_size: float, strategy: str, edge_pct: float = 0,
                           market_url: str = "", confidence: float = 0,
@@ -169,6 +184,8 @@ def alert_position_opened(market_title: str, side: str, entry_price: float,
     ctx = _portfolio_context()
     emoji = _strategy_emoji(strategy)
     label = _strategy_label(strategy)
+    # Use strategy-specific W/L for strategies that track their own resolutions
+    strategy_record = _strategy_record(strategy) if strategy in ("tweet_count_mc", "weather_ensemble") else ctx["record"]
 
     description = market_title[:200]
     if market_url:
@@ -189,18 +206,36 @@ def alert_position_opened(market_title: str, side: str, entry_price: float,
     # Portfolio context footer
     risk_pct = (ctx["at_risk"] / ctx["bankroll"] * 100) if ctx["bankroll"] > 0 else 0
 
-    return _send([{
+    discord_ok = _send([{
         "title": f"📈 Position Opened — {side}",
         "description": description,
         "color": COLOR_GREEN if side == "YES" else COLOR_RED,
         "fields": fields,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "footer": {"text": f"💰 ${ctx['bankroll']:,.0f} · {ctx['open']} open · {risk_pct:.0f}% at risk · {ctx['record']}"},
+        "footer": {"text": f"💰 ${ctx['bankroll']:,.0f} · {ctx['open']} open · {risk_pct:.0f}% at risk · {strategy_record}"},
     }], alert_type="position_opened", alert_meta={
         "market": market_title[:200], "side": side, "entry_price": entry_price,
         "bet_size": bet_size, "strategy": strategy, "edge_pct": edge_pct,
         "confidence": confidence, "bankroll": ctx["bankroll"],
     })
+
+    # Mirror to Telegram
+    try:
+        from scripts.alert_formatter import send_telegram
+        edge_str = f"+{edge_pct:.1f}pp" if edge_pct else "—"
+        tg_msg = (
+            f"📈 <b>ENTRY</b> · {side}\n\n"
+            f"{market_title[:200]}\n"
+            f"{side} @ {entry_price:.0%} · ${bet_size:,.2f}\n"
+            f"Edge: {edge_str} · {emoji} {label}\n"
+            f"ROI: +{roi:.0f}%\n\n"
+            f"💰 ${ctx['bankroll']:,.0f} · {ctx['open']} open · {risk_pct:.0f}% at risk · {strategy_record}"
+        )
+        send_telegram(tg_msg)
+    except Exception as e:
+        logger.debug("Telegram entry alert failed: %s", e)
+
+    return discord_ok
 
 
 def alert_position_closed(market_title: str, side: str, outcome: str,
@@ -248,7 +283,7 @@ def alert_position_closed(market_title: str, side: str, outcome: str,
         {"name": "Strategy", "value": f"{_strategy_emoji(strategy)} {label}", "inline": True},
     ]
 
-    return _send([{
+    discord_ok = _send([{
         "title": f"{emoji} Position {result} — {'+'if pnl>=0 else ''}${pnl:,.2f}",
         "description": description,
         "color": color,
@@ -260,6 +295,24 @@ def alert_position_closed(market_title: str, side: str, outcome: str,
         "pnl": pnl, "entry_price": entry_price, "exit_price": exit_price,
         "strategy": strategy, "close_reason": close_reason, "bankroll": ctx["bankroll"],
     })
+
+    # Mirror to Telegram
+    try:
+        from scripts.alert_formatter import send_telegram
+        pnl_str = f"{'+'if pnl>=0 else ''}${pnl:,.2f}"
+        exit_str = f" → {exit_price:.0%}" if exit_price else ""
+        tg_msg = (
+            f"{emoji} <b>CLOSE · {result}</b> · {pnl_str}\n\n"
+            f"{market_title[:200]}\n"
+            f"{side} @ {entry_price:.0%}{exit_str}\n"
+            f"{close_type} · {_strategy_emoji(strategy)} {_strategy_label(strategy)}\n\n"
+            f"💰 ${ctx['bankroll']:,.0f} · {ctx['open']} open · {ctx['record']}"
+        )
+        send_telegram(tg_msg)
+    except Exception as e:
+        logger.debug("Telegram close alert failed: %s", e)
+
+    return discord_ok
 
 
 # ── Edge Signals ─────────────────────────────────────────────────────────
