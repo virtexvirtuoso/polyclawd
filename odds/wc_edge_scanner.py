@@ -339,6 +339,54 @@ def _format_alert(alert_type: str, label: str, title: str, edge_pp: float,
     return lines
 
 
+def _log_alert_row(sport: str, alert_type: str, participant: str, title: str,
+                   direction: str, edge_pp: float, book_prob: float | None,
+                   poly_price: float | None, kalshi_mid: float | None,
+                   mins_left: float | None, dedup_key: str) -> None:
+    """Append-only log of every FIRED edge alert (audit 2026-07-07: alerts were
+    Telegram-only — delivered then discarded, so direction/outcome/CLV could
+    never be scored). Probabilities stored 0-1. Never raises."""
+    try:
+        import sqlite3
+        from pathlib import Path
+        db = Path(__file__).resolve().parent.parent / "storage" / "shadow_trades.db"
+        conn = sqlite3.connect(str(db), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("""CREATE TABLE IF NOT EXISTS edge_alert_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fired_at     TEXT NOT NULL,
+            sport        TEXT,
+            alert_type   TEXT,      -- NEW / WIDENING / LAST_CALL
+            participant  TEXT,
+            event_title  TEXT,
+            direction    TEXT,      -- BUY / SELL
+            edge_pp      REAL,
+            book_prob    REAL,      -- 0-1 (Vegas devig)
+            poly_price   REAL,      -- 0-1
+            kalshi_mid   REAL,      -- 0-1, three-way only
+            mins_to_game REAL,
+            dedup_key    TEXT
+        )""")
+        conn.execute(
+            "INSERT INTO edge_alert_log (fired_at, sport, alert_type, participant,"
+            " event_title, direction, edge_pp, book_prob, poly_price, kalshi_mid,"
+            " mins_to_game, dedup_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (datetime.now(timezone.utc).isoformat(), sport, alert_type,
+             (participant or "")[:80], (title or "")[:180], direction,
+             round(edge_pp, 2),
+             round(book_prob, 4) if book_prob is not None else None,
+             round(poly_price, 4) if poly_price is not None else None,
+             round(kalshi_mid, 4) if kalshi_mid is not None else None,
+             round(mins_left, 1) if mins_left is not None else None,
+             dedup_key),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as ex:
+        logger.debug(f"edge_alert_log write failed: {ex}")
+
+
 def _send_edge_alerts(results: dict, three_way: list) -> None:
     """Classify and send typed edge alerts. Deduped per alert type."""
     try:
@@ -379,6 +427,9 @@ def _send_edge_alerts(results: dict, three_way: list) -> None:
             block = _format_alert(alert_type, participant, title, edge_pp,
                                    dir_str, book_prob, poly_price, mins_left, prev_pp)
             all_blocks.append(block)
+            _log_alert_row(sport_name, alert_type, participant, title, dir_str,
+                           edge_pp, book_prob or None, poly_price or None, None,
+                           mins_left, key)
             scan_count += 1
 
             entry = state.get(key, {"edge_pct": edge_pp, "alerted_at": now,
@@ -391,6 +442,17 @@ def _send_edge_alerts(results: dict, three_way: list) -> None:
             state_updates[key] = entry
 
     # ── Three-way (Vegas vs PM vs Kalshi) ────────────────────────────────
+    # One game, one alert: if the per-sport engine alerted a team this scan or
+    # within the dedup window, its threeway row is the same edge seen through a
+    # second engine — skip it (was double-firing every MLB game, 2026-07-06).
+    sport_alerted_teams = {
+        k.split(":")[1]
+        for k in (*state_updates, *state)
+        if not k.startswith("threeway:") and k.count(":") == 2
+        and (k in state_updates
+             or now - state[k]["alerted_at"] <= DEDUP_TTL_H * 3600)
+    }
+
     seen_tw_keys: set[str] = set()
     tw_count = 0
 
@@ -399,6 +461,8 @@ def _send_edge_alerts(results: dict, three_way: list) -> None:
             break
         edge_pp   = r["max_gap_pp"]
         if edge_pp < ALERT_THREE_WAY_MIN:
+            continue
+        if r["team"] in sport_alerted_teams:
             continue
         key       = f"threeway:{r['team']}:{r['best_buy']}"
         seen_tw_keys.add(key)
@@ -418,6 +482,12 @@ def _send_edge_alerts(results: dict, three_way: list) -> None:
                                r["best_buy"], r.get("vegas_fair", 0) / 100,
                                r.get("pm_price", 0) / 100, mins_left, prev_pp, extra)
         all_blocks.append(block)
+        _log_alert_row("threeway", alert_type, r["team"], r.get("game", ""),
+                       r["best_buy"], edge_pp,
+                       (r["vegas_fair"] / 100) if r.get("vegas_fair") else None,
+                       (r["pm_price"] / 100) if r.get("pm_price") else None,
+                       (r["kalshi_mid"] / 100) if r.get("kalshi_mid") else None,
+                       mins_left, key)
         tw_count += 1
 
         entry = state.get(key, {"edge_pct": edge_pp, "alerted_at": now,

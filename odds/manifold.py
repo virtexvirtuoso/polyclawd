@@ -126,6 +126,7 @@ def find_polymarket_overlaps(poly_events: List[Dict], min_liquidity: float = 100
         
         for match in matches:
             poly_price = None
+            poly_cid = None
             for mkt in poly.get("markets", []):
                 # Handle outcomePrices which might be a JSON string
                 outcome_prices = mkt.get("outcomePrices", {})
@@ -136,6 +137,7 @@ def find_polymarket_overlaps(poly_events: List[Dict], min_liquidity: float = 100
                     except:
                         outcome_prices = {}
                 poly_price = mkt.get("bestAsk") or (outcome_prices.get("Yes") if isinstance(outcome_prices, dict) else None)
+                poly_cid = mkt.get("conditionId")
                 break
             
             if poly_price:
@@ -144,6 +146,7 @@ def find_polymarket_overlaps(poly_events: List[Dict], min_liquidity: float = 100
                 edge = (manifold_prob - poly_prob) * 100
                 
                 overlaps.append({
+                    "polymarket_id": poly_cid,
                     "polymarket_title": poly_title,
                     "polymarket_price": round(poly_prob * 100, 1),
                     "manifold_question": match.get("title", ""),

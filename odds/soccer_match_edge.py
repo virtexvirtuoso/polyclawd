@@ -64,14 +64,19 @@ def compute_match_edges(game: Dict, ev: Dict, min_edge: float = 0.03) -> List[se
     home, away = game.get("home_team", ""), game.get("away_team", "")
     # True probabilities from weighted consensus across books (Shin devig per book).
     # Falls back to single sharp book if consensus has insufficient data.
-    true = sec.consensus_devig_3way(game, "h2h")
+    try:
+        from odds.book_weights import get_weights
+        _sw = get_weights("soccer_fifa_world_cup")
+    except ImportError:
+        _sw = None
+    true = sec.consensus_devig_3way(game, "h2h", weights=_sw)
     if len(true) < 3:
         best = sec.sharp_odds_per_outcome(game, "h2h")
         if len(best) < 3:
             return []
         true = devig_three_way([{"name": n, "price": p} for n, p in best.items()])
     # Raw odds for display only
-    best = sec.consensus_best_odds(game, "h2h") or sec.sharp_odds_per_outcome(game, "h2h")
+    best = sec.consensus_best_odds(game, "h2h", weights=_sw) or sec.sharp_odds_per_outcome(game, "h2h")
     draw_name = next((n for n in true if sec._norm(n) == "draw"), None)
     legs = map_legs(ev, home, away)
 

@@ -20,18 +20,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import sqlite3
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import requests
 from loguru import logger
 
 POLYMARKET_GAMMA = "https://gamma-api.polymarket.com"
-POLY_WINNER_FEE = 0.02  # Polymarket charges ~2% on winnings; edge must clear it.
+DB_PATH = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
+from execution.fee_model import taker_fee_fraction  # real per-category taker fee (SSOT)
 
 # Sharp books in preference order. Pinnacle first (sharpest); exchanges next.
 SHARP_BOOKS: Tuple[str, ...] = ("pinnacle", "betfair_ex_eu", "betfair_ex_uk", "williamhill")
@@ -233,13 +237,15 @@ def devig_shin(implied: List[float], iters: int = 50) -> List[float]:
     return [x / t for x in true] if t > 0 else [p / s for p in implied]
 
 
-def consensus_devig_2way(game: Dict, market_key: str = "h2h") -> Dict[str, float]:
+def consensus_devig_2way(game: Dict, market_key: str = "h2h",
+                         weights: Optional[Dict[str, float]] = None) -> Dict[str, float]:
     """Per-book devig → weighted consensus for 2-way markets (UFC, MLB moneyline).
     Returns {outcome: true_prob} or {} if no weighted book has both sides."""
+    _w = weights or BOOK_WEIGHTS
     weighted: Dict[str, float] = {}
     total_w = 0.0
     for bk in game.get("bookmakers", []):
-        w = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        w = _w.get(bk.get("key", ""), 0.0)
         if w <= 0.0:
             continue
         for mk in bk.get("markets", []):
@@ -264,13 +270,15 @@ def consensus_devig_2way(game: Dict, market_key: str = "h2h") -> Dict[str, float
     return {nm: v / total_w for nm, v in weighted.items()}
 
 
-def consensus_devig_3way(game: Dict, market_key: str = "h2h") -> Dict[str, float]:
+def consensus_devig_3way(game: Dict, market_key: str = "h2h",
+                         weights: Optional[Dict[str, float]] = None) -> Dict[str, float]:
     """Per-book Shin devig → weighted consensus for 3-way markets (soccer).
     Returns {outcome: true_prob} or {} if no weighted book has all 3 sides."""
+    _w = weights or BOOK_WEIGHTS
     weighted: Dict[str, float] = {}
     total_w = 0.0
     for bk in game.get("bookmakers", []):
-        w = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        w = _w.get(bk.get("key", ""), 0.0)
         if w <= 0.0:
             continue
         for mk in bk.get("markets", []):
@@ -294,13 +302,15 @@ def consensus_devig_3way(game: Dict, market_key: str = "h2h") -> Dict[str, float
     return {nm: v / total_w for nm, v in weighted.items()}
 
 
-def consensus_best_odds(game: Dict, market_key: str = "h2h") -> Dict[str, int]:
+def consensus_best_odds(game: Dict, market_key: str = "h2h",
+                        weights: Optional[Dict[str, float]] = None) -> Dict[str, int]:
     """Raw American odds from the highest-weighted single book that has all outcomes.
     Display/line-movement only — true probs come from consensus_devig_*."""
+    _w = weights or BOOK_WEIGHTS
     best_w = -1.0
     best: Dict[str, int] = {}
     for bk in game.get("bookmakers", []):
-        w = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        w = _w.get(bk.get("key", ""), 0.0)
         if w <= 0.0 or w <= best_w:
             continue
         for mk in bk.get("markets", []):
@@ -344,15 +354,17 @@ def sharp_odds_per_outcome(game: Dict, market_key: str = "h2h") -> Dict[str, int
                key=lambda d: sum(american_to_implied_prob(v) for v in d.values()))
 
 
-def consensus_devig_spreads(game: Dict, market_key: str = "spreads") -> Dict[float, Dict[str, float]]:
+def consensus_devig_spreads(game: Dict, market_key: str = "spreads",
+                            weights: Optional[Dict[str, float]] = None) -> Dict[float, Dict[str, float]]:
     """Per-book devig -> weighted consensus for point spreads, keyed by ABSOLUTE
     point. For each book quoting both sides of a |point| (team_a +X, team_b -X),
     devig the pair within that book, then weight-average across books at that same
     |point|. Returns {abs_point: {team: cover_prob}}; {} if none."""
+    _w = weights or BOOK_WEIGHTS
     acc: Dict[float, Dict[str, float]] = {}
     wsum: Dict[float, float] = {}
     for bk in game.get("bookmakers", []):
-        w = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        w = _w.get(bk.get("key", ""), 0.0)
         if w <= 0.0:
             continue
         for mk in bk.get("markets", []):
@@ -382,14 +394,16 @@ def consensus_devig_spreads(game: Dict, market_key: str = "spreads") -> Dict[flo
     return out
 
 
-def consensus_best_spread_odds(game: Dict, market_key: str = "spreads") -> Dict[float, Dict[str, Tuple[int, float]]]:
+def consensus_best_spread_odds(game: Dict, market_key: str = "spreads",
+                               weights: Optional[Dict[str, float]] = None) -> Dict[float, Dict[str, Tuple[int, float]]]:
     """Raw spread odds + signed point per team from the highest-weighted single
     book quoting both sides of each |point|. Display/line-movement only.
     Returns {abs_point: {team: (american_odds, signed_point)}}."""
+    _w = weights or BOOK_WEIGHTS
     best_w: Dict[float, float] = {}
     out: Dict[float, Dict[str, Tuple[int, float]]] = {}
     for bk in game.get("bookmakers", []):
-        w = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        w = _w.get(bk.get("key", ""), 0.0)
         if w <= 0.0:
             continue
         for mk in bk.get("markets", []):
@@ -409,13 +423,15 @@ def consensus_best_spread_odds(game: Dict, market_key: str = "spreads") -> Dict[
     return out
 
 
-def consensus_devig_totals(game: Dict, market_key: str = "totals") -> Dict[float, Dict[str, float]]:
+def consensus_devig_totals(game: Dict, market_key: str = "totals",
+                           weights: Optional[Dict[str, float]] = None) -> Dict[float, Dict[str, float]]:
     """Per-book devig -> weighted consensus for Over/Under totals, keyed by the
     total point. Returns {point: {"Over": p, "Under": p}}; {} if none."""
+    _w = weights or BOOK_WEIGHTS
     acc: Dict[float, Dict[str, float]] = {}
     wsum: Dict[float, float] = {}
     for bk in game.get("bookmakers", []):
-        w = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        w = _w.get(bk.get("key", ""), 0.0)
         if w <= 0.0:
             continue
         for mk in bk.get("markets", []):
@@ -443,13 +459,15 @@ def consensus_devig_totals(game: Dict, market_key: str = "totals") -> Dict[float
     return out
 
 
-def consensus_best_total_odds(game: Dict, market_key: str = "totals") -> Dict[float, Tuple[int, int]]:
+def consensus_best_total_odds(game: Dict, market_key: str = "totals",
+                              weights: Optional[Dict[str, float]] = None) -> Dict[float, Tuple[int, int]]:
     """Raw (over_odds, under_odds) per total point from the highest-weighted single
     book quoting both sides. Display/line-movement only. {point: (over, under)}."""
+    _w = weights or BOOK_WEIGHTS
     best_w: Dict[float, float] = {}
     out: Dict[float, Tuple[int, int]] = {}
     for bk in game.get("bookmakers", []):
-        w = BOOK_WEIGHTS.get(bk.get("key", ""), 0.0)
+        w = _w.get(bk.get("key", ""), 0.0)
         if w <= 0.0:
             continue
         for mk in bk.get("markets", []):
@@ -578,8 +596,31 @@ class Edge:
     slippage_bps: Optional[float] = None
     fillable_usd: Optional[float] = None
     tradeable: bool = False
+    net_edge_pct: Optional[float] = None  # Phase 1B: fee-adjusted edge (exec edge - taker fee)
     no_api_line: bool = False
     live_book: bool = False
+    # Sport-specific optional fields (MLB uses these)
+    home_team: Optional[str] = None
+    away_team: Optional[str] = None
+    poly_move_1h: Optional[float] = None
+    poly_move_6h: Optional[float] = None
+
+    # Backward-compat aliases for code that still uses MLBEdge field names
+    @property
+    def game_title(self) -> str:
+        return self.event_title
+
+    @property
+    def bet_team(self) -> str:
+        return self.participant
+
+    @property
+    def odds_api_prob(self) -> float:
+        return self.book_prob
+
+    @property
+    def polymarket_price(self) -> float:
+        return self.poly_price
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -659,13 +700,18 @@ def enrich_executable_edge(edge: Edge, outcome_index: int, target_usd: float = 1
         edge.slippage_bps = ex["slippage_bps"]
         edge.fillable_usd = ex.get("fillable_usd")
         edge.tradeable = ex["tradeable"]
+        # Populate net_edge_pct immediately after enrichment
+        edge.net_edge_pct = fee_adjusted_edge(edge)
 
 
 def fee_adjusted_edge(edge: Edge) -> Optional[float]:
-    """Executable edge net of the Polymarket ~2% winner fee. None if not enriched."""
+    """Executable edge net of the real Polymarket sports taker fee
+    (0.03 * p * (1-p); 0% on winnings). None if not enriched."""
     if edge.executable_edge is None or edge.executable_price is None:
         return None
-    return edge.executable_edge - POLY_WINNER_FEE * edge.executable_price
+    return edge.executable_edge - taker_fee_fraction(
+        edge.executable_price, "polymarket", "sports"
+    )
 
 
 def log_shadow(edge: Edge, cfg: SportConfig, days_to_close: float = 7.0) -> bool:
@@ -687,6 +733,30 @@ def log_shadow(edge: Edge, cfg: SportConfig, days_to_close: float = 7.0) -> bool
         logger.debug(f"{cfg.name} shadow skip — {reason2}")
         return False
     rec_size = p2_max_take(edge.fillable_usd)
+    # Phase 1B: CE-5 reconciliation — check if consensus disagreement agrees
+    ce5_tag = ""
+    try:
+        from signals.consensus_disagreement import check_ce5_agrees
+        ce5_agrees = check_ce5_agrees(edge.event_title, edge.participant, edge.direction)
+        if ce5_agrees is True:
+            ce5_tag = " [CE5:agree]"
+        elif ce5_agrees is False:
+            ce5_tag = " [CE5:disagree]"
+    except Exception:
+        pass
+
+    # Phase 2F: CE-8 prop composite reconciliation
+    ce8_tag = ""
+    try:
+        from signals.prop_composite import check_ce8_agrees
+        ce8_agrees = check_ce8_agrees(edge.event_title, edge.participant, edge.direction)
+        if ce8_agrees is True:
+            ce8_tag = " [CE8:agree]"
+        elif ce8_agrees is False:
+            ce8_tag = " [CE8:disagree]"
+    except Exception:
+        pass
+
     try:
         from signals.shadow_tracker import log_shadow_trade
     except Exception:
@@ -703,7 +773,8 @@ def log_shadow(edge: Edge, cfg: SportConfig, days_to_close: float = 7.0) -> bool
             "reasoning": (f"{cfg.name}: book {edge.book_prob * 100:.0f}% vs exec "
                           f"{edge.executable_price * 100:.1f}¢ "
                           f"(exec edge {edge.executable_edge * 100:+.1f}%, fee-adj {fae * 100:+.1f}%) "
-                          f"depth ${edge.fillable_usd:.0f} → rec_size ${rec_size:.0f}"),
+                          f"depth ${edge.fillable_usd:.0f} → rec_size ${rec_size:.0f}"
+                          f"{ce5_tag}{ce8_tag}"),
             "archetype": cfg.archetype, "strategy": cfg.shadow_strategy,
             "category": cfg.name.split("_")[0], "category_tier": "sports",
             "midpoint_price": edge.poly_price,     # for CLV at resolution
@@ -717,8 +788,94 @@ def log_shadow(edge: Edge, cfg: SportConfig, days_to_close: float = 7.0) -> bool
 # ─────────────────────────────────────────────────────────────────────
 # Summary (mirrors baseball get_*_edge_summary JSON shape)
 # ─────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────
+# Phase 1B: Control sample logging — log ALL scanned edges (not just tradeable)
+# ─────────────────────────────────────────────────────────────────────
+_SCAN_LOG_INIT = False
+
+
+def _init_scan_log(conn):
+    global _SCAN_LOG_INIT
+    if _SCAN_LOG_INIT:
+        return
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS edge_scan_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scanned_at TEXT NOT NULL,
+            sport TEXT NOT NULL,
+            event_title TEXT,
+            participant TEXT,
+            market_type TEXT,
+            edge_pct REAL,
+            net_edge_pct REAL,
+            executable_price REAL,
+            book_prob REAL,
+            fillable_usd REAL,
+            alerted INTEGER DEFAULT 0,
+            shadow_trade_id INTEGER,
+            outcome TEXT,
+            predicted_correct INTEGER,
+            resolved_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_scan_log_sport ON edge_scan_log(sport, scanned_at);
+    """)
+    _SCAN_LOG_INIT = True
+
+
+def log_scan_batch(edges: List[Edge], cfg: SportConfig, alerted_ids: Optional[set] = None) -> int:
+    """Log ALL edges from a scan run to edge_scan_log (control sample).
+    Returns number of rows inserted."""
+    if not edges:
+        return 0
+    try:
+        conn = sqlite3.connect(str(DB_PATH), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        _init_scan_log(conn)
+        now = datetime.now(timezone.utc).isoformat()
+        alerted = alerted_ids or set()
+        n = 0
+        for e in edges:
+            try:
+                conn.execute(
+                    """INSERT INTO edge_scan_log
+                       (scanned_at, sport, event_title, participant, market_type,
+                        edge_pct, net_edge_pct, executable_price, book_prob,
+                        fillable_usd, alerted)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (now, cfg.name, e.event_title[:180], e.participant[:80],
+                     e.market_type, round(e.edge_pct, 4),
+                     round(e.net_edge_pct, 4) if e.net_edge_pct is not None else None,
+                     e.executable_price, round(e.book_prob, 4),
+                     e.fillable_usd,
+                     1 if id(e) in alerted else 0),
+                )
+                n += 1
+            except Exception:
+                pass
+        conn.commit()
+        conn.close()
+        return n
+    except Exception as e:
+        logger.debug(f"scan log batch failed: {e}")
+        return 0
+
+
 def summarize(edges: List[Edge], cfg: SportConfig) -> Dict:
     edges = sorted(edges, key=lambda e: abs(e.edge_pct), reverse=True)
+    # Phase 1B: control sample — log ALL edges (including sub-threshold)
+    try:
+        log_scan_batch(edges, cfg)
+    except Exception:
+        pass  # never block summarize on scan logging
+    # Phase 4a: price movement snapshots
+    try:
+        from odds.price_movement import log_edge_prices
+        for e in edges:
+            eid = getattr(e, "poly_event_id", "") or getattr(e, "event_title", "")[:40]
+            log_edge_prices(e, cfg.name, eid)
+    except Exception:
+        pass  # never block summarize on price logging
     return {
         "source": f"the_odds_api_{cfg.name}",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -739,6 +896,7 @@ def summarize(edges: List[Edge], cfg: SportConfig) -> Dict:
             "fillable_usd": (round(e.fillable_usd, 0) if e.fillable_usd is not None else None),
             "rec_size_usd": (round(p2_max_take(e.fillable_usd), 0) if e.fillable_usd is not None else None),
             "tradeable": e.tradeable,
+            "net_edge_pct": (round(e.net_edge_pct * 100, 1) if e.net_edge_pct is not None else None),
             "no_api_line": e.no_api_line, "live_book": e.live_book,
         } for e in edges],
         "top_opportunities": [{
@@ -747,3 +905,59 @@ def summarize(edges: List[Edge], cfg: SportConfig) -> Dict:
             "action": f"{e.direction} at {e.poly_price * 100:.0f}¢",
         } for e in edges[:5] if not e.no_api_line],
     }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Phase 2: Edge Enrichment Table
+# ─────────────────────────────────────────────────────────────────────
+_ENRICH_INIT = False
+
+
+def _init_enrichment(conn):
+    global _ENRICH_INIT
+    if _ENRICH_INIT:
+        return
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS edge_enrichment (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            shadow_trade_id INTEGER,
+            scan_log_id INTEGER,
+            sport TEXT NOT NULL,
+            enriched_at TEXT NOT NULL,
+            stats_score REAL,
+            stats_confirmation INTEGER,
+            alert_tier TEXT,
+            stats_detail TEXT,
+            UNIQUE(shadow_trade_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_enrich_sport ON edge_enrichment(sport);
+    """)
+    _ENRICH_INIT = True
+
+
+def log_enrichment(shadow_trade_id: Optional[int], sport: str,
+                   stats_score: float, stats_confirmation: bool,
+                   alert_tier: str = "speculative",
+                   stats_detail: str = "") -> bool:
+    """Write stats enrichment data for a shadow trade / scan log entry."""
+    try:
+        conn = sqlite3.connect(str(DB_PATH), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        _init_enrichment(conn)
+        conn.execute(
+            """INSERT OR REPLACE INTO edge_enrichment
+               (shadow_trade_id, sport, enriched_at, stats_score,
+                stats_confirmation, alert_tier, stats_detail)
+               VALUES (?,?,?,?,?,?,?)""",
+            (shadow_trade_id, sport,
+             datetime.now(timezone.utc).isoformat(),
+             round(stats_score, 3), 1 if stats_confirmation else 0,
+             alert_tier, stats_detail[:500]),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.debug(f"enrichment log failed: {e}")
+        return False

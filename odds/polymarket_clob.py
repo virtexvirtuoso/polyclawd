@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 CLOB_API = "https://clob.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
+DATA_API = "https://data-api.polymarket.com"
 
 # Resilient fetch wrapper
 try:
@@ -481,62 +482,85 @@ async def get_clob_summary(market_id: str = None) -> Dict:
     return result
 
 
-def get_recent_trades(token_id: str, limit: int = 500) -> list:
-    """
-    Fetch recent trades for a CLOB token from Polymarket /trades endpoint.
+_CONDITION_ID_CACHE: Dict[str, str] = {}
 
-    Requires API key auth via env vars:
-        POLYMARKET_CLOB_API_KEY
-        POLYMARKET_CLOB_SECRET
+
+def _condition_id_for_token(token_id: str) -> str:
+    """Resolve a CLOB token_id to its market conditionId via Gamma."""
+    cid = _CONDITION_ID_CACHE.get(token_id)
+    if cid:
+        return cid
+    try:
+        url = f"{GAMMA_API}/markets?clob_token_ids={token_id}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            markets = json.loads(resp.read().decode())
+        if markets:
+            cid = markets[0].get("conditionId", "") or ""
+            if cid:
+                _CONDITION_ID_CACHE[token_id] = cid
+            return cid
+    except Exception as e:
+        print(f"Warning: Gamma conditionId lookup failed for {token_id[:16]}…: {e}")
+    return ""
+
+
+def get_recent_trades(token_id: str, limit: int = 500, condition_id: str = "") -> list:
+    """
+    Fetch recent trades for a CLOB token via the public Data API.
+
+    The Data API /trades endpoint filters by market via the `market` param,
+    which must be a conditionId (0x… hex). A CLOB token_id passed there is
+    SILENTLY IGNORED and the unfiltered global trade tape comes back with
+    HTTP 200 — so this function requires a conditionId (resolving it from
+    Gamma when not supplied) and keeps only trades whose `asset` matches
+    the requested token.
 
     Args:
-        token_id: The CLOB token ID
-        limit: Max trades to return (default 500, max 2000 per CLOB spec)
+        token_id: The CLOB token ID (asset ID)
+        limit: Max trades to return (default 500)
+        condition_id: Market conditionId (0x… hex). Resolved via Gamma
+            from token_id when omitted.
 
     Returns:
         List of trade dicts: {"price", "size", "side", "timestamp", "maker_address"}
-        Returns empty list on auth failure or other errors.
+        Returns empty list on error — never the unfiltered global tape.
     """
-    import os as _os
-
-    api_key = _os.environ.get("POLYMARKET_CLOB_API_KEY")
-    api_secret = _os.environ.get("POLYMARKET_CLOB_SECRET")
-
-    if not api_key or not api_secret:
-        print("Warning: POLYMARKET_CLOB_API_KEY / SECRET not set — cannot fetch trades")
-        return []
-
     try:
-        url = f"{CLOB_API}/trades?token_id={token_id}&limit={min(limit, 2000)}"
+        if not condition_id:
+            condition_id = _condition_id_for_token(token_id)
+        if not condition_id or not condition_id.startswith("0x"):
+            print(f"Warning: no conditionId for token {token_id[:16]}… — cannot fetch trades")
+            return []
+
+        url = f"{DATA_API}/trades?market={condition_id}&limit={min(limit, 2000)}&takerOnly=true"
         req = urllib.request.Request(url, headers={
             "User-Agent": "Polyclawd/2.0",
-            "POLYMARKET_CLOB_API_KEY": api_key,
-            "POLYMARKET_CLOB_SECRET": api_secret,
         })
         with urllib.request.urlopen(req, timeout=15) as resp:
             raw = json.loads(resp.read().decode())
 
-        # Polymarket /trades returns an array of trade objects.
-        # Normalize fields to our schema.
+        # Data API returns an array directly.
+        # proxyWallet is the taker wallet (maker_address in our schema).
+        # A conditionId covers both outcome tokens — keep only the requested one.
         out = []
         for t in raw if isinstance(raw, list) else raw.get("data", []):
+            if str(t.get("asset", "")) != str(token_id):
+                continue
             out.append({
                 "price": float(t.get("price", 0)),
                 "size": float(t.get("size", 0)),
                 "side": str(t.get("side", "BUY")).upper(),
                 "timestamp": int(t.get("timestamp", 0)),
-                "maker_address": t.get("maker_address", "") or t.get("maker", ""),
+                "maker_address": t.get("proxyWallet", "") or t.get("maker_address", ""),
             })
         return out
 
     except urllib.error.HTTPError as e:
-        if e.code == 401 or e.code == 403:
-            print("Warning: Polymarket CLOB /trades auth failed (HTTP %d) — check API keys" % e.code)
-        else:
-            print(f"Warning: Polymarket CLOB /trades HTTP error: {e.code}")
+        print(f"Warning: Polymarket Data API /trades HTTP error: {e.code}")
         return []
     except Exception as e:
-        print(f"Warning: Polymarket CLOB /trades fetch error: {e}")
+        print(f"Warning: Polymarket Data API /trades fetch error: {e}")
         return []
 
 

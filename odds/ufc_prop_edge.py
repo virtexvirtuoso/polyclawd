@@ -42,6 +42,7 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 DB_PATH = os.path.join(PROJECT_DIR, "storage", "shadow_trades.db")
 MIN_EDGE_PP = 4.0
+PM_MIN_VOLUME_USD = 500   # skip PM prop prices with no real trading activity
 COOLDOWN_MINUTES = 60  # props move slower than sportsbook lines
 EDGE_CHANGE_PP = 3.0  # re-alert inside cooldown if edge moves >= this
 MAX_ALERTS_PER_SCAN = 5
@@ -158,6 +159,8 @@ def get_polymarket_props() -> dict:
                 p = float(json.loads(m.get("outcomePrices", "[]"))[0])
             except Exception:
                 continue
+            if float(m.get("volume") or 0) < PM_MIN_VOLUME_USD:
+                continue  # ghost price — AMM seed, no real trading
             fps[label] = {"price": p, "condition_id": m.get("conditionId")}
         if fps:
             out[key] = {"title": title, "props": fps}

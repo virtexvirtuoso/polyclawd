@@ -7,18 +7,19 @@ Key features:
 - Kelly sizing recommendations
 - Edge filters with time decay
 """
+
 import math
 from typing import Tuple, List, Optional
 from dataclasses import dataclass
 
 # Sharp books to prioritize (low vig, ~2-3%)
-SHARP_BOOKS = ['pinnacle', 'pinnaclesports', 'circa', 'betcris', 'bookmaker']
-SOFT_BOOKS = ['draftkings', 'fanduel', 'betmgm', 'caesars', 'pointsbet', 'barstool']
+SHARP_BOOKS = ["pinnacle", "pinnaclesports", "circa", "betcris", "bookmaker"]
+SOFT_BOOKS = ["draftkings", "fanduel", "betmgm", "caesars", "pointsbet", "barstool"]
 
 
 def american_to_implied(odds: int) -> float:
     """Convert American odds to implied probability.
-    
+
     Examples:
         -200 → 0.667 (66.7%)
         +150 → 0.400 (40.0%)
@@ -30,7 +31,7 @@ def american_to_implied(odds: int) -> float:
 
 def implied_to_american(prob: float) -> int:
     """Convert implied probability back to American odds.
-    
+
     Examples:
         0.667 → -200
         0.400 → +150
@@ -44,7 +45,7 @@ def implied_to_american(prob: float) -> int:
 
 def basic_no_vig(p_a: float, p_b: float) -> Tuple[float, float]:
     """Basic vig removal - assumes even distribution of vig.
-    
+
     Works well for balanced lines (close to 50/50).
     """
     total = p_a + p_b
@@ -56,51 +57,51 @@ def basic_no_vig(p_a: float, p_b: float) -> Tuple[float, float]:
 def shin_no_vig(p_fav: float, p_dog: float) -> Tuple[float, float]:
     """
     Shin method for unbalanced lines.
-    
+
     Better than basic no-vig for heavy favorites (-300 or worse).
-    The Shin model assumes bookmakers set odds to protect against 
+    The Shin model assumes bookmakers set odds to protect against
     informed bettors (insiders), which creates asymmetric vig distribution.
-    
+
     Returns true probabilities (favorite, underdog).
-    
+
     Reference: Shin (1991, 1992, 1993) papers on bookmaker behavior.
     """
     Z = p_fav + p_dog  # overround / total implied probability
-    
+
     if Z <= 1.0:  # No vig case
         return p_fav, p_dog
-    
+
     # Shin factor calculation
     # For a two-outcome market, we solve for s (informed bettor fraction)
     # using: sum(sqrt(p_i^2 + s*(1-s)) - s) = 1
     try:
         # Quadratic approximation for 2-outcome markets
-        discriminant = p_fav**2 + p_dog**2 - (Z**2 - 2*Z + 2)
+        discriminant = p_fav**2 + p_dog**2 - (Z**2 - 2 * Z + 2)
         if discriminant < 0:
             discriminant = 0
-        s = (Z - math.sqrt(max(0, 2 - (1 - p_fav)**2 - (1 - p_dog)**2))) / (2 * Z - 2)
+        s = (Z - math.sqrt(max(0, 2 - (1 - p_fav) ** 2 - (1 - p_dog) ** 2))) / (2 * Z - 2)
         s = max(0, min(s, 0.5))  # Clamp to valid range [0, 0.5]
     except (ValueError, ZeroDivisionError):
         # Fallback to simple approximation
         s = (Z - 1) / 2
-    
+
     # Calculate true probabilities using Shin formula
     denom = 1 - 2 * s
     if abs(denom) < 0.001:  # Avoid division by near-zero
         return basic_no_vig(p_fav, p_dog)
-    
+
     true_fav = (p_fav - s) / denom
     true_dog = (p_dog - s) / denom
-    
+
     # Ensure valid probabilities and normalize
     true_fav = max(0, min(1, true_fav))
     true_dog = max(0, min(1, true_dog))
-    
+
     total = true_fav + true_dog
     if total > 0:
         true_fav /= total
         true_dog /= total
-    
+
     return true_fav, true_dog
 
 
@@ -108,7 +109,7 @@ def get_consensus_true_prob(bookmaker_odds: List[dict], outcome: str) -> Optiona
     """
     Get consensus true probability from multiple bookmakers.
     Prioritizes sharp books (Pinnacle, Circa, etc.).
-    
+
     Args:
         bookmaker_odds: List of dicts with structure:
             [{"book": "pinnacle", "fav_odds": -300, "dog_odds": +250}, ...]
@@ -116,49 +117,45 @@ def get_consensus_true_prob(bookmaker_odds: List[dict], outcome: str) -> Optiona
         outcome: Which outcome to get probability for:
             'yes', 'home', 'favorite' → first outcome
             'no', 'away', 'underdog' → second outcome
-    
+
     Returns:
         Consensus true probability (0-1), or None if no valid data.
     """
     sharp_probs = []
     soft_probs = []
-    
+
     for book_data in bookmaker_odds:
-        book = book_data.get('book', '').lower()
-        
+        book = book_data.get("book", "").lower()
+
         # Support multiple key formats
-        fav = (book_data.get('fav_odds') or 
-               book_data.get('home_odds') or 
-               book_data.get('yes_odds'))
-        dog = (book_data.get('dog_odds') or 
-               book_data.get('away_odds') or 
-               book_data.get('no_odds'))
-        
+        fav = book_data.get("fav_odds") or book_data.get("home_odds") or book_data.get("yes_odds")
+        dog = book_data.get("dog_odds") or book_data.get("away_odds") or book_data.get("no_odds")
+
         if not fav or not dog:
             continue
-        
+
         try:
             p_fav = american_to_implied(int(fav))
             p_dog = american_to_implied(int(dog))
         except (ValueError, TypeError):
             continue
-        
+
         # Use Shin for heavy favorites (>75% implied)
         if p_fav > 0.75 or p_dog > 0.75:
             true_fav, true_dog = shin_no_vig(p_fav, p_dog)
         else:
             true_fav, true_dog = basic_no_vig(p_fav, p_dog)
-        
+
         # Select appropriate probability based on outcome
-        is_first_outcome = outcome.lower() in ['yes', 'home', 'favorite', 'over', 'fav']
+        is_first_outcome = outcome.lower() in ["yes", "home", "favorite", "over", "fav"]
         prob = true_fav if is_first_outcome else true_dog
-        
+
         # Categorize by book type
         if book in SHARP_BOOKS:
             sharp_probs.append(prob)
         elif book in SOFT_BOOKS or book:  # Any named book goes to soft
             soft_probs.append(prob)
-    
+
     # Prioritize sharp book consensus
     if sharp_probs:
         return sum(sharp_probs) / len(sharp_probs)
@@ -170,11 +167,11 @@ def get_consensus_true_prob(bookmaker_odds: List[dict], outcome: str) -> Optiona
 def calculate_edge(true_prob: float, market_price: float) -> dict:
     """
     Calculate edge and Kelly sizing for a betting opportunity.
-    
+
     Args:
         true_prob: Estimated true probability (0-1)
         market_price: Current market price (0-1)
-    
+
     Returns:
         Dict with:
         - true_prob: True probability (%)
@@ -187,7 +184,7 @@ def calculate_edge(true_prob: float, market_price: float) -> dict:
         - ev_per_dollar: Expected value per dollar bet (cents)
     """
     edge = true_prob - market_price
-    
+
     # Kelly fractions for each side
     if edge > 0:  # Bet YES - we think true prob > market price
         # Kelly = edge / (1 - market_price)
@@ -199,9 +196,9 @@ def calculate_edge(true_prob: float, market_price: float) -> dict:
         # Kelly = |edge| / market_price
         kelly_yes = 0
         kelly_no = abs(edge) / market_price if market_price > 0 else 0
-    
+
     kelly_raw = max(kelly_yes, kelly_no)
-    
+
     return {
         "true_prob": round(true_prob * 100, 2),
         "market_price": round(market_price * 100, 2),
@@ -210,48 +207,45 @@ def calculate_edge(true_prob: float, market_price: float) -> dict:
         "kelly_full": round(kelly_raw * 100, 2),
         "kelly_half": round(kelly_raw * 50, 2),
         "kelly_quarter": round(kelly_raw * 25, 2),
-        "ev_per_dollar": round(abs(edge) * 100, 2)
+        "ev_per_dollar": round(abs(edge) * 100, 2),
     }
 
 
 @dataclass
 class EdgeFilter:
     """Configuration for edge quality filters."""
-    min_edge_pct: float = 2.0       # Minimum raw edge (%)
-    min_volume: float = 100000      # Minimum market volume ($)
-    min_confidence: float = 40      # Minimum confidence score (0-100)
+
+    min_edge_pct: float = 2.0  # Minimum raw edge (%)
+    min_volume: float = 100000  # Minimum market volume ($)
+    min_confidence: float = 40  # Minimum confidence score (0-100)
     min_adjusted_edge: float = 3.0  # Minimum edge × confidence/100 threshold
-    edge_time_decay: bool = True    # Apply higher thresholds far from resolution
+    edge_time_decay: bool = True  # Apply higher thresholds far from resolution
 
 
 def apply_edge_filters(
-    edge_pct: float,
-    confidence: float,
-    volume: float,
-    hours_to_resolution: float,
-    filters: EdgeFilter = None
+    edge_pct: float, confidence: float, volume: float, hours_to_resolution: float, filters: EdgeFilter = None
 ) -> dict:
     """
     Apply quality filters to edge signals.
-    
+
     The "adjusted edge" metric combines raw edge with confidence:
         adjusted_edge = |edge_pct| × (confidence / 100)
-    
+
     This ensures we only bet when BOTH edge AND confidence are sufficient.
-    
+
     Args:
         edge_pct: Raw edge percentage (can be negative)
         confidence: Signal confidence (0-100)
         volume: Market volume in USD
         hours_to_resolution: Hours until market resolves
         filters: EdgeFilter configuration (uses defaults if None)
-    
+
     Returns:
         Dict with filter results and reasoning.
     """
     if filters is None:
         filters = EdgeFilter()
-    
+
     # Time-based edge threshold adjustment
     # Markets far from resolution need higher edges (more uncertainty)
     if filters.edge_time_decay and hours_to_resolution and hours_to_resolution > 0:
@@ -270,26 +264,26 @@ def apply_edge_filters(
     else:
         min_edge = filters.min_edge_pct
         time_note = "No time decay"
-    
+
     # Combined quality metric
     adjusted_edge = abs(edge_pct) * (confidence / 100)
-    
+
     # Check all filters
     passes = (
-        abs(edge_pct) >= min_edge and
-        confidence >= filters.min_confidence and
-        volume >= filters.min_volume and
-        adjusted_edge >= filters.min_adjusted_edge
+        abs(edge_pct) >= min_edge
+        and confidence >= filters.min_confidence
+        and volume >= filters.min_volume
+        and adjusted_edge >= filters.min_adjusted_edge
     )
-    
+
     return {
         "passes_filter": passes,
         "min_edge_required": round(min_edge, 2),
         "adjusted_edge": round(adjusted_edge, 2),
         "time_note": time_note,
-        "reasons": [] if passes else _get_filter_reasons(
-            edge_pct, confidence, volume, min_edge, adjusted_edge, filters
-        )
+        "reasons": []
+        if passes
+        else _get_filter_reasons(edge_pct, confidence, volume, min_edge, adjusted_edge, filters),
     }
 
 
@@ -310,24 +304,24 @@ def _get_filter_reasons(edge, conf, vol, min_edge, adj_edge, filters):
 def combined_decision_score(edge_pct: float, confidence: float) -> dict:
     """
     Combined edge + confidence decision metric.
-    
+
     The adjusted edge ensures we only bet when BOTH metrics are strong:
         adjusted_edge = |edge_pct| × (confidence / 100)
-    
+
     Decision thresholds:
         - > 5.0: STRONG - High conviction bet
         - > 3.0: MODERATE - Standard bet
         - ≤ 3.0: WEAK - Skip or reduce size
-    
+
     Args:
         edge_pct: Edge percentage (positive = YES, negative = NO)
         confidence: Confidence score (0-100)
-    
+
     Returns:
         Dict with decision metrics.
     """
     adjusted_edge = abs(edge_pct) * (confidence / 100)
-    
+
     if adjusted_edge > 5.0:
         strength = "strong"
         should_bet = True
@@ -337,19 +331,20 @@ def combined_decision_score(edge_pct: float, confidence: float) -> dict:
     else:
         strength = "weak"
         should_bet = False
-    
+
     return {
         "adjusted_edge": round(adjusted_edge, 2),
         "should_bet": should_bet,
         "bet_direction": "YES" if edge_pct > 0 else "NO",
         "strength": strength,
-        "kelly_multiplier": min(1.0, adjusted_edge / 5.0)  # Scale Kelly by strength
+        "kelly_multiplier": min(1.0, adjusted_edge / 5.0),  # Scale Kelly by strength
     }
 
 
 # ============================================================================
 # Utility Functions
 # ============================================================================
+
 
 def calculate_vig(p_a: float, p_b: float) -> float:
     """Calculate bookmaker vig/margin from implied probabilities."""
@@ -359,25 +354,25 @@ def calculate_vig(p_a: float, p_b: float) -> float:
 def estimate_sharp_line(market_odds: List[dict]) -> Optional[dict]:
     """
     Estimate the "true" sharp line from available bookmaker odds.
-    
+
     Returns the most likely true probability based on sharp book consensus,
     with fallback to soft book average.
     """
     yes_prob = get_consensus_true_prob(market_odds, "yes")
     no_prob = get_consensus_true_prob(market_odds, "no")
-    
+
     if yes_prob is None:
         return None
-    
+
     # If we only got one side, calculate the other
     if no_prob is None:
         no_prob = 1 - yes_prob
-    
+
     return {
         "true_yes": round(yes_prob * 100, 2),
         "true_no": round(no_prob * 100, 2),
         "american_yes": implied_to_american(yes_prob),
-        "american_no": implied_to_american(no_prob)
+        "american_no": implied_to_american(no_prob),
     }
 
 
@@ -385,22 +380,31 @@ def estimate_sharp_line(market_odds: List[dict]) -> Optional[dict]:
 # Cross-Platform Arb Fee Adjustments
 # ============================================================================
 
-# Exchange fee rates (as fraction of contract value)
-# Kalshi: ~1% per contract (10¢ per $10 face value)
-# Polymarket: ~2% on net winnings
-# Both are CLOBs — no bookmaker vig in mid-prices; these are pure exchange fees.
-FEE_MAP = {"polymarket": 0.02, "kalshi": 0.01}
+# Cross-platform fee math is delegated to the single source of truth in
+# execution.fee_model (verified 2026 Polymarket per-category + Kalshi schedules).
+# fee_model is pure math with no I/O, so importing it here introduces no coupling
+# to the execution layer's side effects and no import cycle.
+from execution.fee_model import taker_fee_fraction
 
 
-def net_arb_edge(buy_price: float, sell_price: float, buy_platform: str, sell_platform: str, estimated_slippage: float = 0.005) -> dict:
+def net_arb_edge(
+    buy_price: float,
+    sell_price: float,
+    buy_platform: str,
+    sell_platform: str,
+    estimated_slippage: float = 0.005,
+    category: str = "politics",
+) -> dict:
     """
     Compute fee-adjusted arbitrage edge for cross-platform CLOB arb.
 
-    Both Polymarket and Kalshi are order-book exchanges with no embedded vig
-    in mid-prices (unlike sportsbook odds). The real cost of executing arb is:
-      1. Exchange buy fee (percentage of purchase price)
-      2. Exchange sell fee (percentage of profit, if profitable)
-      3. Estimated slippage from crossing the spread
+    Both Polymarket and Kalshi are order-book exchanges with no embedded vig in
+    mid-prices (unlike sportsbook odds). Each leg is a real taker fill, so each
+    incurs its own taker fee at its own fill price — there is NO "fee on profit"
+    (that was the obsolete pre-2026 model). Fees are symmetric around p=0.5 and
+    shrink to ~0 at the extremes:
+      - Polymarket: TAKER_RATE[category] * p * (1-p); world-events = 0
+      - Kalshi: 0.07 * p * (1-p) (general schedule)
 
     Args:
         buy_price: Price paid on the buy side (fraction of 1.0, e.g. 0.70)
@@ -408,25 +412,24 @@ def net_arb_edge(buy_price: float, sell_price: float, buy_platform: str, sell_pl
         buy_platform: "polymarket" or "kalshi"
         sell_platform: "polymarket" or "kalshi"
         estimated_slippage: Fraction of contract value lost to spread-crossing (default 0.005 = 0.5pp)
+        category: Polymarket fee category for the Polymarket leg(s) (default "politics",
+                  since cross-arb pairs are politics/macro/tech). Ignored for Kalshi legs.
 
     Returns:
         dict with keys:
         - gross_return: raw return fraction (e.g. 0.0714 for 7.14%)
         - net_return: return after fees & slippage
-        - buy_fee: fee fraction incurred on purchase
-        - sell_fee: fee fraction incurred on profitable sale
+        - buy_fee: taker fee fraction on the buy leg (at buy_price)
+        - sell_fee: taker fee fraction on the sell/close leg (at sell_price)
         - slippage: slippage fraction deducted
         - net_edge_pp: net edge in percentage points (e.g. 4.2 for 4.2pp)
     """
     # Gross return
     gross_return = (sell_price / buy_price) - 1.0 if buy_price > 0 else 0.0
 
-    # Buy fee — charged on purchase price
-    buy_fee = buy_price * FEE_MAP.get(buy_platform, 0.0)
-
-    # Sell fee — charged on profit when positive
-    profit = sell_price - buy_price
-    sell_fee = profit * FEE_MAP.get(sell_platform, 0.0) if profit > 0 else 0.0
+    # Each leg is a taker fill at its own price (real 2026 fee schedules).
+    buy_fee = taker_fee_fraction(buy_price, buy_platform, category)
+    sell_fee = taker_fee_fraction(sell_price, sell_platform, category)
 
     # Slippage deduction
     slippage = estimated_slippage
