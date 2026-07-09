@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import sqlite3
 import sys
 import time
@@ -28,20 +27,23 @@ from typing import Dict, List, Optional, Tuple
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
+from odds.monitor_gate import gated_fetch_json
 
 from scripts.alert_formatter import send_telegram
 
 # ── Config ───────────────────────────────────────────────────────────────────
 ODDS_API_KEY  = os.environ.get("ODDS_API_KEY", "")
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
-GAMMA_API     = "https://gamma-api.polymarket.com/events"
-CLOB_BOOK     = "https://clob.polymarket.com/book"
 
-DB_PATH       = BASE_DIR / "storage" / "shadow_trades.db"
-MC_HOST, MC_PORT = "localhost", 11211
+DB_PATH = BASE_DIR / "storage" / "shadow_trades.db"
 
 # Module-level executor — shared across sports and ticks
 _EXECUTOR = ThreadPoolExecutor(max_workers=8)
+
+# Per-game alert cooldown — prevents re-alerting on the same game within this window
+# even if the line keeps moving tick-to-tick. sport_drift_dedup table was created
+# for this but never wired up until now.
+DRIFT_ALERT_COOLDOWN_SECS = 3600  # 1h per game
 
 # ── Sport configs ─────────────────────────────────────────────────────────────
 # Each config drives a full scan cycle for that sport.
@@ -152,30 +154,6 @@ def _get(url: str, params: Optional[dict] = None, timeout: int = 12) -> Optional
         return None
 
 
-# ── Memcached ─────────────────────────────────────────────────────────────────
-def _mc_get(key: str, timeout: float = 0.4) -> Optional[bytes]:
-    try:
-        s = socket.create_connection((MC_HOST, MC_PORT), timeout=timeout)
-        s.settimeout(timeout)
-        s.sendall(b"get " + key.encode() + b"\r\n")
-        buf = b""
-        while b"END\r\n" not in buf and len(buf) < 500_000:
-            chunk = s.recv(8192)
-            if not chunk:
-                break
-            buf += chunk
-        try:
-            s.close()
-        except Exception:
-            pass
-        if not buf.startswith(b"VALUE"):
-            return None
-        _, _, rest = buf.partition(b"\r\n")
-        return rest.split(b"\r\nEND\r\n", 1)[0]
-    except Exception:
-        return None
-
-
 # ── Name matching ─────────────────────────────────────────────────────────────
 def _nmatch(a: str, b: str) -> bool:
     a, b = a.lower().strip(), b.lower().strip()
@@ -215,7 +193,7 @@ def fetch_pinnacle_sport(odds_key: str) -> List[Dict]:
     """
     if not ODDS_API_KEY:
         return []
-    data = _get(f"{ODDS_API_BASE}/{odds_key}/odds", {
+    data = gated_fetch_json(f"{ODDS_API_BASE}/{odds_key}/odds", {
         "apiKey": ODDS_API_KEY,
         "regions": "us",
         "markets": "h2h",
@@ -226,11 +204,22 @@ def fetch_pinnacle_sport(odds_key: str) -> List[Dict]:
         return []
 
     games = []
+    now_iso = datetime.now(timezone.utc).isoformat()
     for event in data:
         home = event.get("home_team", "")
         away = event.get("away_team", "")
         if not home or not away:
             continue
+        # Skip completed games — if commence_time is >4h ago, game is likely over
+        ct = event.get("commence_time", "")
+        if ct:
+            try:
+                start = datetime.fromisoformat(ct.replace("Z", "+00:00"))
+                hours_since = (datetime.now(timezone.utc) - start).total_seconds() / 3600
+                if hours_since > 4:
+                    continue  # Game almost certainly finished
+            except (ValueError, TypeError):
+                pass
         for bm in event.get("bookmakers", []):
             if bm.get("key") != "pinnacle":
                 continue
@@ -257,69 +246,167 @@ def fetch_pinnacle_sport(odds_key: str) -> List[Dict]:
     return games
 
 
-# ── Polymarket CLOB ───────────────────────────────────────────────────────────
-def fetch_poly_mid(home: str, away: str, pm_tag: str, has_draw: bool) -> Dict[str, Optional[float]]:
-    """Fetch PM mid price for each outcome. Returns {outcome_label: mid_price}."""
-    data = _get(GAMMA_API, {"tag_slug": pm_tag, "active": "true", "limit": 200})
-    if not data:
+# ── Polymarket (api.polymarket.us SDK) ───────────────────────────────────────
+# Replaces the old Gamma/CLOB/memcache path entirely. The SDK backend carries
+# live in-game prices with real bid/ask spreads for MLB, UFC, and soccer.
+# MLS has no per-game SDK markets → returns {} cleanly.
+#
+# SDK response shapes:
+#   search: {"events": [{"title", "ticker", "startDate", "markets": [{"slug", "sportsMarketType"}]}]}
+#   bbo:    {"marketData": {"bestBid": {"value": "0.49"}, "bestAsk": {"value": "0.51"}, ...}}
+
+_SMT_MAP: Dict[str, str] = {
+    "baseball":       "baseball_team_full_game_winner",
+    "ufc":            "ufc_fight_winner",
+    "fifa-world-cup": "drawable_outcome",
+    "soccer":         "drawable_outcome",
+}
+
+
+def _bbo_price(bbo_resp: dict, key: str, default: float) -> float:
+    """Extract a price from SDK BBO response. Handles both raw float and {'value': str} shapes."""
+    md = bbo_resp.get("marketData", bbo_resp)
+    val = md.get(key, default)
+    if isinstance(val, dict):
+        return float(val.get("value", default))
+    return float(val)
+
+
+def fetch_poly_mid(
+    home: str,
+    away: str,
+    pm_tag: str,
+    has_draw: bool,
+    commence_time: str = "",
+) -> Dict[str, Optional[float]]:
+    """Fetch PM mid price via api.polymarket.us SDK. Returns {outcome_label: mid_price}.
+
+    Uses live in-game pricing from the Polymarket US sports backend.
+    Ghost-price guard applied: bestBid≤0.02 or bestAsk≥0.98 → skip outcome.
+    commence_time (ISO8601) used to select the correct event date when multiple
+    matchups exist (doubleheaders, past/future games in search results).
+    """
+    if pm_tag == "mls":
+        return {}  # No per-game SDK markets for MLS
+
+    target_smt = _SMT_MAP.get(pm_tag)
+    if not target_smt:
+        return {}
+    draw_mode = has_draw and target_smt == "drawable_outcome"
+
+    # Extract target date for event-matching (YYYY-MM-DD from commence_time)
+    target_date = ""
+    if commence_time:
+        try:
+            target_date = commence_time[:10]  # "2026-06-24"
+        except Exception:
+            pass
+
+    try:
+        from polymarket_us import PolymarketUS
+        client = PolymarketUS()
+    except Exception as e:
+        print(f"[cross_sport_drift] PM SDK unavailable: {e}", flush=True)
         return {}
 
-    for ev in (data if isinstance(data, list) else []):
-        t = ev.get("title", "").lower()
-        if not (_nmatch(home, t) and _nmatch(away, t)):
+    query = f"{home} {away}"
+    try:
+        raw = client.search.query({"query": query}) or {}
+    except Exception as e:
+        print(f"[cross_sport_drift] PM SDK search '{query}' failed: {e}", flush=True)
+        return {}
+
+    events = raw.get("events", []) if isinstance(raw, dict) else raw
+
+    # Find event matching home/away teams and (if known) the game date
+    # Prefer exact date match; fall back to any active non-closed matching event
+    target_event = None
+    fallback_event = None
+    for ev in events:
+        title = ev.get("title", "")
+        if not (_nmatch(home, title) and _nmatch(away, title)):
+            continue
+        if ev.get("closed") or ev.get("archived"):
             continue
 
-        result: Dict[str, Optional[float]] = {}
-        for m in ev.get("markets", []):
-            q = m.get("question", "").lower()
-            prices = m.get("outcomePrices", [])
-            tids = m.get("clobTokenIds", [])
+        start = ev.get("startDate", "") or ev.get("ticker", "")
+        if target_date and target_date in start:
+            target_event = ev
+            break  # exact date match — done
+        if fallback_event is None:
+            fallback_event = ev
 
-            if isinstance(prices, str):
-                try:
-                    prices = json.loads(prices)
-                except Exception:
-                    continue
-            if isinstance(tids, str):
-                try:
-                    tids = json.loads(tids)
-                except Exception:
-                    continue
-            if not prices or not tids:
+    ev = target_event or fallback_event
+    if ev is None:
+        return {}
+
+    # Filter event's markets by sportsMarketType
+    all_mkts = ev.get("markets", [])
+    matching = [m for m in all_mkts if m.get("sportsMarketType") == target_smt]
+    if not matching:
+        return {}
+
+    result: Dict[str, Optional[float]] = {}
+
+    if not draw_mode:
+        # Binary market — one slug per game (MLB, UFC)
+        mkt = matching[0]
+        slug = mkt.get("slug", "")
+        if not slug:
+            return {}
+
+        try:
+            bbo = client.markets.bbo(slug)
+        except Exception as e:
+            print(f"[cross_sport_drift] PM BBO '{slug}' failed: {e}", flush=True)
+            return {}
+
+        best_bid = _bbo_price(bbo, "bestBid", 0.0)
+        best_ask = _bbo_price(bbo, "bestAsk", 1.0)
+        if best_bid <= 0.02 or best_ask >= 0.98:
+            return {}  # ghost price / dead market
+
+        mid = (best_bid + best_ask) / 2
+
+        # Parse "TeamA vs. TeamB" — mid = P(TeamA wins)
+        title = ev.get("title", "")
+        sep = " vs. " if " vs. " in title else " vs "
+        first_team = title.split(sep)[0].strip() if sep in title else home
+
+        if _nmatch(home, first_team):
+            result[home] = mid
+            result[away] = 1.0 - mid
+        else:
+            result[away] = mid
+            result[home] = 1.0 - mid
+
+    else:
+        # 3-way drawable market — 3 slugs per game: -home, -draw, -away
+        for mkt in matching:
+            slug = mkt.get("slug", "")
+            if not slug:
                 continue
 
-            yes_price = float(prices[0])
-            yes_tid = tids[0]
+            try:
+                bbo = client.markets.bbo(slug)
+            except Exception:
+                continue
 
-            # Try memcached book first (low latency, populated by WS service)
-            raw_book = _mc_get(f"poly:book:{yes_tid}")
-            if raw_book:
-                try:
-                    book = json.loads(raw_book)
-                    bids = book.get("bids", [])
-                    asks = book.get("asks", [])
-                    best_bid = float(bids[0]["price"]) if bids else 0.0
-                    best_ask = float(asks[0]["price"]) if asks else 1.0
-                    yes_price = (best_bid + best_ask) / 2
-                except Exception:
-                    pass  # fallback to gamma price
+            best_bid = _bbo_price(bbo, "bestBid", 0.0)
+            best_ask = _bbo_price(bbo, "bestAsk", 1.0)
+            if best_bid <= 0.02 or best_ask >= 0.98:
+                continue  # ghost / pre-open
 
-            if has_draw and "draw" in q:
-                result["Draw"] = yes_price
-            elif "win" in q and _nmatch(home, q) and not _nmatch(away, q):
-                result[home] = yes_price
-            elif "win" in q and _nmatch(away, q) and not _nmatch(home, q):
-                result[away] = yes_price
-            # UFC: "to win" fight (no draw)
-            elif not has_draw and _nmatch(home, q):
-                result[home] = yes_price
-            elif not has_draw and _nmatch(away, q):
-                result[away] = yes_price
+            mid = (best_bid + best_ask) / 2
 
-        if result:
-            return result
+            if slug.endswith("-home"):
+                result[home] = mid
+            elif slug.endswith("-draw"):
+                result["Draw"] = mid
+            elif slug.endswith("-away"):
+                result[away] = mid
 
-    return {}
+    return result
 
 
 # ── Drift detection ───────────────────────────────────────────────────────────
@@ -374,8 +461,17 @@ def check_sport_drift(conn: sqlite3.Connection, cfg: Dict, games: List[Dict]) ->
         if not any_drift:
             continue
 
+        # Skip if PM is settling (any outcome ≥98%)
+        pm_settled = False
+        for _, prob in probs.items():
+            if prob >= 0.98:
+                pm_settled = True
+                break
+        if pm_settled:
+            continue
+
         # Fetch PM mids in parallel with output already computed
-        f_pm = _EXECUTOR.submit(fetch_poly_mid, home, away, pm_tag, has_draw)
+        f_pm = _EXECUTOR.submit(fetch_poly_mid, home, away, pm_tag, has_draw, game.get("commence_time", ""))
         try:
             poly_mids = f_pm.result(timeout=15)
         except Exception:
@@ -436,6 +532,30 @@ def check_sport_drift(conn: sqlite3.Connection, cfg: Dict, games: List[Dict]) ->
             lines.append("━━━━━━━━━━━━━━━━")
             lines.append("💰 <b>PM hasn't caught up yet:</b>")
             lines.extend(trade_signals)
+
+        # Only alert when there's an actionable PM edge — suppress noise
+        if not trade_signals:
+            print(f"[cross_sport_drift] Drift {sport} {home} vs {away} — no PM edge, suppressed", flush=True)
+            continue
+
+        # Cooldown: skip if we already alerted this game within DRIFT_ALERT_COOLDOWN_SECS
+        dedup_row = conn.execute(
+            "SELECT last_alert_ts FROM sport_drift_dedup WHERE sport=? AND game_id=? AND outcome='_game'",
+            (sport, gid),
+        ).fetchone()
+        if dedup_row:
+            try:
+                last_alert = datetime.fromisoformat(dedup_row["last_alert_ts"])
+                if (now_s - last_alert.timestamp()) < DRIFT_ALERT_COOLDOWN_SECS:
+                    print(f"[cross_sport_drift] Drift {sport} {home} vs {away} — cooldown active, suppressed", flush=True)
+                    continue
+            except Exception:
+                pass
+        conn.execute("""
+            INSERT OR REPLACE INTO sport_drift_dedup (sport, game_id, outcome, last_alert_ts)
+            VALUES (?, ?, '_game', ?)
+        """, (sport, gid, now_ts))
+        conn.commit()
 
         send_telegram("\n".join(lines))
         print(f"[cross_sport_drift] Alert: {sport} {home} vs {away}", flush=True)

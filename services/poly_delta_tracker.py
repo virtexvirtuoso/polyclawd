@@ -50,7 +50,13 @@ def _fetch_json(url: str, timeout: int = 8) -> Optional[dict]:
 
 def _get_mid_price(market_id: str, side: str) -> Optional[float]:
     """Fetch PM CLOB mid for a market_id (hex condition_id) + side."""
-    market = _fetch_json(f"{GAMMA_API}/markets/{market_id}")
+    # Gamma rejects /markets/{condition_id} (path) with 422; the correct lookup
+    # is the condition_ids query param, which returns a LIST (matches the working
+    # poly_executable_edge path). Fixed 2026-06-20 — was 0/331 populated.
+    resp = _fetch_json(f"{GAMMA_API}/markets?condition_ids={market_id}")
+    if not resp:
+        return None
+    market = resp[0] if isinstance(resp, list) else resp
     if not market:
         return None
 

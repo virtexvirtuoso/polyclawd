@@ -14,6 +14,12 @@ import sys
 import requests
 import logging
 from datetime import datetime, timezone
+
+# Ensure project root is on sys.path regardless of how this script is invoked
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _BASE_DIR not in sys.path:
+    sys.path.insert(0, _BASE_DIR)
+
 from scripts.alert_formatter import send_telegram
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

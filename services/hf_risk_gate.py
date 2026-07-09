@@ -15,14 +15,31 @@ Kill conditions:
 
 import json
 import time
+from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict, field
 from loguru import logger
 
 
-# In-memory state (resets on service restart — fine for Phase 2)
-_trade_log: List[Dict] = []
+# Trade log — file-backed so drawdown history survives scheduler restarts
+_TRADE_LOG_FILE = Path("/tmp/hf_trade_log.json")
+
+def _load_trade_log() -> List[Dict]:
+    try:
+        if _TRADE_LOG_FILE.exists():
+            return json.loads(_TRADE_LOG_FILE.read_text())
+    except Exception:
+        pass
+    return []
+
+def _save_trade_log(log: List[Dict]) -> None:
+    try:
+        _TRADE_LOG_FILE.write_text(json.dumps(log[-1000:]))
+    except Exception:
+        pass
+
+_trade_log: List[Dict] = _load_trade_log()
 _gate_overrides: Dict[str, bool] = {}
 
 
@@ -277,10 +294,9 @@ def log_trade(asset: str, side: str, size: float, price: float,
         "market_id": market_id,
         "timestamp": datetime.utcnow().isoformat(),
     })
-    
-    # Keep last 1000 trades
     if len(_trade_log) > 1000:
         _trade_log[:] = _trade_log[-500:]
+    _save_trade_log(_trade_log)
 
 
 def get_trade_log(limit: int = 50) -> List[Dict]:

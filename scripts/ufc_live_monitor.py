@@ -31,6 +31,7 @@ from typing import Dict, List, Optional, Tuple
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
+from odds.monitor_gate import gated_fetch_json, LIVE_BOOKS
 
 from scripts.alert_formatter import send_telegram
 
@@ -238,9 +239,9 @@ def fetch_pinnacle(fighter_a: str, fighter_b: str) -> Optional[Dict[str, float]]
     if not ODDS_API_KEY:
         return None
 
-    data = _get(ODDS_API_BASE, {
+    data = gated_fetch_json(ODDS_API_BASE, {
         "apiKey": ODDS_API_KEY,
-        "regions": "us,uk",
+        "bookmakers": LIVE_BOOKS,
         "markets": "h2h",
         "oddsFormat": "decimal",
     })
@@ -598,7 +599,7 @@ def check_line_drift(conn: sqlite3.Connection, fight: Dict,
 
     prev_a = prev["pin_a"]
     drift_a = (pin["a"] - prev_a) * 100 if prev_a else 0
-    drift_b = (pin["b"] - (prev["pin_b"] or 0)) * 100 if prev.get("pin_b") else 0
+    drift_b = (pin["b"] - (prev["pin_b"] or 0)) * 100 if prev["pin_b"] else 0
 
     if abs(drift_a) < LINE_DRIFT_PP and abs(drift_b) < LINE_DRIFT_PP:
         return
@@ -711,8 +712,21 @@ def main() -> None:
             ev = None
 
         tokens = extract_tokens(ev, fa, fb) if ev else {}
+        sdk_source = False
 
-        if tokens:
+        # SDK fallback: aec-ufc-{f1_abbr}-{f2_abbr}-{date} (binary, YES=f1 wins)
+        if not tokens:
+            try:
+                from scripts.pm_sdk_utils import fetch_pm_sdk_ufc
+                tokens = fetch_pm_sdk_ufc(fa, fb, pin=pin)
+                sdk_source = bool(tokens)
+                if sdk_source:
+                    print(f"[ufc_monitor] SDK fallback: {fa} vs {fb}", flush=True)
+            except Exception as _sdk_e:
+                print(f"[ufc_monitor] SDK fallback error: {_sdk_e}", flush=True)
+
+        if tokens and not sdk_source:
+            # SDK tokens use slugs, not CLOB token IDs — skip CLOB refresh for them
             mc_register_tokens([tokens[lbl][0] for lbl in tokens])
             tokens = refresh_clob_prices(tokens)
 

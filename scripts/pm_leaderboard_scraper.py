@@ -2,13 +2,18 @@
 """
 pm_leaderboard_scraper.py — Polymarket leaderboard discovery + smart wallet seeding.
 
-Two discovery paths:
-  1. Scrape PM leaderboard page (top 100 by volume) — seeds new whales into pm_wallets
-  2. Scrape PM leaderboard by profit (top 100 by PnL) — catches profitable traders
+Discovery paths:
+  1. General leaderboard /leaderboard (top by volume) — seeds broad whale universe
+  2. Category leaderboards /leaderboard/{cat}/monthly/profit — category-specific
+     profit leaders (sports, politics, crypto, tech, culture, finance, economics).
+     These pages embed wallet data directly in HTML (not __NEXT_DATA__); parsed
+     via regex on the escaped JSON blob.
 
 Also fires Telegram alerts when:
   - A new wallet is discovered on the leaderboard (not in pm_wallets)
   - A wallet graduates to smart status during refresh
+  - Fast-track: wallets with net_pnl >= FAST_TRACK_PNL promoted without
+    win_rate/trades requirement (event specialists with large PnL but few markets)
 
 Cron: every 6 hours (scheduler tick_6h) — leaderboard doesn't change fast.
 State: storage/whale_meta.db (pm_wallets table)
@@ -97,6 +102,90 @@ def scrape_leaderboard(path: str = "/leaderboard") -> List[Dict]:
     return entries
 
 
+# Category leaderboards with unique profit-leader data (verified 2026-06-24).
+# entertainment/business/elections fall back to generic — excluded.
+_CATEGORY_LEADERBOARD_URLS = [
+    "/leaderboard/sports/monthly/profit",
+    "/leaderboard/sports/weekly/profit",
+    "/leaderboard/politics/monthly/profit",
+    "/leaderboard/crypto/monthly/profit",
+    "/leaderboard/tech/monthly/profit",
+    "/leaderboard/culture/monthly/profit",
+    "/leaderboard/finance/monthly/profit",
+    "/leaderboard/economics/monthly/profit",
+]
+
+# PnL threshold for fast-track smart promotion (no win_rate/trades requirement).
+# Sports/event specialists can have $1M+ PnL with <20 trades — normal gate rejects them.
+FAST_TRACK_PNL = 500_000
+
+
+def scrape_category_leaderboard(path: str) -> List[Dict]:
+    """Scrape a category leaderboard page using HTML regex extraction.
+
+    These pages embed wallet data directly in the HTML (not __NEXT_DATA__) as
+    escaped JSON. Pattern: proxyWallet\\":\\"0x...\\",...
+    Returns list of {wallet, name, pnl, volume, source_path}.
+    """
+    url = f"https://polymarket.com{path}"
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120"
+    })
+    try:
+        text = urllib.request.urlopen(req, timeout=20).read().decode()
+    except Exception as e:
+        print(f"[leaderboard] Failed to fetch {url}: {e}", flush=True)
+        return []
+
+    # Unescape the embedded JSON and extract wallet entries
+    idx = text.find("proxyWallet")
+    if idx < 0:
+        return []
+    start = text.rfind("[", 0, idx)
+    chunk = text[start:start + 80000].replace('\\"', '"')
+    pattern = (r'"proxyWallet":"(0x[0-9a-fA-F]+)",'
+               r'"name":"([^"]*)","pseudonym":"([^"]*)",'
+               r'"amount":([^,]+),"pnl":([^,}]+)')
+    raw = re.findall(pattern, chunk)
+
+    seen: set = set()
+    entries = []
+    for wallet, name, pseudo, amount_str, pnl_str in raw:
+        w = wallet.lower()
+        if w in seen:
+            continue
+        seen.add(w)
+        display = name if (name and not name.startswith("0x")) else (pseudo if (pseudo and not pseudo.startswith("0x")) else "")
+        try:
+            pnl = float(pnl_str)
+        except ValueError:
+            continue
+        try:
+            volume = float(amount_str)
+        except ValueError:
+            volume = 0.0
+        entries.append({
+            "wallet": w,
+            "name": display,
+            "pnl": pnl,
+            "volume": volume,
+            "source_path": path,
+            "rank": len(entries) + 1,  # position within this leaderboard page
+        })
+    return entries
+
+
+def _extract_category(source_path: str) -> Optional[str]:
+    """Extract category name from a leaderboard path.
+    /leaderboard/sports/monthly/profit → sports
+    /leaderboard → general
+    """
+    parts = source_path.strip("/").split("/")
+    if len(parts) >= 2 and parts[0] == "leaderboard":
+        return parts[1] if parts[1] not in ("monthly", "weekly", "profit") else "general"
+    return "general"
+
+
 def scrape_profile_pnl(username: str) -> Optional[Dict]:
     """Scrape a PM profile page for PnL + wallet data."""
     url = f"https://polymarket.com/@{username}"
@@ -139,15 +228,19 @@ def seed_wallets(conn: sqlite3.Connection, entries: List[Dict]) -> Dict:
     now = time.time()
     new_wallets = []
     updated = 0
+    rank_risers = []  # wallets that jumped ≥10 positions since seeding
 
     for entry in entries:
         wallet = entry["wallet"]
         name = entry["name"]
         pnl = entry["pnl"]
         volume = entry["volume"]
+        category = _extract_category(entry.get("source_path", ""))
+        rank = entry.get("rank")
 
         existing = conn.execute(
-            "SELECT wallet, name, smart FROM pm_wallets WHERE wallet=?", (wallet,)
+            "SELECT wallet, name, smart, rank_at_seed, rank_last_seen, source_category FROM pm_wallets WHERE wallet=?",
+            (wallet,)
         ).fetchone()
 
         if existing is None:
@@ -155,19 +248,45 @@ def seed_wallets(conn: sqlite3.Connection, entries: List[Dict]) -> Dict:
             conn.execute(
                 "INSERT INTO pm_wallets (wallet, name, first_seen, last_seen,"
                 " closed_positions, wins, win_rate, realized_pnl, net_pnl,"
-                " zombies, concentration, smart, refreshed)"
-                " VALUES (?,?,?,?, 0,0,NULL,0,?, 0,0,0,0)",
-                (wallet, name, now, now, pnl)
+                " zombies, concentration, smart, refreshed, source_category,"
+                " rank_at_seed, rank_last_seen, rank_scraped_at)"
+                " VALUES (?,?,?,?, 0,0,NULL,0,?, 0,0,0,0, ?,?,?,?)",
+                (wallet, name, now, now, pnl, category, rank, rank, int(now))
             )
-            new_wallets.append({"name": name, "pnl": pnl, "volume": volume})
+            new_wallets.append({"wallet": wallet, "name": name, "pnl": pnl, "volume": volume})
         else:
-            # Update name if blank
+            # Update name, category (keep original if already set), rank
+            updates = []
+            params = []
             if not existing["name"] and name:
-                conn.execute("UPDATE pm_wallets SET name=? WHERE wallet=?", (name, wallet))
+                updates.append("name=?")
+                params.append(name)
+            if not existing["source_category"] and category:
+                updates.append("source_category=?")
+                params.append(category)
+            if rank is not None:
+                updates.extend(["rank_last_seen=?", "rank_scraped_at=?"])
+                params.extend([rank, int(now)])
+                # Check for rank improvement ≥10 positions (lower = better)
+                seed_rank = existing["rank_at_seed"]
+                if seed_rank and rank and (seed_rank - rank) >= 10:
+                    rank_risers.append({
+                        "wallet": wallet,
+                        "name": name or existing["name"],
+                        "seed_rank": seed_rank,
+                        "current_rank": rank,
+                        "category": category,
+                        "pnl": pnl,
+                    })
+            if updates:
+                conn.execute(
+                    "UPDATE pm_wallets SET " + ", ".join(updates) + " WHERE wallet=?",
+                    params + [wallet]
+                )
             updated += 1
 
     conn.commit()
-    return {"new": new_wallets, "updated": updated}
+    return {"new": new_wallets, "updated": updated, "rank_risers": rank_risers}
 
 
 # ── Alerts ────────────────────────────────────────────────────────────────────
@@ -204,32 +323,148 @@ def alert_new_discoveries(new_wallets: List[Dict]) -> None:
     send_telegram("\n".join(lines))
 
 
+# ── Rank velocity alert ───────────────────────────────────────────────────────
+_RANK_RISER_DEDUP_FILE = Path("/tmp/rank_riser_dedup.json")
+_RANK_RISER_TTL = 24 * 3600
+
+
+def _rank_riser_recently_alerted(wallet: str) -> bool:
+    try:
+        with open(_RANK_RISER_DEDUP_FILE) as f:
+            cache = json.load(f)
+        return (time.time() - cache.get(wallet, 0)) < _RANK_RISER_TTL
+    except Exception:
+        return False
+
+
+def _rank_riser_mark_alerted(wallet: str) -> None:
+    try:
+        try:
+            with open(_RANK_RISER_DEDUP_FILE) as f:
+                cache = json.load(f)
+        except Exception:
+            cache = {}
+        cache[wallet] = time.time()
+        with open(_RANK_RISER_DEDUP_FILE, "w") as f:
+            json.dump(cache, f)
+    except Exception:
+        pass
+
+
+def alert_rank_risers(risers: List[Dict]) -> None:
+    """Alert when a wallet jumps ≥10 leaderboard positions since initial seeding."""
+    if not risers:
+        return
+    new_risers = [r for r in risers if not _rank_riser_recently_alerted(r["wallet"])]
+    if not new_risers:
+        return
+
+    for r in new_risers:
+        _rank_riser_mark_alerted(r["wallet"])
+
+    lines = [
+        f"📈 <b>RISING WALLETS</b>",
+        f"<i>{len(new_risers)} wallet(s) climbing fast</i>",
+        "",
+    ]
+    for r in sorted(new_risers, key=lambda x: x["seed_rank"] - x["current_rank"], reverse=True):
+        name = r["name"] or r["wallet"][:10]
+        jump = r["seed_rank"] - r["current_rank"]
+        lines.append(
+            f"<b>{name}</b> [{r['category']}]\n"
+            f"   #{r['seed_rank']} → #{r['current_rank']}  (+{jump} positions)  ${r['pnl']:,.0f} PnL"
+        )
+    lines.append("\n⚠️ Not yet in smart-wallet tier — tracking for graduation.")
+    send_telegram("\n".join(lines))
+
+
+_GRAD_DEDUP_FILE = Path("/tmp/graduation_dedup.json")
+_GRAD_DEDUP_TTL  = 24 * 3600   # suppress re-alert for the same batch for 24h
+
+
+def _grad_recently_alerted(top_wallet: str) -> bool:
+    """Return True if this wallet was already alerted within the dedup TTL."""
+    try:
+        with open(_GRAD_DEDUP_FILE) as f:
+            cache = json.load(f)
+        last_ts = cache.get(top_wallet, 0)
+        return (time.time() - last_ts) < _GRAD_DEDUP_TTL
+    except Exception:
+        return False
+
+
+def _grad_mark_alerted(top_wallet: str) -> None:
+    try:
+        try:
+            with open(_GRAD_DEDUP_FILE) as f:
+                cache = json.load(f)
+        except Exception:
+            cache = {}
+        cache[top_wallet] = time.time()
+        with open(_GRAD_DEDUP_FILE, "w") as f:
+            json.dump(cache, f)
+    except Exception:
+        pass
+
+
 def alert_graduations(conn: sqlite3.Connection) -> int:
-    """Check for wallets that meet smart criteria but aren't flagged. Promote + alert."""
+    """Check for wallets that meet smart criteria but aren't flagged. Promote + alert.
+
+    Three graduation paths:
+      1. Standard: closed_positions >= 20 AND win_rate >= 0.62 AND net_pnl >= 5000
+      2. Fast-track: net_pnl >= FAST_TRACK_PNL (event specialists, e.g. WC bettors
+         with $500K+ but fewer than 20 closed positions)
+      3. Skill: sign-randomization gate (skill_n >= 30, p <= 0.05, positive mean
+         probability-point return) — luck-controlled, catches low-WR longshot
+         specialists the WR path can't see. Fields written by refresh_wallets.
+    """
     rows = conn.execute("""
         SELECT wallet, name, closed_positions, ROUND(win_rate*100,1) as wr_pct,
-               ROUND(net_pnl,0) as net
+               ROUND(net_pnl,0) as net, skill_n, skill_ret, skill_p
         FROM pm_wallets
         WHERE smart = 0
-          AND closed_positions >= 20
-          AND win_rate >= 0.60
-          AND net_pnl >= 5000
+          AND (
+            (closed_positions >= 20 AND win_rate >= 0.62 AND net_pnl >= 5000)
+            OR net_pnl >= ?
+            OR (skill_n >= 30 AND skill_p <= 0.05 AND skill_ret > 0)
+          )
         ORDER BY net_pnl DESC
         LIMIT 20
-    """).fetchall()
+    """, (FAST_TRACK_PNL,)).fetchall()
 
     if not rows:
         return 0
 
-    # Promote
+    # Promote — use executemany on a fresh connection to avoid transaction
+    # contamination from the caller's seed_wallets() writes.
     wallets_to_promote = [r["wallet"] for r in rows]
-    conn.execute(
-        f"UPDATE pm_wallets SET smart=1 WHERE wallet IN ({','.join('?' * len(wallets_to_promote))})",
-        wallets_to_promote
-    )
-    conn.commit()
+    promo_conn = get_db()
+    try:
+        promo_conn.executemany(
+            "UPDATE pm_wallets SET smart=1 WHERE wallet=?",
+            [(w,) for w in wallets_to_promote],
+        )
+        promo_conn.commit()
+        print(f"[leaderboard] Promoted {len(wallets_to_promote)} wallets to smart=1", flush=True)
+    finally:
+        promo_conn.close()
 
-    # Alert (only top 5)
+    # Only alert when a genuine whale graduated — top wallet clears $50K net PnL.
+    # Batches of $5K–$25K wallets are silently promoted to avoid noise.
+    WHALE_ALERT_MIN = 50_000
+    top_wallet = rows[0]["wallet"]
+
+    # Dedup guard: scheduler restarts can trigger multiple back-to-back runs
+    # before any promotion commit is visible. Suppress repeat alerts for 24h
+    # on the same top wallet.
+    if _grad_recently_alerted(top_wallet):
+        print(f"[leaderboard] Graduation alert suppressed (dedup): {top_wallet[:10]}…", flush=True)
+        return len(rows)
+
+    if rows[0]["net"] < WHALE_ALERT_MIN:
+        print(f"[leaderboard] {len(rows)} wallets promoted silently (top PnL ${rows[0]['net']:,.0f} < ${WHALE_ALERT_MIN:,} threshold)", flush=True)
+        return len(rows)
+
     medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
     lines = [
         f"🎓 <b>SMART WALLET GRADUATION</b>",
@@ -238,20 +473,25 @@ def alert_graduations(conn: sqlite3.Connection) -> int:
     ]
     for i, r in enumerate(rows[:5]):
         raw_name = r["name"] or r["wallet"]
-        # Shorten ETH addresses / long hex IDs used as PM display names
         if raw_name.startswith("0x") and len(raw_name) > 12:
-            addr = raw_name.split("-")[0]  # strip -timestamp suffix
+            addr = raw_name.split("-")[0]
             name = f"{addr[:6]}…{addr[-4:]}"
         else:
             name = raw_name
         medal = medals[i]
-        lines.append(f"{medal} <b>{name}</b>")
-        lines.append(f"   {r['wr_pct']}% WR · {r['closed_positions']} trades · <b>${r['net']:+,.0f}</b>")
+        fast_track = r["net"] >= FAST_TRACK_PNL and (not r["wr_pct"] or r["closed_positions"] < 20)
+        skill = ((r["skill_n"] or 0) >= 30 and r["skill_p"] is not None
+                 and r["skill_p"] <= 0.05 and (r["skill_ret"] or 0) > 0)
+        tag = " ⚡ fast-track" if fast_track else (f" 🎯 skill p={r['skill_p']:.3f}" if skill else "")
+        lines.append(f"{medal} <b>{name}</b>{tag}")
+        wr_str = f"{r['wr_pct']}% WR · " if r["wr_pct"] else ""
+        lines.append(f"   {wr_str}{r['closed_positions']} trades · <b>${r['net']:+,.0f}</b>")
     if len(rows) > 5:
         lines.append(f"\n<i>+{len(rows) - 5} more promoted</i>")
     lines.append("")
     lines.append("✅ Signal scores will now be boosted when these wallets enter markets.")
 
+    _grad_mark_alerted(top_wallet)
     send_telegram("\n".join(lines))
     return len(rows)
 
@@ -259,29 +499,50 @@ def alert_graduations(conn: sqlite3.Connection) -> int:
 # ── Main ──────────────────────────────────────────────────────────────────────
 def run() -> Dict:
     conn = get_db()
+    total_scraped = 0
+    total_new: List[Dict] = []
+    total_updated = 0
 
-    # Scrape both volume and profit leaderboards
+    # 1. General leaderboard (volume-sorted, __NEXT_DATA__ path)
     volume_entries = scrape_leaderboard("/leaderboard")
-    print(f"[leaderboard] Volume leaderboard: {len(volume_entries)} entries", flush=True)
+    print(f"[leaderboard] General: {len(volume_entries)} entries", flush=True)
+    if volume_entries:
+        result = seed_wallets(conn, volume_entries)
+        total_new.extend(result["new"])
+        total_updated += result["updated"]
+        total_scraped += len(volume_entries)
 
-    # Profit leaderboard (same page, different sort — PM uses client-side sort)
-    # The __NEXT_DATA__ contains the same dataset, so volume scrape covers both
+    # 2. Category leaderboards (HTML regex path, profit-sorted)
+    all_rank_risers: List[Dict] = []
+    seen_wallets: set = set(e["wallet"] for e in volume_entries)
+    for path in _CATEGORY_LEADERBOARD_URLS:
+        cat_entries = scrape_category_leaderboard(path)
+        # Seed ALL category wallets (including those in general scrape) so ranks are updated
+        if cat_entries:
+            result = seed_wallets(conn, cat_entries)
+            # Only count truly new wallets (not already in general scrape) as new discoveries
+            new_this_cat = [w for w in result["new"] if w["wallet"] not in seen_wallets]
+            total_new.extend(new_this_cat)
+            total_updated += result["updated"]
+            total_scraped += len(cat_entries)
+            seen_wallets.update(e["wallet"] for e in cat_entries)
+            all_rank_risers.extend(result.get("rank_risers", []))
+        print(f"[leaderboard] {path}: {len(cat_entries)} entries", flush=True)
+        time.sleep(0.3)  # be gentle to PM servers
 
-    # Seed new wallets
-    result = seed_wallets(conn, volume_entries)
-    print(f"[leaderboard] New: {len(result['new'])}, Updated: {result['updated']}", flush=True)
+    # Alert on new high-value discoveries and rank risers
+    alert_new_discoveries(total_new)
+    alert_rank_risers(all_rank_risers)
+    print(f"[leaderboard] Total: scraped={total_scraped} new={len(total_new)} updated={total_updated} risers={len(all_rank_risers)}", flush=True)
 
-    # Alert on new discoveries
-    alert_new_discoveries(result["new"])
-
-    # Check for graduation candidates
+    # Check for graduation candidates (standard + fast-track)
     graduated = alert_graduations(conn)
     print(f"[leaderboard] Graduated: {graduated}", flush=True)
 
     conn.close()
     return {
-        "scraped": len(volume_entries),
-        "new": len(result["new"]),
+        "scraped": total_scraped,
+        "new": len(total_new),
         "graduated": graduated,
     }
 

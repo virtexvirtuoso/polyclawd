@@ -23,12 +23,13 @@ import time
 import urllib.request
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
+from odds.monitor_gate import gated_fetch_json, LIVE_BOOKS
 
 from scripts.alert_formatter import send_telegram
 
@@ -50,6 +51,7 @@ LEAGUE_CONFIGS: List[Dict] = [
         "espn_path": "soccer/fifa.world/scoreboard",
         "odds_key": "soccer_fifa_world_cup",
         "pm_tag": "fifa-world-cup",
+        "pm_sdk_comp": "fwc",   # SDK event prefix: fwc-{team1}-{team2}-{date}
         "kalshi_series": "KXWCGAME",
         "active_months": [6, 7],
     },
@@ -58,6 +60,7 @@ LEAGUE_CONFIGS: List[Dict] = [
         "espn_path": "soccer/usa.1/scoreboard",
         "odds_key": "soccer_usa_mls",
         "pm_tag": "mls",
+        "pm_sdk_comp": None,    # SDK prefix unknown — skip SDK fallback
         "kalshi_series": None,
         "active_months": [3, 4, 5, 6, 7, 8, 9, 10, 11],
     },
@@ -66,6 +69,7 @@ LEAGUE_CONFIGS: List[Dict] = [
         "espn_path": "soccer/eng.1/scoreboard",
         "odds_key": "soccer_epl",
         "pm_tag": "soccer",
+        "pm_sdk_comp": None,
         "kalshi_series": None,
         "active_months": [8, 9, 10, 11, 12, 1, 2, 3, 4, 5],
     },
@@ -74,6 +78,7 @@ LEAGUE_CONFIGS: List[Dict] = [
         "espn_path": "soccer/uefa.champions/scoreboard",
         "odds_key": "soccer_uefa_champs_league",
         "pm_tag": "soccer",
+        "pm_sdk_comp": None,
         "kalshi_series": None,
         "active_months": [9, 10, 11, 12, 1, 2, 3, 4, 5, 6],
     },
@@ -82,6 +87,7 @@ LEAGUE_CONFIGS: List[Dict] = [
         "espn_path": "soccer/esp.1/scoreboard",
         "odds_key": "soccer_spain_la_liga",
         "pm_tag": "soccer",
+        "pm_sdk_comp": None,
         "kalshi_series": None,
         "active_months": [8, 9, 10, 11, 12, 1, 2, 3, 4, 5],
     },
@@ -89,6 +95,7 @@ LEAGUE_CONFIGS: List[Dict] = [
 
 ODDS_API_KEY   = os.environ.get("ODDS_API_KEY", "")
 LINE_DRIFT_PP  = 5.0    # pp shift to trigger drift alert
+BLOWOUT_GOAL_DIFF = 3   # if lead >= this, suppress drift alert (game effectively over)
 WHALE_SIZE     = 50000  # single order size threshold (Polymarket CLOB units)
 WHALE_DEDUP_S  = 1800   # suppress re-alert for same wall within 30 min
 EDGE_FLOOR     = 0.02   # close shadow trade if edge drops below 2pp
@@ -285,9 +292,9 @@ def fetch_pinnacle(home: str, away: str, odds_key: str = "soccer_fifa_world_cup"
     """
     if not ODDS_API_KEY:
         return None
-    # Fetch ALL books, not just Pinnacle — 1 credit (bookmakers= costs 1 per book)
-    data = _get(f"{ODDS_API_BASE}/{odds_key}/odds/", {
-        "apiKey": ODDS_API_KEY, "regions": "us,uk,eu",
+    # Multi-book at 1 credit: <=10 bookmakers bill as 1 region (vs regions=us,uk,eu = 3).
+    data = gated_fetch_json(f"{ODDS_API_BASE}/{odds_key}/odds/", {
+        "apiKey": ODDS_API_KEY, "bookmakers": LIVE_BOOKS,
         "markets": "h2h", "oddsFormat": "decimal",
     })
     if not data:
@@ -365,7 +372,16 @@ def fetch_pinnacle(home: str, away: str, odds_key: str = "soccer_fifa_world_cup"
 
 # ── Polymarket ────────────────────────────────────────────────────────────────
 def fetch_poly_event(home: str, away: str, pm_tag: str = "fifa-world-cup") -> Optional[Dict]:
-    data = _get(POLY_EVENTS, {"tag_slug": pm_tag, "active": "true", "limit": 200})
+    now_utc = datetime.now(timezone.utc)
+    end_min = now_utc.strftime("%Y-%m-%dT00:00:00Z")
+    end_max = (now_utc + timedelta(days=2)).strftime("%Y-%m-%dT00:00:00Z")
+    data = _get(POLY_EVENTS, {
+        "tag_slug": pm_tag,
+        "active": "true",
+        "limit": 200,
+        "end_date_min": end_min,
+        "end_date_max": end_max,
+    })
     if not data:
         return None
     for ev in (data if isinstance(data, list) else []):
@@ -747,6 +763,12 @@ def check_line_drift(conn: sqlite3.Connection, game: Dict,
         """, (gid, outcome, prob, now_ts))
     conn.commit()
 
+    # Blowout gate: suppress drift alert if game is effectively over
+    # 4-0 in the 80th minute doesn't need an alert
+    goal_diff = abs(hs - as_)
+    if goal_diff >= BLOWOUT_GOAL_DIFF:
+        any_drift = False
+
     if not any_drift:
         return
 
@@ -977,6 +999,7 @@ def main() -> None:
         espn_path  = league["espn_path"]
         odds_key   = league["odds_key"]
         pm_tag     = league["pm_tag"]
+        pm_sdk_comp = league.get("pm_sdk_comp")  # SDK competition prefix (fwc, etc.)
         kalshi_s   = league["kalshi_series"]  # None = skip Kalshi leg
         lname      = league["name"]
 
@@ -1016,8 +1039,22 @@ def main() -> None:
                 kal = None
 
             tokens = extract_tokens(ev, home, away) if ev else {}
+            sdk_source = False
 
-            if tokens:
+            # SDK fallback: Gamma CLOB may not exist for all games.
+            # For WC, construct slugs directly: atc-fwc-{id}-{team} (3-way)
+            if not tokens and pm_sdk_comp:
+                try:
+                    from scripts.pm_sdk_utils import fetch_pm_sdk_soccer
+                    tokens = fetch_pm_sdk_soccer(home, away, competition=pm_sdk_comp, pin=pin)
+                    sdk_source = bool(tokens)
+                    if sdk_source:
+                        print(f"[soccer_live_monitor] SDK fallback: {home} vs {away}", flush=True)
+                except Exception as _sdk_e:
+                    print(f"[soccer_live_monitor] SDK fallback error: {_sdk_e}", flush=True)
+
+            if tokens and not sdk_source:
+                # SDK tokens use slugs, not CLOB token IDs — skip CLOB refresh for them
                 mc_register_tokens([tokens[lbl][0] for lbl in tokens])
                 tokens = refresh_clob_prices(tokens)
 

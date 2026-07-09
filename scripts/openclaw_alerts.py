@@ -67,7 +67,7 @@ def alert_openclaw(message: str, channel: str = "telegram", silent: bool = False
         # Default to Mr. V's Telegram ID
         target = "468298295" if channel == "telegram" else channel
 
-        cmd = ["openclaw", "message", "send", "--channel", channel, "--target", target, "--message", message]
+        cmd = ["openclaw", "message", "send", "--channel", channel, "--account", "polyclawd", "--target", target, "--message", message]
         if silent:
             cmd.append("--silent")
 

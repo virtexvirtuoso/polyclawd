@@ -93,11 +93,14 @@ def format_alert(
 
 def send_telegram(message: str) -> bool:
     """Send a Telegram message. Tries OpenClaw CLI first, falls back to Bot API."""
+    # Never fire during pytest runs — PYTEST_CURRENT_TEST is set before any module import
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("SMART_WALLET_ALERT_SEND") == "0":
+        return True
     # Try OpenClaw CLI first
     try:
         target = TELEGRAM_CHAT_ID
         cmd = ["openclaw", "message", "send", "--channel", "telegram",
-               "--target", target, "--message", message]
+               "--account", "polyclawd", "--target", target, "--message", message]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         if result.returncode == 0:
             return True

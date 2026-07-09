@@ -186,6 +186,25 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         client_order_ref = f"sw-{date_str}-{condition_id[:16]}-{outcome_index}"
 
+        # Dedup gate: block re-entry if this ref already exists in live_open_orders
+        # (catches cancelled maker → taker re-fire on next poll, e.g. 2026-07-01 Rihanna pos #7)
+        try:
+            from execution import live_db as _live_db
+            _chk_conn = _live_db.connect()
+            try:
+                row = _chk_conn.execute(
+                    "SELECT status FROM live_open_orders WHERE client_order_ref = ? LIMIT 1",
+                    (client_order_ref,)
+                ).fetchone()
+                if row:
+                    logger.info("sw_live: dedup — ref %s already in live_open_orders (status=%s), skipping",
+                                client_order_ref, row[0])
+                    continue
+            finally:
+                _chk_conn.close()
+        except Exception as _dup_exc:
+            logger.warning("sw_live: dedup check failed: %s", _dup_exc)
+
         # Extract event_id for correlation guard (bypassed if gamma doesn't have it)
         event_id = ""
         if condition_id in gamma:

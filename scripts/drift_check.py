@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_DIR, "scripts"))
 
-DIRS = ["odds", "signals", "services", "api", "src"]
+DIRS = ["odds", "signals", "services", "api"]
 VPS_DIR = "/var/www/virtuosocrypto.com/polyclawd"
 LOG = os.path.expanduser("~/Library/Logs/polyclawd-drift-check.log")
 ALERT_ENV = os.path.expanduser("~/.config/polyclawd/alerts.env")

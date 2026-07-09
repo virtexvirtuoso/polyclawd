@@ -142,7 +142,7 @@ TICK_TASKS = {
         "tweet_pace_alerts", "calibration_check", "insider_scan",
         "poly_delta", "manifold_shadow", "clv_snapshot",
         "hf_spread_5m", "cross_sport_drift", "soccer_live_monitor", "mlb_live_monitor",
-        "ufc_live_monitor",
+        "ufc_live_monitor", "ingame_monitor",
     ],
 
     # Tasks gated to every Nth tick of a parent group
@@ -706,6 +706,20 @@ def task_mlb_live_monitor():
     Alert-only: does NOT overlap with ingame_monitor.py (stop-loss stays there)."""
     from scripts.mlb_live_monitor import main as _main
     _main()
+
+
+def task_ingame_monitor():
+    """MLB in-game shadow monitor — stop-loss (−40%), take-profit (+67%), edge inversion.
+    Runs every 5min during MLB game hours (12:00–01:00 ET). Does not overlap with
+    task_mlb_live_monitor (alert-only). See signals/ingame_monitor.py."""
+    import datetime as _dt
+    now_et = _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
+    # UTC hours 16–05 = ET noon–1am (covers all MLB windows + extra buffer)
+    h = _dt.datetime.utcnow().hour
+    if not (16 <= h or h < 6):
+        return  # skip overnight/early morning ticks
+    from signals.ingame_monitor import run_monitor
+    run_monitor()
 
 
 def task_cross_sport_drift():
@@ -1307,7 +1321,7 @@ def task_scorer_clv_snapshot():
     from scripts.scorer_paper_logger import db_connect, live_snapshot
 
     con = db_connect(str(PROJECT_ROOT / "storage" / "scorer_clv.db"))
-    live_snapshot(con, "soccer_fifa_world_cup", window_hours=8.0)
+    live_snapshot(con, "soccer_fifa_world_cup", window_hours=30.0)
     con.close()
 
 

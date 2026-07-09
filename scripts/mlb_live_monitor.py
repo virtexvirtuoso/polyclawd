@@ -51,6 +51,7 @@ WHALE_DEDUP_S  = 1800    # suppress re-alert for same wall within 30 min
 EDGE_FLOOR     = 0.02    # close shadow trade if edge drops below 2pp
 PM_GAP_PP      = 6.0     # min pp gap between PM and Vegas to flag in alerts
 PM_STALE_PP    = 35.0    # gap above this = Endgame MM not active / no live in-game liquidity
+RUN_ALERT_COOLDOWN_MIN = 45  # per-game run-trigger TG cooldown while edge signature unchanged (92 sends/day on 2026-07-05 without it)
 
 DB_PATH  = BASE_DIR / "storage" / "shadow_trades.db"
 MC_HOST, MC_PORT = "localhost", 11211
@@ -157,6 +158,31 @@ def migrate(conn: sqlite3.Connection) -> None:
             outcome       TEXT,
             last_alert_ts TEXT,
             PRIMARY KEY (game_id, outcome)
+        );
+        CREATE TABLE IF NOT EXISTS mlb_run_alert_state (
+            game_id        TEXT PRIMARY KEY,
+            last_sent_ts   TEXT,
+            last_signature TEXT
+        );
+        -- Append-only log of fired ODDS MOVED alerts (audit 2026-07-07: 1,270
+        -- msgs/22d were Telegram-only; the PM-vs-Vegas divergence data was
+        -- discarded after delivery, so the claimed edge could never be scored).
+        CREATE TABLE IF NOT EXISTS mlb_odds_moved_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fired_at    TEXT NOT NULL,
+            game_id     TEXT,
+            home_team   TEXT,
+            away_team   TEXT,
+            home_score  INTEGER,
+            away_score  INTEGER,
+            detail      TEXT,
+            outcome     TEXT,
+            prev_devig  REAL,
+            now_devig   REAL,
+            move_pp     REAL,
+            poly_price  REAL,
+            gap_pp      REAL,
+            trade_signal TEXT     -- BUY/SELL when PM lags Vegas by >= PM_GAP_PP (non-stale), else NULL
         );
     """)
     conn.commit()
@@ -733,6 +759,7 @@ def check_run_trigger(conn: sqlite3.Connection, game: Dict,
             lines.append(f"  {name} wins: <b>{prob:.0%}</b> {tag}")
 
     trade_signals: List[str] = []
+    signal_keys: List[str] = []
     if tokens and pin:
         lines.append("")
         lines.append("Is Polymarket keeping up?")
@@ -755,6 +782,7 @@ def check_run_trigger(conn: sqlite3.Connection, game: Dict,
                 action = "BUY" if gap > 0 else "SELL"
                 lines.append(f"  ⚠️ <b>{name} wins</b>: Polymarket {poly_p:.0%}  ← <b>{abs(gap):.0f}pts {direction} than Vegas</b>")
                 trade_signals.append(f"→ <b>{action} {name} wins YES</b> at {poly_p:.0%}  (Vegas: {pin_p:.0%})")
+                signal_keys.append(f"{action}:{name}")
             else:
                 lines.append(f"  ✅ <b>{name} wins</b>: Polymarket {poly_p:.0%}  (matches Vegas)")
 
@@ -777,7 +805,31 @@ def check_run_trigger(conn: sqlite3.Connection, game: Dict,
         print(f"[mlb_monitor] {event} {home} {hs}-{as_} {away} — no edge/wall, suppressed", flush=True)
         return
 
+    # Per-game cooldown: an in-play PM/Vegas gap persists across runs, so without
+    # this every run scored re-alerts the same edge (92 sends on 2026-07-05).
+    # Edge signature changes (flip/new team) alert immediately.
+    signature = "|".join(sorted(signal_keys))
+    srow = conn.execute(
+        "SELECT last_sent_ts, last_signature FROM mlb_run_alert_state WHERE game_id=?",
+        (gid,),
+    ).fetchone()
+    if srow and srow["last_signature"] == signature:
+        try:
+            age_min = (datetime.now(timezone.utc)
+                       - datetime.fromisoformat(srow["last_sent_ts"])).total_seconds() / 60.0
+        except (TypeError, ValueError):
+            age_min = RUN_ALERT_COOLDOWN_MIN
+        if age_min < RUN_ALERT_COOLDOWN_MIN:
+            print(f"[mlb_monitor] Run alert suppressed (same edge, cooldown "
+                  f"{age_min:.0f}m/{RUN_ALERT_COOLDOWN_MIN}m) {home} {hs}-{as_} {away}", flush=True)
+            return
+
     send_telegram("\n".join(lines))
+    conn.execute(
+        "INSERT OR REPLACE INTO mlb_run_alert_state (game_id, last_sent_ts, last_signature) VALUES (?, ?, ?)",
+        (gid, datetime.now(timezone.utc).isoformat(), signature),
+    )
+    conn.commit()
     print(f"[mlb_monitor] Run/pitcher alert: {home} {hs}-{as_} {away}", flush=True)
 
 
@@ -887,6 +939,26 @@ def check_line_drift(conn: sqlite3.Connection, game: Dict,
         lines.append("━━━━━━━━━━━━━━━━")
         lines.append("💰 <b>PM hasn't caught up yet:</b>")
         lines.extend(trade_signals)
+
+    # Persist what we're about to send (append-only; never blocks the alert).
+    try:
+        for d in outcome_data:
+            signal = None
+            if d["poly"] is not None and d["gap"] is not None \
+               and abs(d["gap"]) >= PM_GAP_PP and abs(d["gap"]) < PM_STALE_PP:
+                signal = "BUY" if d["gap"] > 0 else "SELL"
+            conn.execute(
+                """INSERT INTO mlb_odds_moved_log
+                   (fired_at, game_id, home_team, away_team, home_score, away_score,
+                    detail, outcome, prev_devig, now_devig, move_pp, poly_price,
+                    gap_pp, trade_signal)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (now_ts, gid, home, away, hs, as_, detail, d["name"], d["prev"],
+                 d["now"], d["move"], d["poly"], d["gap"], signal),
+            )
+        conn.commit()
+    except Exception as ex:
+        print(f"[mlb_monitor] odds_moved_log write failed: {ex}", flush=True)
 
     send_telegram("\n".join(lines))
     print(f"[mlb_monitor] Line drift alert: {gid}", flush=True)

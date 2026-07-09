@@ -17,16 +17,24 @@ API = "http://127.0.0.1:8420/api"
 STATE_FILE = "/tmp/whale_alert_tg_state.json"
 CLOB_LAST_FILE = "/tmp/whale_clob_last.json"
 
-MIN_SCORE = 0.48
+MIN_SCORE = 7           # Must reach at least MONITOR verdict (score ≥ 7) to alert
 MIN_HTR = 0.5         # hours — skip only if resolves in < 30 min
 MAX_HTR = 72
 MIN_FLOW = 5000
 MIN_WALLET_WR = 0.45
 MIN_WALLET_N = 5
+# ── Top-accounts filter (2026-06-20) ────────────────────────────────
+# Only alert when a verified smart wallet ($10K+ net, 55%+ WR) is driving
+# the flow. Kalshi has no wallet data, so use high flow+score threshold.
+REQUIRE_SMART_WALLET = True
+KALSHI_FALLBACK_MIN_FLOW = 25_000   # Kalshi alerts without wallet ID need big flow
+KALSHI_FALLBACK_MIN_SCORE = 9       # ... and high score
 DEDUP_WINDOW = 4 * 3600   # 4h standard
 SCORE_ESCALATION_DELTA = 0.15  # re-alert if score jumps this much
 HTR_URGENCY_THRESHOLD = 2.0    # bypass dedup if <2h to resolve
 CLOB_FUSION_WINDOW = 15 * 60   # 15 min — CLOB×scanner fusion window
+PM_ANON_FLOW_FLOOR = 75_000   # PM anon flow above this bypasses smart-wallet gate
+PM_FUTURES_HTR_MAX = 720      # 30 days — WC futures have HTR 336-672h
 
 
 def load_state():
@@ -84,8 +92,15 @@ def is_actionable(alert):
     wr = alert.get("wallet_win_rate")
     if score < MIN_SCORE:
         return False
-    if htr is not None and (htr < MIN_HTR or htr > MAX_HTR):
-        return False
+    if htr is not None:
+        if htr < MIN_HTR:
+            return False
+        # PM futures (WC Advance/Winner) resolve in 14-28 days — use 30-day ceiling
+        htr_ceiling = (PM_FUTURES_HTR_MAX
+                       if (alert.get("platform") == "polymarket" and flow >= PM_ANON_FLOW_FLOOR)
+                       else MAX_HTR)
+        if htr > htr_ceiling:
+            return False
     if flow < MIN_FLOW:
         return False
     wallet_n = alert.get("wallet_n")
@@ -108,8 +123,15 @@ def is_actionable(alert):
     if bid is not None and (bid > 0.90 or bid < 0.10):
         print(f"SKIP decided: {alert.get('title','')[:40]} bid={bid:.2f}")
         return False
-    # ── No price = no edge visibility, skip for CRITICAL/HIGH ────────
-    if bid is None and alert.get("severity") in ("CRITICAL", "HIGH"):
+    # ── PM near-settled fallback: bid is often None for PM (no CLOB snapshot)
+    # Use current_price (last executed trade) as defense-in-depth
+    current_price = alert.get("current_price")
+    if current_price is not None and (current_price >= 0.97 or current_price <= 0.03):
+        print(f"SKIP near-settled PM: {alert.get('title','')[:40]} @ {current_price:.2f}")
+        return False
+    # ── No price = no edge visibility, skip for CRITICAL/HIGH unless large PM flow ─
+    platform = alert.get("platform", "")
+    if bid is None and current_price is None and alert.get("severity") in ("CRITICAL", "HIGH"):
         print(f"SKIP no-price: {alert.get('title','')[:40]}")
         return False
     # ── WNBA: log to shadow only, no Telegram alerts ────────────────
@@ -117,6 +139,20 @@ def is_actionable(alert):
     if mkt.upper().startswith("KXWNBA"):
         print(f"SKIP WNBA (shadow only): {alert.get('title','')[:40]}")
         return False
+    # ── Top-accounts gate: only alert on verified smart wallets ──────
+    if REQUIRE_SMART_WALLET:
+        reasons = alert.get("reasons", "")
+        has_smart = "smart_wallet" in reasons
+        if platform == "polymarket" and not has_smart:
+            # Large anonymous PM flow: aggregate dollar size IS the signal
+            if flow < PM_ANON_FLOW_FLOOR:
+                print(f"SKIP PM anon low-flow (${flow:,.0f}): {alert.get('title','')[:40]}")
+                return False
+        if platform != "polymarket" and not has_smart:
+            # Kalshi/other: no wallet ID available, use high-bar fallback
+            if flow < KALSHI_FALLBACK_MIN_FLOW or score < KALSHI_FALLBACK_MIN_SCORE:
+                print(f"SKIP no-smart-wallet (Kalshi, flow=${flow:,.0f} score={score}): {alert.get('title','')[:40]}")
+                return False
     return True
 
 
@@ -529,10 +565,20 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
     if px_line:
         lines.append(" ".join(px_line))
 
+    # ── Smart wallet identity ────────────────────────────────────────
+    smart_name = None
+    for r in reasons.split(","):
+        r = r.strip()
+        if r.startswith("smart_wallet_"):
+            smart_name = r.replace("smart_wallet_", "").replace("_", " ")
+            break
+
     # ── Whale action (explained) ─────────────────────────────────────
     whale_line = []
     if flow:
-        if flow_dir_str:
+        if smart_name:
+            whale_line.append(f"🐋 <b>{smart_name}</b> · ${flow:,.0f} · {flow_dir_str}" if flow_dir_str else f"🐋 <b>{smart_name}</b> · ${flow:,.0f}")
+        elif flow_dir_str:
             whale_line.append(f"🐋 Whale bought ${flow:,.0f} · {flow_dir_str} of flow")
         else:
             whale_line.append(f"🐋 ${flow:,.0f} flow")

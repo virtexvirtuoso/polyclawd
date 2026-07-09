@@ -62,9 +62,7 @@ def _lines(p):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--send", action="store_true", help="push to Telegram (Bot API, no LLM)"
-    )
+    ap.add_argument("--send", action="store_true", help="push to Telegram (Bot API, no LLM)")
     args = ap.parse_args()
 
     try:
@@ -128,23 +126,16 @@ def main():
     L = ["🌡️ Kalshi Weather Fade — paper shadow"]
     ln = tiers.get("kalshi_fade_longshot_no", {})
     fy = tiers.get("kalshi_fade_favorite_yes", {})
-    L.append(
-        f"Entries last scan: {entered} (open: longshot {ln.get('open', 0)}, "
-        f"favorite {fy.get('open', 0)})"
-    )
+    L.append(f"Entries last scan: {entered} (open: longshot {ln.get('open', 0)}, favorite {fy.get('open', 0)})")
     if exp_by_date:
         worst = max(exp_by_date.items(), key=lambda x: x[1])
-        L.append(
-            f"Exposure: {len(exp_by_date)} dates, peak ${worst[1]:.0f} ({worst[0]}) vs ${DATE_CAP:.0f} cap"
-        )
+        L.append(f"Exposure: {len(exp_by_date)} dates, peak ${worst[1]:.0f} ({worst[0]}) vs ${DATE_CAP:.0f} cap")
     L.append(
         f"Resolved: {totals.get('wins', 0)}W-{totals.get('losses', 0)}L | "
         f"net ${totals.get('total_pnl', 0):+.2f} (fees ${totals.get('fees_paid', 0):.2f}) | "
         f"WR {totals.get('win_rate', 0):.0f}%"
     )
-    L.append(
-        f"Open: {totals.get('open_positions', 0)} pos, ${totals.get('open_exposure', 0):.0f} exposure"
-    )
+    L.append(f"Open: {totals.get('open_positions', 0)} pos, ${totals.get('open_exposure', 0):.0f} exposure")
     if census:
         top = ", ".join(f"{k} {v}" for k, v in census.most_common(4))
         L.append(f"Skips ({sum(census.values())}): {top}")
@@ -162,16 +153,11 @@ def main():
     if adverse(pm):
         flags.append("⚠️ PM ADVERSE SELECTION (ev/$<0 settled)")
     if over_cap:
-        flags.append(
-            "⚠️ over date-cap: "
-            + ", ".join(f"{d} ${v:.0f}" for d, v in over_cap.items())
-        )
+        flags.append("⚠️ over date-cap: " + ", ".join(f"{d} ${v:.0f}" for d, v in over_cap.items()))
     if zero_nights >= 2:
         flags.append(f"⚠️ {zero_nights} nights 0 entries")
     if (ln.get("n", 0) >= 30) and (ln.get("win_rate", 100) < 90):
-        flags.append(
-            f"⚠️ longshot WR {ln.get('win_rate'):.0f}% (<90% at n={ln.get('n')})"
-        )
+        flags.append(f"⚠️ longshot WR {ln.get('win_rate'):.0f}% (<90% at n={ln.get('n')})")
     if flags:
         L.append("FLAGS: " + " | ".join(flags))
         L.append("Verdict: NEEDS REVIEW")
@@ -200,7 +186,9 @@ def main():
             sys.path.insert(0, str(BASE))
             from scripts.openclaw_alerts import alert_openclaw
 
-            print(f"[send] telegram ok={alert_openclaw(text)}")
+            # parse_mode=None: report body has unbalanced '_' (pm_quotes, ev/$) —
+            # Markdown mode 400s and the send drops silently (24 straight days to 2026-07-06)
+            print(f"[send] telegram ok={alert_openclaw(text, parse_mode=None)}")
         except Exception as e:
             print(f"[send] failed: {e}")
 

@@ -345,12 +345,35 @@ def format_alert(row, p: dict) -> str:
     return "\n".join(lines)
 
 
+def _send_telegram_message(text: str) -> bool:
+    """Deliver via the fleet helper. HTML first (format uses <b>/<a> tags), then a
+    tag-stripped plain-text retry so an unescaped & or < in a market title can't
+    400 the whole batch. Telegram hard-caps messages at 4096 chars."""
+    import re
+    import sys as _s
+
+    if str(BASE) not in _s.path:
+        _s.path.insert(0, str(BASE))
+    from scripts.openclaw_alerts import alert_openclaw
+
+    if len(text) > 3900:
+        text = text[:3890] + "\n…truncated"
+    if alert_openclaw(text, parse_mode="HTML"):
+        return True
+    return alert_openclaw(re.sub(r"<[^>]+>", "", text), parse_mode=None)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--peek",
         action="store_true",
         help="show pending alerts without advancing the cursor",
+    )
+    parser.add_argument(
+        "--send",
+        action="store_true",
+        help="deliver to Telegram; cursor only advances if delivery succeeds",
     )
     args = parser.parse_args()
 
@@ -393,19 +416,28 @@ def main():
     parsed.sort(key=lambda x: -x[2])
 
     total_usd = sum(d for _, _, d in parsed)
-    print(f"🦈 WHALE SHARK — {len(rows)} alert(s) | ≈${total_usd:,.0f} total flow\n")
+    out = [f"🦈 WHALE SHARK — {len(rows)} alert(s) | ≈${total_usd:,.0f} total flow\n"]
     for r, payload, _ in parsed[:MAX_FULL]:
-        print(format_alert(r, payload))
-        print()
+        out.append(format_alert(r, payload))
+        out.append("")
     if len(rows) > MAX_FULL:
         hidden_usd = sum(d for _, _, d in parsed[MAX_FULL:])
-        print(
+        out.append(
             f"(+{len(rows) - MAX_FULL} more ≈${hidden_usd:,.0f} — full tape: {DASHBOARD_URL})"
         )
     else:
-        print(f"live tape: {DASHBOARD_URL}")
+        out.append(f"live tape: {DASHBOARD_URL}")
+    text = "\n".join(out)
+    print(text)
 
-    if not args.peek:
+    delivered = True
+    if args.send:
+        delivered = _send_telegram_message(text)
+        print(f"[send] telegram ok={delivered}")
+
+    # A failed --send must NOT advance the cursor — that silently drops the
+    # batch forever (the pre-2026-07-06 consumer-gone failure mode).
+    if not args.peek and delivered:
         CURSOR_PATH.write_text(str(max_id_row["m"]))
 
 

@@ -48,8 +48,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import phase0_prop_falsification as P  # noqa: E402  (consensus anchor, parsing, fetch helpers)
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.alert_formatter import send_telegram  # noqa: E402
+import alert_formatter
 
 SCORER_MARKET = "player_goal_scorer_anytime"
 
@@ -111,6 +110,23 @@ def db_connect(path):
         consensus_fair REAL, best_soft_book TEXT, best_soft_implied REAL,
         edge_pct REAL, n_sharp INTEGER, mins_to_kickoff REAL,
         UNIQUE(event_id, player, snapshot_at))""")
+    con.execute("""CREATE TABLE IF NOT EXISTS scorer_alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        alerted_at TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        event_title TEXT,
+        player TEXT NOT NULL,
+        player_raw TEXT,
+        soft_book TEXT,
+        book_odds_american TEXT,
+        edge_pp REAL,
+        consensus_fair REAL,
+        soft_implied REAL,
+        stake REAL,
+        n_legs INTEGER,
+        status TEXT NOT NULL DEFAULT 'open',
+        resolution_note TEXT,
+        resolved_at TEXT)""")
     con.commit()
     return con
 
@@ -262,7 +278,38 @@ def live_snapshot(con, sport, window_hours, min_edge=5.0, bankroll=10_000.0):
                 f"Fair: {cons * 100:.1f}% | Sharp books: {ns}",
             ])
             print(f"[alert] {praw} edge={edge_pp:.1f}pp stake=${stake:.0f} n={n}")
-            send_telegram(alert)
+            alert_formatter.send_telegram(alert)
+            con.execute(
+                """INSERT INTO scorer_alerts
+                   (alerted_at, event_id, event_title, player, player_raw,
+                    soft_book, book_odds_american, edge_pp, consensus_fair,
+                    soft_implied, stake, n_legs)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (snap_at, eid, title, canon(praw), praw,
+                 sb, amer_str, edge_pp, cons, si, stake, n),
+            )
+            con.commit()
+
+
+# ── alert ledger management ───────────────────────────────────────────────────
+def void_alerts(con, event_id=None, before=None, reason="manual"):
+    """Mark scorer_alerts rows as invalid. Filters by event_id and/or alerted_at < before."""
+    where = ["status='open'"]
+    vals: list = [reason, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")]
+    if event_id:
+        where.append("event_id=?")
+        vals.append(event_id)
+    if before:
+        where.append("alerted_at < ?")
+        vals.append(before)
+    clause = " AND ".join(where)
+    n = con.execute(
+        f"UPDATE scorer_alerts SET status='invalid', resolution_note=?, resolved_at=? WHERE {clause}",
+        tuple(vals),
+    ).rowcount
+    con.commit()
+    print(f"[void] {n} alerts marked invalid: {reason}")
+    return n
 
 
 # ── report: match-level CLV + sequential decision ─────────────────────────────
@@ -343,7 +390,7 @@ def report(con, min_edge, send=False):
             f"Wilson 95% CI: [{lo:.2f}, {hi:.2f}]  pooled props: {pool_beat}/{pool_n}\n"
             f"VERDICT: {v}"
         )
-        send_telegram(msg)
+        alert_formatter.send_telegram(msg)
 
 
 def main():
@@ -359,6 +406,9 @@ def main():
     ap.add_argument("--bankroll", type=float, default=10_000.0, help="bankroll in USD for Step-4 sizing")
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--send", action="store_true", help="send report summary to Telegram")
+    ap.add_argument("--void-before", metavar="ISO", help="Mark all open alerts before this timestamp as invalid")
+    ap.add_argument("--void-event", metavar="EVENT_ID", help="Mark all open alerts for this event_id as invalid")
+    ap.add_argument("--void-reason", default="manual", help="Reason string for voided alerts")
     args = ap.parse_args()
 
     con = db_connect(args.db)
@@ -366,7 +416,9 @@ def main():
         seed_historical(con, args.entry_dir, args.close_dir)
     if args.snapshot:
         live_snapshot(con, args.sport, args.window_hours, min_edge=args.min_edge, bankroll=args.bankroll)
-    if args.report or not (args.seed_historical or args.snapshot):
+    if args.void_before or args.void_event:
+        void_alerts(con, event_id=args.void_event, before=args.void_before, reason=args.void_reason)
+    if args.report or not (args.seed_historical or args.snapshot or args.void_before or args.void_event):
         report(con, args.min_edge, send=args.send)
     con.close()
 
