@@ -1,0 +1,285 @@
+{
+  "generated": "2026-07-10T16:15:38Z",
+  "config": {
+    "lookback_days": 400,
+    "series_cap": 700,
+    "candle_budget": 600,
+    "ref_offset_h": 18,
+    "convergence_guard_h": 6,
+    "search_back_h": 30,
+    "max_spread": 0.2,
+    "primary_bin": [
+      0.15,
+      0.3
+    ],
+    "min_estimation_bin_n": 50,
+    "depth_months_gate": 6.0,
+    "min_flag_events": 6,
+    "min_flag_series": 3,
+    "n_boot": 4000,
+    "seed": 17,
+    "sleep": 0.1,
+    "fee_rate": 0.07
+  },
+  "depth": {
+    "from": "2026-04-18",
+    "to": "2026-07-10",
+    "months": 2.71,
+    "gate_months": 6.0,
+    "pass": false
+  },
+  "n_settled": 7574,
+  "n_calibratable": 592,
+  "full_calibration": [
+    {
+      "bin": "[0.00,0.05)",
+      "n": 173,
+      "events": 44,
+      "series": 29,
+      "implied": 0.0153,
+      "realized": 0.0116,
+      "gap": -0.0037
+    },
+    {
+      "bin": "[0.05,0.15)",
+      "n": 53,
+      "events": 41,
+      "series": 19,
+      "implied": 0.0875,
+      "realized": 0.1132,
+      "gap": 0.0257
+    },
+    {
+      "bin": "[0.15,0.30)",
+      "n": 48,
+      "events": 40,
+      "series": 13,
+      "implied": 0.2113,
+      "realized": 0.1875,
+      "gap": -0.0238
+    },
+    {
+      "bin": "[0.30,0.50)",
+      "n": 65,
+      "events": 52,
+      "series": 17,
+      "implied": 0.3888,
+      "realized": 0.3385,
+      "gap": -0.0503
+    },
+    {
+      "bin": "[0.50,0.70)",
+      "n": 55,
+      "events": 45,
+      "series": 11,
+      "implied": 0.5991,
+      "realized": 0.6182,
+      "gap": 0.0191
+    },
+    {
+      "bin": "[0.70,0.85)",
+      "n": 55,
+      "events": 38,
+      "series": 8,
+      "implied": 0.7816,
+      "realized": 0.5455,
+      "gap": -0.2362
+    },
+    {
+      "bin": "[0.85,0.95)",
+      "n": 55,
+      "events": 39,
+      "series": 15,
+      "implied": 0.8963,
+      "realized": 0.8364,
+      "gap": -0.06
+    },
+    {
+      "bin": "[0.95,1.00)",
+      "n": 88,
+      "events": 42,
+      "series": 24,
+      "implied": 0.9802,
+      "realized": 0.9773,
+      "gap": -0.003
+    }
+  ],
+  "primary_bin": "[0.15,0.3)",
+  "bin_full": {
+    "n": 48,
+    "events": 40,
+    "series": 13,
+    "implied": 0.2113,
+    "realized": 0.1875,
+    "gap": -0.0238
+  },
+  "estimation": {
+    "n": 24,
+    "events": 21,
+    "series": 9,
+    "implied": 0.215,
+    "realized": 0.1667,
+    "gap": -0.0483
+  },
+  "holdout": {
+    "n": 24,
+    "events": 19,
+    "series": 10,
+    "implied": 0.2075,
+    "realized": 0.2083,
+    "gap": 0.0008
+  },
+  "estimation_n_gate": 50,
+  "estimation_n_pass": false,
+  "est_ci_event": [
+    -0.2105,
+    0.1264
+  ],
+  "est_ci_series": [
+    -0.1909,
+    0.2277
+  ],
+  "series_decomposition": [
+    {
+      "series": "KXAAAGASW",
+      "n": 5,
+      "events": 5,
+      "implied": 0.196,
+      "realized": 0.0,
+      "gap": -0.196,
+      "gap_mass": -0.98
+    },
+    {
+      "series": "KXCPI",
+      "n": 2,
+      "events": 2,
+      "implied": 0.235,
+      "realized": 0.0,
+      "gap": -0.235,
+      "gap_mass": -0.47
+    },
+    {
+      "series": "KXECONSTATCPI",
+      "n": 2,
+      "events": 2,
+      "implied": 0.215,
+      "realized": 0.0,
+      "gap": -0.215,
+      "gap_mass": -0.43
+    },
+    {
+      "series": "KXCBDECISIONJAPAN",
+      "n": 2,
+      "events": 1,
+      "implied": 0.19,
+      "realized": 0.0,
+      "gap": -0.19,
+      "gap_mass": -0.38
+    },
+    {
+      "series": "KXU3",
+      "n": 1,
+      "events": 1,
+      "implied": 0.29,
+      "realized": 0.0,
+      "gap": -0.29,
+      "gap_mass": -0.29
+    },
+    {
+      "series": "KXPRIMESPEND",
+      "n": 1,
+      "events": 1,
+      "implied": 0.26,
+      "realized": 0.0,
+      "gap": -0.26,
+      "gap_mass": -0.26
+    },
+    {
+      "series": "KXAAAGASM",
+      "n": 1,
+      "events": 1,
+      "implied": 0.23,
+      "realized": 0.0,
+      "gap": -0.23,
+      "gap_mass": -0.23
+    },
+    {
+      "series": "KXFOMCDISSENTCOUNT",
+      "n": 1,
+      "events": 1,
+      "implied": 0.19,
+      "realized": 0.0,
+      "gap": -0.19,
+      "gap_mass": -0.19
+    },
+    {
+      "series": "KXECONSTATCPIYOY",
+      "n": 1,
+      "events": 1,
+      "implied": 0.18,
+      "realized": 0.0,
+      "gap": -0.18,
+      "gap_mass": -0.18
+    },
+    {
+      "series": "KXPCECORE",
+      "n": 1,
+      "events": 1,
+      "implied": 0.15,
+      "realized": 0.0,
+      "gap": -0.15,
+      "gap_mass": -0.15
+    },
+    {
+      "series": "KXPAYROLLS",
+      "n": 3,
+      "events": 3,
+      "implied": 0.2,
+      "realized": 0.3333,
+      "gap": 0.1333,
+      "gap_mass": 0.4
+    },
+    {
+      "series": "KXAAAGASD",
+      "n": 25,
+      "events": 19,
+      "implied": 0.2072,
+      "realized": 0.24,
+      "gap": 0.0328,
+      "gap_mass": 0.82
+    },
+    {
+      "series": "KXHOUSINGSTART",
+      "n": 3,
+      "events": 2,
+      "implied": 0.2667,
+      "realized": 0.6667,
+      "gap": 0.4,
+      "gap_mass": 1.2
+    }
+  ],
+  "top_series_neg_mass_share": 0.275,
+  "same_sign_series": 10,
+  "pnl_full": {
+    "n_events": 40,
+    "ev_per_contract": 0.0624,
+    "win_rate": 0.85,
+    "total_pnl": 2.4965,
+    "max_drawdown": -1.318
+  },
+  "pnl_estimation": {
+    "n_events": 21,
+    "ev_per_contract": 0.0836,
+    "win_rate": 0.8571,
+    "total_pnl": 1.7552,
+    "max_drawdown": -0.8399
+  },
+  "pnl_holdout": {
+    "n_events": 19,
+    "ev_per_contract": 0.039,
+    "win_rate": 0.8421,
+    "total_pnl": 0.7414,
+    "max_drawdown": -0.8175
+  },
+  "verdict": "INSUFFICIENT"
+}
