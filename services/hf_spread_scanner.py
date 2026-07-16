@@ -115,6 +115,7 @@ def _fmt_pct(pct: float) -> str:
 # Minimum spot move (%) required to call DIVERGENCE.
 # Flat candles (<0.10% on 15m, <0.15% on 1h) are noise, not real divergence.
 _DIVERGENCE_MIN_MOVE = {
+    "5m":  0.06,
     "15m": 0.10,
     "1h":  0.15,
     "4h":  0.20,
@@ -188,18 +189,21 @@ def _send_telegram(msg: str):
 
 TF_CONFIG: Dict[str, Dict] = {
     #           alert thresholds              dedup     window (secs)   min elapsed  min remaining  settled zone
+    # Task 4.1 (2026-07-16 alert overhaul): sub-1h timeframes scan + store data
+    # but NEVER send Telegram alerts ("alert": False); 1h+ intramarket raised
+    # to 0.15 and gated on >$10K market liquidity ("min_liquidity").
     "5m":  {"intramarket": 0.35, "term_spread": 0.20, "cross_asset": 0.30,
             "dedup_secs": 20 * 60,  "duration_secs": 300,   "min_elapsed": 120, "min_remaining": 90,
-            "settled_floor": 0.12,  "settled_ceil": 0.88},
+            "settled_floor": 0.12,  "settled_ceil": 0.88,   "alert": False},
     "15m": {"intramarket": 0.25, "term_spread": 0.18, "cross_asset": 0.25,
             "dedup_secs": 60 * 60,  "duration_secs": 900,   "min_elapsed": 300, "min_remaining": 120,
-            "settled_floor": 0.10,  "settled_ceil": 0.90},
-    "1h":  {"intramarket": 0.08, "term_spread": 0.12, "cross_asset": 0.18,
+            "settled_floor": 0.10,  "settled_ceil": 0.90,   "alert": False},
+    "1h":  {"intramarket": 0.15, "term_spread": 0.12, "cross_asset": 0.18,
             "dedup_secs": 4 * 3600, "duration_secs": 3600,  "min_elapsed": 600, "min_remaining": 300,
-            "settled_floor": 0.12,  "settled_ceil": 0.88},
-    "4h":  {"intramarket": 0.08, "term_spread": 0.10, "cross_asset": 0.15,
+            "settled_floor": 0.12,  "settled_ceil": 0.88,   "alert": True, "min_liquidity": 10_000},
+    "4h":  {"intramarket": 0.15, "term_spread": 0.10, "cross_asset": 0.15,
             "dedup_secs": 16 * 3600,"duration_secs": 14400, "min_elapsed": 1800,"min_remaining": 600,
-            "settled_floor": 0.15,  "settled_ceil": 0.85},
+            "settled_floor": 0.15,  "settled_ceil": 0.85,   "alert": True, "min_liquidity": 10_000},
 }
 # settled_floor / settled_ceil: prices outside this band are "market concluded" —
 # the crowd has converged on a result and there's nothing informative left to signal.
@@ -318,9 +322,15 @@ def _discover_markets(duration: str) -> Dict[str, Dict]:
             except Exception:
                 yes_price = 0.5
 
+            try:
+                liquidity = float(market.get("liquidityNum") or market.get("liquidity") or 0)
+            except Exception:
+                liquidity = 0.0
+
             candidates.setdefault(asset, []).append({
                 "market_id":     market.get("conditionId") or market.get("id", ""),
                 "yes_price":     yes_price,
+                "liquidity":     liquidity,
                 "question":      question,
                 "end_date":      market.get("endDate", ""),
                 "end_ts":        end_ts,
@@ -394,6 +404,7 @@ def _check_intramarket(markets_by_tf: Dict[str, Dict]) -> List[Dict]:
                     "type": "intramarket",
                     "asset": asset,
                     "duration": tf,
+                    "liquidity": m.get("liquidity", 0.0),
                     "yes_price": p,
                     "direction": direction,
                     "spread_from_50": round(spread, 3),
@@ -472,6 +483,31 @@ def _check_cross_asset(markets_by_tf: Dict[str, Dict]) -> List[Dict]:
             if spread >= threshold:
                 max_asset = max(prices, key=prices.get)
                 min_asset = min(prices, key=prices.get)
+                # Spot confirmation (2026-07-10): PM prices disagreeing about a
+                # flat candle is noise, not a beta-group violation. Only alert
+                # when the spot moves themselves diverge. Fail-closed: no spot
+                # data -> no alert. (2026-07-10 example: SOL 0.57 vs DOGE 0.20
+                # with both spots at -0.013% — untradeable coin flip.)
+                min_move = _DIVERGENCE_MIN_MOVE.get(tf, _DIVERGENCE_MIN_MOVE_DEFAULT)
+                ctx_hi = _fetch_candle_context(max_asset, tf)
+                ctx_lo = _fetch_candle_context(min_asset, tf)
+                if ctx_hi is None or ctx_lo is None:
+                    logger.info(f"cross_asset {group_name} {tf}: spot fetch failed — suppressed (fail-closed)")
+                    continue
+                move_gap = ctx_hi["pct_move"] - ctx_lo["pct_move"]
+                if abs(move_gap) < min_move:
+                    logger.info(
+                        f"cross_asset {group_name} {tf}: {spread*100:.0f}¢ PM spread suppressed — "
+                        f"flat spot ({max_asset} {_fmt_pct(ctx_hi['pct_move'])}, "
+                        f"{min_asset} {_fmt_pct(ctx_lo['pct_move'])}, gap < {min_move}%)"
+                    )
+                    continue
+                # Which leg contradicts spot? That's the mispriced side.
+                mispriced = []
+                if prices[max_asset] > 0.5 and ctx_hi["pct_move"] < 0:
+                    mispriced.append(f"{max_asset} priced UP but spot {_fmt_pct(ctx_hi['pct_move'])} — rich, fade")
+                if prices[min_asset] < 0.5 and ctx_lo["pct_move"] > 0:
+                    mispriced.append(f"{min_asset} priced DOWN but spot {_fmt_pct(ctx_lo['pct_move'])} — cheap, buy")
                 alerts.append({
                     "type": "cross_asset",
                     "group": group_name,
@@ -480,10 +516,14 @@ def _check_cross_asset(markets_by_tf: Dict[str, Dict]) -> List[Dict]:
                     "spread": round(spread, 3),
                     "bullish_asset": max_asset,
                     "bearish_asset": min_asset,
+                    "spot_moves": {max_asset: round(ctx_hi["pct_move"], 3),
+                                   min_asset: round(ctx_lo["pct_move"], 3)},
                     "note": (
-                        f"{group_name}: {max_asset} tilted UP ({prices[max_asset]:.2f}) "
-                        f"vs {min_asset} tilted DOWN ({prices[min_asset]:.2f}) — "
+                        f"{group_name}: {max_asset} tilted UP ({prices[max_asset]:.2f}, "
+                        f"spot {_fmt_pct(ctx_hi['pct_move'])}) vs {min_asset} tilted DOWN "
+                        f"({prices[min_asset]:.2f}, spot {_fmt_pct(ctx_lo['pct_move'])}) — "
                         f"{spread*100:.0f}¢ spread within beta group"
+                        + (f" | {'; '.join(mispriced)}" if mispriced else "")
                     ),
                 })
     return alerts
@@ -750,6 +790,21 @@ def _detect_conflicts(actionable: List[tuple]) -> Dict[str, List[str]]:
     return conflicts
 
 
+def _alert_allowed(alert: Dict) -> bool:
+    """Send gate (Task 4.1): sub-1h timeframes collect data but never send;
+    1h+ intramarket alerts additionally require >$10K market liquidity
+    (fail closed when liquidity is unknown). Detection/storage unaffected."""
+    tf = alert.get("short_tf") if alert.get("type") == "term_spread" else alert.get("duration", "1h")
+    cfg = TF_CONFIG.get(tf, TF_CONFIG["1h"])
+    if not cfg.get("alert", True):
+        return False
+    if alert.get("type") == "intramarket":
+        min_liq = cfg.get("min_liquidity", 0)
+        if min_liq and (alert.get("liquidity") or 0.0) <= min_liq:
+            return False
+    return True
+
+
 def scan_spreads(durations: Optional[List[str]] = None) -> List[Dict]:
     """
     Multi-timeframe spread scan. Returns list of fresh alerts (after dedup).
@@ -789,8 +844,10 @@ def scan_spreads(durations: Optional[List[str]] = None) -> List[Dict]:
 
     if fresh:
         _store_alerts(fresh)
+        # Send gate (Task 4.1): sub-1h TFs and thin 1h+ markets are stored but never sent
+        sendable = [a for a in fresh if _alert_allowed(a)]
         # Format each alert — fair-price intramarket alerts return "" and are suppressed
-        formatted = [(a, _format_alert(a)) for a in fresh]
+        formatted = [(a, _format_alert(a)) for a in sendable]
         actionable = [(a, txt) for a, txt in formatted if txt]
         if actionable:
             conflicts = _detect_conflicts(actionable)
@@ -807,7 +864,8 @@ def scan_spreads(durations: Optional[List[str]] = None) -> List[Dict]:
         suppressed = len(fresh) - len(actionable)
         logger.info(
             f"HF spread scan: {len(fresh)} fresh alerts, "
-            f"{len(actionable)} actionable, {suppressed} fair-price suppressed"
+            f"{len(actionable)} actionable, {suppressed} suppressed "
+            f"(send-gate or fair-price)"
         )
     else:
         logger.debug(f"HF spread scan: {len(all_alerts)} alerts, all deduped")
