@@ -62,6 +62,45 @@ def test_long_message_split_into_chunks(monkeypatch, tmp_path):
     assert "\n".join(sent).split("\n") == message.split("\n")
 
 
+def test_default_parse_mode_sends_plain_text(monkeypatch, tmp_path):
+    """Arbitrary market titles/wallets (_ and *) must not 400 under the default mode."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("POLYCLAWD_LEDGER_PATH", str(tmp_path / "l.jsonl"))
+    captured = {}
+
+    class Resp:
+        def read(self):
+            return b'{"ok": true}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def capture(req, timeout):
+        captured["payload"] = req.data.decode()
+        return Resp()
+
+    monkeypatch.setattr(oa.urllib.request, "urlopen", capture)
+    ok, err = oa._telegram_http_send("_underscore_wallet* text")
+    assert ok is True and err == ""
+    assert "parse_mode" not in captured["payload"]
+
+
+def test_alert_openclaw_default_parse_mode_none(monkeypatch, tmp_path):
+    monkeypatch.setenv("POLYCLAWD_LEDGER_PATH", str(tmp_path / "l.jsonl"))
+    seen = {}
+
+    def fake_inner(message, channel="telegram", silent=False, parse_mode="SENTINEL"):
+        seen["parse_mode"] = parse_mode
+        return True, ""
+
+    monkeypatch.setattr(oa, "_alert_openclaw_inner", fake_inner)
+    assert oa.alert_openclaw("hi") is True
+    assert seen["parse_mode"] is None
+
+
 def test_no_token_records_err(monkeypatch, tmp_path):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     ledger = tmp_path / "ledger.jsonl"

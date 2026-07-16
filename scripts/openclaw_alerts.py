@@ -17,7 +17,7 @@ OPENCLAW_GATEWAY = "http://localhost:18789"
 DEFAULT_CHAT_ID = "468298295"  # Mr. V
 
 
-def _telegram_http_send(message: str, silent: bool = False, parse_mode: str = "Markdown") -> tuple:
+def _telegram_http_send(message: str, silent: bool = False, parse_mode: Optional[str] = None) -> tuple:
     """Direct Telegram Bot API send — the delivery path on hosts without the
     openclaw CLI (the VPS). Token comes from the service EnvironmentFile
     (TELEGRAM_BOT_TOKEN in /etc/default/polyclawd); never hardcoded.
@@ -110,7 +110,7 @@ def _ledger_log(ok: bool, channel: str, parse_mode, msg_len: int, err: str = "")
         pass
 
 
-def alert_openclaw(message: str, channel: str = "telegram", silent: bool = False, parse_mode: str = "Markdown") -> bool:
+def alert_openclaw(message: str, channel: str = "telegram", silent: bool = False, parse_mode: Optional[str] = None) -> bool:
     """Ledger-wrapped sender: records every delivery attempt (with failure
     reason), then returns only the boolean result — the public signature is
     frozen (9 pipelines call it). Messages over the Telegram limit are split
@@ -152,7 +152,7 @@ def _split_message(message: str, limit: int = TELEGRAM_MAX_LEN) -> list:
 
 
 def _alert_openclaw_inner(
-    message: str, channel: str = "telegram", silent: bool = False, parse_mode: str = "Markdown"
+    message: str, channel: str = "telegram", silent: bool = False, parse_mode: Optional[str] = None
 ) -> tuple:
     """
     Send an alert via OpenClaw CLI.
