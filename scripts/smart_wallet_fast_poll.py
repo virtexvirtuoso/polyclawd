@@ -17,6 +17,7 @@ compared to the 5-min effective cycle of the full whale scanner.
 
 Called by: scheduler.py task_smart_wallet_fast()
 """
+
 from __future__ import annotations
 
 import logging
@@ -29,9 +30,11 @@ logger = logging.getLogger(__name__)
 _EXIT_COOLDOWN_SECS = 7200  # 2 hours
 _EXIT_COOLDOWN_FILE = "/tmp/sw_exit_cooldown.json"
 
+
 def _is_in_exit_cooldown(token_id: str) -> bool:
     """Return True if this token was recently stopped out and is in cooldown."""
     import json, os, time
+
     try:
         if not os.path.exists(_EXIT_COOLDOWN_FILE):
             return False
@@ -41,9 +44,11 @@ def _is_in_exit_cooldown(token_id: str) -> bool:
     except Exception:
         return False
 
+
 def register_exit_cooldown(token_id: str) -> None:
     """Record that a position was closed — block re-entry for cooldown window."""
     import json, os, time
+
     try:
         data = {}
         if os.path.exists(_EXIT_COOLDOWN_FILE):
@@ -53,14 +58,20 @@ def register_exit_cooldown(token_id: str) -> None:
     except Exception:
         pass
 
+
 # How far back to look for trades each poll (2x poll interval for overlap safety)
-_LOOKBACK_SECS = 180   # 3 minutes
+_LOOKBACK_SECS = 180  # 3 minutes
 _SMART_WALLET_MIN_USD = 1000  # minimum fill size to consider (raised from $500 2026-06-25)
 
 # Live execution config for smart wallet signals
 # Only "entry" alerts are wired — refire has -8.37% avg CLV (2026-06-25 audit, n=70)
 _SW_LIVE_ALERT_TYPES = {"entry"}
-_SW_LIVE_SIZE_USD = 25.0  # conservative start; raise after live validation
+# Dynamic sizing: fraction of bankroll so it scales with wins.
+# At $40 bankroll → $10/trade; $80 → $15/trade (cap).
+# Floored at $5 so we don't get stuck in sub-$5 noise.
+_SW_LIVE_FRACTION = 0.25  # 25% of bankroll per trade
+_SW_LIVE_MIN_USD = 5.0  # floor — $5 minimum even at tiny bankroll
+_SW_LIVE_MAX_USD = 15.0  # cap — safety limit per trade
 
 # Category gate — only follow smart wallets into approved market verticals.
 # Gamma sometimes returns category=None (e.g. entertainment/pop-culture markets).
@@ -68,15 +79,48 @@ _SW_LIVE_SIZE_USD = 25.0  # conservative start; raise after live validation
 _ALLOWED_CATEGORIES = {"sports", "crypto", "politics", "weather", "finance", "economics"}
 _ALLOWED_SLUG_KEYWORDS = (
     # Sports
-    "mlb", "nfl", "nba", "nhl", "ufc", "mls", "wc", "fwc", "fifwc",
-    "soccer", "football", "basketball", "baseball", "tennis", "golf",
-    "nascar", "boxing", "mma", "hockey",
+    "mlb",
+    "nfl",
+    "nba",
+    "nhl",
+    "ufc",
+    "mls",
+    "wc",
+    "fwc",
+    "fifwc",
+    "soccer",
+    "football",
+    "basketball",
+    "baseball",
+    "tennis",
+    "golf",
+    "nascar",
+    "boxing",
+    "mma",
+    "hockey",
     # Crypto / finance
-    "btc", "eth", "bitcoin", "ethereum", "crypto", "sol", "xrp", "doge",
-    "fed-rate", "gdp", "inflation", "cpi",
+    "btc",
+    "eth",
+    "bitcoin",
+    "ethereum",
+    "crypto",
+    "sol",
+    "xrp",
+    "doge",
+    "fed-rate",
+    "gdp",
+    "inflation",
+    "cpi",
     # Politics
-    "trump", "biden", "election", "senate", "congress", "president",
-    "democrat", "republican", "vote",
+    "trump",
+    "biden",
+    "election",
+    "senate",
+    "congress",
+    "president",
+    "democrat",
+    "republican",
+    "vote",
 )
 
 
@@ -92,12 +136,35 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
     """
     try:
         from execution import live_config
+
         if live_config.mode() != "LIVE":
             return
     except Exception:
         return
 
+    logger.info("sw_live: routing %d fired alerts to live executor", len(fired))
+
     from datetime import datetime, timezone
+
+    # Dynamic sizing: compute once per sweep based on current bankroll
+    try:
+        from execution.live_db import connect as _ldb_connect
+
+        _ldb = _ldb_connect()
+        row = _ldb.execute("SELECT bankroll FROM live_portfolio_state ORDER BY id DESC LIMIT 1").fetchone()
+        bankroll = row["bankroll"] if row else 0.0
+        _ldb.close()
+    except Exception:
+        bankroll = 0.0
+    size_usd = max(_SW_LIVE_MIN_USD, min(_SW_LIVE_MAX_USD, bankroll * _SW_LIVE_FRACTION))
+    logger.info(
+        "sw_live: bankroll=$%.2f → size=$%.2f (frac=%.0f%% floor=$%.0f cap=$%.0f)",
+        bankroll,
+        size_usd,
+        _SW_LIVE_FRACTION * 100,
+        _SW_LIVE_MIN_USD,
+        _SW_LIVE_MAX_USD,
+    )
 
     for rec in fired:
         if rec.get("alert_type") not in _SW_LIVE_ALERT_TYPES:
@@ -111,24 +178,40 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
 
         # Category gate: only execute in approved market verticals (Option B).
         # Blocks pop-culture/entertainment markets like the 2026-07-01 Rihanna incident.
+        # Uses Gamma API category first, falls back to the rec dict's category (pre-classified
+        # by smart_wallet_alert.py), then slug keyword matching.
         gm_data = gamma.get(condition_id, {})
         mkt_category = (gm_data.get("category") or "").lower().strip()
         mkt_slug = (gm_data.get("slug") or "").lower()
         mkt_question = (gm_data.get("question") or "").lower()
         if mkt_category:
             if mkt_category not in _ALLOWED_CATEGORIES:
-                logger.info("sw_live: blocked — category '%s' not in allowlist for %s, skipping",
-                            mkt_category, condition_id[:16])
+                logger.info(
+                    "sw_live: blocked — category '%s' not in allowlist for %s, skipping",
+                    mkt_category,
+                    condition_id[:16],
+                )
                 continue
         else:
-            # Gamma returned no category — require positive keyword match in slug/question
-            if not any(kw in mkt_slug or kw in mkt_question for kw in _ALLOWED_SLUG_KEYWORDS):
-                logger.info("sw_live: blocked — no category + no known pattern (slug='%s') for %s, skipping",
-                            mkt_slug[:40], condition_id[:16])
+            # Fallback 1: use rec dict's pre-classified category (populated by smart_wallet_alert.py)
+            rec_category = (rec.get("category") or "").lower().strip()
+            if rec_category in _ALLOWED_CATEGORIES:
+                pass  # allowed
+            # Fallback 2: keyword match in slug/question
+            elif any(kw in mkt_slug or kw in mkt_question for kw in _ALLOWED_SLUG_KEYWORDS):
+                pass  # allowed
+            else:
+                logger.info(
+                    "sw_live: blocked — no category (rec='%s') + no known pattern (slug='%s') for %s, skipping",
+                    rec_category,
+                    mkt_slug[:40],
+                    condition_id[:16],
+                )
                 continue
 
         try:
             from odds.poly_executable_edge import condition_id_to_token_ids
+
             token_ids = condition_id_to_token_ids(condition_id)
             if not token_ids or len(token_ids) < 2:
                 logger.warning("sw_live: no token_ids for condition %s", condition_id[:16])
@@ -159,6 +242,7 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
         net_edge_taker = 0.0
         try:
             from odds.polymarket_clob import get_orderbook
+
             book = get_orderbook(token_id)
             if book and getattr(book, "bids", None):
                 live_bid = float(book.bids[0].price)
@@ -179,8 +263,13 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
         # Suppress if market has moved too far from alert price (>15pp drift = stale signal)
         drift = abs(entry_price - price_at_alert)
         if drift > 0.15:
-            logger.info("sw_live: price drifted %.2f→%.2f (%.0fpp), skipping %s",
-                        price_at_alert, entry_price, drift * 100, condition_id[:16])
+            logger.info(
+                "sw_live: price drifted %.2f→%.2f (%.0fpp), skipping %s",
+                price_at_alert,
+                entry_price,
+                drift * 100,
+                condition_id[:16],
+            )
             continue
 
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -190,15 +279,18 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
         # (catches cancelled maker → taker re-fire on next poll, e.g. 2026-07-01 Rihanna pos #7)
         try:
             from execution import live_db as _live_db
+
             _chk_conn = _live_db.connect()
             try:
                 row = _chk_conn.execute(
-                    "SELECT status FROM live_open_orders WHERE client_order_ref = ? LIMIT 1",
-                    (client_order_ref,)
+                    "SELECT status FROM live_open_orders WHERE client_order_ref = ? LIMIT 1", (client_order_ref,)
                 ).fetchone()
                 if row:
-                    logger.info("sw_live: dedup — ref %s already in live_open_orders (status=%s), skipping",
-                                client_order_ref, row[0])
+                    logger.info(
+                        "sw_live: dedup — ref %s already in live_open_orders (status=%s), skipping",
+                        client_order_ref,
+                        row[0],
+                    )
                     continue
             finally:
                 _chk_conn.close()
@@ -211,7 +303,13 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
             gm = gamma[condition_id]
             event_id = str(gm.get("eventId") or gm.get("event_id") or "")
 
-        intent = {"size_usd": _SW_LIVE_SIZE_USD, "market_id": token_id, "token_id": token_id, "side": "BUY", "event_id": event_id}
+        intent = {
+            "size_usd": size_usd,
+            "market_id": token_id,
+            "token_id": token_id,
+            "side": "BUY",
+            "event_id": event_id,
+        }
 
         conn = live_db.connect()
         try:
@@ -227,29 +325,44 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
                 token_id=token_id,
                 side="BUY",
                 fair_price=entry_price,
-                size_usd=_SW_LIVE_SIZE_USD,
+                size_usd=size_usd,
                 tick_size=tick_size,
                 neg_risk=bool(rec.get("neg_risk", False)),
                 net_edge_taker=net_edge_taker,  # positive when fresh; taker fires after maker window if edge >= min_taker_edge
                 client_order_ref=client_order_ref,
                 category=rec.get("category") or "smart_wallet",
+                market_title=(gm_data.get("question") or rec.get("question") or "")[:120],
             )
             action = result.get("action")
-            logger.info("sw_live: %s → %s (entry=%.2f, alert=%.2f)",
-                        client_order_ref, action, entry_price, price_at_alert)
+            logger.info(
+                "sw_live: %s → %s (entry=%.2f, alert=%.2f)", client_order_ref, action, entry_price, price_at_alert
+            )
             # Instant Telegram alert on any fill
             if action in ("maker_filled", "taker_filled"):
                 try:
                     from scripts.alert_formatter import send_telegram
+
                     liq = result.get("liquidity", action)
                     fill_price = result.get("price", entry_price)
                     usd = result.get("usd", 0.0)
                     fee = result.get("fee_paid", 0.0)
                     market_name = rec.get("question") or rec.get("market", token_id[:16])
+                    # Enrich with full market name from gamma data
+                    gm = gamma.get(condition_id, {})
+                    gm_question = gm.get("question") or ""
+                    gm_slug = gm.get("slug") or ""
+                    display_name = gm_question or market_name
+                    # Enrich with category + edge info from gamma data
+                    gm = gamma.get(condition_id, {})
+                    gm_category = gm.get("category") or ""
+                    gm_slug = gm.get("slug") or ""
+                    gm_question = gm.get("question") or ""
+                    # Use the most descriptive name available
+                    display_name = gm_question or market_name
                     emoji = "✅" if action == "maker_filled" else "⚡"
                     lines = [
                         f"{emoji} <b>LIVE FILL</b> ({liq.upper()})",
-                        f"Market: {market_name}",
+                        f"Market: {display_name}",
                         f"Side: BUY | Price: {fill_price:.2f} | Size: ${usd:.2f}",
                         f"Fee: ${fee:.4f} | Ref: {client_order_ref}",
                     ]
@@ -276,6 +389,7 @@ def run() -> dict:
     # --- Load smart wallet ledger ---
     try:
         from signals.whale_wallets import get_meta_db, get_smart_wallets
+
         meta_conn = get_meta_db()
         smart = get_smart_wallets(meta_conn)
     except Exception as e:
@@ -321,6 +435,7 @@ def run() -> dict:
     # Pass to scanner_hook (handles accumulation, dedup, alert firing, convergence)
     try:
         from scripts.smart_wallet_alert import scanner_hook
+
         fired = scanner_hook(meta_conn, sw_trades, gamma, smart)
     except Exception as e:
         logger.warning("smart_wallet_fast_poll: scanner_hook failed: %s", e)
@@ -340,7 +455,9 @@ def run() -> dict:
 
     logger.info(
         "smart_wallet_fast_poll: %d trades scanned, %d sw fills, %d alerts fired",
-        len(trades), len(sw_trades), len(fired),
+        len(trades),
+        len(sw_trades),
+        len(fired),
     )
     return {
         "smart_wallets": len(smart),
