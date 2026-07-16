@@ -9,19 +9,69 @@ Run from VPS cron:
 """
 
 import argparse
+import json
+import os
 import sqlite3
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
 DB = BASE / "storage" / "shadow_trades.db"
+LEDGER = BASE / "logs" / "telegram_sent.jsonl"
+
+
+def stops_proof_line(db_path=None, now=None) -> str:
+    """Daily proof-of-life for the stop evaluator (plan Task 2.1 Step 3):
+    reads the stop_heartbeat row written by evaluate_stops(). Never raises."""
+    now_ts = int(now if now is not None else time.time())
+    try:
+        conn = sqlite3.connect(str(db_path or DB), timeout=10)
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT ts, positions_checked, warnings_fired FROM stop_heartbeat WHERE id=1").fetchone()
+        finally:
+            conn.close()
+        if row is None or row["ts"] is None:
+            return "stops: no heartbeat recorded yet"
+        age_m = max(0, now_ts - int(row["ts"])) // 60
+        return (
+            f"stops: checked {row['positions_checked'] or 0} positions, "
+            f"{row['warnings_fired'] or 0} warnings fired, last run {age_m}m ago"
+        )
+    except Exception:
+        return "stops: no heartbeat recorded yet"
+
+
+def delivery_line(ledger_path=None, now=None) -> str:
+    """Delivery success rate over the last 24h from the send ledger
+    (covers spec P0 action 5 at zero marginal cost). Never raises."""
+    now_ts = now if now is not None else time.time()
+    path = Path(ledger_path or os.environ.get("POLYCLAWD_LEDGER_PATH") or LEDGER)
+    total = ok = 0
+    try:
+        with open(path) as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                    ts = datetime.fromisoformat(r["ts"]).timestamp()
+                except Exception:
+                    continue
+                if now_ts - ts <= 24 * 3600:
+                    total += 1
+                    if r.get("ok"):
+                        ok += 1
+    except OSError:
+        return "delivery: no send ledger found"
+    if not total:
+        return "delivery: no sends in last 24h"
+    return f"delivery: {ok / total * 100:.0f}% success last 24h ({ok}/{total} from send ledger)"
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--send", action="store_true", help="push to Telegram (Bot API, no LLM)"
-    )
+    ap.add_argument("--send", action="store_true", help="push to Telegram (Bot API, no LLM)")
     args = ap.parse_args()
 
     conn = sqlite3.connect(str(DB), timeout=10)
@@ -35,9 +85,7 @@ def main():
 
     status = {
         r["status"]: r["cnt"]
-        for r in conn.execute(
-            "SELECT status, COUNT(*) AS cnt FROM paper_positions GROUP BY status"
-        )
+        for r in conn.execute("SELECT status, COUNT(*) AS cnt FROM paper_positions GROUP BY status")
     }
     open_n = status.get("open", 0)
 
@@ -51,8 +99,7 @@ def main():
     ).fetchone()
 
     daily = conn.execute(
-        "SELECT date, trades_resolved, wins, losses, win_rate "
-        "FROM daily_summaries ORDER BY date DESC LIMIT 1"
+        "SELECT date, trades_resolved, wins, losses, win_rate FROM daily_summaries ORDER BY date DESC LIMIT 1"
     ).fetchone()
     conn.close()
 
@@ -86,9 +133,11 @@ def main():
     ]
     if daily:
         lines.append(
-            f"summary {daily['date']}: {daily['trades_resolved']} resolved, "
-            f"{daily['wins']}W-{daily['losses']}L"
+            f"summary {daily['date']}: {daily['trades_resolved']} resolved, {daily['wins']}W-{daily['losses']}L"
         )
+    # Proof-of-life lines (plan Task 2.1 Step 3): stops heartbeat + delivery rate
+    lines.append(stops_proof_line())
+    lines.append(delivery_line())
     text = "\n".join(lines)
     print(text)
 

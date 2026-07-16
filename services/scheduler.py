@@ -112,12 +112,27 @@ def _restart_service():
     logger.info("Service restarted")
 
 
+_task_locks: dict = {}
+
+
 def _run_safe(name: str, fn, *args, **kwargs):
-    """Run a function, catching all exceptions."""
+    """Run a function, catching all exceptions.
+
+    Per-task non-blocking lock: if the same task is already running (e.g.
+    live-burst trigger overlapping the periodic tick), skip instead of
+    running concurrently — the monitors are stateful (score-snap tables)
+    and the next tick picks up anything missed."""
+    import threading
+    lock = _task_locks.setdefault(name, threading.Lock())
+    if not lock.acquire(blocking=False):
+        logger.debug("Task %s already running — skipped", name)
+        return None
     try:
         return fn(*args, **kwargs)
     except Exception as e:
         logger.exception("Task %s failed: %s", name, e)
+    finally:
+        lock.release()
         return None
 
 
@@ -132,7 +147,13 @@ def _run_safe(name: str, fn, *args, **kwargs):
 TICK_TASKS = {
     "30s": ["hf_signals"],
 
-    "1min": ["stop_evaluator_urgent", "sport_whale_trades"],
+    "1min": [
+        "stop_evaluator_urgent", "sport_whale_trades",
+        # Moved from 5min tick 2026-07-10: in-play edges decay in 1-3 min.
+        # All self-gate on "any live game?" (free ESPN check) so idle cost ~0.
+        "soccer_live_monitor", "mlb_live_monitor", "ufc_live_monitor",
+        "ingame_monitor", "cross_sport_drift",
+    ],
 
     "5min": [
         "health_check", "stop_evaluator", "price_logger", "book_logger",
@@ -140,9 +161,9 @@ TICK_TASKS = {
         "position_sync", "resolution_scanner", "mlb_props_scratch", "dashboard_warm",
         "weather_reeval", "weather_fast_scan", "weather_shift_alerts",
         "tweet_pace_alerts", "calibration_check", "insider_scan",
+        "tier1_whale_alerts",
         "poly_delta", "manifold_shadow", "clv_snapshot",
-        "hf_spread_5m", "cross_sport_drift", "soccer_live_monitor", "mlb_live_monitor",
-        "ufc_live_monitor", "ingame_monitor",
+        "hf_spread_5m",
     ],
 
     # Tasks gated to every Nth tick of a parent group
@@ -153,6 +174,7 @@ TICK_TASKS = {
         "whale_wall_alerts", "whale_outcomes", "whale_wallets",
         "credit_refresh", "source_health_touch", "stale_line_scan",
         "ufc_prop_scan", "edge_alerts", "mlb_props_alert",
+        "stop_silence_alarm",
         "mlb_props_resolve", "baseball_resolve", "ufc_resolve", "nfl_resolve",
         "scorer_clv_snapshot", "kalshi_fade_scan",
         "pm_maker_shadow", "ensemble_recorder", "arb_scan",
@@ -341,6 +363,57 @@ def task_stop_evaluator_urgent():
     """Fast stop check for positions resolving within 6 hours."""
     from services.stop_evaluator import evaluate_stops_urgent
     evaluate_stops_urgent()
+
+
+STOP_SILENCE_THRESHOLD_SEC = 30 * 60   # heartbeat older than this = evaluator silent
+STOP_SILENCE_REFIRE_SEC = 6 * 3600      # alarm re-fires at most once per 6h
+
+
+def task_stop_silence_alarm(db_path=None, now=None):
+    """Alarm ONLY if the stop-evaluator heartbeat is silent >30 min (D3:
+    silence-alarm only — zero steady-state noise). Re-fire gated to once per
+    6h via a kv DB row, NOT _state — the 15-min health-check restart wipes
+    process memory. Healthy = silent."""
+    path = str(db_path or DB_PATH)
+    now_ts = int(now if now is not None else time.time())
+    conn = sqlite3.connect(path)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
+        # Writer (stop_evaluator) may not be deployed yet — create both tables
+        # so registration order doesn't matter (plan Task 2.1 schema).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS stop_heartbeat ("
+            " id INTEGER PRIMARY KEY, ts INTEGER,"
+            " positions_checked INTEGER, warnings_fired INTEGER)")
+        conn.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
+        conn.commit()
+        row = conn.execute("SELECT ts FROM stop_heartbeat WHERE id=1").fetchone()
+        if row is None or row["ts"] is None:
+            return  # no heartbeat ever written (writer not deployed) — nothing to judge
+        age = now_ts - int(row["ts"])
+        if age <= STOP_SILENCE_THRESHOLD_SEC:
+            return
+        gate = conn.execute("SELECT v FROM kv WHERE k='last_silence_alarm'").fetchone()
+        if gate and now_ts - int(float(gate["v"])) < STOP_SILENCE_REFIRE_SEC:
+            return
+        from scripts.openclaw_alerts import alert_openclaw
+        msg = (
+            f"🚨 stop evaluator SILENT for {age // 60}m — no heartbeat in "
+            f"shadow_trades.db (threshold 30m). Check the polyclawd-scheduler "
+            f"stop_evaluator task."
+        )
+        if alert_openclaw(msg, parse_mode=None):
+            # Arm the 6h gate only on a delivered alarm — a failed send retries
+            # on the next 30-min tick.
+            conn.execute(
+                "INSERT INTO kv (k, v) VALUES ('last_silence_alarm', ?) "
+                "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (str(now_ts),))
+            conn.commit()
+    except Exception as e:
+        logger.error("stop_silence_alarm failed: %s", e)
+    finally:
+        conn.close()
 
 
 def task_price_logger():
@@ -1037,6 +1110,43 @@ def task_whale_clob():
         logger.info("Whale CLOB: %s", result)
 
 
+def task_tier1_whale_alerts():
+    """Process whale alerts through Tier-1 conviction pipeline.
+
+    Runs every 5min: reads from the whale_alerts DB table, evaluates for Tier-1,
+    logs sized alerts, fires Tier-1 alerts to Telegram, resolves pending.
+    """
+    try:
+        from signals.tier1_whale_alert import process_whale_alerts, resolve_tier1_alerts
+
+        resolve_tier1_alerts()
+
+        try:
+            conn = _db()
+            rows = conn.execute(
+                "SELECT * FROM whale_alerts WHERE ts > datetime('now', '-24 hours') "
+                "ORDER BY ts DESC LIMIT 200"
+            ).fetchall()
+            conn.close()
+            if rows:
+                alerts = [dict(r) for r in rows]
+                result = process_whale_alerts(alerts)
+                if result["tier1_fired"] > 0:
+                    logger.info(
+                        "TIER-1: %d fired, %d sized, %d processed",
+                        result["tier1_fired"], result["sized_alerts"], result["alerts_processed"],
+                    )
+                elif result["sized_alerts"] > 0:
+                    logger.debug(
+                        "TIER-1: %d sized alerts (no Tier-1), %d processed",
+                        result["sized_alerts"], result["alerts_processed"],
+                    )
+        except Exception as e:
+            logger.debug("Tier-1 whale alert DB read failed: %s", e)
+    except Exception as e:
+        logger.error("Tier-1 whale alert task failed: %s", e)
+
+
 def task_whale_wall_alerts():
     """Alert on new whale wall detections (dedup by market_id, 4h cooldown)."""
     from signals.whale_wall_scanner import scan_whale_walls
@@ -1722,6 +1832,121 @@ async def tick_1min():
         await asyncio.sleep(60)
 
 
+# ── Live score burst (Phase 2 latency fix, 2026-07-10) ──────────────────────
+# Poll ESPN scoreboards every 20s while games are live; on any score/round/
+# status change, immediately run the matching live monitor instead of waiting
+# for the next 1-min tick. Alert lag target: ~25s from event.
+# ESPN polls are free (no API credits). Backs off to 120s when nothing live.
+
+BURST_ENDPOINTS = {
+    "soccer_live_monitor": [
+        "soccer/fifa.world/scoreboard", "soccer/usa.1/scoreboard",
+        "soccer/eng.1/scoreboard", "soccer/uefa.champions/scoreboard",
+        "soccer/esp.1/scoreboard",
+    ],
+    "mlb_live_monitor": ["baseball/mlb/scoreboard"],
+    "ufc_live_monitor": ["mma/ufc/scoreboard"],
+}
+_burst_state: dict = {}
+_burst_moves_seen: float = 0.0  # ts of newest PM move event already processed
+
+
+def _read_pm_moves():
+    """Read poly:moves:recent from memcached (written by polyclawd-ws).
+
+    Phase 3: sharp PM flow often reprices a live game before the ESPN
+    scoreboard updates — a >=10pp/60s mid move is treated like a score change."""
+    import socket
+    try:
+        s = socket.create_connection(("localhost", 11211), timeout=0.4)
+        s.settimeout(0.4)
+        s.sendall(b"get poly:moves:recent\r\n")
+        buf = b""
+        while b"END\r\n" not in buf and len(buf) < 500_000:
+            chunk = s.recv(8192)
+            if not chunk:
+                break
+            buf += chunk
+        s.close()
+        if not buf.startswith(b"VALUE"):
+            return []
+        body = buf.split(b"\r\n", 1)[1].rsplit(b"\r\nEND\r\n", 1)[0]
+        import json as _json
+        return _json.loads(body)
+    except Exception:
+        return []
+
+
+def _burst_fingerprint(path: str):
+    """Return (fingerprint, n_live) for one ESPN scoreboard.
+
+    Fingerprint covers every live event's per-competition status name, period
+    and scores — so goals, runs, round transitions and fight finishes all
+    register as a change. UFC cards are one event with many competitions."""
+    import requests
+    r = requests.get(
+        f"https://site.api.espn.com/apis/site/v2/sports/{path}", timeout=8
+    )
+    r.raise_for_status()
+    parts, n_live = [], 0
+    for ev in r.json().get("events", []):
+        state = ((ev.get("status") or {}).get("type") or {}).get("state")
+        if state != "in":
+            continue
+        n_live += 1
+        for comp in ev.get("competitions") or []:
+            st = comp.get("status") or ev.get("status") or {}
+            parts.append((
+                comp.get("id"),
+                (st.get("type") or {}).get("name"),
+                st.get("period"),
+                tuple(c.get("score") for c in comp.get("competitors") or []),
+            ))
+    return tuple(parts), n_live
+
+
+async def tick_live_burst():
+    """Every 20s while games are live: ESPN change detection → immediate
+    monitor run. Monitors are idempotent (DB score-snap state) and _run_safe's
+    per-task lock prevents overlap with the 1-min tick."""
+    global _burst_moves_seen
+    while True:
+        any_live = False
+        live_by_task: dict = {}
+        for task, paths in BURST_ENDPOINTS.items():
+            changed = False
+            for path in paths:
+                try:
+                    fp, n_live = await run_in_thread(_burst_fingerprint, path)
+                except Exception as e:
+                    logger.debug("live burst: %s fetch failed: %s", path, e)
+                    continue
+                if n_live:
+                    any_live = True
+                    live_by_task[task] = True
+                prev = _burst_state.get(path)
+                if prev is not None and fp != prev:
+                    changed = True
+                _burst_state[path] = fp
+            if changed:
+                logger.info("live burst: score/status change → %s", task)
+                await run_in_thread(_run_safe, task, _task_fn(task))
+
+        # Phase 3: PM websocket fast moves (>=10pp/60s) — treat like a score
+        # change for every sport that currently has a live game. Sharp flow
+        # front-runs the scoreboard, so this often fires BEFORE ESPN updates.
+        if any_live:
+            moves = await run_in_thread(_read_pm_moves)
+            fresh = [m for m in moves if m.get("ts", 0) > _burst_moves_seen]
+            if fresh:
+                _burst_moves_seen = max(m["ts"] for m in fresh)
+                logger.info("live burst: %d PM fast move(s) → running live monitors", len(fresh))
+                for task in live_by_task:
+                    await run_in_thread(_run_safe, task, _task_fn(task))
+
+        await asyncio.sleep(20 if any_live else 120)
+
+
 async def tick_5min():
     """Every 5 minutes: health, stops, resolution, reeval, weather scan, alerts, calibration."""
     while True:
@@ -1955,6 +2180,7 @@ async def main():
         asyncio.create_task(_delayed_start(120, tick_vpin)),
         asyncio.create_task(_delayed_start(60, tick_6h)),
         asyncio.create_task(_delayed_start(30, tick_scheduled)),
+        asyncio.create_task(_delayed_start(8, tick_live_burst)),
     ]
 
     await asyncio.gather(*tasks)
