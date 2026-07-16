@@ -63,11 +63,8 @@ def _cache_put(db_path: Path, market_id: str, title: str) -> None:
         con.close()
 
 
-def _fetch_question(market_id: str) -> str | None:
-    url = GAMMA_TOKEN_URL if market_id.isdigit() else GAMMA_URL
-    req = urllib.request.Request(
-        url.format(market_id), headers={"User-Agent": "polyclawd/1.0"}
-    )
+def _fetch_one(url: str) -> str | None:
+    req = urllib.request.Request(url, headers={"User-Agent": "polyclawd/1.0"})
     with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
         body = json.loads(resp.read().decode("utf-8", errors="replace"))
     if isinstance(body, list) and body and isinstance(body[0], dict):
@@ -75,6 +72,16 @@ def _fetch_question(market_id: str) -> str | None:
         if isinstance(question, str) and question.strip():
             return question.strip()
     return None
+
+
+def _fetch_question(market_id: str) -> str | None:
+    base = GAMMA_TOKEN_URL if market_id.isdigit() else GAMMA_URL
+    title = _fetch_one(base.format(market_id))
+    if title is None:
+        # Gamma's default listing omits closed markets; closed=true FILTERS
+        # to closed-only, so it is a fallback, not a default.
+        title = _fetch_one(base.format(market_id) + "&closed=true")
+    return title
 
 
 def resolve_title(market_id, db_path: Path | None = None) -> str | None:

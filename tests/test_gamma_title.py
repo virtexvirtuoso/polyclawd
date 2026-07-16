@@ -136,3 +136,31 @@ def test_short_digits_and_tickers_still_decline(tmp_path):
     import odds.gamma_title as gt
     assert gt.resolve_title("12345", db_path=tmp_path / "t.db") is None
     assert gt.resolve_title("KXMLBGAME-FOO", db_path=tmp_path / "t.db") is None
+
+
+def test_closed_market_fallback(monkeypatch, tmp_path):
+    """Closed markets are absent from Gamma's default listing — resolver must
+    retry with closed=true before giving up."""
+    import odds.gamma_title as gt
+    calls = []
+
+    class _Resp:
+        def __init__(self, payload):
+            self.payload = payload
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self):
+            return self.payload
+
+    def fake_urlopen(req, timeout):
+        calls.append(req.full_url)
+        if "closed=true" in req.full_url:
+            return _Resp(b'[{"question": "Will Spain win on 2026-06-26?"}]')
+        return _Resp(b"[]")
+
+    monkeypatch.setattr(gt.urllib.request, "urlopen", fake_urlopen)
+    out = gt.resolve_title("8" * 40, db_path=tmp_path / "t.db")
+    assert out == "Will Spain win on 2026-06-26?"
+    assert len(calls) == 2 and "closed=true" in calls[1]
