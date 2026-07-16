@@ -5,8 +5,9 @@ instead of raw hex ids (Alert System Overhaul plan, Task 3.2).
 
 Contract:
 * ``resolve_title(market_id) -> str | None`` — NEVER raises.
-* Returns None immediately unless ``market_id.startswith("0x")`` (Kalshi
-  tickers are not Gamma condition ids and are already human-readable).
+* Accepts a 0x condition id OR a decimal CLOB token id (>=30 digits —
+  live_positions stores token ids in market_id; see plan Task 3.4 audit).
+  Anything else (e.g. Kalshi tickers, already human-readable) returns None.
 * Caches hits in a ``title_cache`` table in ``storage/shadow_trades.db``
   (same DB as signals/alert_governor.py); failures are NOT cached.
 * Gamma lookup: GET /markets?condition_ids=<id>, extract ``question``,
@@ -23,6 +24,7 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent.parent / "storage" / "shadow_trades.db"
 GAMMA_URL = "https://gamma-api.polymarket.com/markets?condition_ids={}"
+GAMMA_TOKEN_URL = "https://gamma-api.polymarket.com/markets?clob_token_ids={}"
 TIMEOUT_S = 5
 
 
@@ -62,8 +64,9 @@ def _cache_put(db_path: Path, market_id: str, title: str) -> None:
 
 
 def _fetch_question(market_id: str) -> str | None:
+    url = GAMMA_TOKEN_URL if market_id.isdigit() else GAMMA_URL
     req = urllib.request.Request(
-        GAMMA_URL.format(market_id), headers={"User-Agent": "polyclawd/1.0"}
+        url.format(market_id), headers={"User-Agent": "polyclawd/1.0"}
     )
     with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
         body = json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -77,7 +80,10 @@ def _fetch_question(market_id: str) -> str | None:
 def resolve_title(market_id, db_path: Path | None = None) -> str | None:
     """Resolve a 0x condition id to its Gamma market question. Never raises."""
     try:
-        if not isinstance(market_id, str) or not market_id.startswith("0x"):
+        if not isinstance(market_id, str):
+            return None
+        is_token_id = market_id.isdigit() and len(market_id) >= 30
+        if not market_id.startswith("0x") and not is_token_id:
             return None
         path = db_path or DB_PATH
 

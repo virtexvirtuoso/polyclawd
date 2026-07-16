@@ -105,3 +105,34 @@ def test_never_raises_even_on_unwritable_db(monkeypatch, tmp_path):
     # fails, but the resolved title must still come back and nothing raises.
     bad = tmp_path / "nonexistent-dir" / "x.db"
     assert gt.resolve_title(COND_ID, db_path=bad) == QUESTION
+
+
+def test_resolves_decimal_clob_token_id(monkeypatch, tmp_path):
+    """live_positions stores CLOB token ids (decimal, ~77 digits) in market_id;
+    the resolver must route those through the clob_token_ids Gamma param."""
+    import odds.gamma_title as gt
+    seen = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self):
+            return b'[{"question": "Will it rain in NYC on July 17?"}]'
+
+    def fake_urlopen(req, timeout):
+        seen["url"] = req.full_url
+        return _Resp()
+
+    monkeypatch.setattr(gt.urllib.request, "urlopen", fake_urlopen)
+    tok = "9" * 40
+    out = gt.resolve_title(tok, db_path=tmp_path / "t.db")
+    assert out == "Will it rain in NYC on July 17?"
+    assert "clob_token_ids" in seen["url"]
+
+
+def test_short_digits_and_tickers_still_decline(tmp_path):
+    import odds.gamma_title as gt
+    assert gt.resolve_title("12345", db_path=tmp_path / "t.db") is None
+    assert gt.resolve_title("KXMLBGAME-FOO", db_path=tmp_path / "t.db") is None
