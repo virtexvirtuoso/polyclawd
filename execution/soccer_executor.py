@@ -6,6 +6,7 @@ through the hybrid maker→taker executor.
 
 Called from scheduler.task_soccer_match_scan when live_config.mode() == "LIVE".
 """
+
 from __future__ import annotations
 
 import logging
@@ -14,7 +15,7 @@ from datetime import datetime, timezone
 logger = logging.getLogger("soccer_executor")
 
 # ── sizing ────────────────────────────────────────────────────────────────
-_SOCCER_LIVE_SIZE_USD = 10.0   # per-leg cap (same as weather / baseball game edges)
+_SOCCER_LIVE_SIZE_USD = 10.0  # per-leg cap (same as weather / baseball game edges)
 _SOCCER_MIN_EXECUTABLE_EDGE = 0.05  # 5pp net after fees — gate before taker
 
 
@@ -50,6 +51,7 @@ def execute_tradeable_soccer_edges(edges: list) -> dict:
             outcome_index = 0 if edge.direction == "BUY" else 1
             try:
                 from odds.poly_executable_edge import condition_id_to_token_ids
+
                 toks = condition_id_to_token_ids(edge.poly_market_id)
                 if not toks or len(toks) < 2:
                     logger.warning("soccer_exec: no token_ids for %s", edge.poly_market_id[:16])
@@ -76,6 +78,7 @@ def execute_tradeable_soccer_edges(edges: list) -> dict:
             if tick_size is None:
                 try:
                     from execution import clob_client
+
                     tick_size = clob_client.get_tick_size(token_id)
                 except Exception:
                     tick_size = 0.01
@@ -117,6 +120,7 @@ def execute_tradeable_soccer_edges(edges: list) -> dict:
                     net_edge_taker=exec_edge,
                     client_order_ref=client_order_ref,
                     category="soccer_match",
+                    market_title=(f"{edge.event_title} — {edge.participant} {edge.market_type}".strip(" —"))[:120],
                 )
                 action = result.get("action", "unknown")
                 if action in ("maker_filled", "taker_filled"):

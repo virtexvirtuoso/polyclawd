@@ -1532,6 +1532,9 @@ def _route_live_weather(signal: dict, eval_result: dict) -> dict:
             net_edge_taker=net_edge_taker,
             client_order_ref=client_order_ref,
             category="weather",
+            market_title=(
+                signal.get("market_title") or signal.get("market") or signal.get("title") or ""
+            )[:120],
         )
     finally:
         try:

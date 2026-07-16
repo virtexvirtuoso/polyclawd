@@ -241,6 +241,7 @@ def execute_intent(
     net_edge_taker: float,
     client_order_ref: str,
     category: str = "weather",
+    market_title: str = "",
 ) -> dict:
     """Route a single trade intent through the hybrid maker→taker executor.
 
@@ -375,6 +376,7 @@ def execute_intent(
             fee_paid=0.0,
             fair_price=fair_price,
             token_id=token_id,
+            market_title=market_title,
         )
         # Tell the governor the ACTUAL usd deployed, not the full size_usd.
         governor.record_fill(market_id=token_id, usd=maker_usd, liquidity="maker")
@@ -437,6 +439,7 @@ def execute_intent(
                 fee_paid=0.0,
                 fair_price=fair_price,
                 token_id=token_id,
+                market_title=market_title,
             )
             governor.record_fill(market_id=token_id, usd=late_usd, liquidity="maker")
             maker_filled_shares += late_fill
@@ -555,6 +558,7 @@ def execute_intent(
         fee_paid=fee_paid,
         fair_price=fair_price,
         token_id=token_id,
+        market_title=market_title,
     )
     governor.record_fill(market_id=token_id, usd=taker_usd, liquidity="taker")
 

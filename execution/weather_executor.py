@@ -9,6 +9,7 @@ Weather markets are bracket format ("between 92-93°F") — we buy NO when TWC
 forecast is above the bracket (TWC says 96°F, bracket is 92-93°F, market
 prices YES at 0.265 → buy NO at 0.735).
 """
+
 from __future__ import annotations
 
 import logging
@@ -17,7 +18,7 @@ from datetime import datetime, timezone
 logger = logging.getLogger("weather_executor")
 
 # ── sizing ────────────────────────────────────────────────────────────────
-_WEATHER_LIVE_SIZE_USD = 10.0   # per-leg cap
+_WEATHER_LIVE_SIZE_USD = 10.0  # per-leg cap
 _WEATHER_MIN_EXECUTABLE_EDGE = 0.05  # 5pp net after fees
 
 
@@ -62,6 +63,7 @@ def execute_tradeable_weather_edges(signals: list) -> dict:
             outcome_index = 1 if direction == "buy_no" else 0
             try:
                 from odds.poly_executable_edge import condition_id_to_token_ids
+
                 toks = condition_id_to_token_ids(condition_id)
                 if not toks or len(toks) < 2:
                     logger.warning("weather_exec: no token_ids for %s", condition_id[:16])
@@ -130,6 +132,7 @@ def execute_tradeable_weather_edges(signals: list) -> dict:
                     net_edge_taker=exec_edge,
                     client_order_ref=client_order_ref,
                     category="weather_resolution",
+                    market_title=(market_title or "")[:120],
                 )
                 action = result.get("action", "unknown")
                 if action in ("maker_filled", "taker_filled"):
