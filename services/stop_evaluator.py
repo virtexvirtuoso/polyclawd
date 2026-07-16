@@ -229,6 +229,25 @@ def _should_alert(position_id):
     return True
 
 
+def _display_title(raw_title, market_id):
+    """Best human-readable title for alerts (Task 3.3, hex-ID fix).
+
+    Returns the row title unless it is empty or hex-like, in which case the
+    Gamma title resolver is tried (cached in shadow_trades.db; returns None
+    for non-0x ids and on any error — it never raises). Last resort is the
+    raw title (if any) or the truncated market_id.
+    """
+    title = (raw_title or "").strip()
+    if title and not title.startswith("0x"):
+        return title
+    try:
+        from odds.gamma_title import resolve_title
+        resolved = resolve_title(market_id)
+    except Exception:
+        resolved = None
+    return resolved or title or str(market_id or "")[:24]
+
+
 # ---------------------------------------------------------------------------
 # Phase G — Live-position exit routing
 # ---------------------------------------------------------------------------
@@ -369,7 +388,8 @@ def _close_live_position_early(live_pos_row, current_yes_price, reason, hard_cap
                     shares_sold = exit_result.get("shares_sold", 0.0)
                     fee = exit_result.get("fee_paid", 0.0)
                     entry_price = live_pos_row.get("entry_price", 0.0)
-                    market_title = live_pos_row.get("market_title", market_id[:24])
+                    market_title = _display_title(
+                        live_pos_row.get("market_title"), market_id)
                     pnl_emoji = "🟢" if pnl >= 0 else "🔴"
                     liq = exit_result.get("liquidity") or ("taker" if "taker" in exit_action else "maker")
                     label = "PARTIAL EXIT" if exit_action == "partial_closed" else "LIVE EXIT"
@@ -395,7 +415,8 @@ def _close_live_position_early(live_pos_row, current_yes_price, reason, hard_cap
 
             return {
                 "position_id": live_pos_row.get("id"),
-                "market_title": live_pos_row.get("market_title", ""),
+                "market_title": _display_title(
+                    live_pos_row.get("market_title"), market_id),
                 "side": live_pos_row.get("side", "BUY"),
                 "entry_price": live_pos_row.get("entry_price", 0.0),
                 "current_price": mark_price,
@@ -664,7 +685,7 @@ def evaluate_stops():
                         from scripts.alert_formatter import send_telegram
                         lines = [
                             f"⚠️ <b>PRE-RESOLUTION WARNING</b>",
-                            f"Market: {pos.get('market_title', '?')[:60]}",
+                            f"Market: {_display_title(pos.get('market_title'), pos['market_id'])[:60]}",
                             f"Entry: {entry_price:.0%} → Current: {current_yes_price:.0%}",
                             f"Loss: {loss_pct:.0%} | {hours_to_close:.1f}h to resolution",
                             f"Side: {side} | Bet: ${bet_size:.2f}",
