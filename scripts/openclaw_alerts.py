@@ -5,6 +5,7 @@ Sends trading signals and alerts via OpenClaw gateway.
 """
 
 import json
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -40,27 +41,45 @@ def _telegram_http_send(message: str, silent: bool = False, parse_mode: str = "M
     if parse_mode:  # omit entirely for plain text (avoids 400 on stray _ / * in data)
         fields["parse_mode"] = parse_mode
     payload = urllib.parse.urlencode(fields).encode()
-    try:
-        req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=payload)
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = resp.read().decode()
-        if not json.loads(body).get("ok", False):
-            print("[OpenClaw] telegram HTTP send returned ok=false")
-            return False, f"tg_api:{body[:120]}"
-        return True, ""
-    except urllib.error.HTTPError as e:
+
+    def _attempt() -> tuple:
         try:
-            detail = e.read()[:120].decode("utf-8", "replace")
-        except Exception:
-            detail = ""
-        print(f"[OpenClaw] telegram HTTP send failed: {e}")
-        return False, f"http_{e.code}:{detail}"
-    except (urllib.error.URLError, TimeoutError) as e:
-        print(f"[OpenClaw] telegram HTTP send failed: {e}")
-        return False, f"net:{e}"
-    except Exception as e:
-        print(f"[OpenClaw] telegram HTTP send failed: {e}")
-        return False, f"err:{e}"
+            req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=payload)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                body = resp.read().decode()
+            if not json.loads(body).get("ok", False):
+                print("[OpenClaw] telegram HTTP send returned ok=false")
+                return False, f"tg_api:{body[:120]}"
+            return True, ""
+        except urllib.error.HTTPError as e:
+            try:
+                detail = e.read()[:120].decode("utf-8", "replace")
+            except Exception:
+                detail = ""
+            print(f"[OpenClaw] telegram HTTP send failed: {e}")
+            return False, f"http_{e.code}:{detail}"
+        except (urllib.error.URLError, TimeoutError) as e:
+            print(f"[OpenClaw] telegram HTTP send failed: {e}")
+            return False, f"net:{e}"
+        except Exception as e:
+            print(f"[OpenClaw] telegram HTTP send failed: {e}")
+            return False, f"err:{e}"
+
+    ok, err = _attempt()
+    if not ok and _is_transient(err):
+        # ONE inline retry only (decision D2): durable retries belong to the
+        # dispatch queue, not sleeps — this runs in an executor thread, and
+        # long backoffs would starve the finite thread pool.
+        time.sleep(5)
+        ok, err = _attempt()
+    return ok, err
+
+
+def _is_transient(err: str) -> bool:
+    """Retryable failure classes: rate limit, server-side 5xx, network.
+    NEVER 4xx (≠429) — a 400 is deterministic (bad parse_mode/entities) and
+    retrying it just doubles the failure count. no_token is permanent too."""
+    return err.startswith("net:") or err.startswith("http_429") or err.startswith("http_5")
 
 
 def _ledger_log(ok: bool, channel: str, parse_mode, msg_len: int, err: str = "") -> None:
