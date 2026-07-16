@@ -8,7 +8,7 @@ Usage:
     python3 scripts/sports_pulse.py --json       # raw JSON for piping
 """
 
-import json, sqlite3, sys, time, urllib.request, urllib.parse, os
+import hashlib, json, re, sqlite3, sys, time, urllib.request, urllib.parse, os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -26,12 +26,33 @@ CONVERGENCE_LOOKBACK_HOURS = 8
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _get(url: str, timeout: int = 12) -> Optional[dict | list]:
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())
-    except Exception as e:
-        print(f"[WARN] GET {url[:80]} failed: {e}", file=sys.stderr)
+    """
+    Fetch URL. For external Gamma API calls, routes via eth0 to bypass WireGuard
+    tunnel (which would otherwise saturate with read traffic). Local API calls use
+    urllib as normal.
+    """
+    import subprocess as _sp
+    if url.startswith("http://"):
+        # Local API - use urllib directly (no tunnel routing issue)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read())
+        except Exception as e:
+            print(f"[WARN] GET {url[:80]} failed: {e}", file=sys.stderr)
+            return None
+    else:
+        # External Gamma API - use curl --interface eth0 to bypass WireGuard
+        try:
+            result = _sp.run(
+                ["curl", "-s", "--interface", "eth0", "--max-time", str(timeout),
+                 "-H", "User-Agent: Polyclawd/1.0", url],
+                capture_output=True, text=True, timeout=timeout + 2
+            )
+            if result.returncode == 0 and result.stdout:
+                return json.loads(result.stdout)
+        except Exception as e:
+            print(f"[WARN] GET {url[:80]} failed: {e}", file=sys.stderr)
         return None
 
 
@@ -78,6 +99,65 @@ def _db() -> sqlite3.Connection:
 
 # ── Data fetchers ──────────────────────────────────────────────────────────────
 
+
+def fetch_recent_results(hours: int = 36, tag_slug: str = "fifa-world-cup") -> list[dict]:
+    """
+    Pull recently-resolved WC game markets from PM.
+    ONLY uses outcomePrices=["1","0"] -- never infers or guesses results.
+    """
+    import json as _json
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=hours)
+
+    since = (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    since = (now - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    data = _get(f"{GAMMA}/events?tag_slug={tag_slug}&limit=80&closed=true&end_date_min={since}")
+    if not data:
+        return []
+
+    results = []
+    for e in data:
+        title = e.get("title", "")
+        for m in e.get("markets", []):
+            q = m.get("question", "")
+            p = m.get("outcomePrices", "")
+            end_iso = m.get("endDateIso") or m.get("endDate") or ""
+            closed_time = m.get("closedTime") or end_iso
+            try:
+                ct = datetime.fromisoformat(closed_time.replace("Z", "+00:00"))
+                if ct < cutoff:
+                    continue
+            except Exception:
+                continue
+            if not p or not q:
+                continue
+            try:
+                parsed = _json.loads(p)
+                if float(parsed[0]) < 0.99:
+                    continue
+            except Exception:
+                continue
+            # Only keep direct game results: 'Will X win' or 'end in a draw' per-game questions
+            import re as _re
+            q_lower = q.lower()
+            is_game_result = (
+                bool(_re.search(r'will .+ win on \d{4}-\d{2}-\d{2}', q_lower)) or
+                'end in a draw' in q_lower or
+                bool(_re.match(r'exact score:', q_lower))
+            )
+            if not is_game_result:
+                continue
+            results.append({"event": title, "question": q, "closed_time": closed_time})
+
+    # One entry per event, sorted by time
+    seen = {}
+    for r in results:
+        ev = r["event"]
+        if ev not in seen:
+            seen[ev] = r
+    return sorted(seen.values(), key=lambda x: x["closed_time"])
+
 def fetch_wc_outrights(top_n: int = 8) -> list[dict]:
     """Top N teams by price from WC Winner event."""
     data = _get(f"{GAMMA}/events/{WC_EVENT_ID}")
@@ -106,28 +186,16 @@ def fetch_wc_outrights(top_n: int = 8) -> list[dict]:
 
 
 def fetch_hot_markets(limit: int = 8) -> list[dict]:
-    """Top markets by 24h volume from trending endpoint.
-    Filters out WC per-team outright markets (shown separately in WC section).
-    Fetches a larger page to find enough non-WC markets.
-    """
-    data = _api("/api/markets/trending")
-    if not data:
-        return []
-    markets = data.get("markets", [])
-
-    # Also fetch the next page from Gamma directly with higher limit
-    gamma_url = (f"{GAMMA}/markets?active=true&closed=false&limit=50"
+    """Top markets by 24h volume — direct from Gamma API only."""
+    gamma_url = (f"{GAMMA}/markets?active=true&closed=false&limit=10"
                  f"&order=volume24hr&ascending=false")
-    gamma_data = _get(gamma_url) or []
-    # Merge — deduplicate by slug
-    seen_slugs = {m.get("slug", "") for m in markets}
-    for gm in gamma_data:
-        if gm.get("slug", "") not in seen_slugs:
-            # Normalize field names
-            gm["volume_24h"] = gm.get("volume24hr") or gm.get("volume_24h") or 0
+    markets = _get(gamma_url) or []
+    for gm in markets:
+        gm["volume_24h"] = gm.get("volume24hr") or gm.get("volume_24h") or 0
+        try:
             gm["yes_price"] = float(json.loads(gm.get("outcomePrices", "[0.5]"))[0])
-            markets.append(gm)
-            seen_slugs.add(gm.get("slug", ""))
+        except Exception:
+            gm["yes_price"] = 0.5
 
     markets.sort(key=lambda x: -(x.get("volume_24h") or x.get("volume24hr") or 0))
 
@@ -239,43 +307,8 @@ def fetch_convergences(hours: int = CONVERGENCE_LOOKBACK_HOURS) -> list[dict]:
     if not rows:
         return []
 
-    # Batch-resolve condition IDs → market titles via Gamma API
-    condition_ids = [r[0] for r in rows if r[0].startswith("0x")]
-    slug_ids      = [r[0] for r in rows if not r[0].startswith("0x")]
+    # Use condition ID short labels — avoid per-ID network resolution (too slow)
     title_map = {}
-
-    # Gamma API doesn't support batch condition_ids — look up individually in parallel
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    def _resolve_cid(cid: str) -> tuple[str, str]:
-        # Try Gamma first (works for active markets)
-        data = _get(f"{GAMMA}/markets?condition_ids={cid}&limit=1")
-        if data and len(data) > 0:
-            return cid, data[0].get("question", cid[:30] + "…")
-        # Fallback: CLOB API (works for closed/resolved markets too)
-        clob = _get(f"https://clob.polymarket.com/markets/{cid}")
-        if clob and isinstance(clob, dict) and clob.get("question"):
-            return cid, clob["question"]
-        return cid, cid[:30] + "…"
-
-    def _resolve_slug(s: str) -> tuple[str, str]:
-        data = _get(f"{GAMMA}/markets?slug={s}&limit=1")
-        if data and len(data) > 0:
-            return s, data[0].get("question", s[:40])
-        return s, s[:40]
-
-    ids_to_resolve = condition_ids[:12] + slug_ids[:5]
-    resolve_fns = {cid: _resolve_cid for cid in condition_ids[:12]}
-    resolve_fns.update({s: _resolve_slug for s in slug_ids[:5]})
-
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futures = {ex.submit(resolve_fns[k], k): k for k in ids_to_resolve}
-        for fut in as_completed(futures, timeout=15):
-            try:
-                k, title = fut.result()
-                title_map[k] = title
-            except Exception:
-                pass
 
     results = []
     for (market, direction, alerted_at, n_wallets, total_usd) in rows:
@@ -298,9 +331,9 @@ def fetch_convergences(hours: int = CONVERGENCE_LOOKBACK_HOURS) -> list[dict]:
 def _gamma_price(slug_or_condition: str) -> Optional[float]:
     """Fetch current YES price for a PM market."""
     if slug_or_condition.startswith("0x"):
-        data = _get(f"{GAMMA}/markets?condition_ids={slug_or_condition}&limit=1")
+        data = _get(f"{GAMMA}/markets?condition_ids={slug_or_condition}&limit=1", timeout=6)
     else:
-        data = _get(f"{GAMMA}/markets?slug={slug_or_condition}&limit=1")
+        data = _get(f"{GAMMA}/markets?slug={slug_or_condition}&limit=1", timeout=6)
     if data and len(data) > 0:
         prices_raw = data[0].get("outcomePrices", "")
         try:
@@ -423,6 +456,7 @@ def _convergence_tier(ago_min: int, n_wallets: int) -> str:
 
 
 def format_pulse(
+    recent_results: list,
     wc: list,
     hot: list,
     whale_live: list,
@@ -438,6 +472,45 @@ def format_pulse(
     ts = now_et.strftime("%b %-d, %Y · %-I:%M %p ET")
 
     lines = [f"Polymarket Sports Pulse · {ts}", "─" * 36]
+
+    # ── Recent Results (PM-verified only) ────────────────────────────
+    if recent_results:
+        lines.append("\n✅ Recent Results (PM-confirmed)")
+        # Dedupe by game — normalize title, prefer exact scores with real scorelines
+        import re as _re_d
+        seen_events = {}
+        for r in recent_results:
+            ev = r['event']
+            q = r['question']
+            # Normalize event title (strip ' - Exact Score', ' - Halftime Result' etc.)
+            game_key = _re_d.sub(r' - (Exact Score|Halftime Result|More Markets|.* Score)$', '', ev).strip()
+            # Skip useless exact score lines
+            if q.lower().startswith('exact score:') and 'any other score' in q.lower():
+                continue
+            # Prefer exact score line (has actual scoreline vs just 'X won')
+            priority = 1 if q.lower().startswith('exact score:') else 0
+            if game_key not in seen_events or priority > seen_events[game_key][0]:
+                seen_events[game_key] = (priority, q)
+        for ev, (_, q) in seen_events.items():
+            if q.lower().startswith('exact score:'):
+                # Format: "Ecuador vs Germany: 2-1 Ecuador"
+                import re as _re
+                m = _re.match(r'exact score: (.+)\?$', q, _re.IGNORECASE)
+                if m:
+                    lines.append(f"• {m.group(1)}")
+            elif 'end in a draw' in q.lower():
+                import re as _re
+                m = _re.match(r'will (.+) end in a draw', q, _re.IGNORECASE)
+                if m:
+                    lines.append(f"• {m.group(1)}: DRAW")
+            else:
+                # 'Will X win on DATE?' → 'X won'
+                import re as _re
+                m = _re.match(r'will (.+) win on \d{4}-\d{2}-\d{2}', q, _re.IGNORECASE)
+                if m:
+                    lines.append(f"• {ev}: {m.group(1)} won")
+                else:
+                    lines.append(f"• {ev}: {q}")
 
     # ── ∆ Watch Grades ─────────────────────────────────────────────────
     if positions:
@@ -645,8 +718,12 @@ def main():
     send_tg   = "--telegram" in sys.argv
     json_mode = "--json"     in sys.argv
 
+    print("[0/7] Recent results...", file=sys.stderr)
+    recent_results = fetch_recent_results()
+
     print("[1/7] WC outrights...", file=sys.stderr)
     wc = fetch_wc_outrights()
+    time.sleep(1)  # avoid Gamma rate-limit after bulk recent_results fetch
 
     print("[2/7] Hot markets...", file=sys.stderr)
     hot = fetch_hot_markets()
@@ -660,13 +737,33 @@ def main():
     print("[5/7] Smart wallet convergences...", file=sys.stderr)
     convergences = fetch_convergences()
 
+    time.sleep(2)  # let Gamma rate-limit recover before watch list price fetches
     print("[6/7] Watch list...", file=sys.stderr)
     watch = load_watch_list()
-    positions = grade_positions(watch.get("positions", []))
-    arbs      = grade_arbs(watch.get("arbs", []))
+    # Use thread timeout to avoid hanging on Gamma rate-limit during price lookups
+    from concurrent.futures import ThreadPoolExecutor as _TPE, TimeoutError as _TE
+    _positions = []
+    _arbs = []
+    try:
+        with _TPE(max_workers=1) as _ex:
+            _pf = _ex.submit(grade_positions, watch.get("positions", []))
+            _af = _ex.submit(grade_arbs, watch.get("arbs", []))
+            try:
+                _positions = _pf.result(timeout=8)
+            except Exception:
+                _positions = [{**p, 'current_price': None, 'pnl_str': '?'} for p in watch.get('positions', [])]
+            try:
+                _arbs = _af.result(timeout=8)
+            except Exception:
+                _arbs = [{**a, 'pm_price': None, 'kalshi_price': None, 'kalshi_status': 'timeout', 'current_spread_pp': None} for a in watch.get('arbs', [])]
+    except Exception:
+        pass
+    positions = _positions
+    arbs      = _arbs
 
     print("[7/7] Formatting...", file=sys.stderr)
     pulse = format_pulse(
+        recent_results=recent_results,
         wc=wc,
         hot=hot,
         whale_live=whale_live,
@@ -689,7 +786,77 @@ def main():
     print(pulse)
 
     if send_tg:
-        _send_telegram(pulse)
+        if should_send_status(pulse):
+            _send_telegram(pulse)
+            record_status_sent(pulse)
+        else:
+            print("[skip] status unchanged since last send (kv state hash)", file=sys.stderr)
+
+
+# ── Status change detection (Task 4.2, 2026-07-16 alert overhaul) ────────────
+# Skip the send when the report (timestamps stripped) hashes identically to the
+# last sent one. Hash lives in a kv row in shadow_trades.db — restart-proof,
+# unlike process memory. The 20:00 ET slot always sends (daily proof-of-life).
+
+_STATUS_HASH_KEY = "status_report_hash"
+_TS_STRIP_RE = re.compile(
+    r"\d{1,2}:\d{2}(?:\s?[AP]M)?(?:\s?ET)?"          # 12:05, 4:05 PM, 8:00 PM ET
+    r"|[A-Z][a-z]{2} \d{1,2}, \d{4}"                   # Jul 16, 2026
+)
+
+
+def _normalize_for_hash(text: str) -> str:
+    return _TS_STRIP_RE.sub("", text or "")
+
+
+def _status_hash(text: str) -> str:
+    return hashlib.sha256(_normalize_for_hash(text).encode()).hexdigest()
+
+
+def _kv_conn(db_path=None) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(db_path or DB_PATH), timeout=10)
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
+    return conn
+
+
+def should_send_status(text: str, db_path=None, now=None) -> bool:
+    """False only when the normalized report matches the stored hash AND we are
+    not in the 20:00 ET always-send slot. Fails open (send) on any DB error."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif isinstance(now, (int, float)):
+        now = datetime.fromtimestamp(now, tz=timezone.utc)
+    import zoneinfo
+    if now.astimezone(zoneinfo.ZoneInfo("America/New_York")).hour == 20:
+        return True
+    try:
+        conn = _kv_conn(db_path)
+        try:
+            row = conn.execute(
+                "SELECT v FROM kv WHERE k=?", (_STATUS_HASH_KEY,)).fetchone()
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[WARN] status-hash read failed ({e}) — sending", file=sys.stderr)
+        return True
+    return row is None or row[0] != _status_hash(text)
+
+
+def record_status_sent(text: str, db_path=None) -> None:
+    """Persist the hash of a successfully composed+sent report. Best-effort."""
+    try:
+        conn = _kv_conn(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO kv (k, v) VALUES (?, ?) "
+                "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                (_STATUS_HASH_KEY, _status_hash(text)))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[WARN] status-hash store failed: {e}", file=sys.stderr)
 
 
 def _send_telegram(text: str):
