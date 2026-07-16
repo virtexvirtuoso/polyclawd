@@ -25,7 +25,8 @@ Usage:
     send_telegram(msg)
 """
 
-import os, json, urllib.request, urllib.parse, subprocess
+import os
+import re
 
 TELEGRAM_CHAT_ID = "468298295"
 
@@ -92,32 +93,24 @@ def format_alert(
 
 
 def send_telegram(message: str) -> bool:
-    """Send a Telegram message. Tries OpenClaw CLI first, falls back to Bot API."""
+    """Formatter delivery — delegates to the ONE hardened send path
+    (scripts.openclaw_alerts.alert_openclaw: ledger + err detail +
+    transient-only retry). Kept for API compat with format_alert callers."""
+    return _send_telegram_inner(message)
+
+
+def _send_telegram_inner(message: str) -> bool:
+    """Send a Telegram message through alert_openclaw in HTML mode; if the
+    HTML parse is rejected (raw </>/& interpolated by a caller — Telegram
+    400s 'can't parse entities'), degrade to plain text with tags stripped
+    rather than dropping the alert (same pattern as whale_alert_drain).
+    Every attempt lands in the send ledger with an err class — never a
+    silent swallow."""
     # Never fire during pytest runs — PYTEST_CURRENT_TEST is set before any module import
     if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("SMART_WALLET_ALERT_SEND") == "0":
         return True
-    # Try OpenClaw CLI first
-    try:
-        target = TELEGRAM_CHAT_ID
-        cmd = ["openclaw", "message", "send", "--channel", "telegram",
-               "--account", "polyclawd", "--target", target, "--message", message]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        if result.returncode == 0:
-            return True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    from scripts.openclaw_alerts import alert_openclaw
 
-    # Fallback: direct Bot API
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    if not token:
-        return False
-    fields = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML",
-              "disable_web_page_preview": True}
-    payload = urllib.parse.urlencode(fields).encode()
-    try:
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{token}/sendMessage", data=payload)
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode()).get("ok", False)
-    except Exception:
-        return False
+    if alert_openclaw(message, parse_mode="HTML"):
+        return True
+    return alert_openclaw(re.sub(r"<[^>]+>", "", message), parse_mode=None)
