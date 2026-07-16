@@ -113,10 +113,42 @@ def _ledger_log(ok: bool, channel: str, parse_mode, msg_len: int, err: str = "")
 def alert_openclaw(message: str, channel: str = "telegram", silent: bool = False, parse_mode: str = "Markdown") -> bool:
     """Ledger-wrapped sender: records every delivery attempt (with failure
     reason), then returns only the boolean result — the public signature is
-    frozen (9 pipelines call it). See _alert_openclaw_inner for delivery."""
-    ok, err = _alert_openclaw_inner(message, channel=channel, silent=silent, parse_mode=parse_mode)
-    _ledger_log(ok, channel, parse_mode, len(message or ""), err=err)
-    return ok
+    frozen (9 pipelines call it). Messages over the Telegram limit are split
+    on line boundaries and sent sequentially (AND of results). See
+    _alert_openclaw_inner for delivery."""
+    ok_all = True
+    for chunk in _split_message(message or ""):
+        ok, err = _alert_openclaw_inner(chunk, channel=channel, silent=silent, parse_mode=parse_mode)
+        _ledger_log(ok, channel, parse_mode, len(chunk), err=err)
+        ok_all = ok_all and ok
+    return ok_all
+
+
+TELEGRAM_MAX_LEN = 4000  # headroom under Telegram's hard 4096-char sendMessage limit
+
+
+def _split_message(message: str, limit: int = TELEGRAM_MAX_LEN) -> list:
+    """Split a message into ≤limit-char chunks on line boundaries.
+    Single lines longer than the limit are hard-wrapped."""
+    if len(message) <= limit:
+        return [message]
+    chunks, current = [], ""
+    for line in message.split("\n"):
+        while len(line) > limit:  # pathological single line: hard-wrap
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def _alert_openclaw_inner(

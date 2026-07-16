@@ -43,6 +43,25 @@ def test_retries_transient_not_400(monkeypatch, tmp_path):
     assert calls["n"] == 1  # 400 = permanent, no retry
 
 
+def test_long_message_split_into_chunks(monkeypatch, tmp_path):
+    monkeypatch.setenv("POLYCLAWD_LEDGER_PATH", str(tmp_path / "l.jsonl"))
+    sent = []
+
+    def fake_inner(message, channel="telegram", silent=False, parse_mode="Markdown"):
+        sent.append(message)
+        return True, ""
+
+    monkeypatch.setattr(oa, "_alert_openclaw_inner", fake_inner)
+    message = "\n".join("x" * 90 for _ in range(99))  # 9008 chars incl newlines
+    assert len(message) > 9000 - 100
+    ok = oa.alert_openclaw(message)
+    assert ok is True
+    assert len(sent) == 3
+    assert all(len(chunk) <= 4000 for chunk in sent)
+    # nothing lost: recombined content equals the original lines
+    assert "\n".join(sent).split("\n") == message.split("\n")
+
+
 def test_no_token_records_err(monkeypatch, tmp_path):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     ledger = tmp_path / "ledger.jsonl"
