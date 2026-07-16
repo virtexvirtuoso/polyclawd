@@ -40,6 +40,18 @@ from scripts.alert_formatter import send_telegram
 META_DB_PATH = BASE_DIR / "storage" / "whale_meta.db"
 
 
+def _shadow_dispatch(pipeline: str, message: str, dedup_key: str) -> None:
+    """Task 5.3 Step 1 (shadow rollout): mirror the direct send into the
+    dispatch queue (tier 2, shadow=True) so alert_shadow_log can be compared
+    against actual sends after 48h. The direct send stays authoritative.
+    dedup_key encodes entity+state (F3), never just the pipeline name."""
+    try:
+        from signals.alert_dispatch import dispatch
+        dispatch(pipeline, message, tier=2, shadow=True, dedup_key=dedup_key)
+    except Exception as e:  # never let shadow plumbing break a live pipeline
+        print(f"[shadow-dispatch] {pipeline} failed: {e}", flush=True)
+
+
 # ── DB ────────────────────────────────────────────────────────────────────────
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(META_DB_PATH), timeout=30)
@@ -321,6 +333,9 @@ def alert_new_discoveries(new_wallets: List[Dict]) -> None:
     lines.append("⏳ Will promote to smart-wallet tier if they meet win-rate criteria.")
 
     send_telegram("\n".join(lines))
+    _shadow_dispatch(
+        "leaderboard_wallets", "\n".join(lines),
+        "discovered:" + "|".join(sorted(w["wallet"] for w in significant)))
 
 
 # ── Rank velocity alert ───────────────────────────────────────────────────────
@@ -376,6 +391,10 @@ def alert_rank_risers(risers: List[Dict]) -> None:
         )
     lines.append("\n⚠️ Not yet in smart-wallet tier — tracking for graduation.")
     send_telegram("\n".join(lines))
+    _shadow_dispatch(
+        "rising_wallets", "\n".join(lines),
+        "riser:" + "|".join(sorted(
+            f"{r['wallet']}@{r['current_rank']}" for r in new_risers)))
 
 
 _GRAD_DEDUP_FILE = Path("/tmp/graduation_dedup.json")
@@ -493,6 +512,9 @@ def alert_graduations(conn: sqlite3.Connection) -> int:
 
     _grad_mark_alerted(top_wallet)
     send_telegram("\n".join(lines))
+    _shadow_dispatch(
+        "graduation", "\n".join(lines),
+        f"graduated:{top_wallet}:{len(rows)}")
     return len(rows)
 
 

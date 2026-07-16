@@ -496,6 +496,31 @@ def telegram_summary(pred, new_resolved=0):
     return "\n".join(lines)
 
 
+def _send_summary(text: str) -> None:
+    """Push the resolution summary to Telegram (direct send stays
+    authoritative) and mirror it into the dispatch queue in shadow mode
+    (Task 5.3 Step 1). dedup_key = digest of the summary body (entity+state:
+    same resolved-set state never enqueues twice within a batch window)."""
+    print(text)
+    try:
+        sys.path.insert(0, str(PRED_DB.parent.parent))
+        from scripts.openclaw_alerts import alert_openclaw
+
+        print(f"[send] telegram ok={alert_openclaw(text, parse_mode=None)}")
+    except Exception as e:
+        print(f"[send] failed: {e}")
+    try:
+        import hashlib
+
+        from signals.alert_dispatch import dispatch
+
+        dispatch(
+            "whale_resolutions", text, tier=2, shadow=True,
+            dedup_key="resolutions:" + hashlib.sha1(text.encode()).hexdigest()[:16])
+    except Exception as e:
+        print(f"[shadow-dispatch] whale_resolutions failed: {e}")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -525,15 +550,5 @@ if __name__ == "__main__":
     ):
         summary(pred, verbose=args.verbose)
     if args.send:
-        text = telegram_summary(pred, new_resolved)
-        print(text)
-        try:
-            import sys
-
-            sys.path.insert(0, str(PRED_DB.parent.parent))
-            from scripts.openclaw_alerts import alert_openclaw
-
-            print(f"[send] telegram ok={alert_openclaw(text, parse_mode=None)}")
-        except Exception as e:
-            print(f"[send] failed: {e}")
+        _send_summary(telegram_summary(pred, new_resolved))
     pred.close()
