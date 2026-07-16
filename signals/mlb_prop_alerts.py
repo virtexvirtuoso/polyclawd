@@ -48,11 +48,20 @@ MLB_STATS_API = "https://statsapi.mlb.com/api/v1"
 STATS_API_11 = "https://statsapi.mlb.com/api/v1.1"
 
 # ── Tunables (mirror the plan) ───────────────────────────────────────────────
-EDGE_THRESHOLD_PCT = 15.0       # alert when scout edge >= +15pp
 MIN_GAMES = 7                   # SCAN floor — keeps the control sample broad
 ALERT_MIN_GAMES = 15            # ALERT floor (audit 2026-07-07: n=7 hit rates
 #                                 predicted 75% vs 44% realized; at n=7 one 6/7
 #                                 streak inflates the estimate ~14pp vs ~7pp at n=15)
+
+# ── Calibration: Capped Hit Rate (replaces flat discount 2026-07-13) ────────
+# Audit showed scout overconfidence grows nonlinearly: at 80%+ predicted,
+# realized hit rate caps around 60-67%. The capped model trusts predictions
+# up to CALIBRATION_BASELINE fully, then only CALIBRATION_TRUST_PCT of the
+# excess above that. This replaces the old flat 10pp discount + 20pp threshold.
+# See: vault 02-Projects/Polyclawd/Strategy/Sports-Props/MLB-Prop-Calibration-Audit-2026-07-13.md
+CALIBRATION_BASELINE = 0.60     # hit rates ≤60% are well-calibrated (no discount)
+CALIBRATION_TRUST_PCT = 0.30    # above baseline, trust only 30% of the excess
+CALIBRATION_MIN_EDGE_PP = 5.0   # minimum calibrated edge to alert (noise floor)
 ALERT_LAST_N = 20               # fetch up to 20 games so we can compute every
 #                                 candidate lookback (7/10/15/20) from one pull.
 LOOKBACK_WINDOWS = (7, 10, 15, 20)
@@ -69,6 +78,30 @@ MARKET_STAT: Dict[str, Tuple[str, str]] = {
     "batter_rbis":        ("batting", "rbi"),
     "pitcher_strikeouts": ("pitching", "strikeOuts"),
 }
+
+
+# ── Calibration: Capped Hit Rate ────────────────────────────────────────────
+# Replaces the old flat discount + threshold. Trusts predictions up to baseline
+# fully, then only trust_pct of the excess. Fits the observed calibration curve
+# where realized hit rate caps around 60-67% regardless of predicted.
+# See: vault 02-Projects/Polyclawd/Strategy/Sports-Props/MLB-Prop-Calibration-Audit-2026-07-13.md
+
+
+def calibrated_hit_rate(raw_hr: float,
+                         baseline: float = CALIBRATION_BASELINE,
+                         trust_pct: float = CALIBRATION_TRUST_PCT) -> float:
+    """Cap predicted hit rate: anything above baseline, only trust trust_pct of the excess."""
+    if raw_hr <= baseline:
+        return raw_hr
+    excess = raw_hr - baseline
+    return baseline + excess * trust_pct
+
+
+def calibrated_edge_pct(hit_rate_pct: float, book_over_pct: float) -> float:
+    """Return calibrated edge in percentage points."""
+    raw_hr = hit_rate_pct / 100.0
+    adj_hr = calibrated_hit_rate(raw_hr)
+    return round((adj_hr - book_over_pct / 100.0) * 100, 1)
 
 
 # ============================================================================
@@ -444,7 +477,18 @@ async def run_prop_alert_scan(now: Optional[datetime] = None) -> Dict:
             confirmed = False
 
         edge = row.get("edge_pct", 0) or 0
-        qualifies = edge >= EDGE_THRESHOLD_PCT and confirmed and (row.get("games_sampled", 0) >= ALERT_MIN_GAMES)
+        # Calibrated edge: cap the scout's hit rate at baseline, trust only
+        # trust_pct of the excess. Replaces old flat discount + threshold.
+        # See: calibrated_hit_rate() above.
+        hr = row.get("hit_rate_pct", 0) or 0
+        book = row.get("book_over_pct", 0) or 0
+        calibrated_edge = calibrated_edge_pct(hr, book)
+        # Hard block: batter_home_runs (11.3% baseline hit rate, rare-event noise)
+        market = row.get("market", "")
+        if market == "batter_home_runs":
+            qualifies = False
+        else:
+            qualifies = calibrated_edge >= CALIBRATION_MIN_EDGE_PP and confirmed and (row.get("games_sampled", 0) >= ALERT_MIN_GAMES)
 
         # Dedup / cooldown (mirror task_edge_alerts).
         will_alert = False
@@ -489,7 +533,7 @@ async def run_prop_alert_scan(now: Optional[datetime] = None) -> Dict:
                 size_bonus = min(games / 20.0, 1.0) * 0.2  # 0-0.2 for sample size
                 score = hr_frac * 0.8 + size_bonus
                 confirms = hr > book and games >= ALERT_MIN_GAMES
-                tier = "strong" if confirms and edge >= 15 else "speculative" if confirms else "fade"
+                tier = "strong" if confirms and calibrated_edge >= 15 else "speculative" if confirms else "fade"
                 log_enrichment(
                     shadow_trade_id=None,  # prop shadows use mlb_prop_shadow, not shadow_trades
                     sport="mlb_props",
@@ -563,7 +607,7 @@ def _push_alerts(rows: List[Dict]) -> None:
     # Telegram via OpenClaw gateway.
     try:
         from scripts.openclaw_alerts import alert_openclaw
-        lines = ["⚾ *MLB Prop Edges* (lineup-confirmed)"]
+        lines = ["⚾ MLB Prop Edges (lineup-confirmed)"]
         for r in rows[:8]:
             lines.append(
                 f"• {r.get('player')} {r.get('stat_label')} o{r.get('prop_line')} — "
