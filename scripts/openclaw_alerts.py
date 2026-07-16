@@ -16,17 +16,21 @@ OPENCLAW_GATEWAY = "http://localhost:18789"
 DEFAULT_CHAT_ID = "468298295"  # Mr. V
 
 
-def _telegram_http_send(message: str, silent: bool = False, parse_mode: str = "Markdown") -> bool:
+def _telegram_http_send(message: str, silent: bool = False, parse_mode: str = "Markdown") -> tuple:
     """Direct Telegram Bot API send — the delivery path on hosts without the
     openclaw CLI (the VPS). Token comes from the service EnvironmentFile
-    (TELEGRAM_BOT_TOKEN in /etc/default/polyclawd); never hardcoded."""
+    (TELEGRAM_BOT_TOKEN in /etc/default/polyclawd); never hardcoded.
+
+    Returns (ok, err): err is "" on success, else a short machine-parseable
+    failure class ("no_token", "http_<code>:...", "net:...", "tg_api:...")
+    recorded in the send ledger for failure diagnosis."""
     import os
     import urllib.parse
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     if not token:
         print("[OpenClaw] no openclaw CLI and TELEGRAM_BOT_TOKEN unset — telegram alert dropped")
-        return False
+        return False, "no_token"
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", DEFAULT_CHAT_ID)
     fields = {
         "chat_id": chat_id,
@@ -39,16 +43,66 @@ def _telegram_http_send(message: str, silent: bool = False, parse_mode: str = "M
     try:
         req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=payload)
         with urllib.request.urlopen(req, timeout=15) as resp:
-            ok = json.loads(resp.read().decode()).get("ok", False)
-        if not ok:
+            body = resp.read().decode()
+        if not json.loads(body).get("ok", False):
             print("[OpenClaw] telegram HTTP send returned ok=false")
-        return bool(ok)
+            return False, f"tg_api:{body[:120]}"
+        return True, ""
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read()[:120].decode("utf-8", "replace")
+        except Exception:
+            detail = ""
+        print(f"[OpenClaw] telegram HTTP send failed: {e}")
+        return False, f"http_{e.code}:{detail}"
+    except (urllib.error.URLError, TimeoutError) as e:
+        print(f"[OpenClaw] telegram HTTP send failed: {e}")
+        return False, f"net:{e}"
     except Exception as e:
         print(f"[OpenClaw] telegram HTTP send failed: {e}")
-        return False
+        return False, f"err:{e}"
+
+
+def _ledger_log(ok: bool, channel: str, parse_mode, msg_len: int, err: str = "") -> None:
+    """Append one JSON line per delivery attempt — the fleet send ledger
+    (logs/telegram_sent.jsonl; consumed by scripts/send_ledger_watchdog.py).
+    NEVER raises: ledger I/O must not break delivery (audit 2026-07-10)."""
+    try:
+        import os as _os
+        import sys as _sys
+        from datetime import datetime as _dt, timezone as _tz
+
+        path = _os.environ.get("POLYCLAWD_LEDGER_PATH") or _os.path.join(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "logs", "telegram_sent.jsonl"
+        )
+        line = {
+            "ts": _dt.now(_tz.utc).isoformat(timespec="seconds"),
+            "caller": _os.path.basename(_sys.argv[0] or "") or "unknown",
+            "channel": channel,
+            "ok": bool(ok),
+            "parse_mode": parse_mode,
+            "len": msg_len,
+        }
+        if err:
+            line["err"] = str(err)[:200]
+        with open(path, "a") as f:
+            f.write(json.dumps(line) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def alert_openclaw(message: str, channel: str = "telegram", silent: bool = False, parse_mode: str = "Markdown") -> bool:
+    """Ledger-wrapped sender: records every delivery attempt (with failure
+    reason), then returns only the boolean result — the public signature is
+    frozen (9 pipelines call it). See _alert_openclaw_inner for delivery."""
+    ok, err = _alert_openclaw_inner(message, channel=channel, silent=silent, parse_mode=parse_mode)
+    _ledger_log(ok, channel, parse_mode, len(message or ""), err=err)
+    return ok
+
+
+def _alert_openclaw_inner(
+    message: str, channel: str = "telegram", silent: bool = False, parse_mode: str = "Markdown"
+) -> tuple:
     """
     Send an alert via OpenClaw CLI.
 
@@ -58,7 +112,7 @@ def alert_openclaw(message: str, channel: str = "telegram", silent: bool = False
         silent: If True, send without notification sound
 
     Returns:
-        True if successful, False otherwise
+        (ok, err) — err is "" on success, else a short failure class.
     """
     import subprocess
 
@@ -67,29 +121,41 @@ def alert_openclaw(message: str, channel: str = "telegram", silent: bool = False
         # Default to Mr. V's Telegram ID
         target = "468298295" if channel == "telegram" else channel
 
-        cmd = ["openclaw", "message", "send", "--channel", channel, "--account", "polyclawd", "--target", target, "--message", message]
+        cmd = [
+            "openclaw",
+            "message",
+            "send",
+            "--channel",
+            channel,
+            "--account",
+            "polyclawd",
+            "--target",
+            target,
+            "--message",
+            message,
+        ]
         if silent:
             cmd.append("--silent")
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
         if result.returncode == 0:
-            return True
+            return True, ""
         else:
             print(f"[OpenClaw] CLI error: {result.stderr}")
-            return False
+            return False, f"cli:{(result.stderr or '')[:120]}"
 
     except FileNotFoundError:
         if channel == "telegram":
             return _telegram_http_send(message, silent=silent, parse_mode=parse_mode)
         print("[OpenClaw] CLI not found - openclaw not in PATH")
-        return False
+        return False, "cli_not_found"
     except subprocess.TimeoutExpired:
         print("[OpenClaw] CLI timeout")
-        return False
+        return False, "cli_timeout"
     except Exception as e:
         print(f"[OpenClaw] Alert failed: {e}")
-        return False
+        return False, f"err:{e}"
 
 
 def format_signal_alert(
