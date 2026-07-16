@@ -516,6 +516,33 @@ def _send_discord_alert(stop_info):
         logger.warning("Stop-loss Discord alert failed: {}", e)
 
 
+def _write_heartbeat(conn, positions_checked, warnings_fired):
+    """Record proof-of-life for the stop evaluator (Task 2.1, decision D3).
+
+    INSERT OR REPLACE a single row (id=1) so the scheduler-side silence
+    alarm can detect a dead evaluator from the DB — restart-proof, and
+    written even on empty books (zero open positions is a healthy run).
+    Never raises: a heartbeat failure must not break stop evaluation.
+    """
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS stop_heartbeat("
+            " id INTEGER PRIMARY KEY,"
+            " ts INTEGER,"
+            " positions_checked INTEGER,"
+            " warnings_fired INTEGER)"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO stop_heartbeat"
+            " (id, ts, positions_checked, warnings_fired)"
+            " VALUES (1, strftime('%s','now'), ?, ?)",
+            (positions_checked, warnings_fired),
+        )
+        conn.commit()
+    except Exception as e:
+        logger.warning("Stop heartbeat write failed: {}", e)
+
+
 def _send_stop_close_telegram(stop_info):
     """Send a 🛑 stop-close alert through the hardened Telegram sender.
 
@@ -554,6 +581,7 @@ def evaluate_stops():
     ).fetchall()
 
     if not rows:
+        _write_heartbeat(conn, 0, 0)
         conn.close()
         return []
 
@@ -565,6 +593,7 @@ def evaluate_stops():
 
     price_map = {pid: price for pid, price in results if price is not None}
     stopped = []
+    warnings_fired = 0
 
     # Load engine state once per tick for toggle checks
     engine_state = _load_engine_state()
@@ -641,6 +670,7 @@ def evaluate_stops():
                             f"Side: {side} | Bet: ${bet_size:.2f}",
                         ]
                         send_telegram("\n".join(lines))
+                        warnings_fired += 1
                     except Exception:
                         pass
 
@@ -758,6 +788,7 @@ def evaluate_stops():
                 _send_discord_alert(result)
             continue
 
+    _write_heartbeat(conn, len(positions), warnings_fired)
     conn.close()
 
     if stopped:
