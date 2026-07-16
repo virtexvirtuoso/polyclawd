@@ -164,6 +164,9 @@ TICK_TASKS = {
         "tier1_whale_alerts",
         "poly_delta", "manifold_shadow", "clv_snapshot",
         "hf_spread_5m",
+        # UNGATED (Task 5.2): gate counters reset on the 15-min health-check
+        # restart and would starve the dispatch-queue drain.
+        "alert_drain",
     ],
 
     # Tasks gated to every Nth tick of a parent group
@@ -414,6 +417,16 @@ def task_stop_silence_alarm(db_path=None, now=None):
         logger.error("stop_silence_alarm failed: %s", e)
     finally:
         conn.close()
+
+
+def task_alert_drain():
+    """Flush the tiered alert dispatch queue (signals/alert_dispatch.py):
+    tier-1 redeliveries first, then 15-min tier-2 batches. DB timestamps
+    drive the timing, so the 15-min restarts are harmless."""
+    from signals.alert_dispatch import drain
+    n = drain()
+    if n:
+        logger.info("Alert drain: %d message(s) sent", n)
 
 
 def task_price_logger():
