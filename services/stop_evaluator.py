@@ -28,6 +28,24 @@ DB_PATH = PROJECT_ROOT / "storage" / "shadow_trades.db"
 CLOB_API = "https://clob.polymarket.com"
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 
+# ── UNIVERSAL STOP THRESHOLD ──────────────────────────────────────────────
+# Applies to ALL live trades regardless of strategy/archetype.
+# Checked FIRST in both evaluate_stops() and evaluate_stops_urgent().
+# No strategy-specific override can exceed this — it's the hard floor.
+# Env override: UNIVERSAL_MAX_LOSS_PCT for rapid rollback without redeploy.
+UNIVERSAL_MAX_LOSS_PCT = float(os.getenv("UNIVERSAL_MAX_LOSS_PCT", "0.40"))
+
+# ── PRE-RESOLUTION WARNING ─────────────────────────────────────────────────
+# Fire a Telegram warning when a position is within this many hours of
+# resolution and has an unrealized loss above this threshold.
+# Gives you a window to manually exit before the market resolves at 0.
+# MUST default below UNIVERSAL_MAX_LOSS_PCT: at 0.40/0.40 the universal stop
+# (checked first, with `continue`) closed every qualifying position before the
+# warning could evaluate true — the warning branch was structurally dead code
+# (Alert System Overhaul 2026-07-16, Task 0.2 hypothesis d / Task 2.0).
+PRE_RESOLVE_WARN_HOURS = float(os.getenv("PRE_RESOLVE_WARN_HOURS", "6.0"))
+PRE_RESOLVE_WARN_LOSS_PCT = float(os.getenv("PRE_RESOLVE_WARN_LOSS_PCT", "0.30"))
+
 # ── Stop Config ──────────────────────────────────────────────────────────
 # 2026-04-27 weather recalibration. Diagnostic on n=440 weather trades:
 #   * Model is calibrated (mean P(NO) 0.80 vs realized 0.75; CLV +36¢/contract).
@@ -498,6 +516,30 @@ def _send_discord_alert(stop_info):
         logger.warning("Stop-loss Discord alert failed: {}", e)
 
 
+def _send_stop_close_telegram(stop_info):
+    """Send a 🛑 stop-close alert through the hardened Telegram sender.
+
+    Universal-stop closes previously went ONLY to Discord — Telegram (the
+    primary channel) never saw them (Task 2.0). Plain text: parse_mode=None
+    is the format least likely to 400 on arbitrary market titles.
+    """
+    try:
+        from scripts.openclaw_alerts import alert_openclaw
+        title = (stop_info.get("market_title") or "?")[:70]
+        msg = (
+            f"🛑 STOP-LOSS CLOSED — {title}\n"
+            f"Side: {stop_info.get('side', '?')} | "
+            f"Entry: {stop_info.get('entry_price') or 0:.0%} → "
+            f"Exit: {stop_info.get('current_price') or 0:.0%}\n"
+            f"PnL: ${stop_info.get('pnl') or 0:+.2f} | "
+            f"Bet: ${stop_info.get('bet_size') or 0:.2f}\n"
+            f"Reason: {stop_info.get('reason', '')}"
+        )
+        alert_openclaw(msg, parse_mode=None)
+    except Exception as e:
+        logger.warning("Stop-loss Telegram alert failed: {}", e)
+
+
 def evaluate_stops():
     """
     Main entry point. Check all open positions against stop criteria.
@@ -555,6 +597,52 @@ def evaluate_stops():
         # Compute unrealized P&L
         unrealized = _compute_unrealized_pnl(side, entry_price, current_yes_price, bet_size)
         loss_pct = abs(unrealized) / bet_size if unrealized < 0 else 0
+
+        # ── UNIVERSAL STOP CHECK (applies to ALL strategies) ────────────────
+        # Checked FIRST, before any strategy-specific config. No strategy can
+        # override this — it's the hard floor for every live trade.
+        if unrealized < 0 and loss_pct >= UNIVERSAL_MAX_LOSS_PCT:
+            reason = (f"UNIVERSAL STOP loss {loss_pct:.0%} >= {UNIVERSAL_MAX_LOSS_PCT:.0%} "
+                      f"threshold (all strategies)")
+            live_pos = _get_live_position(pos["market_id"])
+            if live_pos is not None:
+                result = _close_live_position_early(
+                    live_pos, current_yes_price, reason,
+                    hard_cap_frac=UNIVERSAL_MAX_LOSS_PCT,
+                )
+            else:
+                result = _close_position_early(conn, pos, current_yes_price,
+                                               unrealized, reason)
+                if result is not None:
+                    conn.commit()
+            if result is not None:
+                stopped.append(result)
+                _send_discord_alert(result)
+                _send_stop_close_telegram(result)
+            continue
+
+        # ── PRE-RESOLUTION WARNING ──────────────────────────────────────────
+        # If a position is within PRE_RESOLVE_WARN_HOURS of resolution and
+        # has an unrealized loss above PRE_RESOLVE_WARN_LOSS_PCT, fire a
+        # Telegram warning so you can manually exit before it resolves at 0.
+        # This catches the "went to 0 in one tick" failure mode.
+        if unrealized < 0 and loss_pct >= PRE_RESOLVE_WARN_LOSS_PCT:
+            target_date = _parse_market_date(pos.get("market_title") or "")
+            if target_date is not None:
+                hours_to_close = (target_date - now).total_seconds() / 3600
+                if 0 < hours_to_close <= PRE_RESOLVE_WARN_HOURS:
+                    try:
+                        from scripts.alert_formatter import send_telegram
+                        lines = [
+                            f"⚠️ <b>PRE-RESOLUTION WARNING</b>",
+                            f"Market: {pos.get('market_title', '?')[:60]}",
+                            f"Entry: {entry_price:.0%} → Current: {current_yes_price:.0%}",
+                            f"Loss: {loss_pct:.0%} | {hours_to_close:.1f}h to resolution",
+                            f"Side: {side} | Bet: ${bet_size:.2f}",
+                        ]
+                        send_telegram("\n".join(lines))
+                    except Exception:
+                        pass
 
         # ── Time-to-resolution gate (2026-04-27) ──
         # Strategies with `defer_to_reeval_above_h > 0` skip the threshold-
@@ -726,7 +814,7 @@ def _parse_market_date(title):
 # See ENSEMBLE_AUDIT_2026-05-15_02_Stop-Sensitivity-Backtest.md
 URGENT_STOP_CONFIG = {
     "default":        {"max_loss_pct": 0.30, "min_hours_to_close": 0.0},
-    "weather":        {"max_loss_pct": float(os.getenv("URGENT_WEATHER_MAX_LOSS_PCT", "0.70")), "min_hours_to_close": 2.0,
+    "weather":        {"max_loss_pct": float(os.getenv("URGENT_WEATHER_MAX_LOSS_PCT", "0.40")), "min_hours_to_close": 2.0,
                        "max_hours_to_close": float(os.getenv("URGENT_MAX_HOURS_TO_CLOSE_WEATHER", "4.0"))},
     "tweet_count_mc": {"max_loss_pct": 0.30, "min_hours_to_close": 0.0},
 }
@@ -802,6 +890,28 @@ def evaluate_stops_urgent():
 
         unrealized = _compute_unrealized_pnl(side, entry_price, current_yes_price, bet_size)
         loss_pct = abs(unrealized) / bet_size if unrealized < 0 else 0
+
+        # ── UNIVERSAL STOP CHECK (urgent path) ─────────────────────────────
+        # Applies to ALL strategies regardless of archetype. Checked before
+        # any strategy-specific config in the urgent path too.
+        if unrealized < 0 and loss_pct >= UNIVERSAL_MAX_LOSS_PCT:
+            reason = (f"UNIVERSAL STOP (urgent) loss {loss_pct:.0%} >= {UNIVERSAL_MAX_LOSS_PCT:.0%} "
+                      f"({pos['_hours_left']}h to resolution)")
+            live_pos = _get_live_position(pos["market_id"])
+            if live_pos is not None:
+                result = _close_live_position_early(
+                    live_pos, current_yes_price, reason,
+                    hard_cap_frac=UNIVERSAL_MAX_LOSS_PCT,
+                )
+            else:
+                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+                if result is not None:
+                    conn.commit()
+            if result is not None:
+                stopped.append(result)
+                _send_discord_alert(result)
+                _send_stop_close_telegram(result)
+            continue
 
         # Post-lock check BEFORE urgent threshold (tighter takes precedence)
         if post_lock_enabled and unrealized < 0:
