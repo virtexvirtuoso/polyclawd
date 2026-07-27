@@ -681,7 +681,7 @@ def _get_db():
     """Get or create SQLite connection."""
     global _db_conn
     if _db_conn is None:
-        _db_conn = sqlite3.connect(DB_PATH)
+        _db_conn = sqlite3.connect(DB_PATH, timeout=15)
         _db_conn.execute("PRAGMA journal_mode=WAL")
         _db_conn.execute("PRAGMA busy_timeout=5000")  # 5s: enough for transient locks, fast-fail if stuck
         _db_conn.execute("""
