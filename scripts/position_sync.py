@@ -132,6 +132,35 @@ def _fetch_gamma_market(market_id: str) -> dict:
         return {}
 
 
+def _sdk_token_price_map() -> dict:
+    """token_id -> (cur_price, redeemable) from SDK open positions. {} on failure."""
+    out = {}
+    try:
+        from execution.clob_client import _get_client
+        client = _get_client()
+        for page in client.list_positions(size_threshold=0.001):
+            for sdk_pos in page.items:
+                t = str(getattr(sdk_pos, "token_id", "") or "")
+                if t:
+                    out[t] = (getattr(sdk_pos, "cur_price", None),
+                              bool(getattr(sdk_pos, "redeemable", False)))
+    except Exception as exc:
+        logger.debug("position_sync: sdk position map failed: %s", exc)
+    return out
+
+
+def _fetch_redeem_assets() -> set:
+    """Asset (token) ids with a REDEEM row in our wallet's data-api activity."""
+    try:
+        url = f"https://data-api.polymarket.com/activity?user={_DEPOSIT_WALLET}&limit=500"
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+        acts = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+        return {str(a.get("asset") or "") for a in acts if a.get("type") == "REDEEM"}
+    except Exception as exc:
+        logger.debug("position_sync: redeem activity fetch failed: %s", exc)
+        return set()
+
+
 def check_resolutions(conn) -> list[dict]:
     """Check all open live_positions for market resolution.
 
@@ -143,9 +172,12 @@ def check_resolutions(conn) -> list[dict]:
 
     rows = conn.execute(
         "SELECT id, market_id, market_title, token_id, side, entry_price, "
-        "shares, cost_usd, fee_paid_total, archetype "
+        "shares, cost_usd, fee_paid_total, archetype, opened_at "
         "FROM live_positions WHERE status='open'"
     ).fetchall()
+
+    sdk_price_map = _sdk_token_price_map()
+    redeem_assets = _fetch_redeem_assets()
 
     resolved = []
     for row in rows:
@@ -163,6 +195,23 @@ def check_resolutions(conn) -> list[dict]:
         if _already_resolution_alerted(pos_id):
             continue
 
+        token_id = str(row[3] or market_id)
+        if token_id not in sdk_price_map and token_id in redeem_assets:
+            # Position gone from wallet + a REDEEM event exists → it WON and
+            # was redeemed on-chain; the books never heard (pos 8/12, Jul 15).
+            pnl = round((1.0 - entry_price) * shares - fee_total, 4)
+            now_iso = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "UPDATE live_positions SET status='closed', closed_at=?, exit_price=1.0, "
+                "pnl=?, close_reason='redeemed_detected' WHERE id=?",
+                (now_iso, pnl, pos_id))
+            conn.commit()
+            resolved.append({"id": pos_id, "market_title": market_title, "pnl": pnl,
+                             "entry_price": entry_price, "exit_price": 1.0, "shares": shares,
+                             "opened_at": row[10], "result_emoji": "\U0001f3c6", "result_label": "WIN (redeemed)"})
+            _mark_resolution_alerted(pos_id)
+            continue
+
         # Resolution strategy:
         # 1. Try SDK list_positions() — cross-reference token_id to get cur_price + redeemable
         #    (handles Endgame/PM-US markets where decimal token_id breaks get_market())
@@ -171,17 +220,7 @@ def check_resolutions(conn) -> list[dict]:
         try:
             from execution.clob_client import _get_client
             client = _get_client()
-            # Build token→price map from on-chain positions
-            sdk_price_map = {}
-            for page in client.list_positions(size_threshold=0.001):
-                for sdk_pos in page.items:
-                    t = str(getattr(sdk_pos, "token_id", "") or "")
-                    cur = getattr(sdk_pos, "cur_price", None)
-                    red = bool(getattr(sdk_pos, "redeemable", False))
-                    if t:
-                        sdk_price_map[t] = (cur, red)
 
-            token_id = str(row[3] or market_id)
             if token_id in sdk_price_map:
                 cur_price, redeemable = sdk_price_map[token_id]
                 if cur_price is not None and redeemable:
@@ -281,6 +320,7 @@ def check_resolutions(conn) -> list[dict]:
             "won": won,
             "result_emoji": result_emoji,
             "result_label": result_label,
+            "opened_at": row[10] if len(row) > 10 else "",
         })
 
     return resolved
@@ -468,10 +508,21 @@ def run() -> dict:
                 from scripts.alert_formatter import send_telegram
                 for r in resolved:
                     pnl_str = f"${r['pnl']:+.2f}"
+                    # Time held
+                    opened = r.get("opened_at", "")
+                    time_held = ""
+                    if opened:
+                        try:
+                            from datetime import datetime, timezone
+                            opened_dt = datetime.fromisoformat(opened)
+                            held_h = (datetime.now(timezone.utc) - opened_dt).total_seconds() / 3600
+                            time_held = f" | Held {held_h:.1f}h"
+                        except Exception:
+                            pass
                     lines = [
                         f"{r['result_emoji']} <b>POSITION RESOLVED — {r['result_label']}</b>",
                         f"Market: {r['market_title']}",
-                        f"Entry: {r['entry_price']:.2f} → Exit: {r['exit_price']:.2f} | Shares: {r['shares']:.1f}",
+                        f"Entry: {r['entry_price']:.2f} → Exit: {r['exit_price']:.2f} | Shares: {r['shares']:.1f}{time_held}",
                         f"PnL: {pnl_str}",
                     ]
                     send_telegram("\n".join(lines))
