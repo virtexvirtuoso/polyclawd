@@ -240,7 +240,7 @@ def execute_intent(
     neg_risk: bool,
     net_edge_taker: float,
     client_order_ref: str,
-    category: str = "weather",
+    category: str = "",  # fail-closed: unspecified must be rejected, not aliased
     market_title: str = "",
 ) -> dict:
     """Route a single trade intent through the hybrid maker→taker executor.
@@ -287,6 +287,8 @@ def execute_intent(
     if not entry_decision.allowed:
         result["action"] = "dropped"
         result["reason"] = f"governor: {entry_decision.reason}"
+        logger.info("execute_intent: governor blocked ref={}: {}",
+                    client_order_ref, entry_decision.reason)
         return result
 
     # ── Step 1: maker-first, laddered across slices ─────────────────────────

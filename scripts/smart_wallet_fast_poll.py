@@ -336,7 +336,12 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
             )
             action = result.get("action")
             logger.info(
-                "sw_live: %s → %s (entry=%.2f, alert=%.2f)", client_order_ref, action, entry_price, price_at_alert
+                "sw_live: %s → %s (entry=%.2f, alert=%.2f) reason=%s",
+                client_order_ref,
+                action,
+                entry_price,
+                price_at_alert,
+                result.get("reason", ""),
             )
             # Instant Telegram alert on any fill
             if action in ("maker_filled", "taker_filled"):
