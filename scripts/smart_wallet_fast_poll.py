@@ -309,6 +309,7 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
             "token_id": token_id,
             "side": "BUY",
             "event_id": event_id,
+            "category": "smart_wallet",
         }
 
         conn = live_db.connect()
@@ -330,7 +331,7 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
                 neg_risk=bool(rec.get("neg_risk", False)),
                 net_edge_taker=net_edge_taker,  # positive when fresh; taker fires after maker window if edge >= min_taker_edge
                 client_order_ref=client_order_ref,
-                category=rec.get("category") or "smart_wallet",
+                category="smart_wallet",
                 market_title=(gm_data.get("question") or rec.get("question") or "")[:120],
             )
             action = result.get("action")

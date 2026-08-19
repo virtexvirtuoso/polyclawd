@@ -99,6 +99,7 @@ def execute_tradeable_soccer_edges(edges: list) -> dict:
                 "market_id": token_id,
                 "token_id": token_id,
                 "side": clob_side,
+                "category": "soccer_match_3way",
             }
 
             decision = governor.check(intent)
@@ -119,7 +120,7 @@ def execute_tradeable_soccer_edges(edges: list) -> dict:
                     neg_risk=False,  # soccer match markets are standard
                     net_edge_taker=exec_edge,
                     client_order_ref=client_order_ref,
-                    category="soccer_match",
+                    category="soccer_match_3way",
                     market_title=(f"{edge.event_title} — {edge.participant} {edge.market_type}".strip(" —"))[:120],
                 )
                 action = result.get("action", "unknown")

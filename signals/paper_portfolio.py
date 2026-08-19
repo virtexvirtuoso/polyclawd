@@ -1508,6 +1508,7 @@ def _route_live_weather(signal: dict, eval_result: dict) -> dict:
         "token_id": token_id,
         "side": clob_side,
         "fair_price": fair_price,
+        "category": "weather",
     }
 
     # I2: own the connection for the whole intent and ALWAYS close it — otherwise

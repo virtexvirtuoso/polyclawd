@@ -111,6 +111,7 @@ def execute_tradeable_weather_edges(signals: list) -> dict:
                 "market_id": token_id,
                 "token_id": token_id,
                 "side": clob_side,
+                "category": "weather_resolution",
             }
 
             decision = governor.check(intent)
