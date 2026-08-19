@@ -132,33 +132,49 @@ def _fetch_gamma_market(market_id: str) -> dict:
         return {}
 
 
-def _sdk_token_price_map() -> dict:
-    """token_id -> (cur_price, redeemable) from SDK open positions. {} on failure."""
+def _sdk_token_price_map() -> "dict[str, tuple] | None":
+    """token_id -> (cur_price, redeemable) from SDK open positions. None on failure —
+    absence must be proven, not inferred from a broken fetch."""
     out = {}
     try:
         from execution.clob_client import _get_client
         client = _get_client()
         for page in client.list_positions(size_threshold=0.001):
             for sdk_pos in page.items:
-                t = str(getattr(sdk_pos, "token_id", "") or "")
+                t = str(getattr(sdk_pos, "token_id", "") or getattr(sdk_pos, "asset", "") or "")
                 if t:
                     out[t] = (getattr(sdk_pos, "cur_price", None),
                               bool(getattr(sdk_pos, "redeemable", False)))
     except Exception as exc:
-        logger.debug("position_sync: sdk position map failed: %s", exc)
+        logger.warning("position_sync: sdk position map failed: %s", exc)
+        return None
     return out
 
 
-def _fetch_redeem_assets() -> set:
-    """Asset (token) ids with a REDEEM row in our wallet's data-api activity."""
+def _fetch_redeem_payouts() -> "dict[str, float] | None":
+    """token_id -> USDC payout for redeemed conditions. REDEEM rows carry
+    conditionId but NOT asset, so bridge via this wallet's TRADE rows.
+    None = activity feed unreachable (caller must skip the heuristic)."""
     try:
         url = f"https://data-api.polymarket.com/activity?user={_DEPOSIT_WALLET}&limit=500"
         req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
         acts = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
-        return {str(a.get("asset") or "") for a in acts if a.get("type") == "REDEEM"}
     except Exception as exc:
-        logger.debug("position_sync: redeem activity fetch failed: %s", exc)
-        return set()
+        logger.warning("position_sync: redeem activity fetch failed: %s", exc)
+        return None
+    payouts = {}
+    for a in acts:
+        if a.get("type") == "REDEEM" and float(a.get("usdcSize") or 0) > 0:
+            cid = str(a.get("conditionId") or "")
+            if cid:
+                payouts[cid] = payouts.get(cid, 0.0) + float(a.get("usdcSize") or 0)
+    out = {}
+    for a in acts:
+        if a.get("type") == "TRADE" and a.get("asset"):
+            cid = str(a.get("conditionId") or "")
+            if cid in payouts:
+                out[str(a["asset"])] = payouts[cid]
+    return out
 
 
 def check_resolutions(conn) -> list[dict]:
@@ -177,7 +193,12 @@ def check_resolutions(conn) -> list[dict]:
     ).fetchall()
 
     sdk_price_map = _sdk_token_price_map()
-    redeem_assets = _fetch_redeem_assets()
+    redeem_payouts = _fetch_redeem_payouts()
+    if sdk_price_map is None or redeem_payouts is None:
+        # Absence must be PROVEN, not inferred from a failed fetch — a transient
+        # SDK/API failure here would otherwise book fabricated wins.
+        sdk_price_map = sdk_price_map or {}
+        redeem_payouts = {}
 
     resolved = []
     for row in rows:
@@ -196,18 +217,26 @@ def check_resolutions(conn) -> list[dict]:
             continue
 
         token_id = str(row[3] or market_id)
-        if token_id not in sdk_price_map and token_id in redeem_assets:
-            # Position gone from wallet + a REDEEM event exists → it WON and
-            # was redeemed on-chain; the books never heard (pos 8/12, Jul 15).
-            pnl = round((1.0 - entry_price) * shares - fee_total, 4)
+        payout = redeem_payouts.get(token_id)
+        if token_id not in sdk_price_map and payout is not None:
+            # Position gone from wallet + a paid REDEEM for its condition.
+            # Attribute only if the payout matches this position's share count
+            # (redeem pays $1/share on the winning outcome).
+            if abs(payout - shares) > max(0.02, shares * 0.01):
+                logger.warning(
+                    "position_sync: redeem payout %.4f does not match shares %.4f "
+                    "for pos %s — leaving open for manual review", payout, shares, pos_id)
+                continue
+            exit_price = round(payout / shares, 4) if shares else 1.0
+            pnl = round(payout - cost_usd - fee_total, 4)
             now_iso = datetime.now(timezone.utc).isoformat()
             conn.execute(
-                "UPDATE live_positions SET status='closed', closed_at=?, exit_price=1.0, "
+                "UPDATE live_positions SET status='closed', closed_at=?, exit_price=?, "
                 "pnl=?, close_reason='redeemed_detected' WHERE id=?",
-                (now_iso, pnl, pos_id))
+                (now_iso, exit_price, pnl, pos_id))
             conn.commit()
             resolved.append({"id": pos_id, "market_title": market_title, "pnl": pnl,
-                             "entry_price": entry_price, "exit_price": 1.0, "shares": shares,
+                             "entry_price": entry_price, "exit_price": exit_price, "shares": shares,
                              "opened_at": row[10], "result_emoji": "\U0001f3c6", "result_label": "WIN (redeemed)"})
             _mark_resolution_alerted(pos_id)
             continue
