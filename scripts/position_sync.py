@@ -188,7 +188,7 @@ def _fetch_redeem_payouts() -> "dict[str, float] | None":
 _FILL_RECON_TOLERANCE_USD = 1.0
 # live_fills recording began 2026-07-14; June history predates the table and
 # would drift forever. Reconcile from the canary re-launch onward.
-_FILL_RECON_SINCE_TS = 1787097600          # 2026-08-18T00:00:00Z
+_FILL_RECON_SINCE_TS = 1787011200          # 2026-08-18T00:00:00Z
 _FILL_RECON_DB_CUTOFF = "2026-08-18T00:00:00+00:00"
 
 
