@@ -179,20 +179,34 @@ def recompute_equity(conn: sqlite3.Connection, onchain_balance: float) -> dict[s
     # Import here so monkeypatching in tests works correctly
     from odds.polymarket_clob import get_orderbook
 
-    # Realized P&L — authoritative source is the closed-positions ledger.
-    # (Resolution + manual closes never write SELL fills; the SELL-fill sum
-    # stays as a cross-check only.)
-    cur = conn.execute("SELECT COALESCE(SUM(pnl), 0.0) FROM live_positions WHERE status = 'closed'")
-    realized_pnl = float(cur.fetchone()[0])
+    # Realized P&L — union of the two close regimes, no double-count:
+    #   • every leg that went through close_position() has a SELL fill
+    #   • resolution/manual closes write pnl but never a SELL fill
     cur = conn.execute(
-        "SELECT COALESCE(SUM(shares * (price - fair_price) - fee_paid), 0.0) FROM live_fills WHERE side = 'SELL'"
+        "SELECT COUNT(*), COALESCE(SUM(shares * (price - fair_price) - fee_paid), 0.0)"
+        " FROM live_fills WHERE side = 'SELL'"
     )
-    realized_from_fills = float(cur.fetchone()[0])
-    if realized_from_fills != 0.0 and abs(realized_pnl - realized_from_fills) > 1.0:
+    n_sell, realized_from_fills = cur.fetchone()
+    realized_from_fills = float(realized_from_fills)
+    cur = conn.execute(
+        "SELECT COALESCE(SUM(pnl), 0.0) FROM live_positions p"
+        " WHERE p.status = 'closed'"
+        "   AND NOT EXISTS (SELECT 1 FROM live_fills f"
+        "                   WHERE f.position_id = p.id AND f.side = 'SELL')"
+    )
+    realized_no_fill = float(cur.fetchone()[0])
+    realized_pnl = realized_from_fills + realized_no_fill
+    # Cross-check: the union above is authoritative; warn (not fatal) when it
+    # diverges from the plain closed-positions sum, meaning a multi-leg
+    # close's partial legs aren't reflected in position pnl yet.
+    cur = conn.execute("SELECT COALESCE(SUM(pnl), 0.0) FROM live_positions WHERE status = 'closed'")
+    closed_positions_sum = float(cur.fetchone()[0])
+    if n_sell and abs(realized_pnl - closed_positions_sum) > 1.0:
         logger.warning(
-            "recompute_equity: realized ledgers diverge — positions {} vs SELL-fills {}",
+            "recompute_equity: realized union {} vs closed-positions sum {} — "
+            "multi-leg closes present or a ledger is missing legs",
             realized_pnl,
-            realized_from_fills,
+            closed_positions_sum,
         )
 
     # Open positions for unrealized mark
