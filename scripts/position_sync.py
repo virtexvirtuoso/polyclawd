@@ -185,6 +185,60 @@ def _fetch_redeem_payouts() -> "dict[str, float] | None":
         return None
 
 
+_FILL_RECON_TOLERANCE_USD = 1.0
+# live_fills recording began 2026-07-14; June history predates the table and
+# would drift forever. Reconcile from the canary re-launch onward.
+_FILL_RECON_SINCE_TS = 1787097600          # 2026-08-18T00:00:00Z
+_FILL_RECON_DB_CUTOFF = "2026-08-18T00:00:00+00:00"
+
+
+def _fetch_trade_activity_usd(since_ts: int) -> tuple:
+    """(count, total_usd) of TRADE rows in wallet activity newer than since_ts.
+    Raises on failure — caller decides how to degrade."""
+    url = f"https://data-api.polymarket.com/activity?user={_DEPOSIT_WALLET}&limit=500"
+    req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+    acts = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+    if not isinstance(acts, list):
+        raise TypeError(f"unexpected activity payload: {type(acts).__name__}")
+    rows = [a for a in acts
+            if isinstance(a, dict) and a.get("type") == "TRADE"
+            and int(a.get("timestamp") or 0) > since_ts]
+    return len(rows), sum(float(a.get("usdcSize") or 0) for a in rows)
+
+
+def _alert_fill_drift(msg: str) -> None:
+    try:
+        from scripts.alert_formatter import send_telegram
+        send_telegram(msg)
+    except Exception as exc:
+        logger.warning("position_sync: fill-drift alert failed: %s", exc)
+
+
+def check_fill_reconciliation(conn, since_ts: int = 0,
+                              db_cutoff_iso: str = "1970-01-01T00:00:00+00:00") -> dict:
+    """Compare on-chain TRADE activity vs recorded live_fills since a cutoff.
+    Untracked fills (June Mariners class) show up as chain > db."""
+    try:
+        chain_n, chain_usd = _fetch_trade_activity_usd(since_ts)
+    except Exception as exc:
+        logger.warning("position_sync: fill recon fetch failed: %s", exc)
+        return {"error": str(exc)}
+    row = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(usd), 0) FROM live_fills WHERE ts >= ?",
+        (db_cutoff_iso,)
+    ).fetchone()
+    db_n, db_usd = int(row[0]), float(row[1] or 0)
+    drift = {"chain_trades": chain_n, "db_fills": db_n,
+             "chain_usd": round(chain_usd, 2), "db_usd": round(db_usd, 2)}
+    if chain_n != db_n or abs(chain_usd - db_usd) > _FILL_RECON_TOLERANCE_USD:
+        _alert_fill_drift(
+            "⚠️ LIVE FILL DRIFT — chain shows "
+            f"{chain_n} trades (${chain_usd:,.2f}) vs {db_n} recorded fills "
+            f"(${db_usd:,.2f}) since cutoff. Untracked fills? "
+            "Check live_fills vs data-api activity.")
+    return drift
+
+
 def check_resolutions(conn) -> list[dict]:
     """Check all open live_positions for market resolution.
 
@@ -568,6 +622,14 @@ def run() -> dict:
 
         # Check wallet balance and sync bankroll to governor
         check_wallet_balance(conn)
+
+        # Fill reconciliation from the canary re-launch onward (June/July history
+        # predates the live_fills table and would false-alarm forever).
+        try:
+            check_fill_reconciliation(conn, since_ts=_FILL_RECON_SINCE_TS,
+                                      db_cutoff_iso=_FILL_RECON_DB_CUTOFF)
+        except Exception as recon_exc:
+            logger.warning("position_sync: fill reconciliation failed: %s", recon_exc)
 
         # Sync bankroll: CLOB liquid + deployed cost = true bankroll
         try:
