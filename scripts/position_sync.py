@@ -190,6 +190,8 @@ _FILL_RECON_TOLERANCE_USD = 1.0
 # would drift forever. Reconcile from the canary re-launch onward.
 _FILL_RECON_SINCE_TS = 1787011200          # 2026-08-18T00:00:00Z
 _FILL_RECON_DB_CUTOFF = "2026-08-18T00:00:00+00:00"
+_FILL_DRIFT_ALERT_FILE = "/tmp/fill_drift_alerted.txt"
+_FILL_DRIFT_ALERT_COOLDOWN_S = 3600
 
 
 def _fetch_trade_activity_usd(since_ts: int) -> tuple:
@@ -200,9 +202,11 @@ def _fetch_trade_activity_usd(since_ts: int) -> tuple:
     acts = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
     if not isinstance(acts, list):
         raise TypeError(f"unexpected activity payload: {type(acts).__name__}")
+    if len(acts) == 500:
+        logger.warning("position_sync: activity window may be truncated (500-row limit)")
     rows = [a for a in acts
             if isinstance(a, dict) and a.get("type") == "TRADE"
-            and int(a.get("timestamp") or 0) > since_ts]
+            and int(a.get("timestamp") or 0) >= since_ts]
     return len(rows), sum(float(a.get("usdcSize") or 0) for a in rows)
 
 
@@ -217,7 +221,10 @@ def _alert_fill_drift(msg: str) -> None:
 def check_fill_reconciliation(conn, since_ts: int = 0,
                               db_cutoff_iso: str = "1970-01-01T00:00:00+00:00") -> dict:
     """Compare on-chain TRADE activity vs recorded live_fills since a cutoff.
-    Untracked fills (June Mariners class) show up as chain > db."""
+    Untracked fills (June Mariners class) show up as chain > db. Alerts are
+    cooldown-guarded (mirrors check_wallet_balance) so persistent drift pages
+    once per hour, not once per 5-minute cycle."""
+    import os, time
     try:
         chain_n, chain_usd = _fetch_trade_activity_usd(since_ts)
     except Exception as exc:
@@ -230,12 +237,42 @@ def check_fill_reconciliation(conn, since_ts: int = 0,
     db_n, db_usd = int(row[0]), float(row[1] or 0)
     drift = {"chain_trades": chain_n, "db_fills": db_n,
              "chain_usd": round(chain_usd, 2), "db_usd": round(db_usd, 2)}
-    if chain_n != db_n or abs(chain_usd - db_usd) > _FILL_RECON_TOLERANCE_USD:
-        _alert_fill_drift(
-            "⚠️ LIVE FILL DRIFT — chain shows "
-            f"{chain_n} trades (${chain_usd:,.2f}) vs {db_n} recorded fills "
-            f"(${db_usd:,.2f}) since cutoff. Untracked fills? "
-            "Check live_fills vs data-api activity.")
+    drifted = chain_n != db_n or abs(chain_usd - db_usd) > _FILL_RECON_TOLERANCE_USD
+
+    if not drifted:
+        try:
+            if os.path.exists(_FILL_DRIFT_ALERT_FILE):
+                os.remove(_FILL_DRIFT_ALERT_FILE)
+        except Exception:
+            pass
+        return drift
+
+    should_alert = True
+    try:
+        if os.path.exists(_FILL_DRIFT_ALERT_FILE):
+            age = time.time() - os.path.getmtime(_FILL_DRIFT_ALERT_FILE)
+            should_alert = age > _FILL_DRIFT_ALERT_COOLDOWN_S
+    except Exception:
+        should_alert = True
+
+    if should_alert:
+        if chain_n > db_n or chain_usd > db_usd + _FILL_RECON_TOLERANCE_USD:
+            msg = (
+                "⚠️ LIVE FILL DRIFT — UNTRACKED FILLS: chain shows "
+                f"{chain_n} trades (${chain_usd:,.2f}) vs {db_n} recorded "
+                f"(${db_usd:,.2f}) — money moved without a live_fills row")
+        else:
+            msg = (
+                "⚠️ LIVE FILL DRIFT — db > chain: "
+                f"{db_n} recorded fills (${db_usd:,.2f}) vs {chain_n} on-chain "
+                f"(${chain_usd:,.2f}) — phantom/duplicate fills or truncated "
+                "activity window")
+        _alert_fill_drift(msg)
+        try:
+            open(_FILL_DRIFT_ALERT_FILE, "w").write(str(time.time()))
+        except Exception:
+            pass
+
     return drift
 
 
