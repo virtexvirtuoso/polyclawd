@@ -194,6 +194,14 @@ def clob_api_passphrase() -> str | None:
     return os.environ.get("CLOB_API_PASSPHRASE") or None
 
 
+def live_strategy_allowlist() -> set:
+    """Strategy categories allowed to touch real money. Empty set = trade NOTHING.
+    Fail-closed by design: a strategy earns its slot via the canary gate doc
+    (vault: Live-Canary-Gate-2026-08-18)."""
+    raw = os.environ.get("POLYCLAWD_LIVE_STRATEGY_ALLOWLIST", "smart_wallet_follow,baseball_total,soccer_match_3way")
+    return {s.strip() for s in raw.split(",") if s.strip()}
+
+
 def signature_type() -> int:
     """CLOB signature type integer (0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE).
     Source: POLYCLAWD_SIG_TYPE.  Default 0 (EOA / direct self-custody)."""

@@ -27,6 +27,10 @@ def gov(monkeypatch):
     monkeypatch.setenv("POLYCLAWD_MAX_DEPLOYED_FRAC", "0.60")
     monkeypatch.delenv("POLYCLAWD_MAX_DEPLOYED_USD", raising=False)
     monkeypatch.delenv("POLYCLAWD_MAX_OPEN_MARKETS", raising=False)
+    # Rule 0 (strategy allowlist, Task 3) requires an allowlisted category on
+    # every intent. This suite tests the money rails downstream of Rule 0, so
+    # pin an allowlisted category rather than weaken the gate.
+    monkeypatch.setenv("POLYCLAWD_LIVE_STRATEGY_ALLOWLIST", "baseball_total")
     # Silence the alert side-channel — KILL/DAILY_HALT transitions would
     # otherwise append synthetic lines to storage/alerts.jsonl.
     monkeypatch.setattr("execution.risk_governor._alert", lambda msg: None)
@@ -38,7 +42,7 @@ def gov(monkeypatch):
 
 
 def _intent(size_usd, market_id="m1"):
-    return {"size_usd": size_usd, "market_id": market_id}
+    return {"size_usd": size_usd, "market_id": market_id, "category": "baseball_total"}
 
 
 class TestDailyHalt:

@@ -4,6 +4,8 @@ Pre-trade gate + KILL/HALT state machine.  No money, no network.
 All state is persisted to live_portfolio_state so a restart reloads it.
 
 Rule order enforced by check() — first failing rule wins:
+  0. strategy_allowlist: intent["category"] not in live_strategy_allowlist()
+                      (fail-closed: missing/empty category is rejected)
   1. KILL      : bankroll < kill_floor()
   2. DAILY_HALT: daily_loss + unrealized_loss >= daily_loss_halt()
                  (realised + unrealised, as the docstring promises)
@@ -253,6 +255,17 @@ class RiskGovernor:
         """
         size_usd: float = float(intent.get("size_usd", 0))
         market_id: str = str(intent.get("market_id", ""))
+
+        # ── Rule 0: strategy allowlist (fail-closed) ────────────────────
+        # The live account traded a K2-killed archetype in July because no
+        # strategy gate existed on the live path. Missing category = reject.
+        category = str(intent.get("category", "") or "")
+        allowed_strategies = live_config.live_strategy_allowlist()
+        if category not in allowed_strategies:
+            return Decision(
+                False,
+                f"strategy_allowlist: category {category or '(missing)'} not in {sorted(allowed_strategies)}",
+            )
 
         # ── Rule 1: KILL floor ──────────────────────────────────────────
         # Check KILL state OR newly crossed threshold.

@@ -277,6 +277,18 @@ def execute_intent(
         logger.info("execute_intent: skipping duplicate ref={}", client_order_ref)
         return result
 
+    # ── Step 0b: governor entry gate (BEFORE any vendor post) ───────────────
+    # Covers the maker path too — previously governor.check() was only called
+    # on the taker leg (line ~493), so maker legs bypassed ALL risk caps.
+    entry_decision = governor.check(
+        {"size_usd": size_usd, "market_id": token_id, "token_id": token_id,
+         "category": category}
+    )
+    if not entry_decision.allowed:
+        result["action"] = "dropped"
+        result["reason"] = f"governor: {entry_decision.reason}"
+        return result
+
     # ── Step 1: maker-first, laddered across slices ─────────────────────────
     slice_depth = _maker_slice_depth(token_id)
     if slice_depth is None or slice_depth <= 0:
@@ -491,7 +503,12 @@ def execute_intent(
         )
 
     decision = governor.check(
-        {"size_usd": remainder_usd, "market_id": token_id, "token_id": token_id}
+        {
+            "size_usd": remainder_usd,
+            "market_id": token_id,
+            "token_id": token_id,
+            "category": category,
+        }
     )
     if not decision.allowed:
         return _finish_dropped_or_partial(
