@@ -134,6 +134,8 @@ class RiskGovernor:
         # Open market IDs — in-memory only (not persisted; rebuilt on restart
         # by the executor which will call record_fill() for each open position).
         self._open_market_ids: set[str] = set()
+        # event_id → market_id map for correlation guard (in-memory, not persisted)
+        self._event_id_by_market: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -172,6 +174,16 @@ class RiskGovernor:
             except Exception as exc:
                 logger.warning("risk_governor transition alert failed (non-fatal): %s", exc)
 
+            # On KILL: cancel all open CLOB orders to prevent further exposure
+            if new_state == "KILL":
+                try:
+                    from execution.clob_client import _get_client
+                    result = _get_client().cancel_all()
+                    cancelled = getattr(result, "canceled", None) or getattr(result, "cancelled", None) or []
+                    logger.info("risk_governor: KILL → cancel_all() cancelled %d orders", len(cancelled) if isinstance(cancelled, (list, tuple)) else 0)
+                except Exception as cancel_exc:
+                    logger.warning("risk_governor: KILL cancel_all failed (non-fatal): %s", cancel_exc)
+
     # ------------------------------------------------------------------
     # Mutators
     # ------------------------------------------------------------------
@@ -195,19 +207,21 @@ class RiskGovernor:
         self._persist()
 
     def record_fill(self, market_id: str, usd: float, **kw) -> None:
-        """Record a confirmed fill: bumps deployed_usd and tracks the open
-        market ID.  Additional keyword args are accepted but ignored (Phase F
-        will pass more context)."""
+        """Record a confirmed fill: bumps deployed_usd, tracks the open
+        market ID, and registers event_id for the correlation guard."""
         self._deployed_usd += float(usd)
         self._open_market_ids.add(market_id)
+        event_id = str(kw.get("event_id", "") or "")
+        if event_id:
+            self._event_id_by_market[market_id] = event_id
         self._persist()
 
     def record_close(self, market_id: str, usd: float) -> None:
-        """Symmetric counterpart to record_fill — called by Phase F/G when a
-        position closes.  Decrements deployed_usd (floored at 0.0 — never
-        goes negative) and removes the market from the open set."""
+        """Symmetric counterpart to record_fill — decrements deployed_usd,
+        removes market from open set, and clears event_id correlation entry."""
         self._deployed_usd = max(0.0, self._deployed_usd - float(usd))
         self._open_market_ids.discard(market_id)
+        self._event_id_by_market.pop(market_id, None)
         self._persist()
 
     def set_unrealized_loss(self, amount: float) -> None:
@@ -295,11 +309,17 @@ class RiskGovernor:
             )
 
         # ── Rule 3: per-trade cap ───────────────────────────────────────
-        # Strict > so that exactly-at-cap (100.0) is ALLOWED.
-        # min() of the flat env cap and a fraction of current bankroll — the
-        # June Mariners trade was 46% of bankroll; a flat cap alone doesn't
-        # scale down as bankroll shrinks.
-        cap = min(live_config.per_trade_cap(), self._bankroll * live_config.per_trade_frac())
+        # Tiered sizing (L2, 2026-07-24) may size up to POLYCLAWD_TIER_SIZE_CAP,
+        # so honor whichever flat ceiling is higher — then bound by a fraction
+        # of current bankroll (the June Mariners trade was 46% of bankroll; a
+        # flat cap alone doesn't scale down as bankroll shrinks).
+        try:
+            tier_cap = live_config._parse_float("POLYCLAWD_TIER_SIZE_CAP", "25.0")
+            flat_cap = max(tier_cap, live_config.per_trade_cap())
+        except Exception:
+            flat_cap = live_config.per_trade_cap()
+        cap = min(flat_cap, self._bankroll * live_config.per_trade_frac())
+        # Strict > so that exactly-at-cap is ALLOWED.
         if size_usd > cap:
             return Decision(
                 False,
@@ -334,6 +354,18 @@ class RiskGovernor:
                     False,
                     f"max_open_markets: {open_count} open >= limit {max_markets}",
                 )
+
+        # ── Rule 5.5: correlation guard ─────────────────────────────────────
+        # Block a second position on the same event_id (different market).
+        # Bypassed when event_id is absent — safe default.
+        event_id = str(intent.get("event_id", "") or "")
+        if event_id:
+            for open_mid, open_eid in self._event_id_by_market.items():
+                if open_eid == event_id and open_mid != market_id:
+                    return Decision(
+                        False,
+                        f"correlation_guard: event {event_id[:24]} already open in {open_mid[:16]}",
+                    )
 
         # ── All rules passed ────────────────────────────────────────────
         return Decision(True, "ok")

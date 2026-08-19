@@ -87,8 +87,67 @@ def execute_tradeable_weather_edges(signals: list) -> dict:
             else:
                 fair_price = twc_implied
 
-            # Executable edge check (net after fees)
-            exec_edge = abs(edge_pp) / 100.0
+            # ── Close-time window gate ──────────────────────────────────
+            # Weather: only enter 3-24h before resolution (matches paper_portfolio).
+            end_date_str = sig.get("end_date") or sig.get("endDate") or ""
+            mins_to_close = None
+            if end_date_str:
+                try:
+                    from datetime import datetime, timezone
+                    edt = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
+                    mins_to_close = (edt - datetime.now(timezone.utc)).total_seconds() / 60.0
+                except Exception:
+                    pass
+            if mins_to_close is not None:
+                from execution.live_config import in_close_window
+                ok, reason = in_close_window(mins_to_close, "weather")
+                if not ok:
+                    stats["dropped"] += 1
+                    logger.info("weather_exec: %s — %s", condition_id[:16], reason)
+                    continue
+
+            # ── Velocity filter ──────────────────────────────────────
+            # Block entry if edge is collapsing. Weather markets don't have
+            # price_movement history yet (different scanner), so this will
+            # return (True, "") for insufficient data — no-op for now.
+            # When weather price logging is added, this gate will activate.
+            from execution.live_config import velocity_check
+            vel_ok, vel_reason = velocity_check(
+                sport="weather",
+                event_id=condition_id[:40],
+                participant=city,
+                market_type="resolution",
+            )
+            if not vel_ok:
+                stats["dropped"] += 1
+                logger.info("weather_exec: %s — %s", client_order_ref, vel_reason)
+                continue
+
+            # Executable edge: walk the live order book for the real fill price.
+            # Falls back to raw midpoint edge only if the book lookup fails
+            # (same pattern as soccer_executor.py).
+            from odds.poly_executable_edge import executable_edge as _exec_edge_fn
+
+            ee_result = _exec_edge_fn(
+                true_prob=fair_price,
+                side="YES" if direction == "buy_yes" else "NO",
+                token_id=token_id,
+                target_usd=_WEATHER_LIVE_SIZE_USD,
+                category="weather",
+            )
+            exec_edge = ee_result.get("executable_edge")
+            if exec_edge is None:
+                # Book unavailable — fall back to raw midpoint edge (conservative)
+                exec_edge = abs(edge_pp) / 100.0
+                logger.debug(
+                    "weather_exec: book lookup failed for %s, using midpoint edge %.4f",
+                    client_order_ref if 'client_order_ref' in dir() else condition_id[:16],
+                    exec_edge,
+                )
+            else:
+                # Use the net-of-fee taker edge from the book walk
+                exec_edge = ee_result.get("net_edge_taker") or exec_edge
+
             if exec_edge < _WEATHER_MIN_EXECUTABLE_EDGE:
                 stats["dropped"] += 1
                 continue
@@ -96,8 +155,9 @@ def execute_tradeable_weather_edges(signals: list) -> dict:
             # Tick size
             tick_size = 0.01  # weather markets use 0.01 tick
 
-            # Size
-            size_usd = _WEATHER_LIVE_SIZE_USD
+            # Size: tiered by executable edge magnitude
+            from execution.live_config import tiered_size_usd
+            size_usd = tiered_size_usd(exec_edge, category="weather")
             if size_usd <= 0:
                 stats["dropped"] += 1
                 continue

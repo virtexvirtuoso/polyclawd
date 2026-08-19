@@ -67,6 +67,39 @@ def execute_tradeable_soccer_edges(edges: list) -> dict:
             clob_side = "BUY"
             fair_price = edge.book_prob if edge.direction == "BUY" else (1.0 - edge.book_prob)
 
+            # ── Close-time window gate ──────────────────────────────────
+            # Soccer: only enter 30min-7h before kickoff.
+            commence_str = edge.commence_time or ""
+            mins_to_close = None
+            if commence_str:
+                try:
+                    from datetime import datetime, timezone
+                    cdt = datetime.fromisoformat(commence_str.replace("Z", "+00:00"))
+                    mins_to_close = (cdt - datetime.now(timezone.utc)).total_seconds() / 60.0
+                except Exception:
+                    pass
+            if mins_to_close is not None:
+                from execution.live_config import in_close_window
+                ok, reason = in_close_window(mins_to_close, "soccer")
+                if not ok:
+                    stats["dropped"] += 1
+                    logger.info("soccer_exec: %s — %s", client_order_ref, reason)
+                    continue
+
+            # ── Velocity filter ──────────────────────────────────────
+            # Block entry if edge is collapsing (soft book converging on sharp).
+            from execution.live_config import velocity_check
+            vel_ok, vel_reason = velocity_check(
+                sport="soccer",
+                event_id=edge.poly_event_id or edge.event_title[:40],
+                participant=edge.participant,
+                market_type=edge.market_type,
+            )
+            if not vel_ok:
+                stats["dropped"] += 1
+                logger.info("soccer_exec: %s — %s", client_order_ref, vel_reason)
+                continue
+
             # Executable edge check (net after fees)
             exec_edge = edge.executable_edge or edge.edge_pct
             if exec_edge < _SOCCER_MIN_EXECUTABLE_EDGE:
@@ -83,8 +116,11 @@ def execute_tradeable_soccer_edges(edges: list) -> dict:
                 except Exception:
                     tick_size = 0.01
 
-            # Size: min of configured cap and fillable depth
-            size_usd = min(_SOCCER_LIVE_SIZE_USD, edge.fillable_usd or _SOCCER_LIVE_SIZE_USD)
+            # Size: tiered by executable edge, capped by fillable book depth
+            from execution.live_config import tiered_size_usd
+            tiered = tiered_size_usd(exec_edge, category="soccer")
+            fillable = edge.fillable_usd or tiered  # if no fillable info, use tiered
+            size_usd = min(tiered, fillable)
             if size_usd <= 0:
                 stats["dropped"] += 1
                 continue

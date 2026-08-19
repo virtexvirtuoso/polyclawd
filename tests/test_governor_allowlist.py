@@ -9,6 +9,7 @@ from execution.risk_governor import Decision, RiskGovernor
 @pytest.fixture
 def gov(tmp_path, monkeypatch):
     monkeypatch.setenv("POLYCLAWD_LIVE_STRATEGY_ALLOWLIST", "smart_wallet,baseball_total,soccer_match_3way")
+    monkeypatch.setenv("POLYCLAWD_TIER_SIZE_CAP", "15.0")  # pin: Rule 3 flat = max(tier, env cap)
     conn = live_db.connect(path=tmp_path / "t.db")
     g = RiskGovernor(conn, mode="LIVE")
     g.set_bankroll(100.0)

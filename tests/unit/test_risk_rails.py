@@ -25,6 +25,7 @@ def gov(monkeypatch):
     monkeypatch.setenv("POLYCLAWD_KILL_FLOOR", "250.0")
     monkeypatch.setenv("POLYCLAWD_WEATHER_PER_TRADE_CAP", "100.0")
     monkeypatch.setenv("POLYCLAWD_PER_TRADE_FRAC", "0.10")  # Rule 3 is now min(flat, frac×bankroll)
+    monkeypatch.setenv("POLYCLAWD_TIER_SIZE_CAP", "25.0")  # pin: flat = max(25, 100) = 100 unchanged
     monkeypatch.setenv("POLYCLAWD_MAX_DEPLOYED_FRAC", "0.60")
     monkeypatch.delenv("POLYCLAWD_MAX_DEPLOYED_USD", raising=False)
     monkeypatch.delenv("POLYCLAWD_MAX_OPEN_MARKETS", raising=False)
