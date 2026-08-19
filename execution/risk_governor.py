@@ -9,7 +9,7 @@ Rule order enforced by check() — first failing rule wins:
   1. KILL      : bankroll < kill_floor()
   2. DAILY_HALT: daily_loss + unrealized_loss >= daily_loss_halt()
                  (realised + unrealised, as the docstring promises)
-  3. per_trade_cap  : intent["size_usd"] > per_trade_cap()
+  3. per_trade_cap  : intent["size_usd"] > min(per_trade_cap(), bankroll * per_trade_frac())
   4. max_deployed   : deployed + size > max_deployed_frac() * bankroll
                       (and absolute max_deployed_usd() if set)
   5. max_open_markets: open distinct markets >= max_open_markets() (if set)
@@ -296,7 +296,10 @@ class RiskGovernor:
 
         # ── Rule 3: per-trade cap ───────────────────────────────────────
         # Strict > so that exactly-at-cap (100.0) is ALLOWED.
-        cap = live_config.per_trade_cap()
+        # min() of the flat env cap and a fraction of current bankroll — the
+        # June Mariners trade was 46% of bankroll; a flat cap alone doesn't
+        # scale down as bankroll shrinks.
+        cap = min(live_config.per_trade_cap(), self._bankroll * live_config.per_trade_frac())
         if size_usd > cap:
             return Decision(
                 False,

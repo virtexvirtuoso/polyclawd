@@ -89,3 +89,15 @@ def test_maker_path_is_gated_by_entry_check(tmp_path, monkeypatch):
     assert res["action"] == "dropped"
     assert "governor:" in res["reason"]
     assert posted == []  # load-bearing: proves no vendor order was posted
+
+
+def test_per_trade_cap_is_min_of_env_and_bankroll_fraction(gov, monkeypatch):
+    monkeypatch.setenv("POLYCLAWD_WEATHER_PER_TRADE_CAP", "15.0")
+    monkeypatch.setenv("POLYCLAWD_PER_TRADE_FRAC", "0.10")
+    # gov fixture bankroll = 100 → frac cap = $10 < env $15 → effective cap $10
+    d = gov.check({"size_usd": 12.0, "market_id": "m1", "category": "baseball_total"})
+    assert d.allowed is False
+    assert "per_trade_cap" in d.reason
+    d = gov.check({"size_usd": 9.0, "market_id": "m1", "category": "baseball_total"})
+    assert "per_trade_cap" not in d.reason
+    assert d.allowed is True

@@ -111,6 +111,12 @@ def per_trade_cap() -> float:
     return _parse_float("POLYCLAWD_WEATHER_PER_TRADE_CAP", "100.0")
 
 
+def per_trade_frac() -> float:
+    """Per-trade cap as a fraction of current bankroll (default 10%).
+    The June Mariners trade was 46% of bankroll; one loss like that is fatal."""
+    return _parse_float("POLYCLAWD_PER_TRADE_FRAC", "0.10")
+
+
 def daily_loss_halt() -> float:
     """Halt threshold: stop trading today once realised+unrealised loss
     exceeds this amount in USD.  Default $50."""
