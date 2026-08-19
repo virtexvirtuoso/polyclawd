@@ -303,7 +303,9 @@ class RiskGovernor:
         if size_usd > cap:
             return Decision(
                 False,
-                f"per_trade_cap: {size_usd:.2f} > {cap:.2f}",
+                f"per_trade_cap: {size_usd:.2f} > {cap:.2f} "
+                f"(min of flat {live_config.per_trade_cap():.2f}, "
+                f"{live_config.per_trade_frac():.0%} of bankroll {self._bankroll:.2f})",
             )
 
         # ── Rule 4: deployed cap ────────────────────────────────────────

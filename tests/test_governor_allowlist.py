@@ -101,3 +101,24 @@ def test_per_trade_cap_is_min_of_env_and_bankroll_fraction(gov, monkeypatch):
     d = gov.check({"size_usd": 9.0, "market_id": "m1", "category": "baseball_total"})
     assert "per_trade_cap" not in d.reason
     assert d.allowed is True
+
+
+def test_per_trade_cap_env_arm_binds_when_frac_is_looser(gov, monkeypatch):
+    monkeypatch.setenv("POLYCLAWD_WEATHER_PER_TRADE_CAP", "15.0")
+    monkeypatch.setenv("POLYCLAWD_PER_TRADE_FRAC", "0.50")
+    # gov fixture bankroll = 100 → frac cap = $50 > env $15 → effective cap $15 (flat arm binds)
+    d = gov.check({"size_usd": 16.0, "market_id": "m1", "category": "baseball_total"})
+    assert d.allowed is False
+    assert "per_trade_cap" in d.reason
+    d = gov.check({"size_usd": 15.0, "market_id": "m1", "category": "baseball_total"})
+    assert "per_trade_cap" not in d.reason
+    assert d.allowed is True
+
+
+def test_per_trade_cap_frac_arm_boundary_exactly_allowed(gov, monkeypatch):
+    monkeypatch.setenv("POLYCLAWD_WEATHER_PER_TRADE_CAP", "100.0")
+    monkeypatch.setenv("POLYCLAWD_PER_TRADE_FRAC", "0.10")
+    # gov fixture bankroll = 100 → frac cap = $10.00 exactly; strict > means $10.00 is allowed
+    d = gov.check({"size_usd": 10.0, "market_id": "m1", "category": "baseball_total"})
+    assert d.allowed is True
+    assert "per_trade_cap" not in d.reason
