@@ -1,4 +1,5 @@
 """Redeemed-and-gone positions must close as wins via data-api REDEEM activity."""
+
 import sqlite3
 import sys
 import types
@@ -59,18 +60,44 @@ def test_absent_without_redeem_activity_stays_open(conn, monkeypatch):
 
 def test_fetch_redeem_payouts_bridges_condition_to_token(monkeypatch):
     import io, json as _json
+
     payload = [
-        {"type": "REDEEM", "asset": "", "conditionId": "0xbadd", "usdcSize": 13.51, "size": 13.51},
-        {"type": "TRADE", "side": "BUY", "asset": "tok123", "conditionId": "0xbadd", "usdcSize": 9.9974},
-        {"type": "TRADE", "side": "BUY", "asset": "tok999", "conditionId": "0xother", "usdcSize": 5.0},
-        {"type": "REDEEM", "asset": "", "conditionId": "0xzero", "usdcSize": 0.0, "size": 250.0},
-        {"type": "TRADE", "side": "BUY", "asset": "tokzero", "conditionId": "0xzero", "usdcSize": 45.5},
+        {"type": "REDEEM", "asset": "", "conditionId": "0xbadd", "outcomeIndex": 0, "usdcSize": 13.51, "size": 13.51},
+        {
+            "type": "TRADE",
+            "side": "BUY",
+            "asset": "tok123",
+            "conditionId": "0xbadd",
+            "outcomeIndex": 0,
+            "usdcSize": 9.9974,
+        },
+        {
+            "type": "TRADE",
+            "side": "BUY",
+            "asset": "tok999",
+            "conditionId": "0xother",
+            "outcomeIndex": 0,
+            "usdcSize": 5.0,
+        },
+        {"type": "REDEEM", "asset": "", "conditionId": "0xzero", "outcomeIndex": 1, "usdcSize": 0.0, "size": 250.0},
+        {
+            "type": "TRADE",
+            "side": "BUY",
+            "asset": "tokzero",
+            "conditionId": "0xzero",
+            "outcomeIndex": 1,
+            "usdcSize": 45.5,
+        },
     ]
+
     class _Resp(io.BytesIO):
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-    monkeypatch.setattr(ps.urllib.request, "urlopen",
-                        lambda req, timeout=15: _Resp(_json.dumps(payload).encode()))
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(ps.urllib.request, "urlopen", lambda req, timeout=15: _Resp(_json.dumps(payload).encode()))
     out = ps._fetch_redeem_payouts()
     assert out == {"tok123": 13.51}  # zero-payout redemption excluded, unrelated token excluded
 
@@ -78,5 +105,57 @@ def test_fetch_redeem_payouts_bridges_condition_to_token(monkeypatch):
 def test_fetch_redeem_payouts_returns_none_on_failure(monkeypatch):
     def boom(req, timeout=15):
         raise OSError("network down")
+
     monkeypatch.setattr(ps.urllib.request, "urlopen", boom)
     assert ps._fetch_redeem_payouts() is None
+
+
+def test_fetch_redeem_payouts_excludes_losing_outcome_of_hedged_condition(monkeypatch):
+    import io, json as _json
+
+    payload = [
+        {"type": "REDEEM", "asset": "", "conditionId": "0xhedge", "outcomeIndex": 0, "usdcSize": 13.51, "size": 13.51},
+        {
+            "type": "TRADE",
+            "side": "BUY",
+            "asset": "TOK_WIN",
+            "conditionId": "0xhedge",
+            "outcomeIndex": 0,
+            "usdcSize": 9.9974,
+        },
+        {
+            "type": "TRADE",
+            "side": "BUY",
+            "asset": "TOK_LOSE",
+            "conditionId": "0xhedge",
+            "outcomeIndex": 1,
+            "usdcSize": 3.51,
+        },
+    ]
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(ps.urllib.request, "urlopen", lambda req, timeout=15: _Resp(_json.dumps(payload).encode()))
+    out = ps._fetch_redeem_payouts()
+    assert out == {"TOK_WIN": 13.51}  # losing outcome must NOT inherit the payout
+
+
+def test_fetch_redeem_payouts_none_on_non_list_body(monkeypatch):
+    import io, json as _json
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        ps.urllib.request, "urlopen", lambda req, timeout=15: _Resp(_json.dumps({"error": "rate limited"}).encode())
+    )
+    assert ps._fetch_redeem_payouts() is None  # must not raise, must not return {}

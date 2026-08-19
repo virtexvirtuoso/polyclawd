@@ -154,27 +154,35 @@ def _sdk_token_price_map() -> "dict[str, tuple] | None":
 def _fetch_redeem_payouts() -> "dict[str, float] | None":
     """token_id -> USDC payout for redeemed conditions. REDEEM rows carry
     conditionId but NOT asset, so bridge via this wallet's TRADE rows.
+    Keyed on (conditionId, outcomeIndex) so a losing outcome of a hedged
+    condition can never inherit the winning outcome's payout.
     None = activity feed unreachable (caller must skip the heuristic)."""
     try:
         url = f"https://data-api.polymarket.com/activity?user={_DEPOSIT_WALLET}&limit=500"
         req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
         acts = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+        if not isinstance(acts, list):
+            raise TypeError(f"unexpected activity payload: {type(acts).__name__}")
+        payouts = {}  # (conditionId, outcomeIndex) -> summed payout
+        for a in acts:
+            if not isinstance(a, dict) or a.get("type") != "REDEEM":
+                continue
+            usdc = float(a.get("usdcSize") or 0)
+            cid = str(a.get("conditionId") or "")
+            if usdc > 0 and cid:
+                key = (cid, a.get("outcomeIndex"))
+                payouts[key] = payouts.get(key, 0.0) + usdc
+        out = {}
+        for a in acts:
+            if not isinstance(a, dict) or a.get("type") != "TRADE" or not a.get("asset"):
+                continue
+            key = (str(a.get("conditionId") or ""), a.get("outcomeIndex"))
+            if key in payouts:
+                out[str(a["asset"])] = payouts[key]
+        return out
     except Exception as exc:
         logger.warning("position_sync: redeem activity fetch failed: %s", exc)
         return None
-    payouts = {}
-    for a in acts:
-        if a.get("type") == "REDEEM" and float(a.get("usdcSize") or 0) > 0:
-            cid = str(a.get("conditionId") or "")
-            if cid:
-                payouts[cid] = payouts.get(cid, 0.0) + float(a.get("usdcSize") or 0)
-    out = {}
-    for a in acts:
-        if a.get("type") == "TRADE" and a.get("asset"):
-            cid = str(a.get("conditionId") or "")
-            if cid in payouts:
-                out[str(a["asset"])] = payouts[cid]
-    return out
 
 
 def check_resolutions(conn) -> list[dict]:
