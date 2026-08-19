@@ -197,8 +197,11 @@ def clob_api_passphrase() -> str | None:
 def live_strategy_allowlist() -> set:
     """Strategy categories allowed to touch real money. Empty set = trade NOTHING.
     Fail-closed by design: a strategy earns its slot via the canary gate doc
-    (vault: Live-Canary-Gate-2026-08-18)."""
-    raw = os.environ.get("POLYCLAWD_LIVE_STRATEGY_ALLOWLIST", "smart_wallet_follow,baseball_total,soccer_match_3way")
+    (vault: Live-Canary-Gate-2026-08-18).
+
+    Default covers smart_wallet, baseball_total, soccer_match_3way — the
+    canonical category strings used by their respective live executors."""
+    raw = os.environ.get("POLYCLAWD_LIVE_STRATEGY_ALLOWLIST", "smart_wallet,baseball_total,soccer_match_3way")
     return {s.strip() for s in raw.split(",") if s.strip()}
 
 

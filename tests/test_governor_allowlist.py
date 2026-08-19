@@ -1,4 +1,5 @@
 """Rule 0: live trades must carry an allowlisted strategy category."""
+
 import sqlite3
 import pytest
 
@@ -8,8 +9,7 @@ from execution.risk_governor import RiskGovernor
 
 @pytest.fixture
 def gov(tmp_path, monkeypatch):
-    monkeypatch.setenv("POLYCLAWD_LIVE_STRATEGY_ALLOWLIST",
-                       "smart_wallet_follow,baseball_total,soccer_match_3way")
+    monkeypatch.setenv("POLYCLAWD_LIVE_STRATEGY_ALLOWLIST", "smart_wallet,baseball_total,soccer_match_3way")
     conn = live_db.connect(path=tmp_path / "t.db")
     g = RiskGovernor(conn, mode="LIVE")
     g.set_bankroll(100.0)
