@@ -81,9 +81,17 @@ def get_live_portfolio_endpoint():
     """
     conn = live_db.connect()
     try:
-        # Read onchain_balance from the latest snapshot to seed recompute.
-        state = live_db.get_state(conn)
-        onchain_balance = float(state.get("bankroll") or 0.0) if state else 0.0
+        # Real collateral (pUSD) via the SDK — the old seed read state.bankroll,
+        # which is itself derived, making "onchain_balance" circular fiction.
+        try:
+            from execution.clob_client import _get_client
+
+            raw = _get_client().get_balance_allowance(asset_type="COLLATERAL").balance
+            onchain_balance = float(raw) / 1e6
+        except Exception as exc:
+            logger.warning("live/portfolio: balance fetch failed, falling back to state: %s", exc)
+            state = live_db.get_state(conn)
+            onchain_balance = float((state or {}).get("bankroll") or 0.0)
 
         # Best-effort fresh mark — swallowed on network/import failure.
         _safe_recompute(conn, onchain_balance)
@@ -113,9 +121,7 @@ def get_live_portfolio_endpoint():
             # be onchain_balance with no pnl; we approximate via realized P&L.
             initial_approx = onchain_bal - realized_pnl
             if initial_approx > 0:
-                since_inception_pct = round(
-                    (total_equity - initial_approx) / initial_approx * 100, 2
-                )
+                since_inception_pct = round((total_equity - initial_approx) / initial_approx * 100, 2)
 
         return {
             "onchain_balance": round(onchain_bal, 4),
@@ -134,9 +140,7 @@ def get_live_portfolio_endpoint():
             "mode": live_config.mode(),
             # extras for completeness
             "peak_equity": round(peak_equity, 4),
-            "fees_paid_cumulative": round(
-                float(portfolio.get("fees_paid_cumulative") or 0.0), 4
-            ),
+            "fees_paid_cumulative": round(float(portfolio.get("fees_paid_cumulative") or 0.0), 4),
             "fill_split": portfolio.get("fill_split", {"maker": 0, "taker": 0}),
             "ts": portfolio.get("ts"),
         }
@@ -154,9 +158,7 @@ def get_live_positions():
     """Return all OPEN live_positions rows with age in seconds."""
     conn = live_db.connect()
     try:
-        cur = conn.execute(
-            "SELECT * FROM live_positions WHERE status = 'open' ORDER BY opened_at"
-        )
+        cur = conn.execute("SELECT * FROM live_positions WHERE status = 'open' ORDER BY opened_at")
         rows = [dict(r) for r in cur.fetchall()]
 
         now = _utcnow()
@@ -210,9 +212,7 @@ def get_live_fills(limit: int = Query(default=50, ge=1, le=500)):
     """
     conn = live_db.connect()
     try:
-        cur = conn.execute(
-            "SELECT * FROM live_fills ORDER BY id DESC LIMIT ?", (limit,)
-        )
+        cur = conn.execute("SELECT * FROM live_fills ORDER BY id DESC LIMIT ?", (limit,))
         rows = [dict(r) for r in cur.fetchall()]
         result = []
         for r in rows:
@@ -229,9 +229,7 @@ def get_live_fills(limit: int = Query(default=50, ge=1, le=500)):
                     "usd": round(float(r.get("usd") or 0), 4),
                     "fee_paid": round(float(r.get("fee_paid") or 0), 6),
                     "fair_price": round(float(r.get("fair_price") or 0), 6),
-                    "slippage_vs_fair": round(
-                        float(r.get("slippage_vs_fair") or 0), 6
-                    ),
+                    "slippage_vs_fair": round(float(r.get("slippage_vs_fair") or 0), 6),
                 }
             )
         return {"fills": result, "count": len(result)}

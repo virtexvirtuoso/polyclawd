@@ -179,17 +179,21 @@ def recompute_equity(conn: sqlite3.Connection, onchain_balance: float) -> dict[s
     # Import here so monkeypatching in tests works correctly
     from odds.polymarket_clob import get_orderbook
 
-    # Realized P&L — aggregate over live_fills SELL rows so that every close
-    # leg (partial maker + taker) is counted.  close_position() records each
-    # SELL fill with fair_price = entry_price, so:
-    #   shares * (price - fair_price)  →  per-share gain/loss vs entry
-    #   - fee_paid                     →  cost deducted per leg
-    # This is partial-close-safe: each leg contributes independently, unlike
-    # reading live_positions.pnl which is only written on the FINAL close leg.
+    # Realized P&L — authoritative source is the closed-positions ledger.
+    # (Resolution + manual closes never write SELL fills; the SELL-fill sum
+    # stays as a cross-check only.)
+    cur = conn.execute("SELECT COALESCE(SUM(pnl), 0.0) FROM live_positions WHERE status = 'closed'")
+    realized_pnl = float(cur.fetchone()[0])
     cur = conn.execute(
         "SELECT COALESCE(SUM(shares * (price - fair_price) - fee_paid), 0.0) FROM live_fills WHERE side = 'SELL'"
     )
-    realized_pnl = float(cur.fetchone()[0])
+    realized_from_fills = float(cur.fetchone()[0])
+    if realized_from_fills != 0.0 and abs(realized_pnl - realized_from_fills) > 1.0:
+        logger.warning(
+            "recompute_equity: realized ledgers diverge — positions {} vs SELL-fills {}",
+            realized_pnl,
+            realized_from_fills,
+        )
 
     # Open positions for unrealized mark
     cur = conn.execute("SELECT id, token_id, entry_price, shares FROM live_positions WHERE status = 'open'")
