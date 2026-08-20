@@ -75,6 +75,11 @@ def execute_tradeable_weather_edges(signals: list) -> dict:
                 stats["errors"] += 1
                 continue
 
+            # Build unique ref (moved above the close-window/velocity gates below —
+            # those log this identifier on rejection, so it must exist before them)
+            city_slug = city.lower().replace(" ", "_")[:15]
+            client_order_ref = f"wx-{date_str}-{city_slug}-{outcome_index}"
+
             # CLOB side is always BUY (we buy the token we want exposure to)
             clob_side = "BUY"
 
@@ -93,13 +98,18 @@ def execute_tradeable_weather_edges(signals: list) -> dict:
             mins_to_close = None
             if end_date_str:
                 try:
-                    from datetime import datetime, timezone
+                    # NOTE: no local `from datetime import ...` here — module already
+                    # imports datetime/timezone at top; a local re-import previously
+                    # shadowed it for the WHOLE function (Python local-scope rule),
+                    # making `date_str = datetime.now(...)` above UnboundLocalError
+                    # on every call once live_config.mode() == "LIVE".
                     edt = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
                     mins_to_close = (edt - datetime.now(timezone.utc)).total_seconds() / 60.0
                 except Exception:
                     pass
             if mins_to_close is not None:
                 from execution.live_config import in_close_window
+
                 ok, reason = in_close_window(mins_to_close, "weather")
                 if not ok:
                     stats["dropped"] += 1
@@ -112,6 +122,7 @@ def execute_tradeable_weather_edges(signals: list) -> dict:
             # return (True, "") for insufficient data — no-op for now.
             # When weather price logging is added, this gate will activate.
             from execution.live_config import velocity_check
+
             vel_ok, vel_reason = velocity_check(
                 sport="weather",
                 event_id=condition_id[:40],
@@ -141,7 +152,7 @@ def execute_tradeable_weather_edges(signals: list) -> dict:
                 exec_edge = abs(edge_pp) / 100.0
                 logger.debug(
                     "weather_exec: book lookup failed for %s, using midpoint edge %.4f",
-                    client_order_ref if 'client_order_ref' in dir() else condition_id[:16],
+                    client_order_ref if "client_order_ref" in dir() else condition_id[:16],
                     exec_edge,
                 )
             else:
@@ -157,14 +168,11 @@ def execute_tradeable_weather_edges(signals: list) -> dict:
 
             # Size: tiered by executable edge magnitude
             from execution.live_config import tiered_size_usd
+
             size_usd = tiered_size_usd(exec_edge, category="weather")
             if size_usd <= 0:
                 stats["dropped"] += 1
                 continue
-
-            # Build unique ref
-            city_slug = city.lower().replace(" ", "_")[:15]
-            client_order_ref = f"wx-{date_str}-{city_slug}-{outcome_index}"
 
             intent = {
                 "size_usd": size_usd,

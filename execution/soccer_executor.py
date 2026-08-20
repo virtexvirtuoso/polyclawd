@@ -45,6 +45,12 @@ def execute_tradeable_soccer_edges(edges: list) -> dict:
             if not edge.tradeable or not edge.poly_market_id:
                 continue
 
+            # Build unique ref (moved above the close-window/velocity gates below —
+            # those log this identifier on rejection, so it must exist before them)
+            participant_slug = edge.participant.lower().replace(" ", "_")[:20]
+            market_slug = edge.market_type[:3]  # home/draw/away
+            client_order_ref = f"sc-{date_str}-{participant_slug}-{market_slug}"
+
             # Resolve token_id from condition_id + outcome_index
             # direction="BUY" → we think YES is underpriced → buy YES token (index 0)
             # direction="SELL" → we think YES is overpriced → buy NO token (index 1)
@@ -73,13 +79,18 @@ def execute_tradeable_soccer_edges(edges: list) -> dict:
             mins_to_close = None
             if commence_str:
                 try:
-                    from datetime import datetime, timezone
+                    # NOTE: no local `from datetime import ...` here — module already
+                    # imports datetime/timezone at top; a local re-import previously
+                    # shadowed it for the WHOLE function (Python local-scope rule),
+                    # making `date_str = datetime.now(...)` above UnboundLocalError
+                    # on every call once live_config.mode() == "LIVE".
                     cdt = datetime.fromisoformat(commence_str.replace("Z", "+00:00"))
                     mins_to_close = (cdt - datetime.now(timezone.utc)).total_seconds() / 60.0
                 except Exception:
                     pass
             if mins_to_close is not None:
                 from execution.live_config import in_close_window
+
                 ok, reason = in_close_window(mins_to_close, "soccer")
                 if not ok:
                     stats["dropped"] += 1
@@ -89,6 +100,7 @@ def execute_tradeable_soccer_edges(edges: list) -> dict:
             # ── Velocity filter ──────────────────────────────────────
             # Block entry if edge is collapsing (soft book converging on sharp).
             from execution.live_config import velocity_check
+
             vel_ok, vel_reason = velocity_check(
                 sport="soccer",
                 event_id=edge.poly_event_id or edge.event_title[:40],
@@ -118,17 +130,13 @@ def execute_tradeable_soccer_edges(edges: list) -> dict:
 
             # Size: tiered by executable edge, capped by fillable book depth
             from execution.live_config import tiered_size_usd
+
             tiered = tiered_size_usd(exec_edge, category="soccer")
             fillable = edge.fillable_usd or tiered  # if no fillable info, use tiered
             size_usd = min(tiered, fillable)
             if size_usd <= 0:
                 stats["dropped"] += 1
                 continue
-
-            # Build unique ref
-            participant_slug = edge.participant.lower().replace(" ", "_")[:20]
-            market_slug = edge.market_type[:3]  # home/draw/away
-            client_order_ref = f"sc-{date_str}-{participant_slug}-{market_slug}"
 
             intent = {
                 "size_usd": size_usd,
