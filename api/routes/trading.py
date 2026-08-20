@@ -8,6 +8,7 @@ This router consolidates all trading-related endpoints:
 - /paper/* - Paper Polymarket trading
 """
 import json
+import os
 import sqlite3
 import urllib.parse
 import urllib.request
@@ -35,6 +36,16 @@ limiter = Limiter(key_func=get_remote_address)
 GAMMA_API = "https://gamma-api.polymarket.com"
 SIMMER_API = "https://api.simmer.markets/api/sdk"
 SIMMER_MAX_TRADE = 100.0
+
+
+def _simmer_trade_enabled() -> bool:
+    """Real-money Simmer route is OFF unless explicitly enabled.
+
+    This path has no RiskGovernor coupling (different custody pot than the
+    canary wallet): no strategy allowlist, KILL state, daily-loss halt, or
+    deployed cap apply. /qa 2026-08-19 found it reachable with dev-mode auth.
+    """
+    return os.environ.get("POLYCLAWD_SIMMER_TRADE_ENABLED", "0").strip().lower() in ("1", "true", "yes")
 
 # Simmer credentials (loaded lazily)
 _simmer_api_key: Optional[str] = None
@@ -461,6 +472,12 @@ async def execute_simmer_trade(
     reasoning: str = Query("", description="Trade reasoning")
 ):
     """Execute a LIVE trade via Simmer SDK - requires API key."""
+    if not _simmer_trade_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="Simmer trade route disabled (POLYCLAWD_SIMMER_TRADE_ENABLED unset) — "
+                   "ungoverned real-money path, see QA-Live-Account-Plan-2026-08-19",
+        )
     side_lower = side.lower()
     if side_lower not in ("yes", "no"):
         raise HTTPException(status_code=400, detail="Side must be YES or NO")
