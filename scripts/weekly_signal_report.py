@@ -23,6 +23,7 @@ LOG = BASE / "logs" / "polyclawd.log"
 CLV = "http://localhost:8420/api/clv"
 META = "http://localhost:8420/api/meta-model"
 FADE = "https://virtuosocrypto.com/polyclawd/api/weather/kalshi-fade/dashboard"
+STRATEGY_IC = "http://localhost:8420/api/signals/strategy-ic"
 
 
 def _get(url, timeout=20):
@@ -103,15 +104,18 @@ def main():
         guards = "?"
 
     # IC + calibration modules.
+    # NOTE: signal_predictions is never resolved (resolve_from_shadow_trades is
+    # dead code — nothing calls it), so ic_report() returns aggregate_ic=None and
+    # full_calibration_report() returns an empty per_source. Use the realized-trade
+    # IC endpoint instead (confidence vs pnl, computed directly from shadow_trades).
+    strat_ic = _get(STRATEGY_IC)
     try:
         sys.path.insert(0, str(BASE))
-        from signals.ic_tracker import ic_report
         from signals.calibrator import full_calibration_report
 
-        ic = ic_report(90)
         cal = full_calibration_report()
     except Exception as e:
-        ic, cal = {"_err": str(e)}, {}
+        cal = {"_err": str(e)}
 
     wr = (wins / resolved * 100) if resolved else 0.0
 
@@ -141,12 +145,19 @@ def main():
 
     L.append(f"Guard blocks (log): {guards}")
 
-    if "_err" not in ic:
-        kill = ", ".join(ic.get("kill_list", [])) or "none"
-        warn = ", ".join(ic.get("warn_list", [])) or "none"
-        L.append(
-            f"IC(90d) agg {ic.get('aggregate_ic', 0):+.3f} | KILL: {kill} | WARN: {warn}"
-        )
+    # Realized-trade IC (confidence vs pnl) — the working IC source.
+    if strat_ic and strat_ic.get("strategies") is not None:
+        sics = strat_ic["strategies"]
+        kill = ", ".join(s["strategy"] for s in sics if s["status"] == "KILL") or "none"
+        warn = ", ".join(s["strategy"] for s in sics if s["status"] == "WARN") or "none"
+        L.append(f"IC(90d) {len(sics)} strategies | KILL: {kill} | WARN: {warn}")
+        for s in sics:
+            sig = "*" if s.get("significant_bonferroni") else ""
+            L.append(
+                f"  {s['strategy']}: IC {s['ic']:+.3f} (n={s['n']}, p={s['p_value']:.3f}){sig}"
+            )
+    else:
+        L.append("IC(90d): n/a")
     per = (cal or {}).get("per_source", {})
     if per:
         calib = sum(1 for v in per.values() if v.get("status") == "calibrated")

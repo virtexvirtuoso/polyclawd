@@ -195,9 +195,11 @@ async def strategy_ic(
 ):
     """Information Coefficient per trading strategy, from REALIZED paper trades.
 
-    IC = Spearman rank correlation of pre-trade `confidence` vs realized `pnl`,
-    computed over resolved shadow_trades (the decision AND its outcome live in the
-    same row, so no lossy predictions<->trades join). Interpretation:
+    IC = Spearman rank correlation of pre-trade `confidence` vs realized win/loss
+    (outcome == side), computed over resolved shadow_trades (the decision AND its
+    outcome live in the same row, so no lossy predictions<->trades join). Using
+    win/loss (not dollar pnl) removes the bet-sizing confound: if stake scales with
+    confidence (Kelly), pnl-based IC is mechanically inflated. Interpretation:
     IC > 0 = confidence has edge; ~0 = noise; < 0 = contra-indicative.
     Thresholds (|IC|): <0.03 KILL, <0.05 WARN, else OK. `min_n` guards small samples
     (default 30 = statistical-validity floor). `significant_bonferroni` corrects the
@@ -217,15 +219,17 @@ async def strategy_ic(
     try:
         rows = _query(
             "shadow_trades.db",
-            "SELECT strategy, confidence, pnl FROM shadow_trades "
-            "WHERE resolved = 1 AND confidence IS NOT NULL AND pnl IS NOT NULL "
-            "AND timestamp >= datetime('now', ?)",
+            "SELECT strategy, confidence, outcome, side FROM shadow_trades "
+            "WHERE resolved = 1 AND confidence IS NOT NULL AND outcome IS NOT NULL "
+            "AND side IS NOT NULL "
+            "AND substr(timestamp, 1, 10) >= date('now', ?)",
             [f"-{window_days} days"],
         )
         grouped = defaultdict(lambda: ([], []))
         for r in rows:
+            win = 1.0 if r["outcome"] == r["side"] else 0.0
             grouped[r["strategy"]][0].append(r["confidence"])
-            grouped[r["strategy"]][1].append(r["pnl"])
+            grouped[r["strategy"]][1].append(win)
 
         results = []
         for strat, (conf, pnl) in grouped.items():
@@ -236,7 +240,15 @@ async def strategy_ic(
             if ic != ic:  # NaN — e.g. confidence is constant within the strategy
                 continue
             se = 1.0 / math.sqrt(n - 1)  # approx SE of a Spearman IC
-            status = "KILL" if abs(ic) < 0.03 else ("WARN" if abs(ic) < 0.05 else "OK")
+            # Sign matters: negative IC = contra-indicative (worse than noise).
+            if ic < 0:
+                status = "KILL"  # actively wrong
+            elif ic < 0.03:
+                status = "KILL"  # noise
+            elif ic < 0.05:
+                status = "WARN"  # marginal
+            else:
+                status = "OK"    # alpha
             results.append(
                 {
                     "strategy": strat,
@@ -257,7 +269,7 @@ async def strategy_ic(
             "window_days": window_days,
             "min_n": min_n,
             "strategies_tested": k,
-            "method": "Spearman(confidence, realized_pnl); |IC|<0.03 KILL, <0.05 WARN; Bonferroni across k strategies",
+            "method": "Spearman(confidence, win/loss); IC<0 KILL(contra), <0.03 KILL(noise), <0.05 WARN; Bonferroni across k strategies",
             "strategies": results,
         }
     except Exception as e:
