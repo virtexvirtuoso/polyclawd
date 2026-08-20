@@ -846,21 +846,13 @@ def aggregate_all_signals() -> dict:
             "composite_mult": bayesian_result["composite_multiplier"]
         }
 
-    # Record predictions for IC (Information Coefficient) tracking
-    try:
-        from ic_tracker import record_signal_prediction
-        from calibrator import calibrate_confidence
-        for sig in all_signals:
-            if sig.get("market_id") and sig.get("side") not in ["NEUTRAL", "RESEARCH", ""]:
-                # Auto-calibrate confidence before recording
-                raw_conf = sig.get("confidence", 0)
-                cal_conf = calibrate_confidence(sig.get("source", ""), raw_conf)
-                if cal_conf != raw_conf:
-                    sig["confidence_raw"] = raw_conf
-                    sig["confidence"] = round(cal_conf, 1)
-                record_signal_prediction(sig)
-    except Exception:
-        pass  # Non-critical — IC tracking failure must not block signal generation
+    # [RETIRED 2026-08-20] Auto-calibrate + record_signal_prediction hot-path removed.
+    # The legacy signal_predictions / calibrator chain was a silent no-op (calibrate_confidence
+    # returned raw confidence unchanged against an empty calibration_curves table; the resolver
+    # was never called, so 0/7k+ predictions resolved). No confidence calibration ran. IC is
+    # served correctly by the realized-trade GET /api/signals/strategy-ic. The read-only
+    # diagnostic endpoints (/signals/ic-report, /signals/calibration, /signals/source-weights)
+    # remain and return empty data harmlessly. See 2026-08-20-Signal-IC-Calibration-Investigation.md.
 
     # Boost daily-expiry markets: they resolve fast, accelerating IC feedback loop
     def _sort_key(s):
