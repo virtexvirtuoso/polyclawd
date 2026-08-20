@@ -1008,7 +1008,7 @@ def _discover_weather_cities() -> List[str]:
                 "footer": {"text": "Weather City Discovery (slug probe)"},
             }], alert_type="new_weather_city", alert_meta={"cities": sorted(new_cities)})
         except Exception:
-            pass
+            logger.warning("new-weather-city alert failed (cities=%s)", sorted(new_cities), exc_info=True)
 
     if dropped_cities:
         logger.info("Cities no longer active on Polymarket: %s", sorted(dropped_cities))

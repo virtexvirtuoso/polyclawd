@@ -265,7 +265,7 @@ def open_hf_paper_position(
                         entry_price, bet_size, f"hf_{trigger_type}",
                         round(edge_pct * 100, 1), market_url=mkt_url)
                 except Exception:
-                    pass
+                    logger.warning("alert_position_opened failed (mkt=%s)", market.get("question","")[:40], exc_info=True)
         
         return result
     

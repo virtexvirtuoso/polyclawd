@@ -68,7 +68,8 @@ _state = {
 # ============================================================================
 
 def _db():
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
@@ -106,7 +107,7 @@ def _restart_service():
         from signals.discord_alerts import alert_api_down
         alert_api_down(count, "Health check failed 3x", restart_attempted=True)
     except Exception:
-        pass
+        logger.warning("alert_api_down failed (count=%d)", count, exc_info=True)
 
     subprocess.run(["sudo", "systemctl", "restart", SERVICE_NAME], timeout=30)
     logger.info("Service restarted")
@@ -232,7 +233,7 @@ def task_health_check():
                 from signals.discord_alerts import alert_api_recovered
                 alert_api_recovered()
             except Exception:
-                pass
+                logger.warning("alert_api_recovered failed", exc_info=True)
         _state["consecutive_restarts"] = 0
     else:
         _restart_service()
@@ -713,7 +714,7 @@ def task_calibration_check():
                     alert_scorecard_milestone(strategy, n, wins, wr, brier)
                     _state["milestone_sent"][strategy] = True
                 except Exception:
-                    pass
+                    logger.warning("alert_scorecard_milestone failed (strategy=%s)", strategy, exc_info=True)
 
 
 def task_signal_scan():
@@ -977,6 +978,8 @@ def _weather_signal_to_shadow(s: dict) -> dict:
         "platform": "polymarket",
         "side": side,
         "price": market_price,
+        "entry_price": (round(1.0 - market_price, 4)
+                        if side == "NO" else market_price),  # held-side cost
         "confidence": confidence,
         "confirmations": 1,
         "days_to_close": max(0.5, horizon_hours / 24),
@@ -1611,7 +1614,7 @@ def task_betfair_scan():
         try:
             send_telegram_alert(msg)
         except Exception:
-            pass
+            logger.warning("send_telegram_alert (betfair) failed", exc_info=True)
     logger.info(f"Betfair scan: {len(edges)} edges, {len(to_alert)} alerted")
 
 
@@ -2091,7 +2094,7 @@ def task_db_maintenance():
 
     # VACUUM in separate connection (can't run inside transaction)
     try:
-        conn2 = sqlite3.connect(str(DB_PATH))
+        conn2 = sqlite3.connect(str(DB_PATH), timeout=15)
         conn2.execute("PRAGMA busy_timeout=5000")
         conn2.execute("VACUUM")
         conn2.close()

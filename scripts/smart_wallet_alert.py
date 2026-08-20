@@ -29,9 +29,11 @@ Scanner hook (one guarded call) lives in signals/whale_scanner.py.
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import sqlite3
+import sys
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -262,9 +264,27 @@ def _fade_gate_stats(shadow_conn, wallet: str):
         ).fetchone()
     except Exception:  # noqa: BLE001
         return None
-    if row and (row["n"] or 0) >= FADE_MIN_N and (row["c"] or 0) <= FADE_MAX_CLV:
-        return {"n": row["n"], "clv": row["c"]}
-    return None
+    if not (row and (row["n"] or 0) >= FADE_MIN_N and (row["c"] or 0) <= FADE_MAX_CLV):
+        return None
+    # Conflict rule (2026-07-10): NEVER fade a wallet whose FULL history passes
+    # the sign-randomization skill gate — our shadow sample (n≈10) is noise next
+    # to their n≈1,000 record. First 3 fades before this rule resolved
+    # -0.84/-0.84/-0.49 per $1: all four faded wallets were skill-positive.
+    # Fail CLOSED (no fade) if the check itself errors.
+    try:
+        from signals.whale_wallets import get_meta_db, skill_gate_ok
+
+        w = get_meta_db().execute(
+            "SELECT skill_n, skill_ret, skill_p FROM pm_wallets WHERE wallet=?",
+            (wallet,),
+        ).fetchone()
+        if w and skill_gate_ok(
+            {"skill_n": w["skill_n"], "skill_ret": w["skill_ret"], "skill_p": w["skill_p"]}
+        ):
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    return {"n": row["n"], "clv": row["c"]}
 
 
 def _price_band_gate_suppress(rec: dict) -> bool:
@@ -406,13 +426,16 @@ def _check_convergence(shadow_conn, market: str, direction: str, title: str, now
             from scripts.alert_formatter import send_telegram
             send_telegram(msg)
         except Exception:
-            pass
+            print(f"SMART_WALLET_ALERT convergence send failed: {sys.exc_info()[1]}", file=sys.stderr)
 
 
 def _format_convergence(market: str, direction: str, title: str, n_wallets: int, total_usd: float,
                         span_secs: int = 0, avg_price: float = None, outcome_index: int = None) -> str:
     tier_emoji, tier_desc = _convergence_tier(span_secs)
-    span_str = _fmt_span(span_secs) if span_secs > 0 else "< 1 min"
+    # Escaped: the literal "<" here previously broke Telegram's HTML parser
+    # ("can't parse entities" 400 -> degraded plain-text fallback with raw
+    # <b> tags visible, which is exactly the bug this line fixes).
+    span_str = html.escape(_fmt_span(span_secs) if span_secs > 0 else "< 1 min", quote=False)
 
     # What they're actually betting (YES/NO token, not BUY/SELL direction)
     is_no = outcome_index == 1
@@ -421,10 +444,14 @@ def _format_convergence(market: str, direction: str, title: str, n_wallets: int,
 
     price_part = f" · avg {avg_price * 100:.0f}¢" if avg_price is not None else ""
 
+    # Escape dynamic content so stray & < > in market titles can't break
+    # Telegram's HTML parser (which would 400 -> degrade to plain text).
+    title_safe = html.escape(title or market[:50], quote=False)
+
     return (
         f"🔥 <b>Smart Wallet Convergence</b>\n"
         f"\n"
-        f"<b>{title or market[:50]}</b>\n"
+        f"<b>{title_safe}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{side_dot} <b>{n_wallets} wallets · {side_token} · within {span_str}</b>\n"
         f"Combined: <b>${total_usd:,.0f}</b>{price_part}\n"
@@ -515,7 +542,7 @@ def check_and_fire(
 
                 send_telegram(_format_alert(rec))
             except Exception:  # noqa: BLE001 - delivery must never break the scan
-                pass
+                print(f"SMART_WALLET_ALERT per-wallet send failed: {sys.exc_info()[1]}", file=sys.stderr)
         fired.append(rec)
     meta_conn.commit()
     shadow_conn.commit()
