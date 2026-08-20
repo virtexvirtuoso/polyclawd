@@ -25,7 +25,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+
+from api.middleware import verify_api_key
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1734,7 +1736,7 @@ async def get_portfolio_history(limit: int = Query(default=50)):
         logger.exception(f"Portfolio history failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/portfolio/process-signals")
+@router.post("/portfolio/process-signals", dependencies=[Depends(verify_api_key)])
 async def process_portfolio_signals():
     """Run signal pipeline and auto-open paper positions for qualifying signals."""
     try:
