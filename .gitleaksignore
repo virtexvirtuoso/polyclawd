@@ -1,0 +1,8 @@
+# gitleaks false-positive allowlist.
+#
+# execution/clob_client.py line 18 documents the bot's public on-chain EOA
+# address (used for tx signing, not a secret) in its module docstring.
+# Already committed at HEAD (737b285) before this entry was added; gitleaks'
+# generic-api-key rule flags it on entropy alone. Allowlisting this specific
+# finding, not weakening the scan for real secrets elsewhere.
+execution/clob_client.py:generic-api-key:18

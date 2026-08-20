@@ -88,7 +88,9 @@ Side strings are plain "BUY" / "SELL".
 
 from __future__ import annotations
 
+import logging
 import os
+import socket
 from typing import TYPE_CHECKING
 
 import requests as _requests
@@ -97,6 +99,8 @@ from execution import live_config
 
 if TYPE_CHECKING:
     from polymarket import SecureClient as _SecureClientType
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +196,7 @@ def _open_order_to_dict(order) -> dict:
     Both snake_case and camelCase keys are populated to be robust against
     executor field-name lookups.
     """
+
     def _to_str(v) -> str:
         if v is None:
             return "0"
@@ -209,6 +214,73 @@ def _open_order_to_dict(order) -> dict:
         "sizeMatched": _to_str(order.size_matched),
         "price": _to_str(order.price),
     }
+
+
+# ---------------------------------------------------------------------------
+# Egress guard — fail closed if orders would leave the VPN
+# ---------------------------------------------------------------------------
+#
+# The production VPS's DEFAULT route egresses in Singapore, a jurisdiction
+# Polymarket blocks. Only traffic whose destination IP falls inside the
+# `proton-ie` WireGuard tunnel's AllowedIPs actually reaches Polymarket from
+# Ireland. Polymarket sits behind Cloudflare and rotates IPs. On 2026-08-19
+# 12:49Z the single live order attempt failed with "Trading restricted in
+# your region ... /CLOB/geoblock" because relayer-v2.polymarket.com (the
+# host the SDK posts ORDERS to) had rotated to an IP outside the tunnel. A
+# 5-minute systemd timer now re-syncs the tunnel, but there is still a
+# window where an order could leak out of Singapore before the timer catches
+# up. This guard closes that window: no order is submitted unless the
+# kernel would actually route it through the tunnel right now.
+
+
+def _egress_src_ip(host: str, port: int = 443) -> str | None:
+    """Source IP the kernel WOULD use for `host`, without sending any packets.
+
+    A connected UDP socket performs route selection locally — no traffic is
+    emitted — so this is a safe, sub-millisecond routing probe.
+    """
+    try:
+        infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_DGRAM)
+        if not infos:
+            return None
+        addr = infos[0][4]
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(addr)
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception as exc:
+        logger.warning("egress probe failed for %s: %s", host, exc)
+        return None
+
+
+def assert_egress_tunneled() -> None:
+    """Fail closed if order traffic would leave via the geo-blocked default route.
+
+    Active only when POLYCLAWD_EGRESS_REQUIRE_SRC is set (e.g. "10.2.0.2", the
+    proton-ie tunnel source address). Unset => guard inactive, so dev machines
+    and tests are unaffected. Raises ClobError when a checked host would egress
+    from an unexpected source address.
+    """
+    required = os.environ.get("POLYCLAWD_EGRESS_REQUIRE_SRC", "").strip()
+    if not required:
+        return
+    hosts = [
+        h.strip()
+        for h in os.environ.get("POLYCLAWD_EGRESS_HOSTS", "relayer-v2.polymarket.com,clob.polymarket.com").split(",")
+        if h.strip()
+    ]
+    for host in hosts:
+        src = _egress_src_ip(host)
+        if src is None:
+            raise ClobError(f"egress guard: could not determine route for {host} — refusing to trade")
+        if src != required:
+            raise ClobError(
+                f"egress guard: {host} would egress from {src}, expected {required} "
+                "(traffic is leaving the VPN — orders would be geo-blocked). "
+                "Check polymarket-wg-sync.timer on the VPS."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +334,8 @@ def post_maker(
         ClobError: If the order is rejected by the exchange (including
                    post_only_would_cross — fee avoidance mechanism).
     """
+    assert_egress_tunneled()
+
     from polymarket import RejectedOrder
 
     c = _get_client()
@@ -273,9 +347,7 @@ def post_maker(
         post_only=True,
     )
     if isinstance(result, RejectedOrder):
-        raise ClobError(
-            f"post_maker rejected ({result.code}): {result.message}"
-        )
+        raise ClobError(f"post_maker rejected ({result.code}): {result.message}")
     return _accepted_to_dict(result)
 
 
@@ -306,6 +378,8 @@ def cross_taker(
     Raises:
         ClobError: For hard rejections (invalid order, insufficient balance, etc.).
     """
+    assert_egress_tunneled()
+
     from polymarket import RejectedOrder
 
     c = _get_client()
@@ -336,9 +410,7 @@ def cross_taker(
                 "making_amount": 0.0,
                 "taking_amount": 0.0,
             }
-        raise ClobError(
-            f"cross_taker rejected ({result.code}): {result.message}"
-        )
+        raise ClobError(f"cross_taker rejected ({result.code}): {result.message}")
 
     d = _accepted_to_dict(result)
     # Expose size_matched for _parse_taker_fill() in live_executor.
@@ -351,15 +423,18 @@ def cross_taker(
     #
     # Both cases: matched = shares, avg_price = USDC/shares (base-unit ratio cancels: both 6-decimal).
     import logging as _logging
+
     _logging.getLogger(__name__).info(
         "cross_taker raw amounts: side=%s making_amount=%s taking_amount=%s",
-        side, d["making_amount"], d["taking_amount"],
+        side,
+        d["making_amount"],
+        d["taking_amount"],
     )
     if side.upper() == "BUY":
-        matched = d["taking_amount"]   # shares received
+        matched = d["taking_amount"]  # shares received
         avg_price = (d["making_amount"] / matched) if matched > 1e-9 else 0.0  # USDC/shares
     else:
-        matched = d["making_amount"]   # shares sold
+        matched = d["making_amount"]  # shares sold
         avg_price = (d["taking_amount"] / matched) if matched > 1e-9 else 0.0  # USDC/shares
 
     d["size_matched"] = str(matched)
