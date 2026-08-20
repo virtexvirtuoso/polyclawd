@@ -693,7 +693,7 @@ def evaluate_stops():
                         send_telegram("\n".join(lines))
                         warnings_fired += 1
                     except Exception:
-                        pass
+                        logger.warning("pre-resolve warning telegram failed (mkt=%s)", pos.get('market_title','')[:40], exc_info=True)
 
         # ── Time-to-resolution gate (2026-04-27) ──
         # Strategies with `defer_to_reeval_above_h > 0` skip the threshold-
