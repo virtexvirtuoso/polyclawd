@@ -1566,7 +1566,14 @@ async function processSignals() {
   msg.textContent = '⚡ Processing signals...';
 
   try {
-    const res = await fetch(`${API}/portfolio/process-signals`, { method: 'POST' }).then(r => r.json());
+    // X-API-Key: this route requires the header (api/middleware.py verify_api_key
+    // has no Header default) even in dev mode where POLYCLAWD_API_KEYS is unset
+    // and any value passes. If POLYCLAWD_API_KEYS is ever set in production,
+    // this placeholder must be replaced with a real provisioned key.
+    const res = await fetch(`${API}/portfolio/process-signals`, {
+      method: 'POST',
+      headers: { 'X-API-Key': 'dashboard' }
+    }).then(r => r.json());
     const opened = res.opened || 0;
     const processed = res.processed || 0;
     const skipped = res.skipped || 0;

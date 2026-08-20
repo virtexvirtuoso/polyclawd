@@ -32,9 +32,15 @@ const api = {
 
   async post(endpoint, data = {}) {
     try {
+      // X-API-Key: routes like /trade and /reset require this header even in
+      // dev mode (api/middleware.py verify_api_key has no Header default, so
+      // a missing header 422s regardless of key configuration; any value
+      // passes when POLYCLAWD_API_KEYS is unset). If POLYCLAWD_API_KEYS is
+      // ever set in production, this placeholder must be replaced with a
+      // real provisioned key.
       const res = await fetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': 'dashboard' },
         body: JSON.stringify(data)
       });
       if (!res.ok) throw new Error(`API Error: ${res.status}`);
