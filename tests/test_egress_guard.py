@@ -101,3 +101,29 @@ def test_cross_taker_blocked_before_vendor_call(monkeypatch):
             tick_size=0.01,
         )
     assert "egress guard" in str(exc_info.value)
+
+
+def test_guard_catches_ipv6_leak(monkeypatch):
+    """Regression: the 2026-08-21 outage. Orders egressed over IPv6 from the
+    raw host address while an AF_INET-only probe saw a healthy tunnel IPv4
+    source. The guard must probe the family the resolver actually prefers and
+    refuse when that source is not the tunnel."""
+    monkeypatch.setenv("POLYCLAWD_EGRESS_REQUIRE_SRC", "10.2.0.2")
+    monkeypatch.setattr(clob_client, "_egress_src_ip", lambda host, port=443: "2a01:4ff:2f0:1405::1")
+    with pytest.raises(clob_client.ClobError) as ei:
+        clob_client.assert_egress_tunneled()
+    assert "2a01:4ff:2f0:1405::1" in str(ei.value)
+
+
+def test_egress_probe_uses_unspec_family(monkeypatch):
+    """The probe must not hardcode AF_INET — that is what made it blind."""
+    seen = {}
+    real_gai = clob_client.socket.getaddrinfo
+
+    def spy(host, port, family=0, socktype=0, *a, **k):
+        seen["family"] = family
+        return real_gai(host, port, clob_client.socket.AF_INET, socktype)
+
+    monkeypatch.setattr(clob_client.socket, "getaddrinfo", spy)
+    clob_client._egress_src_ip("127.0.0.1")
+    assert seen["family"] == clob_client.socket.AF_UNSPEC

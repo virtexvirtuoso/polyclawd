@@ -240,11 +240,15 @@ def _egress_src_ip(host: str, port: int = 443) -> str | None:
     emitted — so this is a safe, sub-millisecond routing probe.
     """
     try:
-        infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_DGRAM)
+        # AF_UNSPEC on purpose: probe the family the resolver ACTUALLY prefers.
+        # An AF_INET-only probe validated IPv4 while the stack egressed over
+        # IPv6 out the default route — every order was geo-blocked 2026-08-20/21
+        # while this guard reported healthy. Test the path traffic will take.
+        infos = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_DGRAM)
         if not infos:
             return None
-        addr = infos[0][4]
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        family, _socktype, _proto, _canon, addr = infos[0]
+        s = socket.socket(family, socket.SOCK_DGRAM)
         try:
             s.connect(addr)
             return s.getsockname()[0]
