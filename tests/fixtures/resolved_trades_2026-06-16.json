@@ -1,0 +1,502 @@
+[
+ {
+  "title": "Ethereum Up or Down on February 14?",
+  "side": "YES",
+  "price": 0.53,
+  "won": 1,
+  "resolved": 1,
+  "created_at": "2026-02-13T19:56:27.077890+00:00",
+  "resolved_at": "2026-04-11T03:26:38.198447+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "Bitcoin Up or Down on February 14?",
+  "side": "YES",
+  "price": 0.59,
+  "won": 1,
+  "resolved": 1,
+  "created_at": "2026-02-13T19:56:27.080247+00:00",
+  "resolved_at": "2026-04-11T03:26:38.708607+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "Will Bitcoin reach $75,000 in February?",
+  "side": "NO",
+  "price": 0.405,
+  "won": 1,
+  "resolved": 1,
+  "created_at": "2026-02-13T19:56:27.082263+00:00",
+  "resolved_at": "2026-04-11T03:26:39.233563+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "Will the price of Bitcoin be above $68,000 on February 22?",
+  "side": "NO",
+  "price": 0.655,
+  "won": 1,
+  "resolved": 1,
+  "created_at": "2026-02-21T20:36:41.067957+00:00",
+  "resolved_at": "2026-04-11T03:26:39.685891+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "Will Anthropic have the best AI model at the end of February 2026?",
+  "side": "NO",
+  "price": 0.9255,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-21T20:36:41.069216+00:00",
+  "resolved_at": "2026-04-11T03:26:40.141366+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "Will the US not strike Iran by February 28, 2026?",
+  "side": "NO",
+  "price": 0.78,
+  "won": 1,
+  "resolved": 1,
+  "created_at": "2026-02-21T20:36:41.070598+00:00",
+  "resolved_at": "2026-04-11T03:26:40.594080+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "Will One Battle After Another win Best Picture at the 98th Academy Awards?",
+  "side": "NO",
+  "price": 0.765,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-21T20:36:41.071879+00:00",
+  "resolved_at": "2026-04-11T03:26:41.055781+00:00",
+  "category": "entertainment"
+ },
+ {
+  "title": "Will the highest temperature in Seoul be 11\u00b0C on February 22?",
+  "side": "NO",
+  "price": 0.8775,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-21T20:36:41.073229+00:00",
+  "resolved_at": "2026-04-11T03:26:41.509496+00:00",
+  "category": "science"
+ },
+ {
+  "title": "Will the price of Bitcoin be above $66,000 on February 23?",
+  "side": "NO",
+  "price": 0.885,
+  "won": 1,
+  "resolved": 1,
+  "created_at": "2026-02-21T20:56:16.669406+00:00",
+  "resolved_at": "2026-04-11T03:26:42.121408+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "LoL: G2 Esports vs Movistar KOI (BO5) - LEC Versus Playoffs",
+  "side": "NO",
+  "price": 0.695,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-23T16:13:02.226374+00:00",
+  "resolved_at": "2026-04-11T03:26:42.643967+00:00",
+  "category": "sports"
+ },
+ {
+  "title": "Will the price of Bitcoin be between $64,000 and $66,000 on February 23?",
+  "side": "NO",
+  "price": 0.91,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-23T16:13:02.227773+00:00",
+  "resolved_at": "2026-04-11T03:26:43.096324+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "LoL: G2 Esports vs Movistar KOI - Game 1 Winner",
+  "side": "NO",
+  "price": 0.755,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-23T16:13:02.229234+00:00",
+  "resolved_at": "2026-04-11T03:26:43.547249+00:00",
+  "category": "sports"
+ },
+ {
+  "title": "Will Sean Penn win Best Supporting Actor at the 98th Academy Awards?",
+  "side": "NO",
+  "price": 0.57,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-23T16:13:02.233011+00:00",
+  "resolved_at": "2026-04-11T03:26:44.002873+00:00",
+  "category": "entertainment"
+ },
+ {
+  "title": "US x Iran meeting by February 28, 2026?",
+  "side": "NO",
+  "price": 0.885,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-23T16:13:02.235829+00:00",
+  "resolved_at": "2026-04-11T03:26:44.467834+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "Will James Talarico be the Democratic nominee for Senate in Texas?",
+  "side": "NO",
+  "price": 0.785,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-23T16:13:02.237154+00:00",
+  "resolved_at": "2026-04-11T03:26:47.333318+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "Will the price of Bitcoin be above $64,000 on February 24?",
+  "side": "NO",
+  "price": 0.605,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-23T16:13:02.238387+00:00",
+  "resolved_at": "2026-04-11T03:26:47.782633+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "LoL: JD Gaming vs Top Esports (BO5) - LPL Playoffs",
+  "side": "NO",
+  "price": 0.595,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-23T18:59:59.020351+00:00",
+  "resolved_at": "2026-04-11T03:26:48.246736+00:00",
+  "category": "sports"
+ },
+ {
+  "title": "Dota 2: Team Liquid vs Team Falcons (BO3) - DreamLeague Stage 2",
+  "side": "NO",
+  "price": 0.645,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-23T18:59:59.022670+00:00",
+  "resolved_at": "2026-04-11T03:26:48.706124+00:00",
+  "category": "sports"
+ },
+ {
+  "title": "Will the price of Bitcoin be above $62,000 on February 24?",
+  "side": "NO",
+  "price": 0.876,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-23T18:59:59.030191+00:00",
+  "resolved_at": "2026-04-11T03:26:49.234817+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "Will the price of Ethereum be above $1,800 on February 24?",
+  "side": "NO",
+  "price": 0.767,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-23T18:59:59.031611+00:00",
+  "resolved_at": "2026-04-11T03:26:49.695152+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "Everton FC vs. Manchester United FC: O/U 1.5",
+  "side": "NO",
+  "price": 0.775,
+  "won": 1,
+  "resolved": 1,
+  "created_at": "2026-02-23T19:30:51.144659+00:00",
+  "resolved_at": "2026-04-11T03:26:50.141904+00:00",
+  "category": "sports"
+ },
+ {
+  "title": "Will Opinion launch a token by March 31, 2026?",
+  "side": "NO",
+  "price": 0.9485,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-24T15:56:12.759199+00:00",
+  "resolved_at": "2026-04-11T03:26:50.839848+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "Opinion FDV above $500M one day after launch?",
+  "side": "NO",
+  "price": 0.481,
+  "won": 1,
+  "resolved": 1,
+  "created_at": "2026-02-24T15:56:12.760805+00:00",
+  "resolved_at": "2026-04-11T03:26:51.304598+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "Opinion FDV above $250M one day after launch?",
+  "side": "NO",
+  "price": 0.835,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-24T15:56:12.762400+00:00",
+  "resolved_at": "2026-04-11T03:26:51.765690+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "US strikes Iran by March 31, 2026?",
+  "side": "NO",
+  "price": 0.605,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-24T15:56:12.765540+00:00",
+  "resolved_at": "2026-04-11T03:26:52.520088+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "US strikes Iran by June 30, 2026?",
+  "side": "NO",
+  "price": 0.69,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-24T15:56:12.767183+00:00",
+  "resolved_at": "2026-04-11T03:26:52.982855+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "US strikes Iran by December 31, 2026?",
+  "side": "NO",
+  "price": 0.735,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-24T15:56:12.770032+00:00",
+  "resolved_at": "2026-04-11T03:26:56.164132+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "Will Teyana Taylor win Best Supporting Actress at the 98th Academy Awards?",
+  "side": "NO",
+  "price": 0.525,
+  "won": 1,
+  "resolved": 1,
+  "created_at": "2026-02-27T15:48:37.024627+00:00",
+  "resolved_at": "2026-04-11T03:26:57.128738+00:00",
+  "category": "entertainment"
+ },
+ {
+  "title": "Will Anthropic have the best AI model at the end of March 2026?",
+  "side": "NO",
+  "price": 0.5565,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-27T15:48:37.029027+00:00",
+  "resolved_at": "2026-04-11T03:26:57.649613+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "Will Bitcoin reach $75,000 by December 31, 2026?",
+  "side": "NO",
+  "price": 0.81,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-27T15:48:37.032406+00:00",
+  "resolved_at": "2026-04-11T03:26:58.358544+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "US x Iran ceasefire by December 31?",
+  "side": "NO",
+  "price": 0.755,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-04-07T16:24:14.136197+00:00",
+  "resolved_at": "2026-04-11T03:26:59.421791+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "US x Iran ceasefire by June 30?",
+  "side": "NO",
+  "price": 0.59,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-04-07T16:24:14.138113+00:00",
+  "resolved_at": "2026-04-11T03:26:59.880100+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "US x Iran ceasefire by May 31?",
+  "side": "NO",
+  "price": 0.495,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-04-07T16:24:14.140110+00:00",
+  "resolved_at": "2026-04-11T03:27:00.334550+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "Kansas City Royals vs. Cleveland Guardians",
+  "side": "NO",
+  "price": 0.595,
+  "won": 1,
+  "resolved": 1,
+  "created_at": "2026-04-07T18:30:03.092428+00:00",
+  "resolved_at": "2026-04-11T03:27:03.642659+00:00",
+  "category": "sports"
+ },
+ {
+  "title": "Israel x Hezbollah ceasefire by April 30, 2026?",
+  "side": "NO",
+  "price": 0.4715,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-04-08T14:40:40.653489+00:00",
+  "resolved_at": "2026-04-17T04:00:41.793955+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "Iran x Israel/US conflict ends by April 30?",
+  "side": "NO",
+  "price": 0.595,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-04-08T14:40:40.645934+00:00",
+  "resolved_at": "2026-04-22T04:00:18.167088+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "Will Anthropic have the best AI model at the end of April 2026?",
+  "side": "NO",
+  "price": 0.92,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-04-07T16:24:14.134033+00:00",
+  "resolved_at": "2026-05-01T04:00:22.825022+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "Trump announces end of military operations against Iran by April 30th?",
+  "side": "NO",
+  "price": 0.485,
+  "won": 1,
+  "resolved": 1,
+  "created_at": "2026-04-08T14:40:40.648433+00:00",
+  "resolved_at": "2026-05-02T04:00:25.457956+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "Will Ethereum reach $2,400 in April?",
+  "side": "NO",
+  "price": 0.55,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-04-08T14:40:40.663217+00:00",
+  "resolved_at": "2026-05-02T04:00:26.692247+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "US x Iran meeting by April 30, 2026?",
+  "side": "NO",
+  "price": 0.845,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-04-08T14:40:40.665105+00:00",
+  "resolved_at": "2026-05-03T04:00:24.209925+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "Iran x Israel/US conflict ends by December 31?",
+  "side": "NO",
+  "price": 0.925,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-04-08T15:53:15.321049+00:00",
+  "resolved_at": "2026-05-03T04:00:24.864364+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "Iran x Israel/US conflict ends by June 30?",
+  "side": "NO",
+  "price": 0.845,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-04-08T15:53:15.323350+00:00",
+  "resolved_at": "2026-05-04T04:00:18.322900+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "Will Bitcoin reach $80,000 by December 31, 2026?",
+  "side": "NO",
+  "price": 0.655,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-04-07T16:24:14.131617+00:00",
+  "resolved_at": "2026-05-05T04:00:15.391162+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "Will Barcelona win the 2025\u201326 La Liga?",
+  "side": "NO",
+  "price": 0.935,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-04-08T14:40:40.657890+00:00",
+  "resolved_at": "2026-05-11T04:00:43.131852+00:00",
+  "category": "sports"
+ },
+ {
+  "title": "Will Shai Gilgeous-Alexander win the 2025\u20132026 NBA MVP?",
+  "side": "NO",
+  "price": 0.944,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-02-24T15:56:12.757292+00:00",
+  "resolved_at": "2026-05-19T04:00:15.532144+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "Will Chong Won-oh win the 2026 Seoul Mayoral Election",
+  "side": "NO",
+  "price": 0.77,
+  "won": 1,
+  "resolved": 1,
+  "created_at": "2026-04-07T16:24:14.142166+00:00",
+  "resolved_at": "2026-06-05T04:00:06.437032+00:00",
+  "category": "sports"
+ },
+ {
+  "title": "Will Bitcoin reach $75,000 in April?",
+  "side": "NO",
+  "price": 0.655,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-04-13T19:14:14.812309+00:00",
+  "resolved_at": "2026-06-06T04:00:15.558953+00:00",
+  "category": "tech"
+ },
+ {
+  "title": "Israel x Hezbollah ceasefire by June 30, 2026?",
+  "side": "NO",
+  "price": 0.5175,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-04-13T19:14:14.816592+00:00",
+  "resolved_at": "2026-06-06T04:01:39.213551+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "Trump announces end of military operations against Iran by May 31st?",
+  "side": "NO",
+  "price": 0.66,
+  "won": 0,
+  "resolved": 1,
+  "created_at": "2026-04-13T19:14:14.819514+00:00",
+  "resolved_at": "2026-06-06T04:02:50.907988+00:00",
+  "category": "dynamic"
+ },
+ {
+  "title": "Will the Oklahoma City Thunder win the NBA Western Conference Finals?",
+  "side": "NO",
+  "price": 0.575,
+  "won": 1,
+  "resolved": 1,
+  "created_at": "2026-05-29T21:12:08.256063+00:00",
+  "resolved_at": "2026-06-07T04:00:13.413233+00:00",
+  "category": "sports"
+ }
+]
