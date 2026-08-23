@@ -1683,6 +1683,7 @@ async def get_portfolio_status():
             from pathlib import Path
             db_path = Path(__file__).resolve().parent.parent / "storage" / "shadow_trades.db"
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+            conn.execute("PRAGMA busy_timeout=8000")
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM paper_positions WHERE status='open'"
@@ -1847,6 +1848,7 @@ async def get_portfolio_equity_curve():
         import sqlite3
         db_path = STORAGE_DIR / "shadow_trades.db"
         conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA busy_timeout=8000")
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT timestamp, bankroll FROM paper_portfolio_state ORDER BY timestamp ASC"
@@ -2100,6 +2102,7 @@ async def weather_dashboard():
 
         def _build():
             conn = sqlite3.connect(_DB_PATH)
+            conn.execute("PRAGMA busy_timeout=8000")
             conn.row_factory = sqlite3.Row
             try:
                 # ── paper_positions: every weather row, ordered by close ──
@@ -2322,6 +2325,7 @@ async def kalshi_fade_dashboard():
 
         def _build():
             conn = sqlite3.connect(str(_DB_PATH), timeout=10)
+            conn.execute("PRAGMA busy_timeout=8000")
             conn.row_factory = sqlite3.Row
             try:
                 rows = conn.execute(
@@ -2507,6 +2511,7 @@ async def get_wr_buckets():
     try:
         import sqlite3
         db = sqlite3.connect(str(STORAGE_DIR / "shadow_trades.db"))
+        db.execute("PRAGMA busy_timeout=8000")
         db.row_factory = sqlite3.Row
 
         from mispriced_category_signal import classify_archetype
@@ -2751,6 +2756,7 @@ def _match_outcomes(alerts: list) -> list:
 
     try:
         conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA busy_timeout=8000")
         conn.row_factory = sqlite3.Row
 
         # Get all resolved positions
@@ -3983,6 +3989,7 @@ async def get_cross_sport_calibration():
 
     def _query():
         conn = sqlite3.connect(str(DB), timeout=10)
+        conn.execute("PRAGMA busy_timeout=8000")
         conn.row_factory = sqlite3.Row
 
         result = {"sports": {}, "scan_log": {}, "ce5_reconciliation": {}}
@@ -4161,6 +4168,7 @@ async def get_price_movement(sport: str = "baseball_mlb", hours: float = 24.0):
         try:
             from odds.price_movement import DB_PATH
             conn = sqlite3.connect(str(DB_PATH), timeout=10)
+            conn.execute("PRAGMA busy_timeout=8000")
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT COUNT(*) as n FROM price_movement_log WHERE sport=?",
@@ -4275,6 +4283,7 @@ async def weather_forecast_log():
                           "storage", "shadow_trades.db")
         try:
             conn = sqlite3.connect(db)
+            conn.execute("PRAGMA busy_timeout=8000")
             conn.row_factory = sqlite3.Row
 
             total = conn.execute("SELECT COUNT(*) FROM weather_forecast_log").fetchone()[0]

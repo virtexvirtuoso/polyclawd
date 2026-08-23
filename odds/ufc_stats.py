@@ -36,7 +36,8 @@ def _canonical(name: str) -> str:
 
 def _init_cache():
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(CACHE_DB))
+    con = sqlite3.connect(str(CACHE_DB), timeout=15)
+    con.execute("PRAGMA busy_timeout=8000")
     con.execute("""CREATE TABLE IF NOT EXISTS fighter_records (
         fighter_canonical TEXT PRIMARY KEY,
         fighter_display TEXT,
@@ -164,7 +165,8 @@ def fetch_event_fighters(force: bool = False) -> list[dict]:
 def lookup_fighter(fighter_canonical: str) -> Optional[dict]:
     """Look up a fighter's stats from cache."""
     try:
-        con = sqlite3.connect(str(CACHE_DB))
+        con = sqlite3.connect(str(CACHE_DB), timeout=15)
+        con.execute("PRAGMA busy_timeout=8000")
         row = con.execute(
             "SELECT fighter_canonical, fighter_display, wins, losses, draws, "
             "win_pct, ko_wins, sub_wins, dec_wins, finish_rate, team "

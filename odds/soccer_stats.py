@@ -52,7 +52,8 @@ def _canonical(name: str) -> str:
 
 def _init_cache():
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(CACHE_DB))
+    con = sqlite3.connect(str(CACHE_DB), timeout=15)
+    con.execute("PRAGMA busy_timeout=8000")
     con.execute("""CREATE TABLE IF NOT EXISTS player_goals (
         player_canonical TEXT,
         player_display TEXT,
@@ -208,7 +209,8 @@ def fetch_scorers(sport_key: str, force: bool = False) -> list[dict]:
 def lookup_player(player_canonical: str, sport_key: str) -> Optional[dict]:
     """Look up a single player's stats from cache (no fetch)."""
     try:
-        con = sqlite3.connect(str(CACHE_DB))
+        con = sqlite3.connect(str(CACHE_DB), timeout=15)
+        con.execute("PRAGMA busy_timeout=8000")
         row = con.execute(
             "SELECT player_canonical, player_display, goals, assists, matches, goals_per_match, team_name "
             "FROM player_goals WHERE player_canonical=? AND sport_key=?",

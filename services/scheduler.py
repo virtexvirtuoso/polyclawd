@@ -369,6 +369,34 @@ def task_stop_evaluator_urgent():
     evaluate_stops_urgent()
 
 
+def _milestone_already_sent(strategy: str) -> bool:
+    """Durable milestone guard (kv row), mirroring task_stop_silence_alarm.
+    Backfilled as ALREADY-SENT for any strategy present in the historical
+    alerts ledger, so the 2026-08-21 repair cannot replay old milestones."""
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.execute("CREATE TABLE IF NOT EXISTS scheduler_kv (k TEXT PRIMARY KEY, v TEXT)")
+        row = conn.execute("SELECT v FROM scheduler_kv WHERE k=?",
+                           (f"milestone_sent:{strategy}",)).fetchone()
+        conn.close()
+        return row is not None
+    except Exception as exc:  # noqa: BLE001 — a guard failure must not spam
+        logger.warning("milestone guard read failed (%s); suppressing alert", exc)
+        return True  # fail CLOSED: never alert when the guard is unreadable
+
+
+def _mark_milestone_sent(strategy: str) -> None:
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.execute("CREATE TABLE IF NOT EXISTS scheduler_kv (k TEXT PRIMARY KEY, v TEXT)")
+        conn.execute("INSERT OR REPLACE INTO scheduler_kv (k, v) VALUES (?, ?)",
+                     (f"milestone_sent:{strategy}", str(int(time.time()))))
+        conn.commit()
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("milestone guard write failed (%s)", exc)
+
+
 STOP_SILENCE_THRESHOLD_SEC = 30 * 60   # heartbeat older than this = evaluator silent
 STOP_SILENCE_REFIRE_SEC = 6 * 3600      # alarm re-fires at most once per 6h
 
@@ -699,22 +727,37 @@ def task_calibration_check():
                 strategy, auto_card["brier"], _status(auto_card["brier"]),
                 auto_card["win_rate"] * 100, auto_card["n"],
             )
+            # Milestone alert — fires the first time an auto-scorecard EXISTS.
+            # Moved here 2026-08-21 (/qa audit). It previously sat in the `else`
+            # (below-threshold) branch and referenced `records`, `n`, `wr`,
+            # `brier` — none bound in that scope — so it raised NameError on
+            # every tick and was swallowed by the except. This alert has never
+            # fired. The else-branch was also wrong by construction: auto_card
+            # is None there, i.e. the milestone had NOT been reached.
+            # Durable flag, NOT _state: process memory is wiped on every restart
+            # (14 restarts in the last 7 days), and the ledger shows 89 prior
+            # milestone alerts including 5 for weather_ensemble inside 90 min.
+            # Gate on the FIRST CROSSING to >=20, not on auto_card merely
+            # existing — otherwise a mature n=197 strategy re-announces
+            # "First 20 Resolutions!" after every restart.
+            _n = auto_card["n"]
+            if _n >= 20 and not _milestone_already_sent(strategy):
+                try:
+                    from signals.discord_alerts import alert_scorecard_milestone
+                    _wr = auto_card["win_rate"]
+                    alert_scorecard_milestone(
+                        strategy, _n, round(_wr * _n), _wr, auto_card["brier"]
+                    )
+                    _mark_milestone_sent(strategy)
+                except Exception:
+                    logger.warning("alert_scorecard_milestone failed (strategy=%s)",
+                                   strategy, exc_info=True)
         else:
             # Look up raw count even when below threshold so we can see growth
             from signals.resolution_logger import load_auto_resolutions
             n_auto = len(load_auto_resolutions(strategy))
             logger.info("CALIBRATION %s model: %d/20 (collecting auto-resolved)",
                         strategy, n_auto)
-
-            # Milestone alert (first time hitting 20)
-            if not _state["milestone_sent"].get(strategy):
-                try:
-                    from signals.discord_alerts import alert_scorecard_milestone
-                    wins = sum(1 for r in records if r.get("won"))
-                    alert_scorecard_milestone(strategy, n, wins, wr, brier)
-                    _state["milestone_sent"][strategy] = True
-                except Exception:
-                    logger.warning("alert_scorecard_milestone failed (strategy=%s)", strategy, exc_info=True)
 
 
 def task_signal_scan():
@@ -1093,13 +1136,13 @@ def task_smart_wallet_resolve():
     import sqlite3
     from scripts.smart_wallet_alert import (SHADOW_DB, init_shadows,
                                             resolve_shadows,
-                                            settle_via_wallet_positions)
+                                            settle_via_market_resolution)
     conn = sqlite3.connect(str(SHADOW_DB))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000")
     try:
         init_shadows(conn)
-        n = resolve_shadows(conn, settle_via_wallet_positions)
+        n = resolve_shadows(conn, settle_via_market_resolution)
         if n:
             logger.info("Smart-wallet shadows resolved: %d", n)
     finally:
@@ -1556,7 +1599,8 @@ def task_nfl_resolve():
 
 def task_nfl_edge_scan():
     """NFL edge scan: consensus devig vs Polymarket. Self-gating: skips if
-    no games within 7-day window (off-season = 0 credits)."""
+    no games within the 42-day window (off-season = 0 credits). Scans both
+    regular season and preseason sport keys."""
     import asyncio
     from odds.nfl_edge import find_nfl_edges, CFG
     from odds.sports_edge_common import summarize
@@ -1564,6 +1608,14 @@ def task_nfl_edge_scan():
     if edges:
         summarize(edges, CFG)
         logger.info(f"NFL edge scan: {len(edges)} edges")
+        # Fire Telegram alerts for tradeable edges above threshold (dedup'd)
+        try:
+            from signals.sport_edge_alerts import run_sport_edge_alerts
+            res = run_sport_edge_alerts(edges, sport="NFL")
+            if res.get("alerted"):
+                logger.info(f"NFL edge alerts: {res['alerted']} fired")
+        except Exception as e:
+            logger.debug(f"NFL edge alert step failed: {e}")
     else:
         logger.debug("NFL edge scan: no edges (off-season or no games)")
 
@@ -1612,9 +1664,10 @@ def task_betfair_scan():
         msg = "\n".join(lines)
         logger.info(msg)
         try:
-            send_telegram_alert(msg)
+            from scripts.alert_formatter import send_telegram
+            send_telegram(msg)
         except Exception:
-            logger.warning("send_telegram_alert (betfair) failed", exc_info=True)
+            logger.warning("send_telegram (betfair) failed", exc_info=True)
     logger.info(f"Betfair scan: {len(edges)} edges, {len(to_alert)} alerted")
 
 
@@ -2177,11 +2230,66 @@ async def tick_scheduled():
         await asyncio.sleep(600)
 
 
+def _assert_live_cap_fits_min_action() -> None:
+    """Startup assertion prescribed by the fleet ledger (2026-08-19):
+
+        "A risk gate that rejects 100% of actions is indistinguishable from
+         'no signal' — add a startup assertion effective_cap >= min_action."
+
+    The failure is silent by construction: the governor logs rejections at
+    INFO and the caller `continue`s, so a live system that can no longer fund
+    its own smallest legal trade looks exactly like a quiet market. This makes
+    that state LOUD at every start.
+    """
+    try:
+        import sqlite3 as _sq
+        from execution import live_config as _lc
+
+        allow = sorted(_lc.live_strategy_allowlist())
+        if not allow:
+            logger.warning("LIVE GATE: allowlist is EMPTY — no strategy may trade real money")
+            return
+        con = _sq.connect(str(DB_PATH))
+        row = con.execute(
+            "SELECT bankroll FROM live_portfolio_state ORDER BY id DESC LIMIT 1").fetchone()
+        con.close()
+        if not row:
+            return
+        bankroll = float(row[0] or 0.0)
+        eff = min(_lc.per_trade_cap(), bankroll * _lc.per_trade_frac())
+        sizes = [_lc.tiered_size_usd(e) for e in (0.03, 0.05, 0.08, 0.15)]
+        sizes = [x for x in sizes if x and x > 0]
+        min_action = min(sizes) if sizes else 0.0
+        if min_action and eff < min_action:
+            logger.error(
+                "LIVE GATE INERT: effective per-trade cap $%.2f < smallest legal action $%.2f "
+                "(bankroll $%.2f x frac %.2f, allowlist=%s). Every intent will be rejected and "
+                "the rejections are logged at INFO — this is indistinguishable from 'no signal'. "
+                "Raise POLYCLAWD_PER_TRADE_FRAC, lower the tier base, or empty the allowlist "
+                "so the halt is explicit.",
+                eff, min_action, bankroll, _lc.per_trade_frac(), allow,
+            )
+        else:
+            logger.info("LIVE GATE OK: cap $%.2f >= min action $%.2f (allowlist=%s)",
+                        eff, min_action, allow)
+    except Exception as exc:  # noqa: BLE001 — never let the assertion break startup
+        logger.warning("live-cap assertion failed to evaluate: %s", exc)
+
+
+async def tick_nfl_fast_move():
+    """NFL fast-move monitor: poll US-sports backend every ~30s, detect
+    moneyline mid moves >= 5pp, fire Telegram alerts. Own loop so it never
+    delays stop evaluation in tick_5min. Self-gates when no upcoming games."""
+    from signals.nfl_fast_move_monitor import run_fast_move_monitor
+    await run_fast_move_monitor()
+
+
 async def main():
     logger.info("=" * 60)
     logger.info("Polyclawd Scheduler starting")
     logger.info("Project: %s", PROJECT_ROOT)
     logger.info("DB: %s", DB_PATH)
+    _assert_live_cap_fits_min_action()
     logger.info("=" * 60)
 
     # Stagger starts to avoid thundering herd
@@ -2197,6 +2305,7 @@ async def main():
         asyncio.create_task(_delayed_start(60, tick_6h)),
         asyncio.create_task(_delayed_start(30, tick_scheduled)),
         asyncio.create_task(_delayed_start(8, tick_live_burst)),
+        asyncio.create_task(_delayed_start(12, tick_nfl_fast_move)),
     ]
 
     await asyncio.gather(*tasks)
