@@ -61,3 +61,9 @@ docs/screenshots/
 
 # MCP tool-discovery cache (machine state, not source)
 mcp/.tool_cache.json
+
+# Tool cache (fastmcp variant)
+mcp/.tool_cache_fastmcp.json
+
+# Deploy backup snapshots
+docs/deploy-snapshots/
