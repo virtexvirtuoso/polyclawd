@@ -534,16 +534,6 @@ def price_at(market: Dict, idx: int) -> float:
     except (ValueError, TypeError, IndexError):
         return 0.0
 
-def price_at(market: Dict, idx: int) -> float:
-    """outcomePrice at a specific outcome index. 0.0 on parse failure / OOB."""
-    raw = market.get("outcomePrices", "[]")
-    arr = json.loads(raw) if isinstance(raw, str) else raw
-    try:
-        return float(arr[idx])
-    except (ValueError, TypeError, IndexError):
-        return 0.0
-
-
 def is_stale_event(commence_time: str, min_minutes: int = 30) -> bool:
     """True if the event starts in <min_minutes or has already started / is unparseable."""
     if not commence_time:
@@ -733,21 +723,6 @@ def _strength_tag(edge: Edge) -> str:
     if edge.situational_edge_pct is not None:
         parts.append(f"SITU:{edge.situational_edge_pct * 100:+.1f}%")
     return " [" + " ".join(parts) + "]" if parts else ""
-
-def _strength_tag(edge: Edge) -> str:
-    """Append NFL team-strength + situational overlay to shadow-log reasoning
-    for calibration. No-op for non-NFL edges (fields are None)."""
-    if edge.strength_agree is None and edge.situational_edge_pct is None:
-        return ""
-    parts = []
-    if edge.strength_agree is not None:
-        parts.append(f"STR:{'agree' if edge.strength_agree else 'conflict'}"
-                     f"(elo {edge.elo_home:.0f}/{edge.elo_away:.0f}, "
-                     f"conf {edge.strength_confidence:.2f})")
-    if edge.situational_edge_pct is not None:
-        parts.append(f"SITU:{edge.situational_edge_pct * 100:+.1f}%")
-    return " [" + " ".join(parts) + "]" if parts else ""
-
 
 def log_shadow(edge: Edge, cfg: SportConfig, days_to_close: float = 7.0) -> bool:
     """Log to the shadow tracker ONLY when the edge is tradeable AND +EV after fees,

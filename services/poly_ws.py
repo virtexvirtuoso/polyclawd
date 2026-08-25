@@ -19,6 +19,7 @@ import os
 import random
 import time
 from collections import defaultdict, deque
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 
 try:
     import websockets
@@ -70,8 +71,7 @@ SHED_INTERVAL = 600      # s — min gap between clean reconnects to drop resolv
 def _fetch_universe_sync(limit=MAX_TOKENS):
     """Top markets by 24h volume (where live books matter most). Sync -> call via to_thread."""
     import urllib.request
-    url = ("https://gamma-api.polymarket.com/markets?active=true&closed=false"
-           f"&order=volume24hr&ascending=false&limit={limit}")
+    url = gamma_url(f"/markets?active=true&closed=false&order=volume24hr&ascending=false&limit={limit}")
     req = urllib.request.Request(url, headers={"User-Agent": "polyclawd-ws/1"})
     with urllib.request.urlopen(req, timeout=15) as resp:
         ms = json.loads(resp.read().decode())
@@ -98,7 +98,7 @@ def _fetch_sport_tags_sync(tags):
     out = []
     for tag in tags:
         try:
-            url = f"https://gamma-api.polymarket.com/events?closed=false&tag_slug={tag}&limit=100"
+            url = gamma_url(f"/events?closed=false&tag_slug={tag}&limit=100")
             req = urllib.request.Request(url, headers={"User-Agent": "polyclawd-ws/1"})
             with urllib.request.urlopen(req, timeout=15) as resp:
                 events = json.loads(resp.read().decode())
@@ -131,8 +131,7 @@ def _fetch_options_tokens_sync(cap=OPTIONS_TOKEN_CAP):
     import urllib.request
     out = []
     try:
-        url = ("https://gamma-api.polymarket.com/public-search"
-               "?q=close%20above&limit_per_type=50&events_status=active")
+        url = gamma_url("/public-search?q=close%20above&limit_per_type=50&events_status=active")
         req = urllib.request.Request(url, headers={"User-Agent": "polyclawd-ws/1"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())

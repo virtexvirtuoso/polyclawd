@@ -372,13 +372,6 @@ def get_espn_games() -> List[Dict]:
 # shadow trade id=136, 2026-06-08). Never treat these as MLB.
 NON_MLB_LEAGUES = ("kbo", "npb", "cpbl", "lidom", "lmb", "kbl", "ncaa")
 
-
-# Non-MLB league prefixes — markets from these leagues can collide with MLB
-# team aliases (e.g. "KBO: LG Twins vs. Kia Tigers" matched Detroit Tigers,
-# shadow trade id=136, 2026-06-08). Never treat these as MLB.
-NON_MLB_LEAGUES = ("kbo", "npb", "cpbl", "lidom", "lmb", "kbl", "ncaa")
-
-
 def _team_in_title(title: str) -> Optional[str]:
     """Extract MLB team keyword from market title. Returns lowercase alias or None."""
     t = title.lower()
