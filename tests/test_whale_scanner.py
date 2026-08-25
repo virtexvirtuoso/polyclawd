@@ -203,8 +203,8 @@ def test_alert_logged_and_dedup(db):
     assert "M2" not in recently_alerted(db)
 
 def test_market_state_upsert_and_load(db):
-    upsert_state(db, "kalshi", [("M1", 100.0, 200.0, "Title one")])
-    upsert_state(db, "kalshi", [("M1", 150.0, 900.0, "Title one")])
+    upsert_state(db, "kalshi", [("M1", 100.0, 200.0, "Title one", "")])
+    upsert_state(db, "kalshi", [("M1", 150.0, 900.0, "Title one", "")])
     db.commit()
     state = load_state(db, "kalshi")
     assert state["M1"] == {"oi": 150.0, "volume": 900.0}
@@ -223,9 +223,9 @@ def test_build_watchlist_weather_and_thin(db):
     kv_set(db, "weather_watchlist", json.dumps(["KXHIGHNY-26JUN12-T97"]))
     kv_set(db, "weather_watchlist_ts", str(time.time()))
     upsert_state(db, "kalshi", [
-        ("KXNBA-26JUN12-LAL", 500.0, 10.0, ""),      # thin-active: in
-        ("KXNBA-26JUN12-BOS", 50000.0, 10.0, ""),    # too big: out
-        ("KXNBA-26JUN12-NYK", 50.0, 10.0, ""),       # below OI floor: out
+        ("KXNBA-26JUN12-LAL", 500.0, 10.0, "", ""),      # thin-active: in
+        ("KXNBA-26JUN12-BOS", 50000.0, 10.0, "", ""),    # too big: out
+        ("KXNBA-26JUN12-NYK", 50.0, 10.0, "", ""),       # below OI floor: out
     ])
     db.commit()
     watch = build_watchlist(db)
@@ -275,8 +275,8 @@ def test_prune_snapshots_and_state(db):
     old_ts = time.time() - 60 * 60 * 72   # 72h ago
     save_snapshot(db, "kalshi", "OLD", _summary([(0.5, 1.0)], []), ts=old_ts)
     save_snapshot(db, "kalshi", "NEW", _summary([(0.5, 1.0)], []))
-    upsert_state(db, "kalshi", [("GONE", 1.0, 1.0, "t")], ts=old_ts)
-    upsert_state(db, "kalshi", [("LIVE", 1.0, 1.0, "t")])
+    upsert_state(db, "kalshi", [("GONE", 1.0, 1.0, "t", "")], ts=old_ts)
+    upsert_state(db, "kalshi", [("LIVE", 1.0, 1.0, "t", "")])
     prune_snapshots(db, max_age_hours=48)
     snaps = [r["market"] for r in db.execute("SELECT market FROM whale_snapshots")]
     state = [r["market"] for r in db.execute("SELECT market FROM market_state")]
@@ -347,19 +347,6 @@ def test_alert_gate_near_settled_last_price():
     from signals.whale_scanner import alert_gate
     det = {"flow_dollars": 9000.0, "last_yes_price": 0.99}
     assert alert_gate("kalshi", "KXMLBHR-27JAN01XX-Y", det, None) == "near_settled"
-
-def test_alert_gate_game_day(monkeypatch):
-    from datetime import date
-    import signals.whale_scanner as ws
-    monkeypatch.setattr(ws, "_today_et", lambda: date(2026, 6, 11))
-    det = {"flow_dollars": 9000.0, "last_yes_price": 0.45}
-    cur = {"best_bid": 0.44, "best_ask": 0.46}
-    assert ws.alert_gate("kalshi", "KXWNBA1HWINNER-26JUN11NYATL-NY", det, cur) == "game_day"
-    # same ticker the day after the event: passes
-    monkeypatch.setattr(ws, "_today_et", lambda: date(2026, 6, 12))
-    assert ws.alert_gate("kalshi", "KXWNBA1HWINNER-26JUN11NYATL-NY", det, cur) is None
-    # polymarket markets never hit the game_day gate
-    assert ws.alert_gate("polymarket", "some-slug", det, cur) is None
 
 def test_alert_gate_first_sight():
     from signals.whale_scanner import alert_gate

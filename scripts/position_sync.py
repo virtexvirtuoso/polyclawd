@@ -691,9 +691,6 @@ def run() -> dict:
             # Update governor in-memory + persist
             gov_conn = live_db.connect()
             gov = RiskGovernor(gov_conn, mode=live_config.mode())
-            gov.set_bankroll(true_bankroll)
-            # Also sync deployed_usd so governor cap math reflects manual positions
-            gov.set_deployed(deployed)
 
             # ── Rule 2 (DAILY_HALT) inputs ──────────────────────────────────
             # Neither field had ANY production caller before this block:
@@ -711,9 +708,6 @@ def run() -> dict:
             daily_loss = realized_loss_today(conn)
             unrealized_loss = unrealized_loss_from_snapshot(conn)
 
-            gov.set_realized_pnl(ledger_realized)
-            gov.set_unrealized_loss(unrealized_loss)
-
             # Day boundary: daily_loss is DERIVED from positions closed since
             # UTC midnight, so it self-zeroes overnight. reset_day() has no
             # other caller anywhere in the tree, so without this the FIRST trip
@@ -724,7 +718,11 @@ def run() -> dict:
                             "(daily_loss $%.2f + unrealized $%.2f < limit $%.2f)",
                             daily_loss, unrealized_loss, live_config.daily_loss_halt())
                 gov.reset_day()
-            gov.set_daily_loss(daily_loss)
+
+            # ONE write transaction for the whole sync (was four).
+            gov.apply_sync(bankroll=true_bankroll, deployed_usd=deployed,
+                           realized_pnl=ledger_realized, daily_loss=daily_loss,
+                           unrealized_loss=unrealized_loss)
 
             gov_conn.close()
             logger.info("position_sync: bankroll synced → $%.2f (liquid $%.2f + deployed $%.2f) | "

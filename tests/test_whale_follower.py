@@ -69,48 +69,48 @@ GOOD_KALSHI = {
     "title": "Will it rain?",
 }
 
-def test_info_gate_dollar_floor():
+def test_info_gate_dollar_floor(meta):
     p = {**GOOD_KALSHI, "flow_dollars": 100.0}
-    score, comps = info_score("kalshi", "KXHIGHTDC-26APR10-B55", "vol_spike_500", p)
+    score, comps = info_score(meta, "kalshi", "KXHIGHTDC-26APR10-B55", "vol_spike_500", p)
     assert score == 0.0 and comps["gate_fail"] == "G1_dollar_floor"
 
-def test_info_gate_near_settled():
+def test_info_gate_near_settled(meta):
     p = {**GOOD_KALSHI, "best_bid": 0.97, "best_ask": 0.99, "last_yes_price": 0.98}
-    score, comps = info_score("kalshi", "KXHIGHTDC-26APR10-B55", "vol_spike_500", p)
+    score, comps = info_score(meta, "kalshi", "KXHIGHTDC-26APR10-B55", "vol_spike_500", p)
     assert score == 0.0 and comps["gate_fail"] == "G2_near_settled"
 
-def test_info_gate_first_sight():
-    score, comps = info_score("kalshi", "KXHIGHTDC-26APR10-B55",
+def test_info_gate_first_sight(meta):
+    score, comps = info_score(meta, "kalshi", "KXHIGHTDC-26APR10-B55",
                               "vol_spike_500,first_sight", GOOD_KALSHI)
     assert score == 0.0 and comps["gate_fail"] == "G5_first_sight"
 
-def test_info_gate_unexecutable_spread():
+def test_info_gate_unexecutable_spread(meta):
     p = {**GOOD_KALSHI, "best_bid": 0.30, "best_ask": 0.46}
-    score, comps = info_score("kalshi", "KXHIGHTDC-26APR10-B55", "vol_spike_500", p)
+    score, comps = info_score(meta, "kalshi", "KXHIGHTDC-26APR10-B55", "vol_spike_500", p)
     assert score == 0.0 and comps["gate_fail"] == "G4_unexecutable"
 
-def test_info_gate_game_day_sports(monkeypatch):
+def test_info_gate_game_day_sports(meta, monkeypatch):
     from datetime import date
     import signals.whale_follower as wf
     monkeypatch.setattr(wf, "_today_et", lambda: date(2026, 6, 11))
-    score, comps = info_score("kalshi", "KXMLBHR-26JUN11XX-Y",
+    score, comps = info_score(meta, "kalshi", "KXMLBHR-26JUN11XX-Y",
                               "vol_spike_500", GOOD_KALSHI)
     assert score == 0.0 and comps["gate_fail"] == "G3_reactive_sports"
 
-def test_info_passes_thin_market_whale():
+def test_info_passes_thin_market_whale(meta):
     """$25k one-sided sweep vs ~$91k standing depth, weather: high INFO."""
-    score, comps = info_score("kalshi", "KXHIGHTDC-26APR10-B55",
+    score, comps = info_score(meta, "kalshi", "KXHIGHTDC-26APR10-B55",
                               "vol_spike_5000,taker_YES_96%,level_jump_bid_2000",
                               GOOD_KALSHI)
     assert score >= INFO_THRESHOLD
     assert comps["archetype"] == "weather"
     assert comps["f_size"] >= 0.8   # $5k vs ~$24k effective liquidity
 
-def test_info_big_flow_in_huge_market_scores_low():
+def test_info_big_flow_in_huge_market_scores_low(meta):
     """$96k into a 2.2M-depth market: f_size collapses, INFO below threshold."""
     p = {**GOOD_KALSHI, "flow_dollars": 96000.0, "open_interest": 4_000_000.0,
          "bid_depth": 2_242_630.0, "ask_depth": 977_513.0}
-    score, _ = info_score("kalshi", "KXSOMETHINGELSE-26", "vol_spike_96000", p)
+    score, _ = info_score(meta, "kalshi", "KXSOMETHINGELSE-26", "vol_spike_96000", p)
     assert score < INFO_THRESHOLD
 
 

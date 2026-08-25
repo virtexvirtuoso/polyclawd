@@ -113,13 +113,29 @@ def test_backfill_scores_kalshi_resolution(meta, tmp_path, monkeypatch):
 # ── Wallet ledger ───────────────────────────────────────────────────────────
 
 def test_is_smart_criteria():
-    """Net profit primary, 50% WR sanity floor (criteria re-weight 2026-06-12)."""
-    assert is_smart({"closed": 40, "wins": 28, "realized": 2000.0, "net": 2000.0})    # 70%, net OK
-    assert not is_smart({"closed": 10, "wins": 9, "realized": 5000.0, "net": 5000.0}) # too few closed
-    assert is_smart({"closed": 40, "wins": 23, "realized": 2000.0, "net": 2000.0})    # 57.5% >= floor, net carries it (RN1 class)
-    assert not is_smart({"closed": 40, "wins": 18, "realized": 9e5, "net": 9e5})      # 45% — sprayer, uninformative entries (pd.unique class)
-    assert not is_smart({"closed": 40, "wins": 28, "realized": 600.0, "net": 600.0})  # net floor now $1k
-    # realized profit hiding unrealized wreckage must NOT qualify
+    """Non-skill path: WR floor AND net floor, both from the module constants.
+
+    Refreshed 2026-08-21 -- this test had gone stale against two deliberate
+    tightenings (WR 0.55 -> 0.62 on 2026-06-25, net $1k -> $100k on
+    2026-06-20) and had been failing ever since. Assert against the constants
+    rather than hardcoded numbers so the next tightening cannot silently
+    desync it again.
+    """
+    from signals.whale_wallets import SMART_MIN_CLOSED, SMART_MIN_NET, SMART_MIN_WIN_RATE
+
+    def stats(closed, wr, net):
+        return {"closed": closed, "wins": round(closed * wr),
+                "realized": net, "net": net}
+
+    # Clears both floors comfortably.
+    assert is_smart(stats(40, 0.70, SMART_MIN_NET * 1.5))
+    # Too few closed positions to judge.
+    assert not is_smart(stats(SMART_MIN_CLOSED - 1, 0.90, SMART_MIN_NET * 1.5))
+    # Win rate below the floor, however profitable.
+    assert not is_smart(stats(40, SMART_MIN_WIN_RATE - 0.05, SMART_MIN_NET * 9))
+    # Net below the floor, however high the win rate.
+    assert not is_smart(stats(40, 0.70, SMART_MIN_NET - 1))
+    # Realized profit hiding unrealized wreckage must NOT qualify.
     assert not is_smart({"closed": 40, "wins": 28, "realized": 5000.0, "net": -1000.0})
 
 

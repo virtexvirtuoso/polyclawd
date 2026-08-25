@@ -266,6 +266,41 @@ class RiskGovernor:
             self._transition("DAILY_HALT")
         self._persist()
 
+    def apply_sync(self, *, bankroll: float | None = None,
+                   deployed_usd: float | None = None,
+                   realized_pnl: float | None = None,
+                   daily_loss: float | None = None,
+                   unrealized_loss: float | None = None) -> None:
+        """Apply a full ledger sync in ONE persisted transaction.
+
+        Every individual setter calls _persist(), so a cron syncing four fields
+        opened four write transactions and appended four rows to
+        live_portfolio_state every cycle. shadow_trades.db has demonstrated
+        lock contention between concurrent sport monitors (mlb_live_monitor and
+        cross_sport_drift both hit "database is locked"), so a caller that can
+        batch its writes should.
+
+        The DAILY_HALT decision is evaluated ONCE, after every field is
+        applied, so it always sees a consistent snapshot. Calling the setters
+        individually makes the outcome depend on their order — set_daily_loss()
+        evaluates against whatever _unrealized_loss happened to hold at the
+        time.
+        """
+        if bankroll is not None:
+            self._bankroll = float(bankroll)
+        if deployed_usd is not None:
+            self._deployed_usd = float(deployed_usd)
+        if realized_pnl is not None:
+            self._realized_pnl = float(realized_pnl)
+        if unrealized_loss is not None:
+            self._unrealized_loss = max(0.0, float(unrealized_loss))
+        if daily_loss is not None:
+            self._daily_loss = max(0.0, float(daily_loss))
+
+        if self._daily_loss + self._unrealized_loss >= live_config.daily_loss_halt():
+            self._transition("DAILY_HALT")
+        self._persist()
+
     def set_unrealized_loss(self, amount: float) -> None:
         """Update the current unrealised loss mark (positive = loss; 0 if flat
         or profitable).  Called by Phase F/G after each recompute_equity cycle.
