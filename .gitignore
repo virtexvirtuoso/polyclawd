@@ -67,3 +67,10 @@ mcp/.tool_cache_fastmcp.json
 
 # Deploy backup snapshots
 docs/deploy-snapshots/
+
+# Operational docs / plans (intentionally NOT tracked)
+deploy.sh
+TOOLS.md
+tasks/lessons.md
+docs/plans/2026-07-16-alert-system-overhaul.md
+docs/plans/2026-08-18-live-account-profitability.md
