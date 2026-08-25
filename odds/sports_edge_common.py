@@ -32,8 +32,8 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 from loguru import logger
+from config.polymarket_urls import GAMMA_API as POLYMARKET_GAMMA  # polyproxy: central URL config
 
-POLYMARKET_GAMMA = "https://gamma-api.polymarket.com"
 DB_PATH = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
 from execution.fee_model import taker_fee_fraction  # real per-category taker fee (SSOT)
 
@@ -64,7 +64,6 @@ EDGE_CAP   = 0.15   # 15% — cap above this (large edges = likely stale/wrong)
 #   2. p2_max_take:  recommended max bet = fillable_usd * 50% (don't own > half of depth)
 P2_MIN_DEPTH = 50.0  # USD — skip markets with less fillable depth than this
 
-
 def p1_confidence(fee_adjusted_edge: float) -> float:
     """Confidence score with diminishing returns on large edges (P1 recalibration).
 
@@ -79,7 +78,6 @@ def p1_confidence(fee_adjusted_edge: float) -> float:
     raw = math.sqrt(max(fee_adjusted_edge, 0.0)) * 260.0
     return round(min(82.0, max(40.0, raw)), 1)
 
-
 def p1_edge_ok(edge_pct: float) -> tuple[bool, str]:
     """Gate an edge through P1 floor/cap. Returns (ok, reason)."""
     abs_e = abs(edge_pct)
@@ -89,7 +87,6 @@ def p1_edge_ok(edge_pct: float) -> tuple[bool, str]:
         return False, f"P1: edge {abs_e:.1%} > cap {EDGE_CAP:.0%} (likely model error)"
     return True, ""
 
-
 def p2_depth_ok(fillable_usd: Optional[float]) -> tuple[bool, str]:
     """Gate on CLOB depth. Returns (ok, reason). None depth = skip (unavailable)."""
     if fillable_usd is None:
@@ -97,7 +94,6 @@ def p2_depth_ok(fillable_usd: Optional[float]) -> tuple[bool, str]:
     if fillable_usd < P2_MIN_DEPTH:
         return False, f"P2: depth ${fillable_usd:.0f} < min ${P2_MIN_DEPTH:.0f} (illiquid)"
     return True, ""
-
 
 def p2_max_take(fillable_usd: Optional[float]) -> float:
     """Recommended max bet size: 50% of fillable depth, or $100 if depth unavailable."""
@@ -145,7 +141,6 @@ CONSENSUS_BOOKMAKERS = ",".join(BOOK_WEIGHTS.keys())
 def VALID_PRICE(p: float) -> bool:
     return 0.02 <= p <= 0.98
 
-
 # ─────────────────────────────────────────────────────────────────────
 # American odds / devig
 # ─────────────────────────────────────────────────────────────────────
@@ -154,19 +149,16 @@ def american_to_implied_prob(odds: int) -> float:
     odds = int(odds)
     return (100.0 / (odds + 100.0)) if odds > 0 else (abs(odds) / (abs(odds) + 100.0))
 
-
 def devig_two_way(odds_a: int, odds_b: int) -> Tuple[float, float]:
     """Proportional devig of a clean 2-way market → (pa, pb) summing to 1."""
     pa, pb = american_to_implied_prob(odds_a), american_to_implied_prob(odds_b)
     t = pa + pb
     return pa / t, pb / t
 
-
 def devig_multiway(probs: List[float]) -> List[float]:
     """Proportional devig (normalize to sum 1). Kept for callers that want it."""
     t = sum(probs)
     return [p / t for p in probs] if t > 0 else list(probs)
-
 
 def devig_power(implied: List[float], iters: int = 64) -> List[float]:
     """Power devig: find k s.t. sum(p_i^(1/k)) = 1, return [p_i^(1/k) / sum].
@@ -201,7 +193,6 @@ def devig_power(implied: List[float], iters: int = 64) -> List[float]:
     t = sum(raw)
     return [x / t for x in raw] if t > 0 else raw
 
-
 def devig_power_2way(odds_a: int, odds_b: int) -> Tuple[float, float]:
     """Power devig of a 2-way market → (pa, pb) summing to 1.
 
@@ -212,7 +203,6 @@ def devig_power_2way(odds_a: int, odds_b: int) -> Tuple[float, float]:
     pb = american_to_implied_prob(odds_b)
     result = devig_power([pa, pb])
     return result[0], result[1]
-
 
 def devig_shin(implied: List[float], iters: int = 50) -> List[float]:
     """Shin (1992/1993) devig: Newton-solve for insider proportion z, return true
@@ -236,11 +226,17 @@ def devig_shin(implied: List[float], iters: int = 50) -> List[float]:
     t = sum(true)
     return [x / t for x in true] if t > 0 else [p / s for p in implied]
 
-
 def consensus_devig_2way(game: Dict, market_key: str = "h2h",
                          weights: Optional[Dict[str, float]] = None) -> Dict[str, float]:
     """Per-book devig → weighted consensus for 2-way markets (UFC, MLB moneyline).
-    Returns {outcome: true_prob} or {} if no weighted book has both sides."""
+    Returns {outcome: true_prob} or {} if no weighted book has both sides.
+
+    Uses POWER devig (not proportional) per the favorite-longshot bias
+    literature (Newall & Cortis 2021; Whelan & Hegarty 2023): proportional
+    normalization understates favorite true-prob at price extremes (>65c/<35c).
+    Power devig removes vig non-linearly, matching empirical bookmaker pricing.
+    For balanced ~50/50 markets the result is nearly identical to proportional.
+    """
     _w = weights or BOOK_WEIGHTS
     weighted: Dict[str, float] = {}
     total_w = 0.0
@@ -259,8 +255,7 @@ def consensus_devig_2way(game: Dict, market_key: str = "h2h",
             if any(n is None or p is None for n, p in zip(names, prices)):
                 continue
             implied = [american_to_implied_prob(int(p)) for p in prices]
-            total = sum(implied)
-            probs = [ip / total for ip in implied]
+            probs = devig_power(implied)
             for nm, pr in zip(names, probs):
                 weighted[nm] = weighted.get(nm, 0.0) + w * pr
             total_w += w
@@ -268,7 +263,6 @@ def consensus_devig_2way(game: Dict, market_key: str = "h2h",
     if total_w == 0.0 or len(weighted) < 2:
         return {}
     return {nm: v / total_w for nm, v in weighted.items()}
-
 
 def consensus_devig_3way(game: Dict, market_key: str = "h2h",
                          weights: Optional[Dict[str, float]] = None) -> Dict[str, float]:
@@ -301,7 +295,6 @@ def consensus_devig_3way(game: Dict, market_key: str = "h2h",
         return {}
     return {nm: v / total_w for nm, v in weighted.items()}
 
-
 def consensus_best_odds(game: Dict, market_key: str = "h2h",
                         weights: Optional[Dict[str, float]] = None) -> Dict[str, int]:
     """Raw American odds from the highest-weighted single book that has all outcomes.
@@ -327,7 +320,6 @@ def consensus_best_odds(game: Dict, market_key: str = "h2h",
             break
     return best
 
-
 def sharp_odds_per_outcome(game: Dict, market_key: str = "h2h") -> Dict[str, int]:
     """Best-available American odds per outcome from a SINGLE sharp book.
 
@@ -352,7 +344,6 @@ def sharp_odds_per_outcome(game: Dict, market_key: str = "h2h") -> Dict[str, int
         return {}
     return min(by_book.values(),
                key=lambda d: sum(american_to_implied_prob(v) for v in d.values()))
-
 
 def consensus_devig_spreads(game: Dict, market_key: str = "spreads",
                             weights: Optional[Dict[str, float]] = None) -> Dict[float, Dict[str, float]]:
@@ -393,7 +384,6 @@ def consensus_devig_spreads(game: Dict, market_key: str = "spreads",
             out[ap] = {nm: v / tw for nm, v in d.items()}
     return out
 
-
 def consensus_best_spread_odds(game: Dict, market_key: str = "spreads",
                                weights: Optional[Dict[str, float]] = None) -> Dict[float, Dict[str, Tuple[int, float]]]:
     """Raw spread odds + signed point per team from the highest-weighted single
@@ -421,7 +411,6 @@ def consensus_best_spread_odds(game: Dict, market_key: str = "spreads",
                     out[ap] = pair
             break
     return out
-
 
 def consensus_devig_totals(game: Dict, market_key: str = "totals",
                            weights: Optional[Dict[str, float]] = None) -> Dict[float, Dict[str, float]]:
@@ -458,7 +447,6 @@ def consensus_devig_totals(game: Dict, market_key: str = "totals",
             out[pt] = {k: v / tw for k, v in d.items()}
     return out
 
-
 def consensus_best_total_odds(game: Dict, market_key: str = "totals",
                               weights: Optional[Dict[str, float]] = None) -> Dict[float, Tuple[int, int]]:
     """Raw (over_odds, under_odds) per total point from the highest-weighted single
@@ -486,24 +474,19 @@ def consensus_best_total_odds(game: Dict, market_key: str = "totals",
             break
     return out
 
-
-
 # ─────────────────────────────────────────────────────────────────────
 # String / matching helpers
 # ─────────────────────────────────────────────────────────────────────
 _DATE_TAIL = re.compile(r"\s+on\s+\d{4}-\d{2}-\d{2}\s*\??$", re.I)
 
-
 def strip_trailing_date(q: str) -> str:
     """'Will Houston Dynamo win on 2026-03-07?' → 'Will Houston Dynamo win'."""
     return _DATE_TAIL.sub("", q or "").strip()
-
 
 def _norm(s: str) -> str:
     """Lowercase + strip diacritics (NFKD) so 'Türkiye' matches 'Turkey'-family aliases."""
     return "".join(c for c in unicodedata.normalize("NFKD", s or "")
                    if not unicodedata.combining(c)).lower().strip()
-
 
 def _name_in(text: str, name: str, aliases: Dict[str, List[str]]) -> bool:
     t = _norm(text)
@@ -511,7 +494,6 @@ def _name_in(text: str, name: str, aliases: Dict[str, List[str]]) -> bool:
         if _norm(a) in t:
             return True
     return False
-
 
 def match_event_by_participants(names: List[str], events: List[Dict],
                                 aliases: Optional[Dict[str, List[str]]] = None) -> Optional[Dict]:
@@ -525,7 +507,6 @@ def match_event_by_participants(names: List[str], events: List[Dict],
             return ev
     return None
 
-
 def outcome_index_for(market: Dict, want: str) -> int:
     """Index of `want` ('Yes'/'Over'/fighter name) in market.outcomes. Default 0."""
     raw = market.get("outcomes", "[]")
@@ -535,13 +516,30 @@ def outcome_index_for(market: Dict, want: str) -> int:
             return i
     return 0
 
-
 def price0(market: Dict) -> float:
     """First outcomePrice (the YES / Over / first-listed side). 0.0 on parse failure."""
     raw = market.get("outcomePrices", "[]")
     arr = json.loads(raw) if isinstance(raw, str) else raw
     try:
         return float(arr[0])
+    except (ValueError, TypeError, IndexError):
+        return 0.0
+
+def price_at(market: Dict, idx: int) -> float:
+    """outcomePrice at a specific outcome index. 0.0 on parse failure / OOB."""
+    raw = market.get("outcomePrices", "[]")
+    arr = json.loads(raw) if isinstance(raw, str) else raw
+    try:
+        return float(arr[idx])
+    except (ValueError, TypeError, IndexError):
+        return 0.0
+
+def price_at(market: Dict, idx: int) -> float:
+    """outcomePrice at a specific outcome index. 0.0 on parse failure / OOB."""
+    raw = market.get("outcomePrices", "[]")
+    arr = json.loads(raw) if isinstance(raw, str) else raw
+    try:
+        return float(arr[idx])
     except (ValueError, TypeError, IndexError):
         return 0.0
 
@@ -555,7 +553,6 @@ def is_stale_event(commence_time: str, min_minutes: int = 30) -> bool:
         return (gt - datetime.now(timezone.utc)).total_seconds() / 60 < min_minutes
     except (ValueError, TypeError):
         return True
-
 
 # ─────────────────────────────────────────────────────────────────────
 # Config + Edge
@@ -573,7 +570,6 @@ class SportConfig:
     shadow_strategy: str = ""
     archetype: str = "sports_single_game"
     min_minutes_to_start: int = 30
-
 
 @dataclass
 class Edge:
@@ -605,6 +601,21 @@ class Edge:
     poly_move_1h: Optional[float] = None
     poly_move_6h: Optional[float] = None
 
+    # NFL team-strength overlay (nfl_strength.py)
+    elo_home: Optional[float] = None
+    elo_away: Optional[float] = None
+    strength_home_prob: Optional[float] = None
+    strength_edge_pct: Optional[float] = None
+    strength_agree: Optional[bool] = None
+    strength_confidence: Optional[float] = None
+
+    # NFL situational overlay (nfl_situational.py)
+    situational_edge_pct: Optional[float] = None
+    home_rest_days: Optional[float] = None
+    away_rest_days: Optional[float] = None
+    home_qb: Optional[Dict] = None
+    away_qb: Optional[Dict] = None
+
     # Backward-compat aliases for code that still uses MLBEdge field names
     @property
     def game_title(self) -> str:
@@ -621,7 +632,6 @@ class Edge:
     @property
     def polymarket_price(self) -> float:
         return self.poly_price
-
 
 # ─────────────────────────────────────────────────────────────────────
 # Polymarket fetch (paginated)
@@ -649,12 +659,10 @@ def fetch_polymarket_events_by_tag(tag: str, page_size: int = 100, max_pages: in
             break
     return out
 
-
 async def fetch_polymarket_events_by_tag_async(tag: str, **kw) -> List[Dict]:
     loop = asyncio.get_event_loop()
     with ThreadPoolExecutor() as pool:
         return await loop.run_in_executor(pool, lambda: fetch_polymarket_events_by_tag(tag, **kw))
-
 
 # ─────────────────────────────────────────────────────────────────────
 # Executable-edge enrichment + shadow logging (lazy heavy imports)
@@ -703,7 +711,6 @@ def enrich_executable_edge(edge: Edge, outcome_index: int, target_usd: float = 1
         # Populate net_edge_pct immediately after enrichment
         edge.net_edge_pct = fee_adjusted_edge(edge)
 
-
 def fee_adjusted_edge(edge: Edge) -> Optional[float]:
     """Executable edge net of the real Polymarket sports taker fee
     (0.03 * p * (1-p); 0% on winnings). None if not enriched."""
@@ -712,6 +719,34 @@ def fee_adjusted_edge(edge: Edge) -> Optional[float]:
     return edge.executable_edge - taker_fee_fraction(
         edge.executable_price, "polymarket", "sports"
     )
+
+def _strength_tag(edge: Edge) -> str:
+    """Append NFL team-strength + situational overlay to shadow-log reasoning
+    for calibration. No-op for non-NFL edges (fields are None)."""
+    if edge.strength_agree is None and edge.situational_edge_pct is None:
+        return ""
+    parts = []
+    if edge.strength_agree is not None:
+        parts.append(f"STR:{'agree' if edge.strength_agree else 'conflict'}"
+                     f"(elo {edge.elo_home:.0f}/{edge.elo_away:.0f}, "
+                     f"conf {edge.strength_confidence:.2f})")
+    if edge.situational_edge_pct is not None:
+        parts.append(f"SITU:{edge.situational_edge_pct * 100:+.1f}%")
+    return " [" + " ".join(parts) + "]" if parts else ""
+
+def _strength_tag(edge: Edge) -> str:
+    """Append NFL team-strength + situational overlay to shadow-log reasoning
+    for calibration. No-op for non-NFL edges (fields are None)."""
+    if edge.strength_agree is None and edge.situational_edge_pct is None:
+        return ""
+    parts = []
+    if edge.strength_agree is not None:
+        parts.append(f"STR:{'agree' if edge.strength_agree else 'conflict'}"
+                     f"(elo {edge.elo_home:.0f}/{edge.elo_away:.0f}, "
+                     f"conf {edge.strength_confidence:.2f})")
+    if edge.situational_edge_pct is not None:
+        parts.append(f"SITU:{edge.situational_edge_pct * 100:+.1f}%")
+    return " [" + " ".join(parts) + "]" if parts else ""
 
 
 def log_shadow(edge: Edge, cfg: SportConfig, days_to_close: float = 7.0) -> bool:
@@ -774,7 +809,8 @@ def log_shadow(edge: Edge, cfg: SportConfig, days_to_close: float = 7.0) -> bool
                           f"{edge.executable_price * 100:.1f}¢ "
                           f"(exec edge {edge.executable_edge * 100:+.1f}%, fee-adj {fae * 100:+.1f}%) "
                           f"depth ${edge.fillable_usd:.0f} → rec_size ${rec_size:.0f}"
-                          f"{ce5_tag}{ce8_tag}"),
+                          f"{ce5_tag}{ce8_tag}"
+                          + _strength_tag(edge)),
             "archetype": cfg.archetype, "strategy": cfg.shadow_strategy,
             "category": cfg.name.split("_")[0], "category_tier": "sports",
             "midpoint_price": edge.poly_price,     # for CLV at resolution
@@ -784,7 +820,6 @@ def log_shadow(edge: Edge, cfg: SportConfig, days_to_close: float = 7.0) -> bool
         logger.debug(f"{cfg.name} shadow log failed: {e}")
         return False
 
-
 # ─────────────────────────────────────────────────────────────────────
 # Summary (mirrors baseball get_*_edge_summary JSON shape)
 # ─────────────────────────────────────────────────────────────────────
@@ -792,7 +827,6 @@ def log_shadow(edge: Edge, cfg: SportConfig, days_to_close: float = 7.0) -> bool
 # Phase 1B: Control sample logging — log ALL scanned edges (not just tradeable)
 # ─────────────────────────────────────────────────────────────────────
 _SCAN_LOG_INIT = False
-
 
 def _init_scan_log(conn):
     global _SCAN_LOG_INIT
@@ -820,7 +854,6 @@ def _init_scan_log(conn):
         CREATE INDEX IF NOT EXISTS idx_scan_log_sport ON edge_scan_log(sport, scanned_at);
     """)
     _SCAN_LOG_INIT = True
-
 
 def log_scan_batch(edges: List[Edge], cfg: SportConfig, alerted_ids: Optional[set] = None) -> int:
     """Log ALL edges from a scan run to edge_scan_log (control sample).
@@ -860,7 +893,6 @@ def log_scan_batch(edges: List[Edge], cfg: SportConfig, alerted_ids: Optional[se
         logger.debug(f"scan log batch failed: {e}")
         return 0
 
-
 def summarize(edges: List[Edge], cfg: SportConfig) -> Dict:
     edges = sorted(edges, key=lambda e: abs(e.edge_pct), reverse=True)
     # Phase 1B: control sample — log ALL edges (including sub-threshold)
@@ -898,20 +930,32 @@ def summarize(edges: List[Edge], cfg: SportConfig) -> Dict:
             "tradeable": e.tradeable,
             "net_edge_pct": (round(e.net_edge_pct * 100, 1) if e.net_edge_pct is not None else None),
             "no_api_line": e.no_api_line, "live_book": e.live_book,
+            # NFL team-strength overlay
+            "elo_home": e.elo_home,
+            "elo_away": e.elo_away,
+            "strength_home_prob": (round(e.strength_home_prob * 100, 1) if e.strength_home_prob is not None else None),
+            "strength_edge_pct": (round(e.strength_edge_pct * 100, 1) if e.strength_edge_pct is not None else None),
+            "strength_agree": e.strength_agree,
+            "strength_confidence": e.strength_confidence,
+            # NFL situational overlay
+            "situational_edge_pct": (round(e.situational_edge_pct * 100, 1) if e.situational_edge_pct is not None else None),
+            "home_rest_days": e.home_rest_days,
+            "away_rest_days": e.away_rest_days,
+            "home_qb": e.home_qb,
+            "away_qb": e.away_qb,
         } for e in edges],
         "top_opportunities": [{
             "event": e.event_title, "participant": e.participant,
             "edge": f"{e.edge_pct * 100:+.1f}%",
             "action": f"{e.direction} at {e.poly_price * 100:.0f}¢",
+            "strength_agree": e.strength_agree,
         } for e in edges[:5] if not e.no_api_line],
     }
-
 
 # ─────────────────────────────────────────────────────────────────────
 # Phase 2: Edge Enrichment Table
 # ─────────────────────────────────────────────────────────────────────
 _ENRICH_INIT = False
-
 
 def _init_enrichment(conn):
     global _ENRICH_INIT
@@ -933,7 +977,6 @@ def _init_enrichment(conn):
         CREATE INDEX IF NOT EXISTS idx_enrich_sport ON edge_enrichment(sport);
     """)
     _ENRICH_INIT = True
-
 
 def log_enrichment(shadow_trade_id: Optional[int], sport: str,
                    stats_score: float, stats_confirmation: bool,

@@ -32,17 +32,20 @@ import os, sys, json, time, sqlite3, unicodedata, requests
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Optional
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_DIR)
 
 from db import connect as db_connect  # noqa: E402
+from execution.fee_model import taker_fee_fraction  # noqa: E402
 
-GAMMA_API = "https://gamma-api.polymarket.com"
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 DB_PATH = os.path.join(PROJECT_DIR, "storage", "shadow_trades.db")
 MIN_EDGE_PP = 4.0
 PM_MIN_VOLUME_USD = 500   # skip PM prop prices with no real trading activity
+KA_MAX_SPREAD = 0.08      # Kalshi book wider than this -> mid is meaningless, not tradeable
+KA_MIN_DEPTH_USD = 100.0  # top-of-book ask depth below this -> illiquid, not tradeable
 COOLDOWN_MINUTES = 60  # props move slower than sportsbook lines
 EDGE_CHANGE_PP = 3.0  # re-alert inside cooldown if edge moves >= this
 MAX_ALERTS_PER_SCAN = 5
@@ -64,7 +67,13 @@ class UFCPropEdge:
     edge_pp: float
     direction: str
     tradeable: bool = False
-    executable_edge_pp: Optional[float] = None  # PM-buy side, ask-walked; None if n/a
+    executable_edge_pp: Optional[float] = None  # ask-walked + fee-adjusted, both directions
+    executable_price: Optional[float] = None    # price you'd actually pay on the buy side
+    kalshi_ticker: Optional[str] = None
+    kalshi_spread: Optional[float] = None
+    kalshi_depth_usd: Optional[float] = None
+    pm_condition_id: Optional[str] = None
+    gate_reason: Optional[str] = None           # why tradeable=False despite big mid edge
 
 
 # ---------------------------------------------------------------------------
@@ -172,36 +181,50 @@ def get_polymarket_props() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _kalshi_mid(market_ticker: str) -> Optional[float]:
-    """Order-book midpoint for one Kalshi market (fractional API: *_dollars)."""
+def _kalshi_book(market_ticker: str) -> Optional[dict]:
+    """Top-of-book snapshot for one Kalshi market (fractional API: *_dollars).
+
+    Returns {"mid", "ask", "spread", "ask_depth_usd"} for the YES side, or None.
+    Kalshi books carry bids only: YES ask = 1 - best NO bid; depth at the ask is
+    the size of that best NO level (contracts * ask price in dollars)."""
     r = requests.get(f"{KALSHI_API}/markets/{market_ticker}/orderbook", timeout=10)
     if r.status_code != 200:
         return None
     ob = r.json().get("orderbook_fp", {}) or {}
     yes, no = ob.get("yes_dollars", []), ob.get("no_dollars", [])
     best_yes = max((float(x[0]) for x in yes), default=0.0)
-    best_no = max((float(x[0]) for x in no), default=0.0)
     if best_yes <= 0:
         return None
-    return (best_yes + (1 - best_no)) / 2
+    best_no_lvl = max(no, key=lambda x: float(x[0]), default=None)
+    if best_no_lvl is None:
+        return None
+    best_no = float(best_no_lvl[0])
+    ask = 1.0 - best_no
+    depth_usd = float(best_no_lvl[1]) * ask  # contracts at the ask * cost each
+    return {
+        "mid": (best_yes + ask) / 2,
+        "ask": ask,
+        "spread": round(ask - best_yes, 4),
+        "ask_depth_usd": round(depth_usd, 2),
+    }
 
 
-def _kalshi_event_mids(event_ticker: str) -> dict:
-    """{market_ticker: orderbook_mid} for every market under a Kalshi event."""
+def _kalshi_event_books(event_ticker: str) -> dict:
+    """{market_ticker: book_dict} for every market under a Kalshi event."""
     r = requests.get(f"{KALSHI_API}/events/{event_ticker}", timeout=8)
     if r.status_code != 200:
         return {}
     out = {}
     for m in r.json().get("markets", []):
         tk = m.get("ticker", "")
-        mid = _kalshi_mid(tk)
-        if mid is not None:
-            out[tk] = mid
+        book = _kalshi_book(tk)
+        if book is not None:
+            out[tk] = book
     return out
 
 
 def get_kalshi_props() -> dict:
-    """{fight_key: {"title": str, "props": {label: mid_price}}}.
+    """{fight_key: {"title": str, "props": {label: {"mid","ask","spread","ask_depth_usd","ticker"}}}}.
 
     Discovers fights from the open KXUFCFIGHT events (no hardcoded fighter map),
     takes the shared {stub} (date+codes) from each event ticker, then reads the
@@ -229,14 +252,14 @@ def get_kalshi_props() -> dict:
     out = {}
     for key, (stub, title) in fights.items():
         fps = {}
-        for tk, mid in _kalshi_event_mids(f"KXUFCMOF-{stub}").items():
+        for tk, book in _kalshi_event_books(f"KXUFCMOF-{stub}").items():
             if tk.endswith("-KOTKODQ"):
-                fps["any_ko_tko"] = mid
+                fps["any_ko_tko"] = {**book, "ticker": tk}
             elif tk.endswith("-SUB"):
-                fps["any_submission"] = mid
-        for tk, mid in _kalshi_event_mids(f"KXUFCDISTANCE-{stub}").items():
+                fps["any_submission"] = {**book, "ticker": tk}
+        for tk, book in _kalshi_event_books(f"KXUFCDISTANCE-{stub}").items():
             if tk.endswith("-DIST"):
-                fps["go_the_distance"] = mid
+                fps["go_the_distance"] = {**book, "ticker": tk}
         if fps:
             out[key] = {"title": title, "props": fps}
     return out
@@ -258,7 +281,8 @@ def compute_prop_edges(pm_props: dict, ka_props: dict) -> list:
             if label not in pm or label not in ka:
                 continue
             pm_price = pm[label]["price"]
-            ka_price = ka[label]
+            kb = ka[label]
+            ka_price = kb["mid"]
             # go_the_distance: PM "Go the Distance" YES and Kalshi DIST YES are the
             # SAME event — no inversion. (The earlier `1 - ka_price` flip compared
             # opposite sides and produced phantom edges.)
@@ -266,9 +290,31 @@ def compute_prop_edges(pm_props: dict, ka_props: dict) -> list:
             direction = "BUY KALSHI" if edge_pp > 0 else "BUY POLYMARKET"
             tradeable = abs(edge_pp) >= MIN_EDGE_PP
             exec_edge_pp = None
+            exec_price = None
+            gate_reason = None
 
-            # Reality-check the PM-buy side against the live CLOB ask. A midpoint
-            # edge that vanishes once you walk the book is not tradeable.
+            # Spread/depth gate: a 10-90 book gives a "50%" mid that means nothing,
+            # and the Kalshi mid is the fair anchor for BOTH directions.
+            if kb["spread"] > KA_MAX_SPREAD:
+                tradeable = False
+                gate_reason = f"kalshi spread {kb['spread'] * 100:.0f}c > {KA_MAX_SPREAD * 100:.0f}c"
+            elif kb["ask_depth_usd"] < KA_MIN_DEPTH_USD:
+                tradeable = False
+                gate_reason = f"kalshi ask depth ${kb['ask_depth_usd']:.0f} < ${KA_MIN_DEPTH_USD:.0f}"
+
+            # Reality-check the KALSHI-buy side: walk to the actual ask and net out
+            # the taker fee (0.07*p*(1-p)). A midpoint edge that vanishes at the
+            # ask is not tradeable.
+            if direction == "BUY KALSHI" and tradeable:
+                fee = taker_fee_fraction(kb["ask"], "kalshi")
+                ee = pm_price - kb["ask"] - fee
+                exec_edge_pp = round(ee * 100, 1)
+                exec_price = kb["ask"]
+                if exec_edge_pp < MIN_EDGE_PP:
+                    tradeable = False
+                    gate_reason = f"executable {exec_edge_pp:+.1f}pp < {MIN_EDGE_PP:.0f}pp after ask+fee"
+
+            # Reality-check the PM-buy side against the live CLOB ask.
             if direction == "BUY POLYMARKET" and tradeable and not DRY_RUN:
                 cid = pm[label].get("condition_id")
                 if cid:
@@ -282,7 +328,10 @@ def compute_prop_edges(pm_props: dict, ka_props: dict) -> list:
                     if res.get("available"):
                         ee = res.get("executable_edge")
                         exec_edge_pp = round(ee * 100, 1) if ee is not None else None
+                        exec_price = res.get("executable_price")
                         tradeable = bool(res.get("tradeable"))
+                        if not tradeable and gate_reason is None:
+                            gate_reason = "PM book: not executable at target size"
 
             edges.append(
                 UFCPropEdge(
@@ -295,6 +344,12 @@ def compute_prop_edges(pm_props: dict, ka_props: dict) -> list:
                     direction=direction,
                     tradeable=tradeable,
                     executable_edge_pp=exec_edge_pp,
+                    executable_price=exec_price,
+                    kalshi_ticker=kb.get("ticker"),
+                    kalshi_spread=kb["spread"],
+                    kalshi_depth_usd=kb["ask_depth_usd"],
+                    pm_condition_id=pm[label].get("condition_id"),
+                    gate_reason=gate_reason,
                 )
             )
     return sorted(edges, key=lambda e: e.edge_pp, reverse=True)
@@ -360,9 +415,55 @@ def _format_alert(e) -> str:
         f"PM: {e.polymarket_price:.1%} vs Kalshi: {e.kalshi_price:.1%}\n"
         f"Edge: {e.edge_pp:.1f}pp -> {e.direction}"
     )
-    if e.executable_edge_pp is not None:
-        msg += f"\nExecutable: {e.executable_edge_pp:+.1f}pp"
+    if e.executable_price is not None and e.executable_edge_pp is not None:
+        msg += (f"\nExecutable: {e.executable_edge_pp:+.1f}pp fee-adj "
+                f"@ {e.executable_price * 100:.0f}c ask")
+    if e.direction == "BUY KALSHI" and e.kalshi_ticker:
+        msg += (f"\nTicker: {e.kalshi_ticker}"
+                f" | spread {e.kalshi_spread * 100:.0f}c"
+                f" | depth ${e.kalshi_depth_usd:.0f}")
     return msg
+
+
+def _log_shadow(e) -> bool:
+    """Shadow-log a fired alert (same discipline as the MLB pipeline): entry at
+    the EXECUTABLE price, resolution/CLV via the shared shadow tracker. Never
+    executes real trades. Returns True if logged."""
+    try:
+        from signals.shadow_tracker import log_shadow_trade
+        from odds.sports_edge_common import p1_confidence
+    except Exception:
+        return False
+    if e.executable_price is None or e.executable_edge_pp is None:
+        return False
+    if e.direction == "BUY KALSHI":
+        platform, market_id = "kalshi", e.kalshi_ticker
+    else:
+        platform, market_id = "polymarket", e.pm_condition_id
+    if not market_id:
+        return False
+    try:
+        return bool(log_shadow_trade({
+            "market_id": market_id,
+            "market": f"{e.fight[:160]} — {e.label}",
+            "platform": platform,
+            "side": "YES",
+            "price": e.executable_price,
+            "confidence": p1_confidence(e.executable_edge_pp / 100.0),
+            "days_to_close": 3,
+            "volume": 0,
+            "confirmations": 1,
+            "reasoning": (f"ufc_prop: PM {e.polymarket_price * 100:.0f}% vs Kalshi mid "
+                          f"{e.kalshi_price * 100:.0f}% (mid edge {e.edge_pp:.1f}pp, "
+                          f"exec {e.executable_edge_pp:+.1f}pp @ {e.executable_price * 100:.0f}c)"),
+            "archetype": "sports_prop",
+            "strategy": "ufc_prop_edge",
+            "category": "ufc",
+            "category_tier": "sports",
+            "midpoint_price": e.polymarket_price if platform == "polymarket" else e.kalshi_price,
+        }))
+    except Exception:
+        return False
 
 
 def run_prop_edge_scan() -> dict:
@@ -377,7 +478,7 @@ def run_prop_edge_scan() -> dict:
     edges = compute_prop_edges(pm_props, ka_props)
     tradeable = sorted([e for e in edges if e.tradeable], key=lambda x: x.edge_pp, reverse=True)
 
-    alerts_sent = suppressed = 0
+    alerts_sent = suppressed = shadows_logged = 0
     if tradeable and not DRY_RUN:
         now_ts = time.time()
         conn = _alert_conn()
@@ -392,6 +493,8 @@ def run_prop_edge_scan() -> dict:
                 if _send_alert(_format_alert(e)):
                     _record_alert(conn, e, now_ts)
                     alerts_sent += 1
+                    if _log_shadow(e):
+                        shadows_logged += 1
         finally:
             conn.close()
 
@@ -402,6 +505,7 @@ def run_prop_edge_scan() -> dict:
         "edges_found": len(edges),
         "alerts_sent": alerts_sent,
         "suppressed": suppressed,
+        "shadows_logged": shadows_logged,
     }
 
 
@@ -420,8 +524,10 @@ def display(edges: list):
         print(f"     {e.label:25s} | PM: {e.polymarket_price:.1%} | KA: {e.kalshi_price:.1%}")
         line = f"     Edge: {e.edge_pp:.1f}pp -> {e.direction}"
         if e.executable_edge_pp is not None:
-            line += f"  (executable: {e.executable_edge_pp:+.1f}pp)"
+            line += f"  (executable: {e.executable_edge_pp:+.1f}pp @ {e.executable_price * 100:.0f}c)"
         print(line)
+        if e.gate_reason:
+            print(f"     GATED: {e.gate_reason}")
     actionable = [e for e in edges if e.tradeable]
     print(f"\n{'-' * 70}")
     print(f"  Total: {len(edges)} prop edges  |  Actionable: {len(actionable)}")

@@ -242,6 +242,8 @@ def execute_intent(
     client_order_ref: str,
     category: str = "",  # fail-closed: unspecified must be rejected, not aliased
     market_title: str = "",
+    event_id: str = "",  # correlation guard; "" safely bypasses (see Rule 5.5)
+    reasoning: dict | None = None,  # entry-trigger audit trail, forwarded as-is
 ) -> dict:
     """Route a single trade intent through the hybrid maker→taker executor.
 
@@ -282,7 +284,7 @@ def execute_intent(
     # on the taker leg (line ~493), so maker legs bypassed ALL risk caps.
     entry_decision = governor.check(
         {"size_usd": size_usd, "market_id": token_id, "token_id": token_id,
-         "category": category}
+         "category": category, "event_id": event_id}
     )
     if not entry_decision.allowed:
         result["action"] = "dropped"
@@ -391,9 +393,12 @@ def execute_intent(
             fair_price=fair_price,
             token_id=token_id,
             market_title=market_title,
+            category=category,
+            reasoning=reasoning,
         )
         # Tell the governor the ACTUAL usd deployed, not the full size_usd.
-        governor.record_fill(market_id=token_id, usd=maker_usd, liquidity="maker")
+        governor.record_fill(market_id=token_id, usd=maker_usd,
+                             liquidity="maker", event_id=event_id)
         logger.info(
             "execute_intent: MAKER filled ref={} {:.4f} sh ${:.2f}",
             client_order_ref,
@@ -454,8 +459,11 @@ def execute_intent(
                 fair_price=fair_price,
                 token_id=token_id,
                 market_title=market_title,
+                category=category,
+                reasoning=reasoning,
             )
-            governor.record_fill(market_id=token_id, usd=late_usd, liquidity="maker")
+            governor.record_fill(market_id=token_id, usd=late_usd,
+                                 liquidity="maker", event_id=event_id)
             maker_filled_shares += late_fill
             remainder_shares = max(0.0, remainder_shares - late_fill)
             logger.info(
@@ -510,6 +518,7 @@ def execute_intent(
             "market_id": token_id,
             "token_id": token_id,
             "category": category,
+            "event_id": event_id,
         }
     )
     if not decision.allowed:
@@ -578,8 +587,11 @@ def execute_intent(
         fair_price=fair_price,
         token_id=token_id,
         market_title=market_title,
+        category=category,
+        reasoning=reasoning,
     )
-    governor.record_fill(market_id=token_id, usd=taker_usd, liquidity="taker")
+    governor.record_fill(market_id=token_id, usd=taker_usd,
+                         liquidity="taker", event_id=event_id)
 
     result.update(
         action="taker_filled",

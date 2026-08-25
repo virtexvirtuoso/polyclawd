@@ -56,6 +56,19 @@ def _alert(msg: str) -> None:
     except Exception as exc:
         logger.warning("risk_governor alert failed (non-fatal): %s", exc)
 
+    # Telegram mirror (added 2026-08-21 after /qa audit found this path was
+    # Discord-ONLY). State transitions here include ACTIVE->KILL and
+    # ACTIVE->DAILY_HALT, i.e. the kill switch firing on live capital and
+    # cancel_all() running. If the Discord webhook 4xx'd, that fired silently.
+    # Mirrors the pattern already used by alert_position_opened/closed.
+    # Deliberately a SEPARATE try: a Discord failure must not skip the mirror.
+    try:
+        from scripts.alert_formatter import send_telegram
+
+        send_telegram(f"🛑 <b>RISK GOVERNOR</b>\n\n{msg}")
+    except Exception as exc:  # noqa: BLE001 — never let alerting break risk control
+        logger.warning("risk_governor telegram mirror failed (non-fatal): %s", exc)
+
 
 # ---------------------------------------------------------------------------
 # Decision dataclass
@@ -165,15 +178,10 @@ class RiskGovernor:
             # Defense-in-depth: a raising/replaced _alert must NEVER break a
             # trade Decision. _alert is also internally guarded, but guard the
             # call site too so a monkeypatched/buggy _alert can't propagate.
-            try:
-                _alert(
-                    f"Risk Governor transition: {old} → {new_state} | "
-                    f"bankroll={self._bankroll:.2f} daily_loss={self._daily_loss:.2f} "
-                    f"deployed={self._deployed_usd:.2f}"
-                )
-            except Exception as exc:
-                logger.warning("risk_governor transition alert failed (non-fatal): %s", exc)
-
+            # ORDER MATTERS: cancel FIRST, notify second. _alert() does up to
+            # ~35s of blocking network I/O (Discord 10s + Telegram 15s+5s+15s);
+            # delaying order cancellation on live capital to send a message is
+            # the wrong trade-off. (/qa critic, 2026-08-21.)
             # On KILL: cancel all open CLOB orders to prevent further exposure
             if new_state == "KILL":
                 try:
@@ -183,6 +191,15 @@ class RiskGovernor:
                     logger.info("risk_governor: KILL → cancel_all() cancelled %d orders", len(cancelled) if isinstance(cancelled, (list, tuple)) else 0)
                 except Exception as cancel_exc:
                     logger.warning("risk_governor: KILL cancel_all failed (non-fatal): %s", cancel_exc)
+
+            try:
+                _alert(
+                    f"Risk Governor transition: {old} → {new_state} | "
+                    f"bankroll={self._bankroll:.2f} daily_loss={self._daily_loss:.2f} "
+                    f"deployed={self._deployed_usd:.2f}"
+                )
+            except Exception as exc:
+                logger.warning("risk_governor transition alert failed (non-fatal): %s", exc)
 
     # ------------------------------------------------------------------
     # Mutators
@@ -222,6 +239,31 @@ class RiskGovernor:
         self._deployed_usd = max(0.0, self._deployed_usd - float(usd))
         self._open_market_ids.discard(market_id)
         self._event_id_by_market.pop(market_id, None)
+        self._persist()
+
+    def set_realized_pnl(self, value: float) -> None:
+        """Set cumulative realised P&L (signed; negative = net loss).
+
+        Observability only — no rule in check() reads this field. It exists so
+        the persisted state and the /api/live/governor view agree with
+        live_position_tracker.recompute_equity(), which is the authority.
+        Before this setter existed the field was loaded once at init and echoed
+        back by _persist() forever, freezing it at whatever the DB last held.
+        """
+        self._realized_pnl = float(value)
+        self._persist()
+
+    def set_daily_loss(self, amount: float) -> None:
+        """Set today's cumulative realised loss (positive = loss magnitude).
+
+        Idempotent counterpart to record_realized_loss(): callers that derive
+        the day's loss from the ledger must NOT accumulate, or every sync cycle
+        would double-count. Transitions to DAILY_HALT on the same combined
+        realised+unrealised threshold record_realized_loss() uses.
+        """
+        self._daily_loss = max(0.0, float(amount))
+        if self._daily_loss + self._unrealized_loss >= live_config.daily_loss_halt():
+            self._transition("DAILY_HALT")
         self._persist()
 
     def set_unrealized_loss(self, amount: float) -> None:

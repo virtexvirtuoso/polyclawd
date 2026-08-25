@@ -23,7 +23,7 @@ from typing import List, Dict, Any
 import re
 from pathlib import Path
 from loguru import logger
-
+from config.polymarket_urls import GAMMA_API, gamma_url  # polyproxy: central URL config
 
 # Sub-daily noise filter: BTC/ETH "Up or Down" with time ranges are coin flips
 _SUBDAILY_PATTERN = re.compile(
@@ -50,7 +50,6 @@ def _is_subdaily_noise(title: str) -> bool:
     if re.search(r'(bitcoin|ethereum|btc|eth)\s+price\s+(range|on|at)\b', t, re.IGNORECASE):
         return True
     return False
-
 
 # ============================================================================
 # Archetype Classification + Kill Rules (from 51-trade confidence analysis)
@@ -145,7 +144,6 @@ def classify_archetype(title: str) -> str:
 
     return 'other'
 
-
 def _check_kill_rules(title: str, price_cents: int) -> tuple:
     """Check kill rules against market archetype and entry price.
 
@@ -227,7 +225,6 @@ def _check_kill_rules(title: str, price_cents: int) -> tuple:
         return True, "K6: unclassified archetype + cheap entry", archetype
 
     return False, "", archetype
-
 
 # ============================================================================
 # Strategy Parameters (from backtest optimization)
@@ -330,8 +327,6 @@ SHADOW_LOG = Path(__file__).parent.parent / "storage" / "shadow_trades.json"
 # ============================================================================
 
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
-GAMMA_API = "https://gamma-api.polymarket.com"
-
 
 def _fetch_json(url: str, timeout: int = 12) -> Any:
     """Fetch JSON with timeout and error handling."""
@@ -342,7 +337,6 @@ def _fetch_json(url: str, timeout: int = 12) -> Any:
     except Exception as e:
         logger.warning(f"Fetch failed {url[:80]}: {e}")
         return None
-
 
 def fetch_kalshi_markets(pages: int = 3, per_page: int = 30, status: str = "open") -> List[Dict]:
     """Fetch active markets from Kalshi with pagination."""
@@ -414,7 +408,6 @@ def fetch_kalshi_markets(pages: int = 3, per_page: int = 30, status: str = "open
     logger.info(f"Kalshi: fetched {len(all_markets)} markets from {pages} pages + {len(MISPRICED_CATEGORIES)} targeted series")
     return all_markets
 
-
 def fetch_polymarket_markets(limit: int = 100) -> List[Dict]:
     """Fetch active markets from Polymarket Gamma API."""
     all_markets = []
@@ -441,7 +434,6 @@ def fetch_polymarket_markets(limit: int = 100) -> List[Dict]:
     logger.info(f"Polymarket: fetched {len(all_markets)} markets")
     return all_markets
 
-
 # ============================================================================
 # Signal Generation
 # ============================================================================
@@ -451,7 +443,6 @@ def extract_category(event_ticker: str) -> str:
     if not event_ticker:
         return ""
     return event_ticker.split('-')[0] if '-' in event_ticker else event_ticker
-
 
 def calculate_signal_confidence(
     category_edge: float,
@@ -554,7 +545,6 @@ def calculate_signal_confidence(
         "velocity_modifier": velocity_data,
     }
 
-
 def _is_mispriced_polymarket(market: Dict) -> tuple:
     """Check if a Polymarket market is in a mispriced category.
     
@@ -646,7 +636,6 @@ def _is_mispriced_polymarket(market: Dict) -> tuple:
 
     return False, 0, ""
 
-
 def _log_shadow_trade(signal: Dict):
     """Log signal as a shadow/paper trade via SQLite tracker."""
     try:
@@ -668,7 +657,7 @@ def _log_shadow_trade(signal: Dict):
                 "market": signal.get("market", "")[:80],
                 "category": signal.get("category"),
                 "side": signal.get("side"),
-                "entry_price": signal.get("price"),
+                "entry_price": signal.get("entry_price", signal.get("price")),
                 "confidence": signal.get("confidence"),
                 "confirmations": signal.get("confirmations"),
                 "days_to_close": signal.get("days_to_close"),
@@ -685,7 +674,6 @@ def _log_shadow_trade(signal: Dict):
             logger.warning(f"Shadow trade log failed: {e}")
     except Exception as e:
         logger.warning(f"Shadow tracker log failed: {e}")
-
 
 # ============================================================================
 # Kalshi Scanner
@@ -819,6 +807,7 @@ def scan_kalshi_signals() -> List[Dict]:
             "category_tier": cat_info["tier"] if cat_info else "dynamic",
             "side": side,
             "price": price / 100.0,
+            "entry_price": round(1.0 - price / 100.0, 4),  # held-side (NO) cost
             "confidence": conf["confidence"],
             "volume": volume,
             "days_to_close": round(days_to_close, 1),
@@ -842,7 +831,6 @@ def scan_kalshi_signals() -> List[Dict]:
 
     return signals
 
-
 # ============================================================================
 # Polymarket Scanner
 # ============================================================================
@@ -856,8 +844,7 @@ def scan_polymarket_signals() -> List[Dict]:
     event_markets = []
     try:
         import httpx
-        GAMMA = "https://gamma-api.polymarket.com"
-        r = httpx.get(f"{GAMMA}/events", params={
+        r = httpx.get(gamma_url("/events"), params={
             "active": "true", "closed": "false", "limit": 100, 
             "order": "volume24hr", "ascending": "false"
         }, timeout=20)
@@ -971,6 +958,7 @@ def scan_polymarket_signals() -> List[Dict]:
             "category_tier": tier,
             "side": side,
             "price": yes_price,
+            "entry_price": round(1.0 - yes_price, 4),  # held-side (NO) cost
             "confidence": conf["confidence"],
             "volume": int(volume),
             "volume_24h": int(volume_24h),
@@ -1015,13 +1003,14 @@ def scan_polymarket_signals() -> List[Dict]:
             if ex.get("available"):
                 sig["no_entry_price"] = (round(ex["executable_price"] * 100, 1)
                                          if ex["executable_price"] is not None else None)
+                if ex["executable_price"] is not None:
+                    sig["entry_price"] = round(ex["executable_price"], 4)
                 sig["entry_slippage_bps"] = ex["slippage_bps"]
                 sig["book_spread_pct"] = (round(ex["spread"] * 100, 1)
                                           if ex["spread"] is not None else None)
                 sig["tradeable"] = bool(ex["reason"] in ("full", "resized"))
 
     return signals
-
 
 # ============================================================================
 # Cross-Platform Matching
@@ -1060,7 +1049,6 @@ def find_cross_platform_matches(kalshi_signals: List[Dict], poly_signals: List[D
                     })
 
     return matches
-
 
 # ============================================================================
 # Main Entry Points
@@ -1137,7 +1125,6 @@ def get_mispriced_category_signals() -> Dict[str, Any]:
     _cache["timestamp"] = now
 
     return result
-
 
 # ============================================================================
 # CLI Testing

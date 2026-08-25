@@ -214,7 +214,7 @@ def run_resolver(game_date: str = None, dry_run: bool = False) -> Dict:
 
     logger.info(f"kalshi_prop_resolver: resolving for {game_date} (dry_run={dry_run})")
 
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
@@ -308,7 +308,7 @@ def print_unresolved(game_date: str = None):
     """Print current unresolved Kalshi prop trades for review."""
     if game_date is None:
         game_date = date.today().isoformat()
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     rows = conn.execute("""
         SELECT id, market_id, market, entry_price, snapshot_date

@@ -20,9 +20,9 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 from loguru import logger
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 
-GAMMA_API = "https://gamma-api.polymarket.com"
 DB_PATH = os.getenv("HF_DB_PATH",
     str(Path(__file__).parent.parent / "storage" / "shadow_trades.db"))
 
@@ -33,7 +33,8 @@ DB_PATH = os.getenv("HF_DB_PATH",
 
 def _get_db() -> sqlite3.Connection:
     """Get SQLite connection with tables created."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.execute("PRAGMA journal_mode=WAL")
     
     # Market resolutions — the ground truth for backtesting

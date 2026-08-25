@@ -14,6 +14,7 @@ import json
 import time
 import logging
 import requests
+from config.polymarket_urls import clob_url, gamma_url  # polyproxy: central URL config
 
 logger = logging.getLogger("whale_hot_rescan")
 
@@ -37,14 +38,14 @@ def _fetch_kalshi_book(ticker: str):
 
 def _fetch_pm_book(slug: str):
     try:
-        g = requests.get(f"https://gamma-api.polymarket.com/markets?slug={slug}&limit=1", timeout=5)
+        g = requests.get(gamma_url(f"/markets?slug={slug}&limit=1"), timeout=5)
         if not g.ok:
             return None
         markets = g.json()
         if not markets:
             return None
         token = json.loads(markets[0].get("clobTokenIds", "[]"))[0]
-        r = requests.get(f"https://clob.polymarket.com/book?token_id={token}", timeout=5)
+        r = requests.get(clob_url(f"/book?token_id={token}"), timeout=5)
         if r.ok:
             d = r.json()
             bids = d.get("bids", [])

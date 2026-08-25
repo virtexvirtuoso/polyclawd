@@ -29,7 +29,8 @@ BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
 from odds.monitor_gate import gated_fetch_json
 
-from scripts.alert_formatter import send_telegram
+from scripts.alert_formatter import format_grid, send_telegram
+from signals.alert_dispatch import TIER_DIGEST, dispatch
 
 # ── Config ───────────────────────────────────────────────────────────────────
 ODDS_API_KEY  = os.environ.get("ODDS_API_KEY", "")
@@ -44,6 +45,20 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=8)
 # even if the line keeps moving tick-to-tick. sport_drift_dedup table was created
 # for this but never wired up until now.
 DRIFT_ALERT_COOLDOWN_SECS = 3600  # 1h per game
+
+# Vegas-tier EV filter (2026-08-23, from edge_calibration): the BUY-side edge is
+# regime-dependent. Buying cheap underdogs (<40% Vegas) = +15pp EV; buying
+# favorites (>60%) = +9.3pp EV; the middle (40-60%) is NEGATIVE EV (-6 to -10pp).
+# Only fire signals in the +EV tiers. VEGAS_UNDERDOG_MAX / VEGAS_FAVORITE_MIN are
+# the Vegas devig probability bounds that define the +EV regimes.
+VEGAS_UNDERDOG_MAX = 0.40   # Vegas prob below this = +EV underdog buy
+VEGAS_FAVORITE_MIN = 0.60   # Vegas prob above this = +EV favorite buy
+
+
+def _in_positive_ev_tier(vegas_prob: float) -> bool:
+    """True if a Vegas devig prob is in a +EV regime (underdog <40% or favorite >60%).
+    The 40-60% middle is negative EV per edge_calibration and is suppressed."""
+    return vegas_prob < VEGAS_UNDERDOG_MAX or vegas_prob > VEGAS_FAVORITE_MIN
 
 # ── Sport configs ─────────────────────────────────────────────────────────────
 # Each config drives a full scan cycle for that sport.
@@ -87,6 +102,24 @@ SPORT_CONFIGS: List[Dict] = [
         "active_months": list(range(1, 13)),
         "edge_floor_pp": 6.0,
     },
+    {
+        "name": "NFL",
+        "odds_key": "americanfootball_nfl",
+        "pm_tag": "nfl",
+        "has_draw": False,
+        "drift_pp": 6.0,
+        "active_months": [8, 9, 10, 11, 12, 1, 2],
+        "edge_floor_pp": 6.0,
+    },
+    {
+        "name": "NBA",
+        "odds_key": "basketball_nba",
+        "pm_tag": "nba",
+        "has_draw": False,
+        "drift_pp": 6.0,
+        "active_months": [10, 11, 12, 1, 2, 3, 4, 5, 6],
+        "edge_floor_pp": 6.0,
+    },
 ]
 
 # Team name aliases for cross-platform matching
@@ -108,6 +141,8 @@ SPORT_EMOJI: Dict[str, str] = {
     "WC Soccer": "⚽",
     "MLS": "⚽",
     "UFC": "🥊",
+    "NFL": "🏈",
+    "NBA": "🏀",
 }
 
 
@@ -182,6 +217,85 @@ def _game_id(home: str, away: str, commence_time: str = "") -> str:
 def _imp(price: int) -> float:
     p = int(price)
     return (100 / (100 + p)) if p > 0 else (-p / (-p + 100))
+
+
+# Sharp US books used for the consensus fallback when Pinnacle has no line.
+# Pinnacle is sharpest; DK/FD/MGM/Caesars/Fanatics are the sharp US books.
+# Soft/offshore books (Bovada, MyBookie) are excluded — they lag and add noise.
+SHARP_BOOKS = ["pinnacle", "draftkings", "fanduel", "betmgm", "williamhill_us", "fanatics"]
+
+
+def fetch_sharp_consensus_sport(odds_key: str) -> List[Dict]:
+    """Fetch all h2h games for a sport, devigging a consensus across the sharp
+    US books (Pinnacle + DK/FD/MGM/Caesars/Fanatics). Soft offshore books are
+    excluded. Used as a fallback when Pinnacle has no line (common in preseason).
+
+    Returns the same shape as fetch_pinnacle_sport:
+      {"home", "away", "game_id", "outcomes": {name: devigged_prob}, "commence_time"}
+    """
+    if not ODDS_API_KEY:
+        return []
+    data = gated_fetch_json(f"{ODDS_API_BASE}/{odds_key}/odds", {
+        "apiKey": ODDS_API_KEY,
+        "regions": "us",
+        "markets": "h2h",
+        "oddsFormat": "american",
+    })
+    if not isinstance(data, list):
+        return []
+
+    games = []
+    for event in data:
+        home = event.get("home_team", "")
+        away = event.get("away_team", "")
+        if not home or not away:
+            continue
+        ct = event.get("commence_time", "")
+        if ct:
+            try:
+                start = datetime.fromisoformat(ct.replace("Z", "+00:00"))
+                if (datetime.now(timezone.utc) - start).total_seconds() / 3600 > 4:
+                    continue  # Game almost certainly finished
+            except (ValueError, TypeError):
+                pass
+        # Collect each sharp book's devigged 2-way probs.
+        book_probs = []
+        for bm in event.get("bookmakers", []):
+            if bm.get("key") not in SHARP_BOOKS:
+                continue
+            for mkt in bm.get("markets", []):
+                if mkt.get("key") != "h2h":
+                    continue
+                outcomes = mkt.get("outcomes", [])
+                valid = [o for o in outcomes if o.get("price", 0) and o["price"] != 0]
+                if len(valid) < 2:
+                    continue
+                raw = {o["name"]: _imp(o["price"]) for o in valid}
+                total = sum(raw.values())
+                if not (0.95 <= total <= 1.50):
+                    continue
+                book_probs.append({k: v / total for k, v in raw.items()})
+        if not book_probs:
+            continue
+        # Average across the sharp books that carry the game.
+        all_outcomes = set()
+        for bp in book_probs:
+            all_outcomes.update(bp.keys())
+        consensus = {}
+        for oc in all_outcomes:
+            vals = [bp[oc] for bp in book_probs if oc in bp]
+            consensus[oc] = sum(vals) / len(vals) if vals else 0
+        total = sum(consensus.values())
+        if total < 0.1:
+            continue
+        games.append({
+            "home": home,
+            "away": away,
+            "game_id": _game_id(home, away, ct),
+            "outcomes": {k: v / total for k, v in consensus.items()},
+            "commence_time": ct,
+        })
+    return games
 
 
 def fetch_pinnacle_sport(odds_key: str) -> List[Dict]:
@@ -260,6 +374,8 @@ _SMT_MAP: Dict[str, str] = {
     "ufc":            "ufc_fight_winner",
     "fifa-world-cup": "drawable_outcome",
     "soccer":         "drawable_outcome",
+    "nfl":            "football_team_full_game_winner",
+    "nba":            "basketball_team_full_game_winner",
 }
 
 
@@ -479,19 +595,14 @@ def check_sport_drift(conn: sqlite3.Connection, cfg: Dict, games: List[Dict]) ->
 
         # Build alert
         fired_ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
-        lines = [
-            f"{emoji} <b>ODDS MOVED</b> — {sport} | {home} vs {away}  <i>{fired_ts}</i>",
-            "",
-            "Vegas shifted big on this game:",
-            "",
-        ]
-
         trade_signals: List[str] = []
+        grid_rows: List[list] = []
+        comparison_lines: List[str] = []
 
         for d in outcome_data:
             sym = "↑" if d["move"] > 0 else "↓"
             moved = abs(d["move"]) >= drift_pp
-            move_tag = f"  <b>{sym}{abs(d['move']):.0f}pts</b>" if moved else f"  {d['move']:+.0f}pts"
+            move_str = f"{sym}{abs(d['move']):.0f}pts" if moved else f"{d['move']:+.0f}pts"
 
             # Plain label
             if d["name"] == "Draw":
@@ -503,8 +614,7 @@ def check_sport_drift(conn: sqlite3.Connection, cfg: Dict, games: List[Dict]) ->
             else:
                 label = f"{d['name']} wins"
 
-            lines.append(f"<b>{label}</b>")
-            lines.append(f"   {d['prev']:.0%} → <b>{d['now']:.0%}</b>{move_tag}")
+            grid_rows.append([label, f"{d['prev']:.0%}", f"{d['now']:.0%}", move_str])
 
             # PM comparison
             pm_p = poly_mids.get(d["name"])
@@ -518,24 +628,45 @@ def check_sport_drift(conn: sqlite3.Connection, cfg: Dict, games: List[Dict]) ->
             if pm_p is not None:
                 gap = (d["now"] - pm_p) * 100
                 if abs(gap) >= edge_floor:
-                    direction = "cheaper" if gap > 0 else "pricier"
-                    action = "BUY" if gap > 0 else "SELL"
-                    lines.append(f"   Polymarket: {pm_p:.0%}  ← <b>{abs(gap):.0f}pts {direction} than Vegas</b>")
-                    trade_signals.append(
-                        f"→ <b>{action} {label} YES</b> at {pm_p:.0%}  (Vegas: {d['now']:.0%})"
-                    )
+                    # Vegas-tier EV filter (2026-08-23): only fire in +EV regimes.
+                    if not _in_positive_ev_tier(d["now"]):
+                        comparison_lines.append(f"<b>{label}</b>: Polymarket {pm_p:.0%}  (gap {abs(gap):.0f}pts but mid-tier {d['now']:.0%} — negative EV, suppressed)")
+                    else:
+                        direction = "cheaper" if gap > 0 else "pricier"
+                        action = "BUY" if gap > 0 else "SELL"
+                        comparison_lines.append(f"<b>{label}</b>: Polymarket {pm_p:.0%}  ← <b>{abs(gap):.0f}pts {direction} than Vegas</b>")
+                        trade_signals.append(
+                            f"→ <b>{action} {label} YES</b> at {pm_p:.0%}  (Vegas: {d['now']:.0%})"
+                        )
                 else:
-                    lines.append(f"   Polymarket: {pm_p:.0%}  (in line)")
-            lines.append("")
+                    comparison_lines.append(f"<b>{label}</b>: Polymarket {pm_p:.0%}  (in line)")
+
+        lines = [
+            f"{emoji} <b>ODDS MOVED</b> — {sport} | {home} vs {away}  <i>{fired_ts}</i>",
+            "",
+            "Vegas shifted big on this game:",
+            "",
+            format_grid(["Outcome", "Prev", "Now", "Move"], grid_rows),
+            "",
+        ]
+        lines.extend(comparison_lines)
 
         if trade_signals:
             lines.append("━━━━━━━━━━━━━━━━")
             lines.append("💰 <b>PM hasn't caught up yet:</b>")
             lines.extend(trade_signals)
 
-        # Only alert when there's an actionable PM edge — suppress noise
+        # Only alert when there's an actionable PM edge. The rest is not
+        # dropped — it goes to the tier-3 digest so a Vegas move is still
+        # reviewable twice a day without being an interrupt.
         if not trade_signals:
-            print(f"[cross_sport_drift] Drift {sport} {home} vs {away} — no PM edge, suppressed", flush=True)
+            try:
+                dispatch("ufc_drift",
+                         f"{sport}: {home} vs {away} — Vegas moved, no PM edge",
+                         TIER_DIGEST)
+            except Exception as ex:  # noqa: BLE001 — digest must never block
+                print(f"[cross_sport_drift] digest dispatch failed: {ex}", flush=True)
+            print(f"[cross_sport_drift] Drift {sport} {home} vs {away} — no PM edge, digested", flush=True)
             continue
 
         # Cooldown: skip if we already alerted this game within DRIFT_ALERT_COOLDOWN_SECS

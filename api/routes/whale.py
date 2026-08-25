@@ -14,6 +14,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Query
 from typing import Optional
+from config.polymarket_urls import clob_url, data_url, gamma_url  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
 
@@ -304,7 +305,7 @@ def whale_wallet_detail(wallet_addr: str):
     # Fetch recent trades from PM data-api
     trades = []
     try:
-        url = f"https://data-api.polymarket.com/trades?user={wallet_addr.lower()}&limit=50"
+        url = data_url(f"/trades?user={wallet_addr.lower()}&limit=50")
         req = _ur.Request(url, headers={"User-Agent": "polyclawd/1.0"})
         with _ur.urlopen(req, timeout=12) as r:
             raw = json.loads(r.read().decode())
@@ -361,7 +362,7 @@ def whale_book(platform: str = Query(...), market: str = Query(...)):
             b, a = parse_kalshi_book(d["orderbook_fp"])
             bids, asks = b[:12], a[:12]
     elif platform == "polymarket":
-        g = _fetch_json(f"https://gamma-api.polymarket.com/markets?slug={market}&limit=1")
+        g = _fetch_json(gamma_url(f"/markets?slug={market}&limit=1"))
         token = None
         if g:
             try:
@@ -369,7 +370,7 @@ def whale_book(platform: str = Query(...), market: str = Query(...)):
             except (ValueError, IndexError, TypeError):
                 token = None
         if token:
-            d = _fetch_json(f"https://clob.polymarket.com/book?token_id={token}")
+            d = _fetch_json(clob_url(f"/book?token_id={token}"))
             if d:
                 bids = sorted(
                     ((float(x["price"]), float(x["size"])) for x in d.get("bids") or []), key=lambda v: -v[0]

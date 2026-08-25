@@ -9,6 +9,7 @@ from pathlib import Path
 from functools import lru_cache
 from typing import Optional, TYPE_CHECKING
 import os
+from config.polymarket_urls import GAMMA_API as _CENTRAL_GAMMA_API  # polyproxy: central URL config
 
 if TYPE_CHECKING:
     from api.services.storage import StorageService
@@ -32,7 +33,7 @@ class Settings:
     ]
 
     # External APIs
-    GAMMA_API = "https://gamma-api.polymarket.com"
+    GAMMA_API = _CENTRAL_GAMMA_API
     SIMMER_API = "https://api.simmer.markets/api/sdk"
 
     # Rate limits

@@ -434,25 +434,21 @@ def test_smart_wallet_pierces():
     assert a["severity"] == "CRITICAL" and "smart_pierce" in a["reasons"]
 
 def test_pregame_steam_pierces_game_not_tracker():
-    """Pre-game = burst on a calendar day BEFORE the ticker's game day
-    (close_time is unusable: Kalshi settlement buffers run days past games)."""
     from signals import whale_scanner as ws
-    day_before = 1781100000.0   # 2026-06-10 UTC; game day in ticker = 06-11
+    from datetime import datetime, timezone
+    now = 1e9
+    far_close = datetime.fromtimestamp(now + 6 * 3600, tz=timezone.utc).isoformat()
     a = _crit_alert()
     ws.apply_livegame_ceiling(a, "kalshi", "KXMLBHR-26JUN111310MINDET-X",
-                              {"flow_dollars": 600.0, "volume": 500}, now=day_before)
+                              {"flow_dollars": 600.0, "volume": 500,
+                               "close_time": far_close}, now=now)
     assert a["severity"] == "CRITICAL" and "pregame_steam" in a["reasons"]
-    # same burst ON game day = in-play churn, capped
-    game_day = 1781190000.0     # 2026-06-11 UTC
+    # tracker with identical timing must NOT get the pregame pierce
     b = _crit_alert()
-    ws.apply_livegame_ceiling(b, "kalshi", "KXMLBHR-26JUN111310MINDET-X",
-                              {"flow_dollars": 600.0, "volume": 500}, now=game_day)
+    ws.apply_livegame_ceiling(b, "kalshi", "KXGOLDD-26JUN12-T3400",
+                              {"flow_dollars": 600.0, "volume": 500,
+                               "close_time": far_close}, now=now)
     assert b["severity"] == "HIGH"
-    # tracker never gets the pregame pierce
-    c = _crit_alert()
-    ws.apply_livegame_ceiling(c, "kalshi", "KXGOLDD-26JUN13-T3400",
-                              {"flow_dollars": 600.0, "volume": 500}, now=day_before)
-    assert c["severity"] == "HIGH"
 
 def test_quiet_market_untouched():
     from signals import whale_scanner as ws

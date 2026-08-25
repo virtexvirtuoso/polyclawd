@@ -1,6 +1,7 @@
 """Social count analysis — use known event slugs to discover all related events."""
 import json, urllib.request, time, re, sqlite3
 from collections import defaultdict
+from config.polymarket_urls import GAMMA_API as GAMMA  # polyproxy: central URL config
 
 def fetch(url, timeout=10):
     for attempt in range(3):
@@ -12,7 +13,7 @@ def fetch(url, timeout=10):
     return None
 
 DB = "/var/www/virtuosocrypto.com/polyclawd/storage/shadow_trades.db"
-GAMMA = "https://gamma-api.polymarket.com"
+
 CLOB = "https://clob.polymarket.com"
 
 db = sqlite3.connect(DB)

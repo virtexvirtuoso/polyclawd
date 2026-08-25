@@ -4,6 +4,7 @@ The formatter's Telegram delivery must go through ONE hardened send path
 (ledger + err detail + transient-only retry) and must never 400-drop an
 alert because a caller interpolated raw `<`/`>`/`&` into HTML mode.
 """
+
 import io
 import json
 import subprocess
@@ -55,8 +56,8 @@ def _fake_telegram(calls):
         pm = payload.get("parse_mode", [None])[0]
         if pm == "HTML" and "< 2" in text:
             raise urllib.error.HTTPError(
-                req.full_url, 400, "Bad Request",
-                {}, io.BytesIO(b'{"ok":false,"description":"can\'t parse entities"}'))
+                req.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"ok":false,"description":"can\'t parse entities"}')
+            )
         return _Resp()
 
     return urlopen
@@ -80,8 +81,8 @@ def test_permanent_400_lands_err_in_ledger_no_retry(monkeypatch, tmp_path):
     def always_400(req, timeout):
         calls.append(1)
         raise urllib.error.HTTPError(
-            req.full_url, 400, "Bad Request",
-            {}, io.BytesIO(b'{"ok":false,"description":"chat not found"}'))
+            req.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"ok":false,"description":"chat not found"}')
+        )
 
     ledger = _wire(monkeypatch, tmp_path, always_400)
     ok = af.send_telegram("hello <b>world</b>")
@@ -91,6 +92,34 @@ def test_permanent_400_lands_err_in_ledger_no_retry(monkeypatch, tmp_path):
     lines = [json.loads(l) for l in ledger.read_text().splitlines()]
     assert lines, "failure must land in the ledger, never a silent swallow"
     assert all(l["ok"] is False and l["err"].startswith("http_400") for l in lines)
+
+
+def test_format_alert_escapes_dynamic_fields(monkeypatch, tmp_path):
+    """Raw </>/& in caller data must be escaped so the HTML send succeeds
+    FIRST try with formatting intact — not rescued plain by the send-path
+    fallback (step-10 polish)."""
+    calls = []
+    _wire(monkeypatch, tmp_path, _fake_telegram(calls))
+    msg = af.format_alert(
+        alert_type="whale",
+        rank=2,
+        emoji="🐋",
+        title="High temp < 2°C in NYC?",
+        direction="YES",
+        price_cents=41,
+        action="Bought $5K < 2 min after open",
+        data_line="Depth < 2x & thin",
+        links=["<a href='https://x'>Polymarket</a>"],
+        tags=["🔴 <soon>"],
+    )
+    # dynamic text escaped; template markup and links untouched
+    assert "&lt; 2°C" in msg and "&lt; 2 min" in msg and "&lt; 2x &amp; thin" in msg
+    assert "&lt;soon&gt;" in msg
+    assert "<b>#2</b>" in msg and "<a href=" in msg
+    ok = af.send_telegram(msg)
+    assert ok is True
+    assert len(calls) == 1  # clean escaped HTML passes on the first try
+    assert calls[0]["parse_mode"][0] == "HTML"
 
 
 def test_intentional_html_tags_still_render(monkeypatch, tmp_path):

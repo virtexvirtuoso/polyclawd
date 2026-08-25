@@ -13,12 +13,12 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
-GAMMA_API = "https://gamma-api.polymarket.com"
 
 # ── Archetype → estimated-hours fallback ──────────────────────────────────
 ARCHETYPE_ESTIMATE_HOURS: dict[str, tuple[int, int]] = {
@@ -50,13 +50,11 @@ MONTH_NAMES = {
 
 WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
 
-
 def _get_db() -> sqlite3.Connection:
     """Open read-only connection to shadow_trades.db."""
     conn = db_connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def _fetch_json(url: str, timeout: int = 8) -> Optional[dict]:
     """Lightweight JSON GET with timeout — returns None on failure."""
@@ -71,12 +69,10 @@ def _fetch_json(url: str, timeout: int = 8) -> Optional[dict]:
         logger.debug("Fetch failed for %s: %s", url[:60], exc)
         return None
 
-
 def _fetch_kalshi_market(ticker: str) -> Optional[dict]:
     """Fetch a Kalshi market by ticker, returning close_time if available."""
     data = _fetch_json(f"{KALSHI_API}/markets/{ticker}", timeout=6)
     return data
-
 
 def _fetch_polymarket_market(market_id: str) -> Optional[dict]:
     """Fetch a Polymarket market by ID, slug, or conditionId."""
@@ -85,7 +81,6 @@ def _fetch_polymarket_market(market_id: str) -> Optional[dict]:
         if data and isinstance(data, list) and len(data) > 0:
             return data[0]
     return None
-
 
 def _try_extract_date_from_title(title: str) -> Optional[str]:
     """Try to parse a resolution date from market title."""
@@ -137,7 +132,6 @@ def _try_extract_date_from_title(title: str) -> Optional[str]:
 
     return None
 
-
 def _extract_date_from_market_slug(slug: str) -> Optional[str]:
     """Try to extract a date from a Kalshi market slug like INDPX-24JUN26."""
     if not slug:
@@ -157,7 +151,6 @@ def _extract_date_from_market_slug(slug: str) -> Optional[str]:
                 year = int(yr_str)
             return f"{year:04d}-{month:02d}-{day:02d}"
     return None
-
 
 def _resolve_date(position: dict) -> tuple[str, str]:
     """Determine resolution date and its source for a position.
@@ -245,7 +238,6 @@ def _resolve_date(position: dict) -> tuple[str, str]:
             pass
 
     return ("unknown", "unknown")
-
 
 def compute_resolution_clusters(positions: Optional[list[dict]] = None) -> dict:
     """Analyze resolution-date concentration across open positions.

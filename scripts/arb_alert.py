@@ -60,7 +60,7 @@ def log_arb_opportunities():
         return
 
     now = time.time()
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.execute("PRAGMA busy_timeout=10000")
     _init_table(conn)
 

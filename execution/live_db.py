@@ -91,6 +91,21 @@ _ALLOWED_LIVE_OPEN_ORDERS = frozenset(
     }
 )
 
+_ALLOWED_LIVE_ENTRY_REASONING = frozenset(
+    {
+        "position_id",
+        "ts",
+        "trigger_source",
+        "wallet_address",
+        "wallet_win_rate",
+        "wallet_net_pnl",
+        "edge_pct",
+        "confidence",
+        "reasoning",
+        "raw_json",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -174,6 +189,23 @@ CREATE INDEX IF NOT EXISTS idx_live_fills_position_id
 
 CREATE INDEX IF NOT EXISTS idx_live_open_orders_order_id
     ON live_open_orders(order_id);
+
+CREATE TABLE IF NOT EXISTS live_entry_reasoning (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id     INTEGER NOT NULL,
+    ts              TEXT,
+    trigger_source  TEXT,
+    wallet_address  TEXT,
+    wallet_win_rate REAL,
+    wallet_net_pnl  REAL,
+    edge_pct        REAL,
+    confidence      REAL,
+    reasoning       TEXT,
+    raw_json        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_entry_reasoning_position
+    ON live_entry_reasoning(position_id);
 """
 
 
@@ -222,6 +254,27 @@ def insert_position(conn: sqlite3.Connection, commit: bool = True, **fields) -> 
     cols = ", ".join(fields.keys())
     placeholders = ", ".join(["?"] * len(fields))
     sql = f"INSERT INTO live_positions ({cols}) VALUES ({placeholders})"
+    cur = conn.execute(sql, list(fields.values()))
+    if commit:
+        conn.commit()
+    return cur.lastrowid
+
+
+def record_entry_reasoning(conn: sqlite3.Connection, commit: bool = True, **fields) -> int:
+    """Insert a new live_entry_reasoning row. Returns the new rowid.
+
+    position_id is required — this row is meaningless without a link back to
+    the live_positions row it explains. Raises ValueError if position_id is
+    missing/falsy, or if any key in *fields* is not in the allowed column set.
+    """
+    if not fields.get("position_id"):
+        raise ValueError("record_entry_reasoning: position_id is required")
+    unknown = set(fields) - _ALLOWED_LIVE_ENTRY_REASONING
+    if unknown:
+        raise ValueError(f"record_entry_reasoning: unknown column(s): {unknown}")
+    cols = ", ".join(fields.keys())
+    placeholders = ", ".join(["?"] * len(fields))
+    sql = f"INSERT INTO live_entry_reasoning ({cols}) VALUES ({placeholders})"
     cur = conn.execute(sql, list(fields.values()))
     if commit:
         conn.commit()

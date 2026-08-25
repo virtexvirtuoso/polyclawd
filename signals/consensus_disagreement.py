@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 from loguru import logger
+from config.polymarket_urls import GAMMA_API as POLYMARKET_GAMMA  # polyproxy: central URL config
 
 # ─── Credit Budget Manager ──────────────────────────────────────────────
 CREDIT_FILE = Path(__file__).parent.parent / "storage" / "ce5_credit_usage.json"
@@ -31,7 +32,6 @@ MIN_FEE_ADJUSTED_DISAGREEMENT_PP = 3.0
 MIN_BOOKMAKERS = 3
 CACHE_TTL_SEC = 900  # 15 min
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
-POLYMARKET_GAMMA = "https://gamma-api.polymarket.com"
 
 # ─── Sport configs ─────────────────────────────────────────────────────
 SPORT_CONFIGS: Dict[str, dict] = {
@@ -258,7 +258,6 @@ SPORT_ALIAS_MAP: Dict[str, Dict[str, List[str]]] = {
 _sport_cache: Dict[str, dict] = {}
 _credit_state: Optional[dict] = None
 
-
 # ─── Helpers ───────────────────────────────────────────────────────────
 
 def _norm(s: str) -> str:
@@ -268,7 +267,6 @@ def _norm(s: str) -> str:
         if not unicodedata.combining(c)
     ).lower().strip()
 
-
 def _team_in_title(team: str, title: str, aliases: Dict[str, List[str]]) -> bool:
     """Check if team or any alias appears in title text."""
     title_lower = _norm(title)
@@ -277,17 +275,14 @@ def _team_in_title(team: str, title: str, aliases: Dict[str, List[str]]) -> bool
             return True
     return False
 
-
 from odds.sports_edge_common import (
     american_to_implied_prob as _american_to_implied_prob,
     consensus_devig_2way as _sec_consensus_devig_2way,
     consensus_devig_3way as _sec_consensus_devig_3way,
 )
 
-
 def _get_api_key() -> Optional[str]:
     return os.getenv("ODDS_API_KEY") or None
-
 
 def _is_stale_event(commence_time: str) -> bool:
     if not commence_time:
@@ -297,7 +292,6 @@ def _is_stale_event(commence_time: str) -> bool:
         return (gt - datetime.now(timezone.utc)).total_seconds() / 60 < 30
     except (ValueError, TypeError):
         return True
-
 
 # ─── Credit Budget Manager ─────────────────────────────────────────────
 
@@ -317,7 +311,6 @@ def _ensure_credit_state():
     else:
         _credit_state = default
 
-
 def _save_credit_state():
     global _credit_state
     if _credit_state is None:
@@ -325,7 +318,6 @@ def _save_credit_state():
     CREDIT_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(CREDIT_FILE, "w") as f:
         json.dump(_credit_state, f, indent=2, sort_keys=True)
-
 
 def sports_odds_api_credit(credits: int = 1) -> bool:
     """Check budget and consume credits. Returns True if OK, False if exhausted."""
@@ -340,7 +332,6 @@ def sports_odds_api_credit(credits: int = 1) -> bool:
     _save_credit_state()
     return True
 
-
 def get_credit_status() -> dict:
     _ensure_credit_state()
     return {
@@ -349,7 +340,6 @@ def get_credit_status() -> dict:
         "max_daily": _credit_state["max_daily"],
         "date": _credit_state["date"],
     }
-
 
 # ─── Cache management ─────────────────────────────────────────────────
 
@@ -360,10 +350,8 @@ def _get_cached_sport(sport_key: str) -> Optional[list]:
         return entry["data"]
     return None
 
-
 def _set_sport_cache(sport_key: str, data: list):
     _sport_cache[sport_key] = {"ts": time.time(), "data": data}
-
 
 # ─── Odds API fetch ────────────────────────────────────────────────────
 
@@ -397,7 +385,6 @@ def _fetch_odds_sync(sport_key: str, api_key: str) -> list:
         logger.warning(f"CE-5 Odds API fetch failed for {sport_key}: {e}")
         return []
 
-
 # ─── Polymarket fetch ──────────────────────────────────────────────────
 
 def _fetch_polymarket_events_sync(tag_slug: str) -> list:
@@ -413,7 +400,6 @@ def _fetch_polymarket_events_sync(tag_slug: str) -> list:
     except Exception as e:
         logger.warning(f"CE-5 Polymarket fetch failed for tag={tag_slug}: {e}")
         return []
-
 
 def _find_poly_price(
     home_team: str,
@@ -459,17 +445,14 @@ def _find_poly_price(
                     return (price1, price0)
     return None
 
-
 def _compute_consensus_2way(event: dict) -> Optional[dict]:
     """Compute weighted consensus prob for a 2-way event.
     Returns {team: true_prob} or None."""
     return _sec_consensus_devig_2way(event, "h2h") or None
 
-
 def _compute_consensus_3way(event: dict) -> Optional[dict]:
     """Compute Shin-devigged weighted consensus for 3-way events."""
     return _sec_consensus_devig_3way(event, "h2h") or None
-
 
 def _count_bookmakers(event: dict) -> int:
     """Count bookmakers that contributed h2h odds for this event."""
@@ -485,7 +468,6 @@ def _count_bookmakers(event: dict) -> int:
                 count += 1
                 break
     return count
-
 
 def _compute_fee_adjusted_disagreement(
     raw_disagreement_pp: float,
@@ -512,7 +494,6 @@ def _compute_fee_adjusted_disagreement(
     round_trip_fees_pp = taker_fee_fraction(entry_price, "polymarket", "sports") * 100.0
     fee_adjusted_pp = raw_disagreement_pp - round_trip_fees_pp
     return fee_adjusted_pp, round_trip_fees_pp
-
 
 # ─── Main scanner ──────────────────────────────────────────────────────
 
@@ -683,7 +664,6 @@ def scan_all_sports_disagreement(sports_list: Optional[list] = None) -> list:
 
     return results
 
-
 def scan_sport_disagreement(sport_key: str) -> dict:
     """Scan a single sport for consensus disagreement.
 
@@ -712,7 +692,6 @@ def scan_sport_disagreement(sport_key: str) -> dict:
         "credits_remaining": credit_status["credits_remaining"],
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
-
 
 # ─── CLI test ─────────────────────────────────────────────────────────
 
@@ -745,10 +724,8 @@ if __name__ == "__main__":
         cs = get_credit_status()
         print(f"Credits: {cs['credits_consumed']}/{cs['max_daily']} used ({cs['credits_remaining']} remaining)")
 
-
 # ─── Phase 1B: DB persistence for CE-5/per-sport reconciliation ────────────
 _CE5_DB_INIT = False
-
 
 def _init_ce5_cache(conn):
     global _CE5_DB_INIT
@@ -770,7 +747,6 @@ def _init_ce5_cache(conn):
         CREATE INDEX IF NOT EXISTS idx_ce5_event ON ce5_signal_cache(event_title, team);
     """)
     _CE5_DB_INIT = True
-
 
 def persist_ce5_results(results: list) -> int:
     """Write CE-5 scan results to DB for reconciliation with per-sport engines."""
@@ -807,7 +783,6 @@ def persist_ce5_results(results: list) -> int:
     except Exception as e:
         logger.debug(f"CE-5 persist failed: {e}")
         return 0
-
 
 def check_ce5_agrees(event_title: str, participant: str, direction: str) -> Optional[bool]:
     """Check if CE-5 has a recent signal for this event+participant that agrees

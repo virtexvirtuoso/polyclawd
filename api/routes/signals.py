@@ -28,16 +28,16 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from api.middleware import verify_api_key
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
+from config.polymarket_urls import POLYMARKET_DATA_API  # polyproxy: central URL config
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # Constants
-GAMMA_API = "https://gamma-api.polymarket.com"
-POLYMARKET_DATA_API = "https://data-api.polymarket.com"
+
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 STORAGE_DIR = Path(__file__).parent.parent.parent / "storage"
-
 
 # ============================================================================
 # Helper Functions - Data Access
@@ -53,13 +53,11 @@ def _load_json(path: Path, default=None):
             pass
     return default if default is not None else {}
 
-
 def _save_json(path: Path, data):
     """Save data to JSON file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
-
 
 # Predictor stats file
 PREDICTOR_STATS_FILE = DATA_DIR / "predictor_stats.json"
@@ -72,7 +70,6 @@ CONFLICT_HISTORY_FILE = DATA_DIR / "conflict_history.json"
 # Paper trading files
 TRADES_FILE = STORAGE_DIR / "trades.json"
 
-
 # ============================================================================
 # Core Helper Functions
 # ============================================================================
@@ -82,16 +79,13 @@ def load_predictor_stats() -> dict:
     PREDICTOR_STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
     return _load_json(PREDICTOR_STATS_FILE, {"predictors": {}, "last_updated": None})
 
-
 def save_predictor_stats(stats: dict):
     """Save whale predictor statistics."""
     _save_json(PREDICTOR_STATS_FILE, stats)
 
-
 def load_whale_config() -> dict:
     """Load whale configuration."""
     return _load_json(WHALE_CONFIG_FILE, {"whales": []})
-
 
 def load_source_outcomes() -> dict:
     """Load signal source win/loss tracking."""
@@ -126,11 +120,9 @@ def load_source_outcomes() -> dict:
     _save_json(SOURCE_OUTCOMES_FILE, defaults)
     return defaults
 
-
 def save_source_outcomes(outcomes: dict):
     """Save source outcomes."""
     _save_json(SOURCE_OUTCOMES_FILE, outcomes)
-
 
 def get_source_win_rate(source: str) -> float:
     """Get win rate for a signal source."""
@@ -139,7 +131,6 @@ def get_source_win_rate(source: str) -> float:
     if data["total"] == 0:
         return 0.5
     return data["wins"] / data["total"]
-
 
 def record_outcome(source: str, won: bool, market_title: str = ""):
     """Record a trade outcome for Bayesian learning."""
@@ -161,12 +152,10 @@ def record_outcome(source: str, won: bool, market_title: str = ""):
         outcomes[source]["history"] = outcomes[source]["history"][-100:]
     save_source_outcomes(outcomes)
 
-
 def load_conflict_history() -> dict:
     """Load signal conflict history."""
     CONFLICT_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     return _load_json(CONFLICT_HISTORY_FILE, {"conflicts": [], "source_vs_source": {}})
-
 
 def fetch_polymarket_positions(address: str, limit: int = 50) -> list:
     """Fetch positions from Polymarket Data API."""
@@ -177,7 +166,6 @@ def fetch_polymarket_positions(address: str, limit: int = 50) -> list:
             return json.loads(resp.read().decode())
     except Exception as e:
         return {"error": str(e)}
-
 
 # ============================================================================
 # Volume Spike Detection
@@ -256,7 +244,6 @@ def scan_volume_spikes(spike_threshold: float = 2.0, use_zscore: bool = True) ->
         "scan_time": datetime.now().isoformat()
     }
 
-
 # ============================================================================
 # Resolution Timing
 # ============================================================================
@@ -316,7 +303,6 @@ def scan_resolution_timing(hours_until: int = 48) -> dict:
         "scan_time": datetime.now().isoformat(),
         "note": "Markets near resolution often see volatility spikes as outcomes become clearer"
     }
-
 
 # ============================================================================
 # Whale Tracking Functions
@@ -402,7 +388,6 @@ def get_inverse_whale_signals() -> dict:
         "losing_whales": losing_whales,
         "strategy": "Fade positions where losing whales (accuracy <50%) are heavily invested"
     }
-
 
 def get_smart_money_flow() -> dict:
     """Calculate net whale buying/selling per market."""
@@ -492,7 +477,6 @@ def get_smart_money_flow() -> dict:
         "note": "Weighted by whale accuracy. Positive = bullish YES, Negative = bullish NO"
     }
 
-
 # ============================================================================
 # Bayesian Confidence Scoring
 # ============================================================================
@@ -509,7 +493,6 @@ def laplace_smoothed_win_rate(wins: int, total: int, alpha: float = 4.0) -> floa
     """
     return (wins + alpha) / (total + 2 * alpha)
 
-
 def sigmoid_normalize(raw_signal: float, k: float = 0.1, center: float = 50) -> float:
     """
     Sigmoid scaling to handle outliers and normalize to 0-100.
@@ -522,7 +505,6 @@ def sigmoid_normalize(raw_signal: float, k: float = 0.1, center: float = 50) -> 
         return 100 / (1 + math.exp(-k * (raw_signal - center)))
     except OverflowError:
         return 0 if raw_signal < center else 100
-
 
 def calculate_bayesian_confidence(raw_score: float, source: str, market: str, side: str, all_signals: list) -> dict:
     """Calculate Bayesian-adjusted confidence score (legacy interface)."""
@@ -555,7 +537,6 @@ def calculate_bayesian_confidence(raw_score: float, source: str, market: str, si
         "composite_multiplier": round(composite_multiplier, 2),
         "final_confidence": round(min(100, final_confidence), 1)
     }
-
 
 def calculate_bayesian_confidence_v2(
     raw_scores: dict,      # {source: base_confidence}
@@ -649,7 +630,6 @@ def calculate_bayesian_confidence_v2(
         }
     }
 
-
 def combined_decision_score(edge_pct: float, confidence: float) -> dict:
     """
     Combined edge + confidence decision metric.
@@ -692,7 +672,6 @@ def combined_decision_score(edge_pct: float, confidence: float) -> dict:
         "size_multiplier": size_multiplier,
         "rationale": f"|{edge_pct:.1f}%| × {confidence:.0f}/100 = {adjusted_edge:.1f}%"
     }
-
 
 # ============================================================================
 # Signal Aggregation
@@ -883,7 +862,6 @@ def aggregate_all_signals() -> dict:
         "generated_at": datetime.now().isoformat()
     }
 
-
 # ============================================================================
 # Endpoints: Signals
 # ============================================================================
@@ -899,7 +877,6 @@ async def get_all_signals():
         logger.exception(f"Signal aggregation failed: {e}")
         raise HTTPException(status_code=500, detail="Signal aggregation failed")
 
-
 @router.get("/signals/mispriced-category")
 async def get_mispriced_category_strategy_signals():
     """Get signals from the MispricedCategoryWhale strategy.
@@ -914,7 +891,6 @@ async def get_mispriced_category_strategy_signals():
     except Exception as e:
         logger.exception(f"Mispriced category signal scan failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.get("/signals/news")
 async def get_news_signals():
@@ -960,7 +936,6 @@ async def get_news_signals():
     except Exception as e:
         logger.warning(f"News signals error: {e}")
         return {"error": str(e), "enabled": False}
-
 
 @router.post("/signals/auto-trade")
 async def auto_trade_on_signals(
@@ -1031,7 +1006,6 @@ async def auto_trade_on_signals(
         logger.exception(f"Auto-trade analysis failed: {e}")
         raise HTTPException(status_code=500, detail="Auto-trade analysis failed")
 
-
 # ============================================================================
 # Endpoints: Volume
 # ============================================================================
@@ -1051,7 +1025,6 @@ async def get_volume_spikes(
         logger.exception(f"Volume spike scan failed: {e}")
         raise HTTPException(status_code=500, detail="Volume spike scan failed")
 
-
 # ============================================================================
 # Endpoints: Resolution
 # ============================================================================
@@ -1067,7 +1040,6 @@ async def get_approaching_resolution(
         logger.exception(f"Resolution scan failed: {e}")
         raise HTTPException(status_code=500, detail="Resolution scan failed")
 
-
 @router.get("/resolution/imminent")
 async def get_imminent_resolution():
     """Markets resolving within 24 hours - highest volatility potential."""
@@ -1082,7 +1054,6 @@ async def get_imminent_resolution():
     except Exception as e:
         logger.exception(f"Imminent resolution scan failed: {e}")
         raise HTTPException(status_code=500, detail="Resolution scan failed")
-
 
 # ============================================================================
 # Endpoints: Cross-Market Correlation
@@ -1118,7 +1089,6 @@ async def get_correlation_violations(
     except Exception as e:
         logger.exception(f"Correlation scan failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.get("/correlation/entities")
 async def get_market_entities():
@@ -1181,7 +1151,6 @@ async def get_market_entities():
         logger.exception(f"Entity scan failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # ============================================================================
 # Endpoints: Whale Tracking
 # ============================================================================
@@ -1218,7 +1187,6 @@ async def get_predictor_stats():
         logger.exception(f"Predictor stats failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to load predictor stats")
 
-
 @router.post("/predictors/update")
 async def refresh_predictor_stats():
     """Refresh predictor accuracy statistics."""
@@ -1233,7 +1201,6 @@ async def refresh_predictor_stats():
         "last_updated": stats.get("last_updated")
     }
 
-
 @router.get("/inverse-whale")
 async def inverse_whale_signals():
     """Get signals to fade losing whale positions."""
@@ -1245,7 +1212,6 @@ async def inverse_whale_signals():
         logger.exception(f"Inverse whale scan failed: {e}")
         raise HTTPException(status_code=500, detail="Inverse whale scan failed")
 
-
 @router.get("/smart-money")
 async def smart_money_flow():
     """Get net whale flow per market (weighted by accuracy)."""
@@ -1256,7 +1222,6 @@ async def smart_money_flow():
     except Exception as e:
         logger.exception(f"Smart money scan failed: {e}")
         raise HTTPException(status_code=500, detail="Smart money scan failed")
-
 
 # ============================================================================
 # Endpoints: Confidence
@@ -1286,7 +1251,6 @@ async def get_source_statistics():
         logger.exception(f"Source statistics failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to load source statistics")
 
-
 @router.post("/confidence/record")
 async def record_trade_outcome(
     source: str = Query(..., description="Signal source"),
@@ -1304,7 +1268,6 @@ async def record_trade_outcome(
     except Exception as e:
         logger.exception(f"Record outcome failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to record outcome")
-
 
 @router.get("/confidence/market/{market_id}")
 async def get_market_confidence(market_id: str):
@@ -1338,7 +1301,6 @@ async def get_market_confidence(market_id: str):
         logger.exception(f"Market confidence failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to get market confidence")
 
-
 @router.get("/confidence/history")
 async def get_confidence_history(limit: int = Query(50, ge=1, le=200)):
     """Get recent trade outcome history for Bayesian learning analysis."""
@@ -1363,7 +1325,6 @@ async def get_confidence_history(limit: int = Query(50, ge=1, le=200)):
     except Exception as e:
         logger.exception(f"Confidence history failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to load confidence history")
-
 
 @router.get("/confidence/calibration")
 async def get_calibration_data():
@@ -1397,7 +1358,6 @@ async def get_calibration_data():
     except Exception as e:
         logger.exception(f"Calibration data failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to get calibration data")
-
 
 # ============================================================================
 # Endpoints: Conflicts
@@ -1443,7 +1403,6 @@ async def get_conflict_stats():
         logger.exception(f"Conflict stats failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to load conflict stats")
 
-
 @router.get("/conflicts/active")
 async def get_active_conflicts():
     """Get currently active signal conflicts (opposing signals on same market)."""
@@ -1488,7 +1447,6 @@ async def get_active_conflicts():
         logger.exception(f"Active conflicts failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to get active conflicts")
 
-
 # ============================================================================
 # Endpoints: Rotations
 # ============================================================================
@@ -1529,7 +1487,6 @@ async def get_recent_rotations(hours: int = Query(24, ge=1, le=168)):
         logger.exception(f"Rotations fetch failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch rotations")
 
-
 @router.get("/rotation/candidates")
 async def get_rotation_candidates():
     """Get positions that are candidates for rotation based on EV decay."""
@@ -1542,7 +1499,6 @@ async def get_rotation_candidates():
     except Exception as e:
         logger.exception(f"Rotation candidates failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to get rotation candidates")
-
 
 @router.get("/signals/shadow-performance")
 async def get_shadow_performance():
@@ -1572,9 +1528,7 @@ async def get_shadow_performance():
         logger.exception(f"Shadow performance failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 POLY_DELTA_VERDICT_THRESHOLD = 50
-
 
 @router.get("/signals/poly-delta-stats")
 async def get_poly_delta_stats():
@@ -1625,7 +1579,6 @@ async def get_poly_delta_stats():
         logger.exception(f"poly-delta-stats failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.post("/signals/shadow-resolve")
 async def trigger_shadow_resolution():
     """Manually trigger shadow trade resolution."""
@@ -1637,7 +1590,6 @@ async def trigger_shadow_resolution():
     except Exception as e:
         logger.exception(f"Shadow resolution failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ============================================================================
 # AI Model Market Tracker
@@ -1653,7 +1605,6 @@ async def get_ai_model_tracker():
         logger.exception(f"AI model tracker failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/signals/ai-models/trends")
 async def get_ai_model_trends(days: int = Query(default=7, ge=1, le=90)):
     """Get Arena score trends over recent days."""
@@ -1663,7 +1614,6 @@ async def get_ai_model_trends(days: int = Query(default=7, ge=1, le=90)):
     except Exception as e:
         logger.exception(f"AI model trends failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ============================================================================
 # Paper Portfolio
@@ -1741,7 +1691,6 @@ async def process_portfolio_signals():
         logger.exception(f"Portfolio signal processing failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.post("/portfolio/resolve")
 async def resolve_portfolio_positions():
     """Auto-resolve stale open positions using Polymarket CLOB / Kalshi APIs."""
@@ -1751,7 +1700,6 @@ async def resolve_portfolio_positions():
     except Exception as e:
         logger.exception(f"Portfolio resolve failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.get("/portfolio/positions-live")
 async def get_portfolio_positions_live():
@@ -1763,7 +1711,6 @@ async def get_portfolio_positions_live():
         logger.exception(f"Live positions failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/portfolio/archetype-breakdown")
 async def get_portfolio_archetype_breakdown():
     """Get win rate and P&L breakdown by market archetype."""
@@ -1773,7 +1720,6 @@ async def get_portfolio_archetype_breakdown():
     except Exception as e:
         logger.exception(f"Archetype breakdown failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.get("/portfolio/archetype-pnl-series")
 async def get_archetype_pnl_series():
@@ -1785,7 +1731,6 @@ async def get_archetype_pnl_series():
         logger.exception(f"Archetype P&L series failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.post("/portfolio/close/{position_id}")
 async def manually_close_position(position_id: int, outcome: str = Query(..., pattern="^(won|lost)$")):
     """Manually close an open position as won or lost."""
@@ -1796,7 +1741,6 @@ async def manually_close_position(position_id: int, outcome: str = Query(..., pa
         logger.exception(f"Manual close failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/portfolio/resolve-log")
 async def get_resolve_log(limit: int = Query(default=20)):
     """Get the last N resolved positions with timestamps and close reasons."""
@@ -1806,7 +1750,6 @@ async def get_resolve_log(limit: int = Query(default=20)):
     except Exception as e:
         logger.exception(f"Resolve log failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ============================================================================
 # Equity Curve
@@ -1829,7 +1772,6 @@ async def get_portfolio_equity_series(hours: int = Query(default=0, ge=0, le=876
         logger.exception(f"Equity series failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.post("/portfolio/equity-snapshot")
 async def post_portfolio_equity_snapshot():
     """Force-capture a single equity snapshot now. Used by scheduler/debug."""
@@ -1839,7 +1781,6 @@ async def post_portfolio_equity_snapshot():
     except Exception as e:
         logger.exception(f"Equity snapshot failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.get("/portfolio/equity-curve")
 async def get_portfolio_equity_curve():
@@ -1863,7 +1804,6 @@ async def get_portfolio_equity_curve():
         logger.exception(f"Equity curve failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # ============================================================================
 # Copy-Trade Whale Signals
 # ============================================================================
@@ -1878,7 +1818,6 @@ async def get_copy_trade_data():
         logger.exception(f"Copy-trade scan failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/signals/cross-platform-arb")
 async def get_cross_platform_arb():
     """Scan for cross-platform arbitrage between Kalshi and Polymarket."""
@@ -1888,7 +1827,6 @@ async def get_cross_platform_arb():
     except Exception as e:
         logger.exception(f"Cross-platform arb scan failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ============================================================================
 # Resolution Certainty Scanner
@@ -1904,7 +1842,6 @@ async def get_resolution_certainty():
         logger.exception(f"Resolution certainty scan failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/signals/ic-report")
 async def get_ic_report(window_days: int = Query(30, ge=1, le=365)):
     """IC (Information Coefficient) report across all signal sources.
@@ -1919,7 +1856,6 @@ async def get_ic_report(window_days: int = Query(30, ge=1, le=365)):
         logger.exception(f"IC report failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/signals/ic/{source}")
 async def get_ic_for_source(source: str, window_days: int = Query(30, ge=1, le=365)):
     """IC measurement for a specific signal source."""
@@ -1929,7 +1865,6 @@ async def get_ic_for_source(source: str, window_days: int = Query(30, ge=1, le=3
     except Exception as e:
         logger.exception(f"IC calculation for {source} failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ============================================================================
 # Alpha Score Tracker
@@ -1944,7 +1879,6 @@ async def run_alpha_snapshot():
     except Exception as e:
         logger.exception(f"Alpha snapshot failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.get("/signals/alpha-history/{symbol}")
 async def get_alpha_history(symbol: str, hours: int = Query(default=24)):
@@ -1962,7 +1896,6 @@ async def get_alpha_history(symbol: str, hours: int = Query(default=24)):
     except Exception as e:
         logger.exception(f"Alpha history failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.get("/signals/btc-tracker")
 async def get_btc_tracker(hours: int = Query(default=24)):
@@ -1984,7 +1917,6 @@ async def get_btc_tracker(hours: int = Query(default=24)):
         logger.exception(f"BTC tracker failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # ============================================================================
 # Auto-Calibration
 # ============================================================================
@@ -1999,7 +1931,6 @@ async def get_calibration_report():
         logger.exception(f"Calibration report failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/signals/calibration/{source}")
 async def get_source_calibration(source: str):
     """Calibration curve for a specific signal source."""
@@ -2013,7 +1944,6 @@ async def get_source_calibration(source: str):
         logger.exception(f"Source calibration failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/signals/source-weights")
 async def get_source_weights():
     """Optimal source weights based on IC-squared."""
@@ -2023,7 +1953,6 @@ async def get_source_weights():
     except Exception as e:
         logger.exception(f"Source weights failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ============================================================================
 # Weather Scanner
@@ -2051,7 +1980,6 @@ async def weather_ensemble_status():
     except Exception as e:
         logger.exception(f"Ensemble status failed: {e}")
         raise HTTPException(status_code=500, detail="ensemble status failed")
-
 
 @router.get("/weather/dashboard")
 async def weather_dashboard():
@@ -2294,7 +2222,6 @@ async def weather_dashboard():
         logger.exception(f"Weather dashboard failed: {e}")
         raise HTTPException(status_code=500, detail="weather dashboard failed")
 
-
 @router.get("/weather/kalshi-fade/dashboard")
 async def kalshi_fade_dashboard():
     """Dashboard payload for the Kalshi weather tail-fade (PAPER) strategy.
@@ -2435,7 +2362,6 @@ async def kalshi_fade_dashboard():
         logger.exception(f"Kalshi fade dashboard failed: {e}")
         raise HTTPException(status_code=500, detail="kalshi fade dashboard failed")
 
-
 @router.get("/signals/weather")
 async def scan_weather():
     """Scan weather markets on Kalshi + Polymarket against Open-Meteo forecasts."""
@@ -2448,7 +2374,6 @@ async def scan_weather():
         logger.exception(f"Weather scan failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/signals/tweets")
 async def scan_tweet_counts():
     """Scan tweet count bracket markets using Monte Carlo vs xtracker data."""
@@ -2458,7 +2383,6 @@ async def scan_tweet_counts():
     except Exception as e:
         logger.exception(f"Tweet count scan failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.get("/signals/scorecard/{strategy}")
 async def get_strategy_scorecard(strategy: str):
@@ -2474,7 +2398,6 @@ async def get_strategy_scorecard(strategy: str):
         logger.exception(f"Scorecard failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # ─── Confidence Redesign: Archetype & Kill Rules ─────────────────────
 
 @router.get("/archetype/classify")
@@ -2486,7 +2409,6 @@ async def classify_market_archetype(title: str = Query(...)):
         return {"title": title, "archetype": archetype}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.get("/archetype/kill-check")
 async def check_kill_rules(title: str = Query(...), price_cents: int = Query(...)):
@@ -2503,7 +2425,6 @@ async def check_kill_rules(title: str = Query(...), price_cents: int = Query(...
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.get("/archetype/wr-buckets")
 async def get_wr_buckets():
@@ -2574,7 +2495,6 @@ async def get_wr_buckets():
         logger.exception(f"WR buckets failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/archetype/kill-stats")
 async def get_kill_stats():
     """Get stats on how many current signals would be killed by rules."""
@@ -2602,7 +2522,6 @@ async def get_kill_stats():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/archetype/calibration")
 async def get_calibration_audit():
     """Run calibration audit — check if predicted confidence matches actual WR."""
@@ -2613,7 +2532,6 @@ async def get_calibration_audit():
         logger.exception(f"Calibration audit failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/archetype/evaluate")
 async def evaluate_with_empirical(title: str = Query(...), side: str = Query(...), price: float = Query(...)):
     """Evaluate a market using empirical confidence engine."""
@@ -2623,8 +2541,6 @@ async def evaluate_with_empirical(title: str = Query(...), side: str = Query(...
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
-
 # === Basket Arb Endpoints ===
 
 @router.get("/basket-arb")
@@ -2632,7 +2548,6 @@ async def basket_arb_signals():
     """Get sum-to-one basket arbitrage signals."""
     from signals.basket_arb_scanner import get_basket_arb_signals
     return get_basket_arb_signals()
-
 
 @router.get("/basket-arb/compression")
 async def basket_arb_compression():
@@ -2644,7 +2559,6 @@ async def basket_arb_compression():
         all_markets.extend(ev.get("markets", []))
     return check_spread_compression(all_markets)
 
-
 # === Copy-Trade Watcher Endpoints ===
 
 @router.get("/copy-trade")
@@ -2653,7 +2567,6 @@ async def copy_trade_signals():
     from signals.copy_trade_watcher import get_copy_trade_signals
     return get_copy_trade_signals()
 
-
 @router.get("/copy-trade/whales")
 async def copy_trade_whales():
     """Get discovered whale wallets from recent trades."""
@@ -2661,14 +2574,12 @@ async def copy_trade_whales():
     whales = discover_whales()
     return {"whales": whales, "count": len(whales)}
 
-
 @router.get("/copy-trade/positions")
 async def copy_trade_positions():
     """Get aggregated whale positions by market."""
     from signals.copy_trade_watcher import discover_whales, scan_whale_positions
     whales = discover_whales()
     return scan_whale_positions(whales[:15])
-
 
 @router.get("/portfolio/risk-guards")
 async def get_risk_guards():
@@ -2695,7 +2606,6 @@ async def get_risk_guards():
         logger.exception(f"Risk guards failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/signals/strike-scanner")
 async def strike_scanner():
     """Scan crypto strike markets for volatility-based mispricing signals."""
@@ -2714,13 +2624,11 @@ async def strike_scanner():
         logger.exception(f"Strike scanner failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # ============================================================================
 # Alert Analytics
 # ============================================================================
 
 ALERTS_LOG = STORAGE_DIR / "alerts.jsonl"
-
 
 def _load_alerts(days: int = 30) -> list:
     """Load alert records from JSONL, filtered by recency."""
@@ -2745,7 +2653,6 @@ def _load_alerts(days: int = 30) -> list:
     except Exception:
         pass
     return alerts
-
 
 def _match_outcomes(alerts: list) -> list:
     """Cross-reference position alerts with paper_positions outcomes."""
@@ -2792,7 +2699,6 @@ def _match_outcomes(alerts: list) -> list:
         pass
 
     return alerts
-
 
 @router.get("/alerts/stats")
 async def alert_stats(days: int = Query(30, ge=1, le=365)):
@@ -2927,7 +2833,6 @@ async def alert_stats(days: int = Query(30, ge=1, le=365)):
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }
 
-
 # ── Election Sentiment ───────────────────────────────────────────────────
 
 _election_cache = {"data": None, "ts": 0, "refreshing": False, "artifacts": None}
@@ -2938,7 +2843,6 @@ _election_skeleton_cache = {"source_ts": 0, "artifacts": None}
 
 _ELECTION_FRESH_TTL = 900     # 15 min — serve without refresh
 _ELECTION_STALE_TTL = 7200    # 2 hr  — serve stale, refresh in background (extended from 1hr)
-
 
 def _trim_election_report(report: dict) -> dict:
     """Shallow-trim large lists in the election report for wire transfer.
@@ -2968,7 +2872,6 @@ def _trim_election_report(report: dict) -> dict:
             new_insights["policy_pulse"] = new_pp
         trimmed["insights"] = new_insights
     return trimmed
-
 
 def _build_election_skeleton(report: dict) -> dict:
     """Build a minimal above-the-fold payload from a full election report.
@@ -3009,7 +2912,6 @@ def _build_election_skeleton(report: dict) -> dict:
         "full_market_count": len(markets),
     }
 
-
 def _build_election_artifacts(report: dict) -> dict:
     """Serialize + gzip + hash an election report once, so every cache hit
     just returns pre-built bytes instead of re-encoding a 7MB dict + gzipping
@@ -3022,7 +2924,6 @@ def _build_election_artifacts(report: dict) -> dict:
     body_gz = _gzip.compress(body, compresslevel=6)
     etag = '"' + _hashlib.md5(body).hexdigest()[:16] + '"'
     return {"body": body, "body_gz": body_gz, "etag": etag}
-
 
 def _serve_election_cache(cache_dict: dict, request, max_age: int):
     """Return a FastAPI Response for a cached election report, honoring
@@ -3066,7 +2967,6 @@ def _serve_election_cache(cache_dict: dict, request, max_age: int):
         },
     )
 
-
 async def _refresh_election_cache():
     """Refresh election cache in background thread (non-blocking)."""
     import asyncio
@@ -3097,12 +2997,10 @@ async def _refresh_election_cache():
     finally:
         _election_cache["refreshing"] = False
 
-
 async def prewarm_election_cache():
     """Pre-warm election cache on startup. Call from lifespan."""
     logger.info("Pre-warming election cache...")
     await _refresh_election_cache()
-
 
 @router.get("/signals/elections")
 async def get_election_markets(request: Request):
@@ -3136,7 +3034,6 @@ async def get_election_markets(request: Request):
         import traceback
         logger.error("Election data fetch failed: %s\n%s", e, traceback.format_exc())
         raise HTTPException(status_code=502, detail=str(e))
-
 
 def _serve_election_skeleton(source_cache: dict, request, max_age: int):
     """Build (or reuse) skeleton artifacts from a source cache and serve them.
@@ -3189,7 +3086,6 @@ def _serve_election_skeleton(source_cache: dict, request, max_age: int):
         },
     )
 
-
 @router.get("/signals/elections/core")
 async def get_election_markets_core(request: Request):
     """Fast skeleton payload for first paint (~80KB gzipped).
@@ -3234,7 +3130,6 @@ async def get_election_markets_core(request: Request):
     except Exception as e:
         logger.error("Election core fetch failed: %s", e)
         raise HTTPException(status_code=502, detail=str(e))
-
 
 # Keywords that identify a policy market as CLARITY Act / crypto regulation relevant.
 # NOTE: "kalshi" and "polymarket" are intentionally NOT in this list — they appear
@@ -3282,7 +3177,6 @@ _CLARITY_NOISE_PATTERNS = (
     "nfl", "nba", "mlb", "nhl", "ncaa",
 )
 
-
 # Passage-market predicate — used to decide which markets get price-history attached.
 def _is_passage_market(q: str) -> bool:
     q = (q or "").lower()
@@ -3295,7 +3189,6 @@ def _is_passage_market(q: str) -> bool:
     if "clarity act" in q and any(w in q for w in ("sign", "law", "pass", "vote", "2026", "2027")):
         return True
     return any(t in q for t in passage_terms)
-
 
 def _filter_clarity_markets(policy_pulse: dict) -> list:
     """Extract CLARITY-relevant markets from policy_pulse, deduped by question.
@@ -3405,7 +3298,6 @@ def _filter_clarity_markets(policy_pulse: dict) -> list:
 
     return relevant
 
-
 @router.get("/signals/clarity")
 async def get_clarity_widget_data():
     """Lightweight payload for the CLARITY Act tracker widget.
@@ -3471,9 +3363,6 @@ async def get_clarity_widget_data():
         content=out,
     )
 
-
-
-
 # ═══════════════════════════════════════════════════════════════════════
 # VPIN: Volume-Synchronized Probability of Informed Trading (CE-4)
 # ═══════════════════════════════════════════════════════════════════════
@@ -3491,7 +3380,6 @@ async def get_vpin_for_slug(slug: str):
         raise HTTPException(status_code=404, detail=result["error"])
     return result
 
-
 @router.get("/signals/vpin-scan")
 async def get_vpin_scan(
     top_n: int = Query(20, ge=5, le=50, description="Number of markets to scan"),
@@ -3508,7 +3396,6 @@ async def get_vpin_scan(
         "scan_time": datetime.now(timezone.utc).isoformat(),
     }
 
-
 @router.get("/signals/vpin-accuracy")
 async def get_vpin_accuracy():
     """Get VPIN backtest accuracy stats (Andersen-Bondarenko validation gate).
@@ -3519,9 +3406,7 @@ async def get_vpin_accuracy():
     from vpin import backtest_vpin_accuracy
     return backtest_vpin_accuracy()
 
-
 _IVRV_TTL_S = 600  # IV/RV moves slowly; 10-min board freshness is plenty.
-
 
 @router.get("/options/iv-rv")
 async def get_options_iv_rv():
@@ -3548,9 +3433,6 @@ async def get_options_iv_rv():
         if cached:
             return cached.get("data", {})
         raise HTTPException(status_code=500, detail=str(e))
-
-
-
 
 @router.get("/options/status")
 async def options_status():
@@ -3665,7 +3547,6 @@ async def options_dashboard():
         finally: con.close()
     return await asyncio.get_event_loop().run_in_executor(None, _build)
 
-
 # ============================================================================
 # CE-6: Implied Correlation Matrix
 # ============================================================================
@@ -3688,7 +3569,6 @@ async def get_implied_correlation(min_markets: int = Query(3, ge=2, le=50)):
         return get_all_matrices(min_markets=min_markets)
     return await asyncio.get_event_loop().run_in_executor(None, _build)
 
-
 @router.get("/signals/implied-correlation/{cluster}")
 async def get_implied_correlation_cluster(cluster: str):
     """Return correlation matrix for one specific cluster."""
@@ -3704,7 +3584,6 @@ async def get_implied_correlation_cluster(cluster: str):
         return result
     return await asyncio.get_event_loop().run_in_executor(None, _build)
 
-
 @router.get("/signals/implied-correlation/clusters/list")
 async def list_correlation_clusters(min_markets: int = Query(3, ge=2, le=50)):
     """List all auto-detected clusters available for correlation analysis."""
@@ -3713,7 +3592,6 @@ async def list_correlation_clusters(min_markets: int = Query(3, ge=2, le=50)):
         from signals.implied_correlation import get_cluster_list
         return get_cluster_list(min_markets=min_markets)
     return await asyncio.get_event_loop().run_in_executor(None, _build)
-
 
 @router.get("/signals/implied-correlation/snapshots")
 async def get_correlation_snapshots(cluster: Optional[str] = Query(None),
@@ -3725,14 +3603,12 @@ async def get_correlation_snapshots(cluster: Optional[str] = Query(None),
         return get_latest_snapshots(cluster=cluster, limit=limit)
     return await asyncio.get_event_loop().run_in_executor(None, _build)
 
-
 # ============================================================================
 # Endpoints: Category Momentum
 # ============================================================================
 
 # 30-min TTL cache for category momentum
 _category_momentum_cache = {"data": None, "timestamp": None}
-
 
 @router.get("/signals/category-momentum")
 async def get_category_momentum():
@@ -3769,14 +3645,12 @@ async def get_category_momentum():
         logger.exception(f"Category momentum scan failed: {e}")
         raise HTTPException(status_code=500, detail="Category momentum scan failed")
 
-
 # ============================================================================
 # Endpoints: Theta Decay Curves
 # ============================================================================
 
 # Daily cache for theta decay curves (refreshed once per day)
 _theta_decay_cache = {"data": None, "timestamp": None}
-
 
 @router.get("/signals/theta-decay")
 async def get_theta_decay_all():
@@ -3819,7 +3693,6 @@ async def get_theta_decay_all():
         logger.exception(f"Theta decay scan failed: {e}")
         raise HTTPException(status_code=500, detail="Theta decay scan failed")
 
-
 @router.get("/signals/theta-decay/{archetype}")
 async def get_theta_decay_single(archetype: str):
     """Get theta decay curve for a single archetype.
@@ -3843,7 +3716,6 @@ async def get_theta_decay_single(archetype: str):
     except Exception as e:
         logger.exception(f"Theta decay single failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CE-8: Prop Composite -> Implied Game Price
@@ -3871,7 +3743,6 @@ async def prop_composite_scan():
         logger.error(f"prop-composite scan failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/signals/prop-composite/{event_id}")
 async def prop_composite_event(event_id: str):
     """Get prop-composite analysis for a specific event.
@@ -3898,11 +3769,9 @@ async def prop_composite_event(event_id: str):
         logger.error(f"prop-composite event {event_id} failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # ============================================================================
 # CE-5: Sportsbook Consensus Disagreement Index
 # ============================================================================
-
 
 @router.get("/signals/consensus-disagreement")
 async def get_consensus_disagreement(
@@ -3949,7 +3818,6 @@ async def get_consensus_disagreement(
         logger.exception(f"CE-5 consensus_disagreement scan failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/signals/consensus-disagreement/{sport_key}")
 async def get_consensus_disagreement_sport(
     sport_key: str,
@@ -3974,7 +3842,6 @@ async def get_consensus_disagreement_sport(
     except Exception as e:
         logger.exception(f"CE-5 consensus_disagreement/{sport_key} failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ─── Phase 1C: Cross-Sport Calibration Endpoint ──────────────────────────────
 @router.get("/calibration/cross-sport")
@@ -4149,7 +4016,6 @@ async def get_cross_sport_calibration():
 
     return await run_in_threadpool(_query)
 
-
 @router.get("/calibration/price-movement")
 async def get_price_movement(sport: str = "baseball_mlb", hours: float = 24.0):
     """Phase 4: Price movement snapshots + DK lag profile."""
@@ -4214,7 +4080,6 @@ async def get_price_movement(sport: str = "baseball_mlb", hours: float = 24.0):
 
     return await run_in_threadpool(_query)
 
-
 @router.get("/calibration/book-weights")
 async def get_book_weights():
     """Phase 3: Show sport-specific book weights and recalibration status."""
@@ -4240,7 +4105,6 @@ async def get_book_weights():
         return result
 
     return await run_in_threadpool(_query)
-
 
 @router.get("/signals/weather-resolution-edge")
 async def weather_resolution_edge(city: str = None, platform: str = None):
@@ -4270,7 +4134,6 @@ async def weather_resolution_edge(city: str = None, platform: str = None):
             return {"error": str(e), "signals": []}
 
     return await run_in_threadpool(_scan)
-
 
 @router.get("/weather/forecast-log")
 async def weather_forecast_log():

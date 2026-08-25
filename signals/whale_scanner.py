@@ -51,10 +51,13 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
+from config.polymarket_urls import POLYMARKET_DATA_API as PM_DATA_API  # polyproxy: central URL config
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from db import connect as db_connect  # noqa: E402
+from config.polymarket_urls import clob_url  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +66,6 @@ STORAGE_DIR = BASE_DIR / "storage"
 DB_PATH = STORAGE_DIR / "whale_scanner.db"
 
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
-GAMMA_API = "https://gamma-api.polymarket.com"
-PM_DATA_API = "https://data-api.polymarket.com"
 
 # ── Per-category thresholds from whale_threshold_study.py ───────────────────
 # Loaded at init from research/results/whale_thresholds.json if available,
@@ -112,7 +113,6 @@ _KX_PREFIX_TO_CAT = {
 # Loaded thresholds: {platform: {category: {whale_alert, mega_whale, noise_floor}}}
 _CAT_THRESHOLDS: dict = {}
 
-
 def _load_thresholds():
     """Load per-category thresholds from whale_threshold_study output."""
     global _CAT_THRESHOLDS
@@ -129,7 +129,6 @@ def _load_thresholds():
                        _THRESHOLDS_PATH, e)
         _CAT_THRESHOLDS = {}
 
-
 def classify_market_category(platform: str, market: str) -> str:
     """Map a market identifier to a threshold category."""
     if platform == "kalshi":
@@ -142,19 +141,16 @@ def classify_market_category(platform: str, market: str) -> str:
     slug = market.split("-")[0].lower()
     return _PM_SLUG_TO_CAT.get(slug, "other")
 
-
 def get_category_thresholds(platform: str, category: str) -> dict:
     """Get whale_alert / mega_whale / noise_floor for a platform+category."""
     plat_key = "polymarket" if platform != "kalshi" else "kalshi"
     cat_config = _CAT_THRESHOLDS.get(plat_key, {})
     return cat_config.get(category, _DEFAULT_THRESHOLDS)
 
-
 def get_market_thresholds(platform: str, market: str) -> dict:
     """Convenience: classify then look up thresholds for a specific market."""
     cat = classify_market_category(platform, market)
     return get_category_thresholds(platform, cat)
-
 
 # ── Sweep thresholds (executed flow; relative AND absolute) ─────────────────
 # These flat constants are FALLBACKS only — used when no category threshold
@@ -222,7 +218,6 @@ LIVE_GAME_PM_PREFIXES = (
     "itf-", "ufc-", "mma-", "lol-", "cs2-", "csgo-", "val-", "dota-",
     "fifwc-", "epl-", "ucl-", "laliga-", "seriea-", "bundesliga-")
 
-
 _KALSHI_GAMEDATE = re.compile(r"-\d{2}[A-Z]{3}\d{2}")   # -26JUN11 = per-game/per-day
 _PM_GAMEDATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
@@ -234,7 +229,6 @@ TRACKER_KALSHI_PREFIXES = (
     "KXINX", "KXNASDAQ", "KXDJI", "KXBTC", "KXETH", "KXSOL", "KXXRP",
     "KXBRENT", "KXGOLD", "KXSILVER", "KXWTI", "KXAAAGAS", "KXUSD", "KXEUR",
     "KXNATGAS", "KXBNB", "KXCOPPER", "KXPLATINUM", "KXPALLADIUM")
-
 
 def live_game_class(platform: str, market: str) -> Optional[str]:
     """'game' (per-game sports), 'tracker' (financial bracket), or None."""
@@ -248,17 +242,14 @@ def live_game_class(platform: str, market: str) -> Optional[str]:
     sporty = market.startswith(LIVE_GAME_PM_PREFIXES) or "-vs-" in market
     return "game" if sporty and _PM_GAMEDATE.search(market) else None
 
-
 def is_live_game_market(platform: str, market: str) -> bool:
     return live_game_class(platform, market) is not None
-
 
 def class_key(platform: str, market: str) -> str:
     """Distribution bucket for class-relative outlier thresholds."""
     if platform == "kalshi":
         return market.split("-")[0]
     return "pm:" + market.split("-")[0]
-
 
 # ── Pierce rules: conditions that punch through the live-game ceiling ──────
 CLASS_OUTLIER_PCTL    = 0.995   # burst must beat its own class's p99.5...
@@ -268,7 +259,6 @@ SMART_PIERCE_MIN_USD  = 1000.0  # proven wallet putting this much in pierces
 _MONTHS = {m: i + 1 for i, m in enumerate(
     ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
      "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"))}
-
 
 def _extract_game_date(platform, market):
     """Game day from the ticker/slug (Kalshi -26JUN11, PM 2026-06-11)."""
@@ -291,7 +281,6 @@ PREGAME_MAX_PRIOR_VOL  = 2000       # ...into a barely-traded game market = stea
 CLASS_THRESH_TTL_S     = 3600
 
 _CLASS_P995: dict = {"_ts": 0.0}
-
 
 def refresh_class_thresholds(conn):
     """Hourly: per-class p99.5 of burst dollars from our own 7d alert history.
@@ -321,7 +310,6 @@ def refresh_class_thresholds(conn):
     logger.info("Class outlier thresholds refreshed: %d classes, global p99.5 $%.0f",
                 len(fresh) - 2 if "_global" in fresh else len(fresh) - 1,
                 fresh.get("_global", 0))
-
 
 def apply_livegame_ceiling(alert: dict, platform: str, market: str,
                            meta: Optional[dict], now: Optional[float] = None):
@@ -372,7 +360,6 @@ def apply_livegame_ceiling(alert: dict, platform: str, market: str,
     alert["severity"] = "HIGH"
     alert["reasons"] += ",livegame_capped"
 
-
 PM_EXCLUDE_SLUG_PREFIXES = ("btc-updown-", "eth-updown-", "sol-updown-",
                             "xrp-updown-")  # PM 5-min crypto churn, same class
 SMART_WALLET_MIN_USD = 250.0   # proven wallet trading this much = candidate regardless
@@ -395,7 +382,6 @@ PM_AGGREGATE_WHALE_USD = 50_000  # PM condition_id aggregate flow bypasses relat
 _MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
            "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
 
-
 def _ticker_event_date(ticker: str) -> Optional[date]:
     """Event date embedded in a Kalshi ticker's event segment, or None.
     KXMLBHR-26JUN111905SEABAL-... -> 2026-06-11 (trailing 1905 = start time).
@@ -412,11 +398,9 @@ def _ticker_event_date(ticker: str) -> Optional[date]:
     except ValueError:
         return None
 
-
 def _today_et() -> date:
     """Sports event dates in tickers follow US Eastern day boundaries."""
     return datetime.now(ZoneInfo("America/New_York")).date()
-
 
 def alert_gate(platform: str, market: str, det: Optional[dict],
                cur: Optional[dict], first_sight: bool = False,
@@ -459,7 +443,6 @@ def alert_gate(platform: str, market: str, det: Optional[dict],
 SNAPSHOT_RETENTION_HOURS = 48
 STATE_RETENTION_HOURS    = 48
 
-
 # ── Database ────────────────────────────────────────────────────────────────
 
 def get_db(path: Optional[Path] = None) -> sqlite3.Connection:
@@ -469,7 +452,7 @@ def get_db(path: Optional[Path] = None) -> sqlite3.Connection:
     conn = db_connect(str(db_path), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS whale_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -542,17 +525,14 @@ def get_db(path: Optional[Path] = None) -> sqlite3.Connection:
     conn.commit()
     return conn
 
-
 def kv_get(conn, key: str, default: str = "") -> str:
     row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default
-
 
 def kv_set(conn, key: str, value: str):
     conn.execute("INSERT INTO kv (key, value) VALUES (?,?)"
                  " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                  (key, value))
-
 
 def save_snapshot(conn, platform: str, market: str, summary: dict,
                   ts: Optional[float] = None):
@@ -566,7 +546,6 @@ def save_snapshot(conn, platform: str, market: str, summary: dict,
          summary["best_bid"], summary["best_ask"],
          summary["oi"], summary["volume"], json.dumps(summary["levels"])))
 
-
 def load_prev_snapshot(conn, market: str) -> Optional[dict]:
     row = conn.execute(
         "SELECT * FROM whale_snapshots WHERE market=? ORDER BY ts DESC LIMIT 1",
@@ -579,7 +558,6 @@ def load_prev_snapshot(conn, market: str) -> Optional[dict]:
         "oi": row["oi"], "volume": row["volume"],
         "levels": json.loads(row["levels"] or "{}"),
     }
-
 
 def _fire_alert_live(alert: dict):
     """Fire a single CRITICAL alert to Telegram immediately via subprocess."""
@@ -596,7 +574,6 @@ def _fire_alert_live(alert: dict):
     except Exception as e:
         logger.debug("Live fire error: %s", e)
 
-
 def log_alert(conn, alert: dict):
     conn.execute(
         "INSERT INTO whale_alerts (ts, platform, market, severity, score,"
@@ -609,12 +586,10 @@ def log_alert(conn, alert: dict):
     if alert.get("severity") == "CRITICAL" or (is_accum and alert.get("severity") == "HIGH"):
         _fire_alert_live(alert)
 
-
 def recently_alerted(conn, window_s: int = ALERT_DEDUP_S) -> set:
     cutoff = time.time() - window_s
     return {r["market"] for r in conn.execute(
         "SELECT DISTINCT market FROM whale_alerts WHERE ts > ?", (cutoff,))}
-
 
 def prune_snapshots(conn, max_age_hours: int = SNAPSHOT_RETENTION_HOURS):
     cutoff = time.time() - max_age_hours * 3600
@@ -626,7 +601,6 @@ def prune_snapshots(conn, max_age_hours: int = SNAPSHOT_RETENTION_HOURS):
                  (time.time() - ACCUM_RETENTION_S,))
     conn.commit()
 
-
 # ── HTTP ────────────────────────────────────────────────────────────────────
 
 def _fetch_json(url: str, timeout: int = 20):
@@ -637,10 +611,8 @@ def _fetch_json(url: str, timeout: int = 20):
     except Exception:
         return None
 
-
 def kalshi_fetch(path: str):
     return _fetch_json(f"{KALSHI_API}{path}")
-
 
 def _fp_float(value) -> Optional[float]:
     """Kalshi *_fp fields are decimal strings; tolerate absence."""
@@ -648,7 +620,6 @@ def _fp_float(value) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
-
 
 # ── Parsing ─────────────────────────────────────────────────────────────────
 
@@ -663,7 +634,6 @@ def parse_kalshi_book(fp: dict) -> tuple:
     asks = sorted(((round(1.0 - float(p), 4), float(q)) for p, q in fp.get("no_dollars") or []),
                   key=lambda x: x[0])
     return bids, asks
-
 
 def book_summary(bids: list, asks: list, oi: Optional[float] = None,
                  volume: Optional[float] = None) -> dict:
@@ -683,7 +653,6 @@ def book_summary(bids: list, asks: list, oi: Optional[float] = None,
         "volume": volume,
         "levels": levels,
     }
-
 
 # ── Scoring: sweep (executed flow) ──────────────────────────────────────────
 
@@ -739,7 +708,6 @@ def sweep_score(prev: Optional[dict], cur: dict,
 
     return min(score, 10), reasons
 
-
 # ── Scoring: books (resting orders) ─────────────────────────────────────────
 
 def _ratio(summary: dict) -> float:
@@ -747,12 +715,10 @@ def _ratio(summary: dict) -> float:
         return summary["bid_depth"] / summary["ask_depth"]
     return float("inf") if summary["bid_depth"] > 0 else 1.0
 
-
 def _spread(summary: dict) -> Optional[float]:
     if summary["best_bid"] is not None and summary["best_ask"] is not None:
         return round(summary["best_ask"] - summary["best_bid"], 4)
     return None
-
 
 def score_change(prev: Optional[dict], cur: dict,
                  platform: str = "", market: str = "") -> tuple:
@@ -821,7 +787,6 @@ def score_change(prev: Optional[dict], cur: dict,
         reasons.append(f"spread_collapse_{ps:.2f}->{cs:.2f}")
 
     return min(score, 10), reasons
-
 
 def _compute_raw_score(sw_score: int, bk_score: int, meta: dict, reasons_list: list) -> tuple:
     """Compute unbounded raw score from sweep + book + market context.
@@ -927,7 +892,6 @@ def _compute_raw_score(sw_score: int, bk_score: int, meta: dict, reasons_list: l
 
     return max(0.0, round(raw, 1)), extra
 
-
 def severity_for(score: float) -> str:
     """Map raw_score to severity. Dynamic thresholds."""
     if score >= 10.0:
@@ -938,13 +902,11 @@ def severity_for(score: float) -> str:
         return "LOW"
     return "SUPPRESSED"
 
-
 def load_state(conn, platform: str) -> dict:
     return {r["market"]: {"oi": r["oi"], "volume": r["volume"]}
             for r in conn.execute(
                 "SELECT market, oi, volume FROM market_state WHERE platform=?",
                 (platform,))}
-
 
 def upsert_state(conn, platform: str, items: list, ts: Optional[float] = None):
     """items: [(market, oi, volume, title, sub_title)]"""
@@ -956,7 +918,6 @@ def upsert_state(conn, platform: str, items: list, ts: Optional[float] = None):
         "  ts=excluded.ts, oi=excluded.oi, volume=excluded.volume, title=excluded.title, sub_title=excluded.sub_title",
         [(platform, m, now, oi, vol, title, sub) for m, oi, vol, title, sub in items])
 
-
 def get_weather_series_set() -> set:
     """Series tickers in Kalshi's Climate and Weather category."""
     data = kalshi_fetch("/series?limit=200")
@@ -964,7 +925,6 @@ def get_weather_series_set() -> set:
         return set()
     return {s["ticker"] for s in data.get("series", [])
             if s.get("category") == "Climate and Weather"}
-
 
 # ── Kalshi sweep (exchange-wide trades feed) ───────────────────────────────
 
@@ -985,7 +945,6 @@ def fetch_trades_since(min_ts: int) -> list:
     if pages >= TRADES_PAGE_CAP:
         logger.warning("Kalshi trades feed hit page cap (%d) — burst truncated", pages)
     return out
-
 
 def aggregate_trades(trades: list) -> dict:
     """ticker -> {vol, yes_vol, no_vol, dollars, last_yes_price,
@@ -1014,7 +973,6 @@ def aggregate_trades(trades: list) -> dict:
         a["last_yes_price"] = yes_px
     return agg
 
-
 def fetch_market_details(tickers: list) -> dict:
     """Batch market lookup (100/call): oi, total volume, title, close_time."""
     details = {}
@@ -1031,7 +989,6 @@ def fetch_market_details(tickers: list) -> dict:
             }
     return details
 
-
 def flow_direction(flow: dict) -> tuple:
     """(side, pct) of taker flow if one side dominates 2:1, else (None, 0)."""
     y, n = flow.get("yes_vol", 0.0), flow.get("no_vol", 0.0)
@@ -1043,7 +1000,6 @@ def flow_direction(flow: dict) -> tuple:
     if n >= 2 * y:
         return "NO", round(100 * n / total)
     return None, 0
-
 
 def kalshi_sweep(conn) -> tuple:
     """Executed-flow detection from the trades feed. Returns (flagged, details).
@@ -1122,13 +1078,11 @@ def kalshi_sweep(conn) -> tuple:
     flagged.sort(key=lambda f: -f[0])
     return flagged, details
 
-
 # ── Kalshi books (flagged + rotation) ───────────────────────────────────────
 
 def get_kalshi_orderbook(ticker: str) -> Optional[dict]:
     data = kalshi_fetch(f"/markets/{ticker}/orderbook")
     return data.get("orderbook_fp") if data else None
-
 
 def inspect_kalshi_book(conn, ticker: str, meta: dict) -> tuple:
     """Fetch + diff one book. Returns (book_score, reasons, cur_summary) or
@@ -1143,15 +1097,12 @@ def inspect_kalshi_book(conn, ticker: str, meta: dict) -> tuple:
     save_snapshot(conn, "kalshi", ticker, cur)
     return score, reasons, cur
 
-
-
-
 def inspect_pm_book(conn, condition_id: str, token_id: str, meta: dict) -> tuple:
     """Fetch Polymarket CLOB orderbook and diff against previous snapshot.
     Returns (book_score, reasons, cur_summary) or (None, [], None) on failure.
     Mirrors inspect_kalshi_book but uses the PM CLOB API."""
     try:
-        data = _fetch_json(f"https://clob.polymarket.com/book?token_id={token_id}",
+        data = _fetch_json(clob_url(f"/book?token_id={token_id}"),
                            timeout=10)
         if not data or "error" in data:
             return None, [], None
@@ -1175,7 +1126,6 @@ def inspect_pm_book(conn, condition_id: str, token_id: str, meta: dict) -> tuple
     save_snapshot(conn, "polymarket", snap_key, cur)
     return score, reasons, cur
 
-
 def get_weather_watchlist(conn) -> list:
     """All open weather-series market tickers, kv-cached for 1h (53 series
     lookups are too slow to repeat every cycle from the VPS)."""
@@ -1195,7 +1145,6 @@ def get_weather_watchlist(conn) -> list:
     logger.info("Weather watchlist refreshed: %d markets", len(tickers))
     return tickers
 
-
 def build_watchlist(conn) -> list:
     """Deterministic book-rotation universe: every weather market + every
     thin-active market we've seen trade (resting walls only show in books;
@@ -1204,7 +1153,6 @@ def build_watchlist(conn) -> list:
         "SELECT market FROM market_state WHERE platform='kalshi'"
         " AND oi BETWEEN ? AND ?", (WATCH_OI_MIN, WATCH_OI_MAX))]
     return sorted(set(get_weather_watchlist(conn)) | set(thin))
-
 
 def _mk_alert(platform: str, market: str, score: int, reasons: list,
               cur: Optional[dict], meta: Optional[dict]) -> dict:
@@ -1259,7 +1207,6 @@ def _mk_alert(platform: str, market: str, score: int, reasons: list,
             if meta.get(k) not in (None, ""):
                 alert[k] = meta[k]
     return alert
-
 
 def scan_kalshi(conn) -> list:
     """Trades-feed sweep, then books: flagged first, rotation second."""
@@ -1337,7 +1284,6 @@ def scan_kalshi(conn) -> list:
     conn.commit()
     return alerts
 
-
 # ── Polymarket flow sweep (exchange-wide trades feed) ──────────────────────
 
 def fetch_pm_trades_since(since_ts: int) -> list:
@@ -1356,7 +1302,6 @@ def fetch_pm_trades_since(since_ts: int) -> list:
         logger.warning("PM trades feed hit page cap (%d) — burst truncated",
                        PM_TRADES_PAGE_CAP)
     return out
-
 
 def aggregate_pm_trades(trades: list) -> dict:
     """conditionId -> {dollars, shares, slug, title, flows: {(side,outcome): $},
@@ -1393,7 +1338,6 @@ def aggregate_pm_trades(trades: list) -> dict:
             a["wallet_names"][w] = t.get("name") or t.get("pseudonym") or ""
     return agg
 
-
 def pm_flow_desc(flow: dict) -> tuple:
     """(reason_tag, human_desc) for the dominant (side, outcome) flow if it
     carries >= 2/3 of dollars, else (None, None)."""
@@ -1408,7 +1352,6 @@ def pm_flow_desc(flow: dict) -> tuple:
     tag = f"taker_{side}_{outcome.replace(' ', '_')}_{pct}%"
     return tag, f"{side} {outcome} ${usd:,.0f} ({pct}%)"
 
-
 def fetch_gamma_by_condition(cids: list) -> dict:
     """conditionId -> gamma market (volumeNum, liquidityNum, question, endDate)."""
     out = {}
@@ -1419,7 +1362,6 @@ def fetch_gamma_by_condition(cids: list) -> dict:
         for m in d or []:
             out[m.get("conditionId")] = m
     return out
-
 
 def scan_polymarket_flow(conn) -> list:
     """Exchange-wide executed-flow detection on Polymarket (all markets, not
@@ -1607,7 +1549,6 @@ def scan_polymarket_flow(conn) -> list:
         meta.close()
     return alerts
 
-
 # ── Polymarket sweep ────────────────────────────────────────────────────────
 
 def fetch_pm_markets() -> list:
@@ -1624,7 +1565,6 @@ def fetch_pm_markets() -> list:
         if len(d) < 100:
             break
     return out
-
 
 def scan_polymarket(conn) -> list:
     """Executed-flow sweep on Polymarket. Book-level wall detection on PM is
@@ -1670,7 +1610,6 @@ def scan_polymarket(conn) -> list:
                     len(to_store))
     return alerts
 
-
 # ── Entry points ────────────────────────────────────────────────────────────
 
 # ── Wallet accumulation tracking ─────────────────────────────────────────────
@@ -1683,14 +1622,12 @@ def _accum_recently_alerted(conn, wallet: str, market: str) -> bool:
         (wallet, market, cutoff)).fetchone()
     return row is not None
 
-
 def _accum_hour_count(conn) -> int:
     """Count accumulation alerts in the last hour (rate limiting)."""
     cutoff = time.time() - 3600
     row = conn.execute(
         "SELECT COUNT(*) FROM accumulation_alerts WHERE ts>?", (cutoff,)).fetchone()
     return row[0] if row else 0
-
 
 def check_wallet_accumulations(conn, trades: list) -> list:
     """Per-wallet-per-market accumulation over rolling window.
@@ -1820,12 +1757,10 @@ def check_wallet_accumulations(conn, trades: list) -> list:
                 }
                 log_alert(conn, alert)
 
-
                 alerts.append(alert)
 
     conn.commit()
     return alerts
-
 
 def check_kalshi_market_accumulations(conn, trade_agg: dict) -> list:
     """Per-market accumulation for Kalshi (anonymous trades — no wallet IDs).
@@ -1919,7 +1854,6 @@ def check_kalshi_market_accumulations(conn, trade_agg: dict) -> list:
     conn.commit()
     return alerts
 
-
 def run_scan(platform: str = "all") -> list:
     """Full scan. Persists state/snapshots/alerts; returns alerts by score.
 
@@ -1943,7 +1877,6 @@ def run_scan(platform: str = "all") -> list:
     alerts.sort(key=lambda a: a.get("raw_score", a["score"]), reverse=True)
     return alerts
 
-
 def format_alert(a: dict) -> str:
     sev_icon = "🚨" if a["severity"] == "CRITICAL" else "⚠️" if a["severity"] == "HIGH" else "🐟"
     plat_icon = "📊" if a["platform"] == "kalshi" else "🔵"
@@ -1966,7 +1899,6 @@ def format_alert(a: dict) -> str:
     else:
         lines.append(f"Link: https://polymarket.com/market/{a['market']}")
     return "\n".join(lines)
-
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")

@@ -18,13 +18,14 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from loguru import logger
+from config.polymarket_urls import xtracker_url  # polyproxy: central URL config
 
 
 # ============================================================================
 # Configuration
 # ============================================================================
 
-XTRACKER_API = "https://xtracker.polymarket.com/api"
+XTRACKER_API = xtracker_url("/api")
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 

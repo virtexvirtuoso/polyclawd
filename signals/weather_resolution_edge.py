@@ -301,7 +301,7 @@ def compute_range_probability(
 def get_source_rmse(city: str, source: str) -> Optional[float]:
     """Get per-city RMSE for a forecast source from source_city_rmse table."""
     try:
-        conn = sqlite3.connect(_DB_PATH)
+        conn = sqlite3.connect(_DB_PATH, timeout=15)
         row = conn.execute("""
             SELECT AVG(ABS(error_f)) FROM source_city_rmse
             WHERE city = ? AND source = ? AND actual_high_f IS NOT NULL
@@ -591,7 +591,7 @@ def compute_twc_range_edge(
 def _ensure_delta_table():
     """Create resolution_edge_delta table if not exists."""
     try:
-        conn = sqlite3.connect(_DB_PATH)
+        conn = sqlite3.connect(_DB_PATH, timeout=15)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS resolution_edge_delta (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -619,7 +619,7 @@ _ensure_delta_table()
 def track_forecast_delta(city: str, target_date: str, source: str, forecast_f: float) -> Optional[float]:
     """Track forecast changes. Returns delta from previous reading, or None if first."""
     try:
-        conn = sqlite3.connect(_DB_PATH)
+        conn = sqlite3.connect(_DB_PATH, timeout=15)
         prev = conn.execute("""
             SELECT forecast_f FROM resolution_edge_delta
             WHERE city = ? AND target_date = ? AND source = ?
@@ -797,22 +797,39 @@ def _scan_polymarket_edges(signals: list):
     _twc_cache: Dict[str, Optional[float]] = {}  # key = "city|date" -> twc_high_f
 
     def _get_twc_high(city_name: str, target_date: str) -> Optional[float]:
-        """Get TWC high temp for a city+date, cached per scan."""
+        """Get TWC high temp for a city+date, cached per scan.
+
+        Falls back to ensemble mean (from Open-Meteo, NWS, Tomorrow.io,
+        WeatherAPI, Pirate Weather, Visual Crossing) when TWC API is
+        unavailable. The ensemble mean is slightly less precise (TWC is
+        the resolution source with 1.5x weight) but far better than
+        skipping the city entirely.
+        """
         key = f"{city_name}|{target_date}"
         if key in _twc_cache:
             return _twc_cache[key]
         try:
-            from signals.weather_ensemble import _fetch_weather_com
+            from signals.weather_ensemble import _fetch_weather_com, get_ensemble_forecast
             coords = CITY_COORDS.get(city_name)
             if not coords:
                 _twc_cache[key] = None
                 return None
             lat, lon = coords[0], coords[1]
+            # Try TWC first (resolution source — highest precision)
             twc = _fetch_weather_com(lat, lon, target_date, city_name)
             if twc:
                 val = twc.get("high_f")
                 _twc_cache[key] = val
                 return val
+            # Fallback: use ensemble mean (6 other sources)
+            ens = get_ensemble_forecast(city_name, target_date)
+            if ens and ens.get("ensemble"):
+                val = ens["ensemble"].get("high_mean_f")
+                if val is not None:
+                    logger.info("TWC unavailable for %s/%s, using ensemble mean: %.1f°F",
+                                city_name, target_date, val)
+                    _twc_cache[key] = val
+                    return val
         except Exception:
             pass
         _twc_cache[key] = None
@@ -922,6 +939,23 @@ def _scan_polymarket_edges(signals: list):
                         # Reconstruct slug from current city+date (not the stale loop variable)
                         edge["slug"] = f"highest-temperature-in-{city_slug}-on-{month}-{day}-{year}"
                         signals.append(edge)
+                        # ── Log price snapshot for velocity filter (L3) ──────────────
+                        try:
+                            from odds.price_movement import log_price_snapshot
+                            log_price_snapshot(
+                                sport="weather",
+                                event_id=edge["condition_id"][:40] if edge.get("condition_id") else f"{city_slug}|{target_date}",
+                                participant=city_name,
+                                market_type="range",
+                                consensus_fair=edge.get("twc_implied_prob"),
+                                best_soft_implied=None,
+                                spread_pp=abs(edge.get("edge_pp", 0)),
+                                american_odds=None,
+                                poly_price=edge.get("market_price"),
+                                commence_time=target_date,
+                            )
+                        except Exception:
+                            pass  # never block scan on price logging
                     continue
                 else:
                     continue
@@ -936,6 +970,22 @@ def _scan_polymarket_edges(signals: list):
                     delta = track_forecast_delta(city_name, target_date, "twc", edge["twc_forecast_f"])
                     edge["forecast_delta"] = delta
                     signals.append(edge)
+                    # ── Log price snapshot for velocity filter (L3) ──────────────
+                    try:
+                        from odds.price_movement import log_price_snapshot
+                        log_price_snapshot(
+                            sport="weather",
+                            event_id=edge["condition_id"][:40] if edge.get("condition_id") else f"{city_slug}|{target_date}",
+                            participant=city_name,
+                            market_type=comparison,  # "above" or "below"
+                            consensus_fair=edge.get("twc_implied_prob"),
+                            best_soft_implied=None,  # weather has no soft book
+                            american_odds=None,
+                            poly_price=edge.get("market_price"),
+                            commence_time=target_date,  # resolution date
+                        )
+                    except Exception:
+                        pass  # never block scan on price logging
 
 
 def _extract_date_from_kalshi_event(event: dict) -> Optional[str]:

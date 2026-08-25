@@ -448,7 +448,8 @@ def scan_open_markets() -> List[Dict]:
 
     # Get open shadow trades
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(DB_PATH), timeout=15)
+        conn.execute("PRAGMA busy_timeout=8000")
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT * FROM shadow_trades WHERE resolved = 0"
@@ -461,7 +462,8 @@ def scan_open_markets() -> List[Dict]:
 
     # Get open paper positions
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(DB_PATH), timeout=15)
+        conn.execute("PRAGMA busy_timeout=8000")
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT * FROM paper_positions WHERE status = 'open'"

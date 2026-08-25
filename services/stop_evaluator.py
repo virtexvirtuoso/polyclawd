@@ -20,12 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
+from config.polymarket_urls import CLOB_API  # polyproxy: central URL config
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 DB_PATH = PROJECT_ROOT / "storage" / "shadow_trades.db"
-CLOB_API = "https://clob.polymarket.com"
+
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 
 # ── UNIVERSAL STOP THRESHOLD ──────────────────────────────────────────────
@@ -126,13 +127,12 @@ def _save_alert_cache(cache: dict) -> None:
     except Exception:
         pass
 
-
 def _db():
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=8000")
     return conn
-
 
 def _fetch_url(url, timeout=10):
     try:
@@ -142,7 +142,6 @@ def _fetch_url(url, timeout=10):
     except Exception as e:
         logger.debug("Stop evaluator fetch failed {}: {}", url, e)
         return None
-
 
 def _fetch_price(pos):
     """Fetch current YES token price. Returns (position_id, price_or_None)."""
@@ -170,7 +169,6 @@ def _fetch_price(pos):
 
     return (pos["id"], None)
 
-
 def _compute_unrealized_pnl(side, entry_price, current_yes_price, bet_size):
     """Compute unrealized P&L if we sold at current price."""
     if side == "YES":
@@ -182,11 +180,9 @@ def _compute_unrealized_pnl(side, entry_price, current_yes_price, bet_size):
         no_current = 1 - current_yes_price
         return bet_size * (no_current / no_entry - 1) if no_entry > 0 else 0
 
-
 def _get_config(strategy):
     """Get stop config for a strategy, falling back to defaults."""
     return STOP_CONFIG.get(strategy, STOP_CONFIG["default"])
-
 
 def _load_engine_state():
     """Read engine state once per tick; used to check toggles."""
@@ -195,7 +191,6 @@ def _load_engine_state():
         return load_engine_state() or {}
     except Exception:
         return {}
-
 
 def _post_lock_threshold(strategy, pos, now):
     """
@@ -216,7 +211,6 @@ def _post_lock_threshold(strategy, pos, now):
         return None
     return float(cfg["max_loss_pct"])
 
-
 def _should_alert(position_id):
     """Check cooldown — avoid spamming alerts for same position."""
     now = datetime.now(timezone.utc)
@@ -227,7 +221,6 @@ def _should_alert(position_id):
     cache[position_id] = now
     _save_alert_cache(cache)
     return True
-
 
 def _display_title(raw_title, market_id):
     """Best human-readable title for alerts (Task 3.3, hex-ID fix).
@@ -246,7 +239,6 @@ def _display_title(raw_title, market_id):
     except Exception:
         resolved = None
     return resolved or title or str(market_id or "")[:24]
-
 
 # ---------------------------------------------------------------------------
 # Phase G — Live-position exit routing
@@ -277,7 +269,6 @@ def _get_live_position(market_id):
     finally:
         if conn is not None:
             conn.close()
-
 
 def _close_live_position_early(live_pos_row, current_yes_price, reason, hard_cap_frac=0.50):
     """Route a genuine stop on a LIVE position through execute_exit.
@@ -433,7 +424,6 @@ def _close_live_position_early(live_pos_row, current_yes_price, reason, hard_cap
         logger.error("_close_live_position_early: {} — skipping live exit", exc)
         return None
 
-
 def _close_position_early(conn, pos, current_yes_price, unrealized_pnl, reason):
     """
     Close a position at current market price (early exit).
@@ -495,7 +485,6 @@ def _close_position_early(conn, pos, current_yes_price, unrealized_pnl, reason):
         "strategy": pos["strategy"] or "",
     }
 
-
 def _send_discord_alert(stop_info):
     """Send Discord alert for a stop-loss trigger."""
     try:
@@ -536,7 +525,6 @@ def _send_discord_alert(stop_info):
     except Exception as e:
         logger.warning("Stop-loss Discord alert failed: {}", e)
 
-
 def _write_heartbeat(conn, positions_checked, warnings_fired):
     """Record proof-of-life for the stop evaluator (Task 2.1, decision D3).
 
@@ -563,7 +551,6 @@ def _write_heartbeat(conn, positions_checked, warnings_fired):
     except Exception as e:
         logger.warning("Stop heartbeat write failed: {}", e)
 
-
 def _send_stop_close_telegram(stop_info):
     """Send a 🛑 stop-close alert through the hardened Telegram sender.
 
@@ -586,7 +573,6 @@ def _send_stop_close_telegram(stop_info):
         alert_openclaw(msg, parse_mode=None)
     except Exception as e:
         logger.warning("Stop-loss Telegram alert failed: {}", e)
-
 
 def evaluate_stops():
     """
@@ -819,7 +805,6 @@ def evaluate_stops():
 
     return stopped
 
-
 def _parse_market_date(title):
     """Extract target date from market title like '...on April 8?'."""
     import re
@@ -842,7 +827,6 @@ def _parse_market_date(title):
     if (now - target).days > 180:
         target = target.replace(year=year + 1)
     return target
-
 
 # Urgent stop config — tighter thresholds for positions resolving soon.
 # Calibrated 2026-04-23: 14d counterfactual showed 15% weather stop cost $1,857
@@ -872,7 +856,6 @@ URGENT_STOP_CONFIG = {
 }
 
 URGENT_HOURS = 6  # positions resolving within this window get urgent checks
-
 
 def evaluate_stops_urgent():
     """
@@ -1055,7 +1038,6 @@ def evaluate_stops_urgent():
         logger.info("Urgent stop evaluator: {} positions stopped", len(stopped))
 
     return stopped
-
 
 if __name__ == "__main__":
     results = evaluate_stops()

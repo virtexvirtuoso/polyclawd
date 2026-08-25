@@ -32,6 +32,7 @@ import aiomcache
 import websockets
 
 from services.hf_enrichment import get_enrichment_reader
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 from services.hf_velocity import (
     ImbalanceVelocityTracker,
     CVDAccelerationTracker,
@@ -496,7 +497,7 @@ def _find_active_hf_market(asset: str, prefer_duration: str = "5min") -> Optiona
 
     try:
         q = urllib.parse.quote(f"{name} up or down")
-        url = f"https://gamma-api.polymarket.com/markets?active=true&closed=false&_q={q}&limit=40&order=endDate&ascending=true"
+        url = gamma_url(f"/markets?active=true&closed=false&_q={q}&limit=40&order=endDate&ascending=true")
         req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd-HF/1.0"})
         with urllib.request.urlopen(req, timeout=8) as resp:
             markets = json.loads(resp.read().decode())
@@ -578,7 +579,7 @@ def _resolve_from_pm_market(market_id: str, direction: str) -> Optional[str]:
     """
     import urllib.request
     try:
-        url = f"https://gamma-api.polymarket.com/markets/{market_id}"
+        url = gamma_url(f"/markets/{market_id}")
         req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd-HF/1.0"})
         with urllib.request.urlopen(req, timeout=8) as r:
             m = json.loads(r.read())

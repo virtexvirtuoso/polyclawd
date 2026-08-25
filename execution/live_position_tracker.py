@@ -26,6 +26,7 @@ from loguru import logger
 
 from execution.live_db import (
     insert_position,
+    record_entry_reasoning,
     record_fill,
     snapshot_equity,
 )
@@ -59,6 +60,73 @@ def _get_prev_peak(conn: sqlite3.Connection) -> float:
 
 # ---------------------------------------------------------------------------
 # Public API
+def realized_pnl_from_ledger(conn: sqlite3.Connection) -> tuple[float, int]:
+    """Cumulative realised P&L, plus the SELL-fill count.
+
+    Union of the two close regimes, with no double-count:
+      * every leg that went through close_position() has a SELL fill
+      * resolution/manual closes write pnl but never a SELL fill
+
+    This is the single source of truth. recompute_equity() and the position_sync
+    governor sync both call it, so the snapshot ledger and the governor's
+    persisted realized_pnl cannot drift apart.
+    """
+    cur = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(shares * (price - fair_price) - fee_paid), 0.0)"
+        " FROM live_fills WHERE side = 'SELL'"
+    )
+    n_sell, realized_from_fills = cur.fetchone()
+    cur = conn.execute(
+        "SELECT COALESCE(SUM(pnl), 0.0) FROM live_positions p"
+        " WHERE p.status = 'closed'"
+        "   AND NOT EXISTS (SELECT 1 FROM live_fills f"
+        "                   WHERE f.position_id = p.id AND f.side = 'SELL')"
+    )
+    realized_no_fill = float(cur.fetchone()[0])
+    return float(realized_from_fills) + realized_no_fill, int(n_sell)
+
+
+def realized_loss_today(conn: sqlite3.Connection, now: datetime | None = None) -> float:
+    """Net realised loss booked since UTC midnight, as a POSITIVE magnitude.
+
+    Returns 0.0 when the day is flat or profitable.
+
+    closed_at exists in two formats in the live ledger: Python isoformat
+    ("2026-08-21T18:46:04.724194+00:00") from the current code path, and
+    space-separated ("2026-08-21 12:00:00") from older backfills. A 'T' cutoff
+    compared against a space-separated value silently drops those rows, because
+    ' ' (0x20) sorts below 'T' (0x54) -- so normalise the column before
+    comparing, and build the cutoff in Python rather than with sqlite
+    datetime(), which would reintroduce the same separator mismatch.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = now.strftime("%Y-%m-%dT00:00:00")
+    cur = conn.execute(
+        "SELECT COALESCE(SUM(pnl), 0.0) FROM live_positions"
+        " WHERE status = 'closed'"
+        "   AND replace(COALESCE(closed_at, ''), ' ', 'T') >= ?",
+        (cutoff,),
+    )
+    return max(0.0, -float(cur.fetchone()[0]))
+
+
+def unrealized_loss_from_snapshot(conn: sqlite3.Connection) -> float:
+    """Latest snapshot's unrealised loss as a POSITIVE magnitude (0.0 if flat,
+    profitable, or no snapshot yet).
+
+    Reads the last persisted snapshot rather than recomputing, so a governor
+    sync never fires per-position orderbook fetches or writes a spurious
+    snapshot row. Freshness is bounded by the recompute_equity cadence.
+    """
+    cur = conn.execute(
+        "SELECT unrealized_pnl FROM live_equity_snapshots ORDER BY id DESC LIMIT 1"
+    )
+    row = cur.fetchone()
+    if row is None or row[0] is None:
+        return 0.0
+    return max(0.0, -float(row[0]))
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -77,8 +145,16 @@ def record_real_fill(
     fair_price: float,
     token_id: str | None = None,
     market_title: str | None = None,
+    category: str = "",
+    reasoning: dict | None = None,
 ) -> int:
     """Record a real fill and open/update the live position.
+
+    *reasoning*, if given, is written to live_entry_reasoning ONLY when this
+    fill opens a brand-new position (never on a VWAP top-up into an existing
+    one) — it's entry-time-only context, not something to re-attribute on
+    every subsequent fill. Written inside the same BEGIN IMMEDIATE
+    transaction as the position insert, so the two rows are atomic.
 
     Returns
     -------
@@ -134,8 +210,16 @@ def record_real_fill(
                 cost_usd=usd,
                 status="open",
                 fee_paid_total=fee_paid,
-                archetype="weather",
+                archetype=category or "unknown",
             )
+            if reasoning:
+                record_entry_reasoning(
+                    conn,
+                    commit=False,
+                    position_id=position_id,
+                    ts=_utcnow(),
+                    **reasoning,
+                )
 
         record_fill(
             conn,
@@ -179,23 +263,8 @@ def recompute_equity(conn: sqlite3.Connection, onchain_balance: float) -> dict[s
     # Import here so monkeypatching in tests works correctly
     from odds.polymarket_clob import get_orderbook
 
-    # Realized P&L — union of the two close regimes, no double-count:
-    #   • every leg that went through close_position() has a SELL fill
-    #   • resolution/manual closes write pnl but never a SELL fill
-    cur = conn.execute(
-        "SELECT COUNT(*), COALESCE(SUM(shares * (price - fair_price) - fee_paid), 0.0)"
-        " FROM live_fills WHERE side = 'SELL'"
-    )
-    n_sell, realized_from_fills = cur.fetchone()
-    realized_from_fills = float(realized_from_fills)
-    cur = conn.execute(
-        "SELECT COALESCE(SUM(pnl), 0.0) FROM live_positions p"
-        " WHERE p.status = 'closed'"
-        "   AND NOT EXISTS (SELECT 1 FROM live_fills f"
-        "                   WHERE f.position_id = p.id AND f.side = 'SELL')"
-    )
-    realized_no_fill = float(cur.fetchone()[0])
-    realized_pnl = realized_from_fills + realized_no_fill
+    # Realized P&L — shared helper so the governor sync reads the same number.
+    realized_pnl, n_sell = realized_pnl_from_ledger(conn)
     # Cross-check: the union above is authoritative; warn (not fatal) when it
     # diverges from the plain closed-positions sum, meaning a multi-leg
     # close's partial legs aren't reflected in position pnl yet.

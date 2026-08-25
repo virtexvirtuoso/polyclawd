@@ -27,13 +27,12 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 
 from odds.edge_math import net_arb_edge
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # Constants
-GAMMA_API = "https://gamma-api.polymarket.com"
-
 # Sports calendar for seasonal Vegas scanning
 SPORTS_CALENDAR = {
     1: ["americanfootball_nfl", "basketball_nba", "icehockey_nhl", "mma_mixed_martial_arts"],
@@ -605,6 +604,11 @@ async def find_vegas_edge(
 
     Compares implied probability from sportsbooks against Polymarket prices.
     Returns opportunities where the gap exceeds min_edge.
+
+    NFL is routed through the dedicated game-to-game engine (odds/nfl_edge.py)
+    which matches each game's moneyline against the corresponding Polymarket
+    game-winner market — NOT the old hardcoded Super-Bowl-season mapping that
+    compared per-game odds to season-long futures and produced garbage signals.
     """
     # Use dynamic sports calendar if "auto"
     if sports == "auto":
@@ -612,69 +616,52 @@ async def find_vegas_edge(
         sports_list = SPORTS_CALENDAR.get(current_month, ["basketball_nba", "mma_mixed_martial_arts"])
         sports = ",".join(sports_list[:3])  # Limit to 3 to conserve API calls
 
-    # Manual mapping of known markets with current prices
-    MARKET_MAPPINGS = {
-        "Seattle Seahawks": {
-            "polymarket_id": "540234",
-            "polymarket_question": "Will the Seattle Seahawks win Super Bowl 2026?",
-            "polymarket_price": 0.68,
-            "sport": "americanfootball_nfl"
-        },
-        "New England Patriots": {
-            "polymarket_id": "540227",
-            "polymarket_question": "Will the New England Patriots win Super Bowl 2026?",
-            "polymarket_price": 0.32,
-            "sport": "americanfootball_nfl"
-        },
-    }
-
     all_edges = []
     all_errors = []
 
     # Scan each sport
     for sport in sports.split(","):
         sport = sport.strip()
-        vegas_data = await get_vegas_odds(sport)
 
+        # NFL → dedicated game-to-game edge engine
+        if sport == "americanfootball_nfl":
+            try:
+                import sys
+                from odds.nfl_edge import get_nfl_edge_summary
+                summary = await get_nfl_edge_summary(min_edge=min_edge)
+                for e in summary.get("edges", []):
+                    all_edges.append({
+                        "team": e.get("participant"),
+                        "sport": sport,
+                        "event": e.get("event"),
+                        "vegas_prob": round((e.get("book_prob") or 0) / 100, 4),
+                        "vegas_odds": e.get("american_odds"),
+                        "polymarket_price": round((e.get("polymarket_price") or 0) / 100, 4),
+                        "edge": round((e.get("edge_pct") or 0) / 100, 4),
+                        "edge_pct": e.get("edge_pct"),
+                        "signal": e.get("direction"),
+                        "polymarket_id": e.get("market_id"),
+                        "polymarket_question": None,
+                        "commence_time": e.get("commence_time"),
+                    })
+            except ImportError:
+                all_errors.append({"sport": sport, "error": "nfl_edge module unavailable"})
+            except Exception as exc:
+                all_errors.append({"sport": sport, "error": str(exc)})
+            continue
+
+        # Generic path for other sports (Vegas consensus vs Polymarket)
+        vegas_data = await get_vegas_odds(sport)
         if "error" in vegas_data:
             all_errors.append({"sport": sport, "error": vegas_data["error"]})
             continue
 
-        # Process events for this sport
-        for event in vegas_data.get("events", []):
-            for team_key in ["home_team", "away_team"]:
-                team = event.get(team_key)
-
-                if team in MARKET_MAPPINGS:
-                    mapping = MARKET_MAPPINGS[team]
-
-                    # Get true probability from Vegas
-                    prob_key = "home_prob_true" if team_key == "home_team" else "away_prob_true"
-                    vegas_prob = event.get(prob_key, 0)
-
-                    # Get Polymarket price from mapping
-                    poly_price = mapping.get("polymarket_price", 0.50)
-
-                    edge = vegas_prob - poly_price
-
-                    if abs(edge) >= min_edge:
-                        all_edges.append({
-                            "team": team,
-                            "sport": sport,
-                            "event": f"{event['away_team']} @ {event['home_team']}",
-                            "vegas_prob": round(vegas_prob, 4),
-                            "vegas_odds": event.get(f"{team_key.split('_')[0]}_odds"),
-                            "polymarket_price": poly_price,
-                            "edge": round(edge, 4),
-                            "edge_pct": round(edge * 100, 1),
-                            "signal": "BUY" if edge > 0 else "SELL",
-                            "polymarket_id": mapping["polymarket_id"],
-                            "polymarket_question": mapping["polymarket_question"],
-                            "commence_time": event.get("commence_time")
-                        })
+        # No hardcoded team→futures mapping here; other sports are handled by
+        # their own dedicated engines (/api/baseball/edge, /api/ufc/edge, etc.)
+        all_errors.append({"sport": sport, "error": "no dedicated edge engine wired; use /api/<sport>/edge"})
 
     # Sort by edge size
-    all_edges.sort(key=lambda x: abs(x["edge"]), reverse=True)
+    all_edges.sort(key=lambda x: abs(x["edge"] or 0), reverse=True)
 
     return {
         "edges": all_edges,
@@ -957,6 +944,34 @@ async def get_baseball_dashboard():
         logger.exception(f"baseball dashboard query failed: {e}")
 
     return result
+
+
+@router.get("/nfl/edge")
+async def get_nfl_edge(min_edge: float = Query(default=0.03, ge=0, le=1)):
+    """NFL moneyline edges: devigged The Odds API vs Polymarket game markets.
+
+    Data sources:
+      - The Odds API americanfootball_nfl + americanfootball_nfl_preseason h2h
+      - Polymarket Gamma API tag_slug=nfl game events
+
+    Edge = devigged bookmaker probability - Polymarket price (YES).
+    Only returns |edge| >= min_edge (default 3%).
+
+    Returns:
+      {source, timestamp, total_edges, edges: [...], top_opportunities: [...]}
+    """
+    async def _get_nfl():
+        import sys
+        from odds.nfl_edge import get_nfl_edge_summary
+        return await get_nfl_edge_summary(min_edge)
+
+    return await handle_edge_request("nfl", _get_nfl())
+
+
+@router.get("/nfl/dashboard")
+async def get_nfl_dashboard():
+    """NFL shadow-trade dashboard (moneyline strategy)."""
+    return await run_in_threadpool(_sports_shadow_dashboard, ["nfl_moneyline"])
 
 
 @router.get("/baseball/props")

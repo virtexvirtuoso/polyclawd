@@ -23,13 +23,12 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from config.polymarket_urls import CLOB_API  # polyproxy: central URL config
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "storage" / "shadow_trades.db"
-CLOB_API = "https://clob.polymarket.com"
 
 UA = {"User-Agent": "Mozilla/5.0"}
-
 
 def _fetch(url: str, timeout: int = 10):
     try:
@@ -38,7 +37,6 @@ def _fetch(url: str, timeout: int = 10):
             return json.loads(resp.read().decode())
     except Exception as e:
         return None
-
 
 def resolve_polymarket(market_id: str):
     """Mirror of signals/paper_portfolio.py::_resolve_polymarket without side dep.
@@ -92,7 +90,6 @@ def resolve_polymarket(market_id: str):
 
     return None, closing_line
 
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true", help="Write to DB (default: dry-run)")
@@ -100,7 +97,8 @@ def main():
     parser.add_argument("--sleep", type=float, default=0.25, help="Sleep between API calls")
     args = parser.parse_args()
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.row_factory = sqlite3.Row
 
     q = """SELECT id, market_id, market_slug, side, entry_price, bet_size, closing_line
@@ -172,7 +170,6 @@ def main():
     conn.commit()
     print("[APPLY] done.")
     conn.close()
-
 
 if __name__ == "__main__":
     main()

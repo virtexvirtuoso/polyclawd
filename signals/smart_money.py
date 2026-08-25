@@ -9,8 +9,10 @@ from pathlib import Path
 
 from loguru import logger
 
-HOLDERS_API = "https://data-api.polymarket.com/holders"
-GAMMA_API = "https://gamma-api.polymarket.com/markets"
+from config.polymarket_urls import data_url  # polyproxy: central URL config
+HOLDERS_API = data_url("/holders")
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
+GAMMA_API = gamma_url("/markets")
 CACHE_DIR = Path(__file__).parent.parent / "storage" / "smart_money_cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_DIR = Path(__file__).parent.parent / "storage" / "smart_money_history"

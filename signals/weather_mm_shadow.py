@@ -24,6 +24,7 @@ Usage: python3 -m signals.weather_mm_shadow [--min-rate 25] [--share 0.5] [--siz
 """
 
 from __future__ import annotations
+from config.polymarket_urls import clob_url  # polyproxy: central URL config
 
 import json
 import re
@@ -37,8 +38,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from signals import weather_ensemble as we  # calibrated prob + forecast std
 from signals import weather_scanner as ws    # title parsers + CITY_COORDS
 
-GAMMA = "https://gamma-api.polymarket.com"
-MULTI = "https://clob.polymarket.com/rewards/markets/multi"
+from config.polymarket_urls import GAMMA_API as GAMMA  # polyproxy: central URL config
+MULTI = clob_url("/rewards/markets/multi")
 UA = {"User-Agent": "Mozilla/5.0 polyclawd-weather-mm/1.0"}
 OUT = Path(__file__).resolve().parent.parent / "static" / "weather_mm_shadow.json"
 
@@ -65,7 +66,7 @@ def _eligible_share(token_id, max_spread_c, size_shares):
     """Observed reward-pool share = your size / (existing eligible-band depth +
     your size). Eligible band = within max_spread (cents) of the book mid, both
     sides. Grounds the share in REAL competition instead of a flat guess."""
-    book = _get("https://clob.polymarket.com/book", {"token_id": token_id})
+    book = _get(clob_url("/book"), {"token_id": token_id})
     if not book or "bids" not in book:
         return None, None
     bids = sorted([(float(b["price"]), float(b["size"])) for b in book.get("bids", [])], key=lambda x: -x[0])

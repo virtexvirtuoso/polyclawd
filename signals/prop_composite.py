@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import json
 import requests
 from loguru import logger
+from config.polymarket_urls import GAMMA_API as POLYMARKET_GAMMA  # polyproxy: central URL config
 
 try:
     from odds.odds_api_fetch import get_event_markets, get_games_with_markets, upcoming_window
@@ -49,7 +50,6 @@ N_SIMULATIONS_DEFAULT = 10_000
 SIGNAL_THRESHOLD_PP = 3.0  # flag divergences > 3 percentage points
 MIN_PROPS_FOR_ANALYSIS = 3  # minimum props needed per game
 CACHE_TTL_S = 1800  # 30 minute cache per game
-POLYMARKET_GAMMA = "https://gamma-api.polymarket.com"
 
 # Sharp books for moneyline devig
 SHARP_2WAY_KEYS = "pinnacle,fanduel,draftkings,betmgm,williamhill_us"
@@ -84,11 +84,9 @@ BASELINE_HITS_ALLOWED = 8.0
 # ── Cache ───────────────────────────────────────────────────────────────────
 _CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}  # for scan_all
 
-
 def _normalize_name(name: str) -> str:
     """Normalize player name for consistent matching."""
     return name.strip().lower().replace(".", "").replace("-", " ").replace("\u2019", "'").replace("\u2018", "'")
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Section 1: Data Fetch (from existing Odds API integration)
@@ -190,7 +188,6 @@ async def get_all_player_props_for_game(event_id: str) -> Dict[str, Any]:
         "home_props": home_props,
     }
 
-
 def _get_team_rosters_from_lineups() -> Dict[str, List[str]]:
     """Get probable lineups from MLB StatsAPI to assign players to teams.
 
@@ -226,7 +223,6 @@ def _get_team_rosters_from_lineups() -> Dict[str, List[str]]:
     except Exception as e:
         logger.debug(f"prop_composite: lineup fetch failed — {e}")
     return teams
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Section 2: Prop Line → Implied Performance Distribution
@@ -294,7 +290,6 @@ def prop_line_to_distribution(
 
     return (mean, variance)
 
-
 def sample_performance(mean: float, variance: float, prop_type: str = "batter_hits") -> float:
     """Sample a player's prop performance from the implied distribution.
 
@@ -315,7 +310,6 @@ def sample_performance(mean: float, variance: float, prop_type: str = "batter_hi
         sample = round(sample)
 
     return sample
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Section 3: Monte Carlo Simulation
@@ -357,7 +351,6 @@ def _team_stat_score(
     )
 
     return norm_score
-
 
 def monte_carlo_game_outcome(
     game_props: Dict[str, Any], n_simulations: int = N_SIMULATIONS_DEFAULT
@@ -466,7 +459,6 @@ def monte_carlo_game_outcome(
         "key_props_home": key_props_home[:5],
     }
 
-
 def _rank_key_props(
     dists: List[Tuple[str, float, float, str]]
 ) -> List[str]:
@@ -482,7 +474,6 @@ def _rank_key_props(
         scores.append((impact, label))
     scores.sort(reverse=True)
     return [label for _, label in scores]
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Section 4: Moneyline & Polymarket Price Fetch
@@ -562,7 +553,6 @@ def _fetch_polymarket_game_price(
         logger.warning(f"prop_composite: Polymarket fetch failed -- {e}")
         return {"away": None, "home": None, "event_slug": None}
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Section 5: Composite Comparison
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -622,7 +612,6 @@ async def _fetch_moneyline_for_event(event_id: str) -> Dict[str, float]:
         _normalize_name(names[1]): round(devigged[1], 4),
     }
 
-
 def _match_team_name(moneyline_probs: Dict[str, float], team_name: str) -> Optional[float]:
     """Match a canonical team name against moneyline probability keys."""
     normalized = _normalize_name(team_name)
@@ -630,7 +619,6 @@ def _match_team_name(moneyline_probs: Dict[str, float], team_name: str) -> Optio
         if normalized in key or key in normalized:
             return prob
     return None
-
 
 async def implied_game_prob_from_props(
     event_id: str, event_data: Optional[Dict[str, Any]] = None
@@ -742,7 +730,6 @@ async def implied_game_prob_from_props(
         "n_props_home": mc_result.get("n_props_home", 0),
     }
 
-
 async def scan_all_games_prop_composite(
     force: bool = False,
     max_games: int = 12,
@@ -822,7 +809,6 @@ async def scan_all_games_prop_composite(
 
     return results
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Section 6: CLI entry point for testing
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -835,10 +821,8 @@ async def main():
     results = await scan_all_games_prop_composite(force=True)
     print(json.dumps(results, indent=2, default=str))
 
-
 # ─── Phase 2F: DB persistence for CE-8/per-sport reconciliation ────────────
 _CE8_DB_INIT = False
-
 
 def _init_ce8_cache(conn):
     global _CE8_DB_INIT
@@ -861,7 +845,6 @@ def _init_ce8_cache(conn):
         CREATE INDEX IF NOT EXISTS idx_ce8_event ON ce8_signal_cache(event_title);
     """)
     _CE8_DB_INIT = True
-
 
 def persist_ce8_results(results: list) -> int:
     """Write CE-8 composite results to DB for reconciliation."""
@@ -902,7 +885,6 @@ def persist_ce8_results(results: list) -> int:
     except Exception as e:
         logger.debug(f"CE-8 persist failed: {e}")
         return 0
-
 
 def check_ce8_agrees(event_title: str, participant: str, direction: str) -> Optional[bool]:
     """Check if CE-8 prop composite agrees with the per-sport edge direction.
@@ -946,7 +928,6 @@ def check_ce8_agrees(event_title: str, participant: str, direction: str) -> Opti
         return mc_says_value == is_buy
     except Exception:
         return None
-
 
 if __name__ == "__main__":
     import asyncio

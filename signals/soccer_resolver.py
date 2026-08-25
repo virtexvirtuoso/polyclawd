@@ -33,11 +33,11 @@ import json as _json
 import urllib.parse as _uparse
 import urllib.request as _urequest
 from pathlib import Path as _Path
+from config.polymarket_urls import CLOB_API  # polyproxy: central URL config
 
 DB_PATH = _Path(__file__).parent.parent / "storage" / "shadow_trades.db"
-CLOB_API = "https://clob.polymarket.com"
-RATE_DELAY = 5.0
 
+RATE_DELAY = 5.0
 
 def _fetch_json(url, params=None, timeout=10):
     try:
@@ -49,18 +49,15 @@ def _fetch_json(url, params=None, timeout=10):
         logger.debug(f"soccer_resolver fetch failed: {str(url)[:60]} — {e}")
         return None
 
-
 SOCCER_STRATEGIES = ("soccer_match_3way", "soccer_futures")
 
-
 def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     _init(conn)
     return conn
-
 
 def _init(conn: sqlite3.Connection) -> None:
     conn.executescript(
@@ -95,11 +92,9 @@ def _init(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
 
-
 def _clob_market(market_id: str) -> Optional[Dict]:
     """Fetch one CLOB market. Returns the raw dict or None."""
     return _fetch_json(f"{CLOB_API}/markets/{market_id}", timeout=10)
-
 
 def _market_state(data: Dict):
     """(is_closed, winner_idx_or_None, yes_mid_or_None) from a CLOB market payload.
@@ -130,7 +125,6 @@ def _market_state(data: Dict):
                     pass
     return (closed, winner_idx, yes_mid)
 
-
 def _score(side: str, entry_price: float, winner_idx: int):
     """Binary 'Will X win?' market. side YES=BUY participant, NO=SELL. Held token
     is YES (BUY) or NO (SELL), bought at entry_price. Returns (correct, pnl)."""
@@ -141,14 +135,12 @@ def _score(side: str, entry_price: float, winner_idx: int):
     pnl = (1.0 - p) if bet_won else -p
     return (1 if bet_won else 0), round(pnl, 4)
 
-
 def _clv(side: str, entry_price: float, closing_yes_mid: Optional[float]) -> Optional[float]:
     """CLV in pp of the held token vs the PM close. None if no close captured."""
     if closing_yes_mid is None or entry_price is None:
         return None
     held_close = closing_yes_mid if (side or "YES").upper() == "YES" else (1.0 - closing_yes_mid)
     return round((held_close - entry_price) * 100, 1)
-
 
 def _edge_from_reasoning(reasoning: str) -> float:
     import re
@@ -158,7 +150,6 @@ def _edge_from_reasoning(reasoning: str) -> float:
         return float(m.group(1))
     m = re.search(r"([+-]?\d+\.?\d*)%\s*edge", reasoning or "")
     return float(m.group(1)) if m else 0.0
-
 
 def scan_resolved_soccer_trades(batch_size: int = 200) -> Dict[str, Any]:
     """Resolve closed soccer shadows + capture PM closing mid for still-open ones."""
@@ -261,7 +252,6 @@ def scan_resolved_soccer_trades(batch_size: int = 200) -> Dict[str, Any]:
         logger.info(f"soccer_resolver: {result}")
     return result
 
-
 def get_soccer_calibration() -> Dict:
     """Edge-bucket -> realized win-rate + avg CLV, per strategy + overall. For the
     dashboard / kill rules. Degrades to empty pre-data."""
@@ -313,7 +303,6 @@ def get_soccer_calibration() -> Dict:
     except Exception as e:  # pragma: no cover
         out["error"] = str(e)
     return out
-
 
 if __name__ == "__main__":
     print("resolve:", scan_resolved_soccer_trades())

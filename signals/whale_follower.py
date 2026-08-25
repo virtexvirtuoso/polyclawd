@@ -456,6 +456,7 @@ def open_new_follows(meta: sqlite3.Connection, alerts_db_path: Optional[Path] = 
 
     pm_dirs = {}  # slug -> outcomes, fetched lazily once per pass
     entered = skipped_info = skipped_dir = skipped_edge = skipped_stale = 0
+    _COMMIT_EVERY = 50  # commit in chunks so the write txn never spans network I/O
 
     for r in rows:
         try:
@@ -555,6 +556,8 @@ def open_new_follows(meta: sqlite3.Connection, alerts_db_path: Optional[Path] = 
             ),
         )
         entered += 1
+        if entered % _COMMIT_EVERY == 0:
+            meta.commit()  # release write lock periodically (see _COMMIT_EVERY)
 
     meta.commit()
     return {

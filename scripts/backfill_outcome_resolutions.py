@@ -59,7 +59,8 @@ def load_existing_auto_market_ids() -> set:
 
 def fetch_closes() -> list[dict]:
     """Closed weather positions post-cutoff, ordered chronologically."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """

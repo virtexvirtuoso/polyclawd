@@ -31,15 +31,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from loguru import logger
+from config.polymarket_urls import CLOB_API  # polyproxy: central URL config
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DB_PATH = PROJECT_ROOT / "storage" / "shadow_trades.db"
-CLOB_API = "https://clob.polymarket.com"
-
 
 def _ensure_table():
     """Create position_book_log table if it doesn't exist."""
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS position_book_log (
@@ -69,7 +69,6 @@ def _ensure_table():
     conn.commit()
     conn.close()
 
-
 def _fetch_url(url: str, timeout: int = 10):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
@@ -78,7 +77,6 @@ def _fetch_url(url: str, timeout: int = 10):
     except Exception as e:
         logger.debug("Book fetch failed for {}: {}", url, e)
         return None
-
 
 def _depth_within_pp(levels, top_price: float, pp: float) -> float:
     """Sum price*size for levels within `pp` percentage points of `top_price`.
@@ -94,7 +92,6 @@ def _depth_within_pp(levels, top_price: float, pp: float) -> float:
     # asks (ascending) or single-level
     return sum(float(l["price"]) * float(l["size"])
                for l in levels if float(l["price"]) <= top_price + pp / 100.0)
-
 
 def _snapshot_book(pos: dict) -> dict | None:
     """Fetch + summarize the adverse-side book for one position.
@@ -172,12 +169,12 @@ def _snapshot_book(pos: dict) -> dict | None:
         "fetch_latency_ms": latency_ms,
     }
 
-
 def log_position_books():
     """Snapshot adverse-side orderbook for every open Polymarket position."""
     _ensure_table()
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT id, market_id, platform, side, entry_price, strategy "
@@ -193,7 +190,8 @@ def log_position_books():
 
     rows_to_insert = [s for s in snapshots if s is not None]
     if rows_to_insert:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(DB_PATH), timeout=15)
+        conn.execute("PRAGMA busy_timeout=8000")
         conn.execute("PRAGMA journal_mode=WAL")
         cols = ("position_id, timestamp, token_id, best_bid, best_ask, spread, "
                 "microprice, bid_depth_3pp, ask_depth_3pp, bid_depth_5pp, "
@@ -214,7 +212,6 @@ def log_position_books():
     logger.info("Book logger: snapshotted {}/{} open positions",
                 len(rows_to_insert), len(positions))
     return len(rows_to_insert)
-
 
 if __name__ == "__main__":
     n = log_position_books()

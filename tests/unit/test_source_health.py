@@ -1,10 +1,12 @@
 """Tests for source health registry."""
 import os
+import sqlite3
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from importlib.util import spec_from_file_location, module_from_spec
 
 # Direct import to avoid api.services.__init__ pulling in aiofiles

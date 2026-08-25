@@ -21,6 +21,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 
 router = APIRouter()
@@ -57,8 +58,6 @@ LLM_CACHE_TTL = 300  # 5 minutes
 
 # Defaults
 DEFAULT_BALANCE = 10000.0
-GAMMA_API = "https://gamma-api.polymarket.com"
-
 # Adaptive confidence config
 ADAPTIVE_CONF_INCREMENT = 3
 ADAPTIVE_CONF_MAX = 40

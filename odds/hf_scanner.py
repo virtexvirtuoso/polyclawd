@@ -15,9 +15,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 from loguru import logger
-
-GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API = "https://clob.polymarket.com"
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 # Resilient fetch wrapper
 try:

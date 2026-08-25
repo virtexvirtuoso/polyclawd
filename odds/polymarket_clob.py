@@ -8,10 +8,8 @@ import urllib.request  # noqa: F401 (converge w/ VPS copy)
 from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass
-
-CLOB_API = "https://clob.polymarket.com"
-GAMMA_API = "https://gamma-api.polymarket.com"
-DATA_API = "https://data-api.polymarket.com"
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
+from config.polymarket_urls import POLYMARKET_DATA_API as DATA_API  # polyproxy: central URL config
 
 # Resilient fetch wrapper
 try:
@@ -31,12 +29,10 @@ def _resilient_urlopen(source_name, url, timeout=10):
         return resilient_call(source_name, _do_fetch, retries=2, backoff_base=2.0)
     return _do_fetch()
 
-
 @dataclass
 class OrderBookLevel:
     price: float
     size: float
-
 
 @dataclass  
 class OrderBook:
@@ -48,7 +44,6 @@ class OrderBook:
     spread: float
     mid_price: float
     timestamp: str
-
 
 def get_token_id_for_market(market_slug: str, outcome: str = "Yes") -> Optional[str]:
     """Get CLOB token ID for a market outcome"""
@@ -78,7 +73,6 @@ def get_token_id_for_market(market_slug: str, outcome: str = "Yes") -> Optional[
     except Exception as e:
         print(f"Error getting token ID: {e}")
         return None
-
 
 def get_orderbook(token_id: str) -> Optional[OrderBook]:
     """
@@ -133,14 +127,12 @@ def get_orderbook(token_id: str) -> Optional[OrderBook]:
         print(f"Orderbook fetch error: {e}")
         return None
 
-
 def get_orderbook_for_market(market_slug: str, outcome: str = "Yes") -> Optional[OrderBook]:
     """Convenience function to get orderbook by market slug"""
     token_id = get_token_id_for_market(market_slug, outcome)
     if not token_id:
         return None
     return get_orderbook(token_id)
-
 
 def get_price_history(
     token_id: str,
@@ -195,7 +187,6 @@ def get_price_history(
         print(f"Price history error: {e}")
         return []
 
-
 def analyze_orderbook_depth(orderbook: OrderBook) -> Dict:
     """
     Analyze orderbook for trading signals.
@@ -237,7 +228,6 @@ def analyze_orderbook_depth(orderbook: OrderBook) -> Dict:
         "tight_spread": orderbook.spread < 0.02,  # <2 cents is tight
     }
 
-
 @dataclass
 class FillEstimate:
     """Result of walking the order book to size a position.
@@ -260,7 +250,6 @@ class FillEstimate:
     slippage_bps: float
     spread: float
     reason: str
-
 
 def _walk_asks(
     asks: List[OrderBookLevel],
@@ -322,7 +311,6 @@ def _walk_asks(
         if take < lvl.size:
             break
     return cum_usd, cum_shares
-
 
 def size_to_book(
     token_id: Optional[str] = None,
@@ -395,7 +383,6 @@ def size_to_book(
         reason=reason,
     )
 
-
 def get_market_microstructure(market_slug: str) -> Dict:
     """
     Get complete market microstructure analysis for a market.
@@ -436,7 +423,6 @@ def get_market_microstructure(market_slug: str) -> Dict:
         }
     
     return result
-
 
 async def get_clob_summary(market_id: str = None) -> Dict:
     """Get CLOB orderbook summary for trading signals"""
@@ -481,9 +467,7 @@ async def get_clob_summary(market_id: str = None) -> Dict:
     
     return result
 
-
 _CONDITION_ID_CACHE: Dict[str, str] = {}
-
 
 def _condition_id_for_token(token_id: str) -> str:
     """Resolve a CLOB token_id to its market conditionId via Gamma."""
@@ -503,7 +487,6 @@ def _condition_id_for_token(token_id: str) -> str:
     except Exception as e:
         print(f"Warning: Gamma conditionId lookup failed for {token_id[:16]}…: {e}")
     return ""
-
 
 def get_recent_trades(token_id: str, limit: int = 500, condition_id: str = "") -> list:
     """
@@ -562,7 +545,6 @@ def get_recent_trades(token_id: str, limit: int = 500, condition_id: str = "") -
     except Exception as e:
         print(f"Warning: Polymarket Data API /trades fetch error: {e}")
         return []
-
 
 if __name__ == "__main__":
     import asyncio

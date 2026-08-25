@@ -10,6 +10,7 @@ from slowapi.util import get_remote_address
 from api.deps import get_storage_service
 from api.models import HealthResponse, ReadyResponse, MetricsResponse
 from api.activity_feed import get_events
+from config.polymarket_urls import clob_url, gamma_url  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
 
@@ -178,12 +179,12 @@ async def opportunities(request: Request):
             pass
         # Cache miss — resolve via CLOB + gamma
         try:
-            r = httpx.get(f"https://clob.polymarket.com/markets/{mid}", timeout=5)
+            r = httpx.get(clob_url(f"/markets/{mid}"), timeout=5)
             if r.status_code == 200:
                 mslug = r.json().get("market_slug", "")
                 if mslug:
                     m["market_slug"] = mslug
-                    r2 = httpx.get(f"https://gamma-api.polymarket.com/markets?slug={mslug}", timeout=5)
+                    r2 = httpx.get(gamma_url(f"/markets?slug={mslug}"), timeout=5)
                     if r2.status_code == 200:
                         data = r2.json()
                         if data and data[0].get("events"):

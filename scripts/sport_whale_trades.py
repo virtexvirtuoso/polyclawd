@@ -18,6 +18,8 @@ State: storage/shadow_trades.db (auto-migrated tables)
 """
 
 from __future__ import annotations
+from config.polymarket_urls import POLYMARKET_DATA_API as DATA_API  # polyproxy: central URL config
+from config.polymarket_urls import clob_url, data_url  # polyproxy: central URL config
 
 import json
 import os
@@ -25,17 +27,24 @@ import socket
 import sqlite3
 import sys
 import time
-import urllib.request
 import urllib.parse
+
+import requests
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
 from odds.monitor_gate import gated_fetch_json, LIVE_BOOKS
 
 from scripts.alert_formatter import send_telegram
+
+# Mirror scripts/smart_wallet_alert.py — suppress near-resolution follows.
+# Was referenced without definition -> NameError in prod (audit 2026-07-10).
+NEAR_SETTLED_HI = 0.90
+NEAR_SETTLED_LO = 0.10
 
 # ── Sport configs ─────────────────────────────────────────────────────────────
 SPORT_CONFIGS = [
@@ -88,8 +97,6 @@ SPORT_CONFIGS = [
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ESPN_BASE       = "https://site.api.espn.com/apis/site/v2/sports"
-GAMMA_API       = "https://gamma-api.polymarket.com"
-DATA_API        = "https://data-api.polymarket.com"
 
 POLL_LOOKBACK_S   = 90
 DATA_API_PAGE_SZ  = 500
@@ -121,7 +128,6 @@ ALIASES: Dict[str, List[str]] = {
     "cubs": ["chicago cubs"],
 }
 
-
 # ── DB ────────────────────────────────────────────────────────────────────────
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH), timeout=15)
@@ -129,7 +135,6 @@ def get_db() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=8000")
     return conn
-
 
 def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript("""
@@ -152,19 +157,19 @@ def migrate(conn: sqlite3.Connection) -> None:
     """)
     conn.commit()
 
-
 # ── HTTP ──────────────────────────────────────────────────────────────────────
 def _get(url: str, params: Optional[dict] = None, timeout: int = 12) -> Optional[object]:
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "polyclawd/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode())
+        # requests, not urllib: ESPN's edge 403s Python's urllib TLS fingerprint
+        # (silent outage Aug 4-16 2026; urllib3's handshake passes)
+        r = requests.get(url, headers={"User-Agent": "polyclawd/1.0"}, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
     except Exception as e:
         print(f"[sport_whale] GET {url[:70]} → {e}", flush=True)
         return None
-
 
 # ── Memcached ─────────────────────────────────────────────────────────────────
 def _mc_get(key: str, timeout: float = 0.4) -> Optional[bytes]:
@@ -189,7 +194,6 @@ def _mc_get(key: str, timeout: float = 0.4) -> Optional[bytes]:
     except Exception:
         return None
 
-
 def _mc_set(key: str, value: str, exptime: int = 600, timeout: float = 0.4) -> None:
     try:
         payload = value.encode()
@@ -201,7 +205,6 @@ def _mc_set(key: str, value: str, exptime: int = 600, timeout: float = 0.4) -> N
         s.close()
     except Exception:
         pass
-
 
 def mc_register_tokens(token_ids: List[str]) -> None:
     raw = _mc_get("poly:ws:registered")
@@ -215,7 +218,6 @@ def mc_register_tokens(token_ids: List[str]) -> None:
     merged = list(cur)[:500]
     _mc_set("poly:ws:registered", json.dumps(merged), exptime=600)
 
-
 def mc_get_trade(token_id: str) -> Optional[Dict]:
     raw = _mc_get(f"poly:trade:{token_id}")
     if not raw:
@@ -224,7 +226,6 @@ def mc_get_trade(token_id: str) -> Optional[Dict]:
         return json.loads(raw)
     except Exception:
         return None
-
 
 # ── Name matching ─────────────────────────────────────────────────────────────
 def _nmatch(a: str, b: str) -> bool:
@@ -235,7 +236,6 @@ def _nmatch(a: str, b: str) -> bool:
         if alias in b or b in alias:
             return True
     return False
-
 
 # ── ESPN: get active games for any sport ──────────────────────────────────────
 def fetch_espn_active(espn_path: str, sport_name: str) -> List[Dict]:
@@ -294,7 +294,6 @@ def fetch_espn_active(espn_path: str, sport_name: str) -> List[Dict]:
             })
 
     return games
-
 
 # ── Token resolution ──────────────────────────────────────────────────────────
 def get_tokens_for_game(conn: sqlite3.Connection, sport: str, game_id: str,
@@ -403,7 +402,6 @@ def get_tokens_for_game(conn: sqlite3.Connection, sport: str, game_id: str,
 
     return tokens
 
-
 # ── Trade sources ─────────────────────────────────────────────────────────────
 def get_live_ws_trade(token_id: str) -> Optional[Dict]:
     t = mc_get_trade(token_id)
@@ -417,7 +415,6 @@ def get_live_ws_trade(token_id: str) -> Optional[Dict]:
         "timestamp": int(float(t.get("ts", 0) or 0) / 1000),
         "source": "ws",
     }
-
 
 def get_global_trades(watched_tokens: set, since_ts: int = 0) -> List[Dict]:
     if since_ts == 0:
@@ -455,7 +452,6 @@ def get_global_trades(watched_tokens: set, since_ts: int = 0) -> List[Dict]:
             break
 
     return out
-
 
 # ── Alert ─────────────────────────────────────────────────────────────────────
 def _get_vegas_consensus(sport: str, home: str, away: str, outcome_label: str) -> Optional[float]:
@@ -511,7 +507,6 @@ def _get_vegas_consensus(sport: str, home: str, away: str, outcome_label: str) -
     except Exception:
         return None
 
-
 def _get_net_flow(conn: sqlite3.Connection, sport: str, token_id: str,
                   window_s: int = 900) -> Tuple[float, float, int]:
     """Returns (buy_usd, sell_usd, trade_count) in last window_s seconds."""
@@ -523,7 +518,7 @@ def _get_net_flow(conn: sqlite3.Connection, sport: str, token_id: str,
         """, (sport, token_id, cutoff)).fetchall()
         # We don't store individual trade amounts in whale_trade_seen,
         # so use the data-api for recent trades on this token
-        url = f"https://data-api.polymarket.com/trades?asset_id={token_id}&limit=50"
+        url = data_url(f"/trades?asset_id={token_id}&limit=50")
         data = _get(url)
         if not data:
             return (0.0, 0.0, 0)
@@ -553,13 +548,12 @@ def _get_net_flow(conn: sqlite3.Connection, sport: str, token_id: str,
     except Exception:
         return (0.0, 0.0, 0)
 
-
 def _get_wallet_intel(maker_addr: str) -> Optional[str]:
     """Check if wallet is known or new. Returns a short description."""
     if not maker_addr:
         return None
     try:
-        url = f"https://data-api.polymarket.com/activity?user={maker_addr}&limit=5"
+        url = data_url(f"/activity?user={maker_addr}&limit=5")
         data = _get(url)
         if not data:
             return None
@@ -583,11 +577,10 @@ def _get_wallet_intel(maker_addr: str) -> Optional[str]:
     except Exception:
         return None
 
-
 def _get_price_after(token_id: str) -> Optional[float]:
     """Get current mid price from CLOB book."""
     try:
-        url = f"https://clob.polymarket.com/book?token_id={token_id}"
+        url = clob_url(f"/book?token_id={token_id}")
         data = _get(url)
         if not data:
             return None
@@ -600,7 +593,6 @@ def _get_price_after(token_id: str) -> Optional[float]:
         return None
     except Exception:
         return None
-
 
 def _fire_alert(sport: str, home: str, away: str, outcome: str,
                 direction: str, size_usdc: float, price: float,
@@ -673,7 +665,6 @@ def _fire_alert(sport: str, home: str, away: str, outcome: str,
     send_telegram("\n".join(lines))
     print(f"[sport_whale] {sport}: {outcome} {direction} ${size_usdc:,.0f}@{price:.0%} ({lag})",
           flush=True)
-
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def run() -> None:
@@ -824,7 +815,6 @@ def run() -> None:
         print("[sport_whale] No whale trades across any sport.", flush=True)
 
     conn.close()
-
 
 if __name__ == "__main__":
     run()

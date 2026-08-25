@@ -67,7 +67,8 @@ def init_db():
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS arena_snapshots (
@@ -285,7 +286,8 @@ def snapshot_leaderboard(models: List[Dict[str, Any]]) -> str:
 
     init_db()
     now = datetime.now(timezone.utc).isoformat()
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
 
     for m in models:
         conn.execute("""
@@ -337,7 +339,8 @@ def compute_company_rankings(models: List[Dict[str, Any]]) -> Dict[str, Dict]:
 def detect_new_models(models: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Detect models not seen in previous snapshots."""
     init_db()
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
 
     known = set()
     cursor = conn.execute("SELECT DISTINCT model_name FROM arena_snapshots")
@@ -356,7 +359,8 @@ def detect_new_models(models: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def get_score_history(company: str, days: int = 30) -> List[Dict]:
     """Get historical best scores for a company."""
     init_db()
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
     cursor = conn.execute("""
@@ -412,7 +416,8 @@ def generate_ai_model_signals(polymarket_markets: List[Dict] = None) -> List[Dic
         logger.info(f"🆕 {len(new_models)} new models detected on Arena")
         for nm in new_models:
             init_db()
-            conn = sqlite3.connect(str(DB_PATH))
+            conn = sqlite3.connect(str(DB_PATH), timeout=15)
+            conn.execute("PRAGMA busy_timeout=8000")
             conn.execute("""
                 INSERT INTO model_releases (detected_at, model_name, company, source, initial_rank, initial_score, vote_count)
                 VALUES (?, ?, ?, 'arena', ?, ?, ?)
@@ -691,7 +696,8 @@ def get_arena_summary() -> Dict[str, Any]:
 def get_score_trends(days: int = 7) -> Dict[str, Any]:
     """Get score trends over recent days."""
     init_db()
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
     # Get distinct timestamps

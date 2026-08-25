@@ -122,29 +122,44 @@ def _load_vpin_snapshots(limit: int = 500) -> list:
         conn.close()
 
 
-def _update_price_1h_later(slug: str, ts: float, price_1h: float):
-    """Backfill price_1h_later and direction_match for a snapshot."""
+def _backfill_1h_outcomes(
+    min_age_s: int = 3300, max_age_s: int = 5400, max_slugs: int = 40
+) -> int:
+    """Fill price_1h_later for snapshots aged ~55-90 min.
+
+    Called from run_scan() every cycle, so in steady state rows are filled
+    on the first cycle after they turn 55 min old (i.e. at 55-65 min — an
+    honest "1h later" price). Rows that age past max_age_s unfilled (e.g.
+    scheduler downtime) stay NULL and are excluded by backtest_vpin_accuracy.
+    direction_match is left NULL — the backtest derives direction from
+    buy_pct + the two prices itself.
+
+    Returns the number of snapshots filled.
+    """
     _ensure_db()
+    now = time.time()
     conn = db_connect(str(VPIN_DB_PATH))
     try:
-        # Find the snapshot closest to ts+1h for this slug
-        target_ts = ts + 3600
-        row = conn.execute(
-            """SELECT id, price_at_snap FROM vpin_snapshots
-               WHERE slug = ? AND ts >= ? AND price_1h_later IS NULL
-               ORDER BY ts ASC LIMIT 1""",
-            (slug, target_ts),
-        ).fetchone()
-        if row:
-            price_old = row[1] or 0.5
-            direction_match = 1 if (price_1h > price_old) == (price_1h > price_old) else -1  # corrected below
-            # Correct direction_match: does the move direction match VPIN flow?
-            # We'll compute this in backtest_vpin_accuracy instead.
-            conn.execute(
-                "UPDATE vpin_snapshots SET price_1h_later = ? WHERE id = ?",
-                (price_1h, row[0]),
+        slugs = conn.execute(
+            """SELECT DISTINCT slug FROM vpin_snapshots
+               WHERE price_1h_later IS NULL AND ts <= ? AND ts >= ?
+               LIMIT ?""",
+            (now - min_age_s, now - max_age_s, max_slugs),
+        ).fetchall()
+        filled = 0
+        for (slug,) in slugs:
+            price = _fetch_market_price(slug)
+            if price is None:
+                continue
+            cur = conn.execute(
+                """UPDATE vpin_snapshots SET price_1h_later = ?
+                   WHERE slug = ? AND price_1h_later IS NULL
+                     AND ts <= ? AND ts >= ?""",
+                (price, slug, now - min_age_s, now - max_age_s),
             )
-            conn.commit()
+            filled += cur.rowcount
+        conn.commit()
+        return filled
     finally:
         conn.close()
 
@@ -641,6 +656,12 @@ def backtest_vpin_accuracy(vpin_snapshots: Optional[list] = None) -> dict:
 def run_scan(verbose: bool = False) -> dict:
     """Run a full VPIN scan and return results."""
     results = scan_top_markets_vpin(top_n=20)
+    try:
+        filled = _backfill_1h_outcomes()
+        if filled:
+            logger.info("VPIN backfill: price_1h_later filled for %d snapshots", filled)
+    except Exception:
+        logger.exception("VPIN 1h-outcome backfill failed")
     accuracy = backtest_vpin_accuracy()
     return {
         "scan_results": results,

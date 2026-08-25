@@ -20,8 +20,8 @@ CACHE_DIR = Path(__file__).parent.parent / "storage" / "polymarket_price_history
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_TTL = 15 * 60  # 15 min — prices move intraday
 
-GAMMA_BASE = "https://gamma-api.polymarket.com"
-CLOB_BASE = "https://clob.polymarket.com"
+from config.polymarket_urls import GAMMA_API as GAMMA_BASE  # polyproxy: central URL config
+from config.polymarket_urls import CLOB_API as CLOB_BASE  # polyproxy: central URL config
 
 
 def _fetch_json(url: str, timeout: int = 15):

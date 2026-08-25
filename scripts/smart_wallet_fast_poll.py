@@ -20,6 +20,7 @@ Called by: scheduler.py task_smart_wallet_fast()
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Optional
@@ -209,6 +210,33 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
                 )
                 continue
 
+        # Per-archetype track-record gate (2026-08-21). The category gate above
+        # asks "is this market vertical allowed?"; this asks "has THIS wallet
+        # ever made money in it?". The canary's first live trade followed a
+        # wallet into sports while wallet_archetype_pnl already recorded it at
+        # -$1,807.97 over 127 sports trades. Abstains when the record is thin.
+        try:
+            from signals.whale_follower import classify_archetype
+            from signals.whale_wallets import archetype_gate_ok, get_meta_db
+
+            _arch = classify_archetype(
+                "polymarket", condition_id,
+                gm_data.get("question") or rec.get("question") or "")
+            _mconn = get_meta_db()
+            try:
+                _ok, _why = archetype_gate_ok(_mconn, rec.get("wallet", ""), _arch)
+            finally:
+                _mconn.close()
+            if not _ok:
+                logger.info("sw_live: blocked — %s for %s, skipping",
+                            _why, condition_id[:16])
+                continue
+            logger.debug("sw_live: archetype gate %s (%s)", _why, _arch)
+        except Exception as _ag_exc:  # noqa: BLE001
+            # Fail OPEN: a gate that errors must not silently halt all trading,
+            # but it must say so rather than look like a clean pass.
+            logger.warning("sw_live: archetype gate errored (allowing): %s", _ag_exc)
+
         try:
             from odds.poly_executable_edge import condition_id_to_token_ids
 
@@ -333,6 +361,17 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
                 client_order_ref=client_order_ref,
                 category="smart_wallet",
                 market_title=(gm_data.get("question") or rec.get("question") or "")[:120],
+                event_id=event_id,
+                reasoning={
+                    "trigger_source": "smart_wallet",
+                    "wallet_address": rec.get("wallet", ""),
+                    # wallet_win_rate/wallet_net_pnl intentionally left unset —
+                    # not looked up on this hot path (would add a DB query per
+                    # trigger); raw_json below preserves the full alert record
+                    # so nothing is lost, just not pre-joined.
+                    "edge_pct": net_edge_taker,
+                    "raw_json": json.dumps(rec, default=str),
+                },
             )
             action = result.get("action")
             logger.info(

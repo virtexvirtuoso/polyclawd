@@ -68,7 +68,8 @@ def extract_features(row):
 
 def load_trades():
     """Load all resolved trades from archive + current, with timestamps for recency weighting."""
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.row_factory = sqlite3.Row
     
     trades = []

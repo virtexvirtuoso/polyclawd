@@ -9,6 +9,7 @@ Called from scheduler.task_soccer_match_scan when live_config.mode() == "LIVE".
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -166,6 +167,23 @@ def execute_tradeable_soccer_edges(edges: list) -> dict:
                     client_order_ref=client_order_ref,
                     category="soccer_match_3way",
                     market_title=(f"{edge.event_title} — {edge.participant} {edge.market_type}".strip(" —"))[:120],
+                    reasoning={
+                        "trigger_source": "soccer_match_3way",
+                        "edge_pct": exec_edge,
+                        "reasoning": f"{edge.direction} {edge.participant} {edge.market_type} (book_prob={edge.book_prob:.3f})",
+                        "raw_json": json.dumps(
+                            {
+                                "event_title": edge.event_title,
+                                "participant": edge.participant,
+                                "market_type": edge.market_type,
+                                "direction": edge.direction,
+                                "book_prob": edge.book_prob,
+                                "edge_pct": edge.edge_pct,
+                                "commence_time": edge.commence_time,
+                            },
+                            default=str,
+                        ),
+                    },
                 )
                 action = result.get("action", "unknown")
                 if action in ("maker_filled", "taker_filled"):

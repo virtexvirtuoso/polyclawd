@@ -5,6 +5,7 @@ Scope: vault 02-Projects/Polyclawd/Research/2026-05-29-Scope-Single-Name-Options
 """
 
 from __future__ import annotations
+from config.polymarket_urls import gamma_url, clob_url  # polyproxy: central URL config
 import math, sqlite3, pathlib, json, re, os, statistics
 from datetime import date, datetime, timezone
 
@@ -132,7 +133,7 @@ def upsert_rows(db_path, rows):
     return written
 
 
-GAMMA = "https://gamma-api.polymarket.com"
+from config.polymarket_urls import GAMMA_API as GAMMA  # polyproxy: central URL config
 try:  # shared order-book executable-edge enrichment
     from odds import poly_executable_edge as pee
 except Exception:  # pragma: no cover
@@ -687,7 +688,7 @@ def _fetch_poly_current_price(condition_id: str) -> float | None:
     """Fetch current YES price from Polymarket CLOB for a condition.
     Returns None if market closed or unreachable."""
     import urllib.request as _ur
-    url = f"https://clob.polymarket.com/markets/{condition_id}"
+    url = clob_url(f"/markets/{condition_id}")
     try:
         req = _ur.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
         with _ur.urlopen(req, timeout=8) as resp:

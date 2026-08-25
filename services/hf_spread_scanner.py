@@ -21,10 +21,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DB_PATH = PROJECT_ROOT / "storage" / "shadow_trades.db"
-GAMMA_API = "https://gamma-api.polymarket.com"
 
 # Binance is primary (highest liquidity, major Chainlink source, accessible from VPS).
 # HYPE is not listed on Binance — falls back to Bybit.
@@ -42,7 +42,6 @@ _BYBIT_FALLBACK: Dict[str, str] = {
 # Binance interval strings; Bybit uses integer minutes
 _BINANCE_INTERVAL: Dict[str, str] = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h"}
 _BYBIT_INTERVAL:   Dict[str, str] = {"5m": "5",  "15m": "15",  "1h": "60", "4h": "240"}
-
 
 def _fetch_candle_context(asset: str, duration: str) -> Optional[Dict]:
     """Fetch live kline for the current candle window.
@@ -104,13 +103,11 @@ def _fetch_candle_context(asset: str, duration: str) -> Optional[Dict]:
 
     return None
 
-
 def _fmt_pct(pct: float) -> str:
     """Format a percentage, avoiding the -0.00% display artifact."""
     if abs(pct) < 0.005:
         return "~0.00%"
     return f"{pct:+.2f}%"
-
 
 # Minimum spot move (%) required to call DIVERGENCE.
 # Flat candles (<0.10% on 15m, <0.15% on 1h) are noise, not real divergence.
@@ -121,7 +118,6 @@ _DIVERGENCE_MIN_MOVE = {
     "4h":  0.20,
 }
 _DIVERGENCE_MIN_MOVE_DEFAULT = 0.12
-
 
 def _spot_bias(pm_direction: str, pm_price: float, spot: Dict, duration: str = "15m") -> Tuple[str, str]:
     """Derive a trading bias from PM price vs spot candle data.
@@ -167,7 +163,6 @@ def _spot_bias(pm_direction: str, pm_price: float, spot: Dict, duration: str = "
         f"✅ Spot {spot_dir} {pct_str} — PM {pm_price:.0%} is fair",
         "No clear edge — price reflects the move",
     )
-
 
 def _send_telegram(msg: str):
     try:
@@ -233,7 +228,6 @@ def _fetch_json(url: str, timeout: int = 10) -> Optional[Dict]:
         logger.debug(f"Fetch error {url}: {e}")
         return None
 
-
 def _parse_end_date(end_date_str: str) -> Optional[float]:
     """Parse ISO end_date string → unix timestamp. Returns None on failure."""
     if not end_date_str:
@@ -246,7 +240,6 @@ def _parse_end_date(end_date_str: str) -> Optional[float]:
         return dt.timestamp()
     except Exception:
         return None
-
 
 def _discover_markets(duration: str) -> Dict[str, Dict]:
     """
@@ -345,11 +338,9 @@ def _discover_markets(duration: str) -> Dict[str, Dict]:
 
     return result
 
-
 # ─── Spread analysis ─────────────────────────────────────────────────────────
 
 _1H_CONFIRM_GATE = 0.70   # 1h price > this contradicts 5m DOWN; < (1-this) contradicts 5m UP
-
 
 def _check_intramarket(markets_by_tf: Dict[str, Dict]) -> List[Dict]:
     """Flag markets where YES price is far from 0.50 per timeframe threshold.
@@ -419,7 +410,6 @@ def _check_intramarket(markets_by_tf: Dict[str, Dict]) -> List[Dict]:
                 })
     return alerts
 
-
 def _check_term_spread(markets_by_tf: Dict[str, Dict]) -> List[Dict]:
     """Flag divergence between adjacent timeframes for the same asset."""
     alerts = []
@@ -458,7 +448,6 @@ def _check_term_spread(markets_by_tf: Dict[str, Dict]) -> List[Dict]:
                     "note": note,
                 })
     return alerts
-
 
 def _check_cross_asset(markets_by_tf: Dict[str, Dict]) -> List[Dict]:
     """Flag when assets in the same beta group have divergent PM pricing."""
@@ -528,12 +517,10 @@ def _check_cross_asset(markets_by_tf: Dict[str, Dict]) -> List[Dict]:
                 })
     return alerts
 
-
 # ─── Alert dedup ─────────────────────────────────────────────────────────────
 
 _DEDUP_FILE = Path("/tmp/hf_spread_dedup.json")
 _MAX_TTL = max(cfg["dedup_secs"] for cfg in TF_CONFIG.values())
-
 
 def _load_cache() -> Dict[str, float]:
     try:
@@ -542,14 +529,12 @@ def _load_cache() -> Dict[str, float]:
     except Exception:
         return {}
 
-
 def _save_cache(cache: Dict[str, float]) -> None:
     try:
         with open(_DEDUP_FILE, "w") as f:
             json.dump(cache, f)
     except Exception:
         pass
-
 
 def _dedup_key(alert: Dict) -> str:
     t = alert["type"]
@@ -559,7 +544,6 @@ def _dedup_key(alert: Dict) -> str:
         return f"{t}:{alert['asset']}:{alert.get('short_tf','')}:{alert.get('long_tf','')}"
     else:
         return f"{t}:{alert['group']}:{alert['duration']}"
-
 
 def _is_fresh(alert: Dict, cache: Dict[str, float]) -> bool:
     """Returns True if alert should fire (not seen within its timeframe's cooldown)."""
@@ -575,9 +559,7 @@ def _is_fresh(alert: Dict, cache: Dict[str, float]) -> bool:
     cache[key] = now
     return True
 
-
 # ─── Telegram notify (via alert_formatter → polyclawd bot) ───────────────────
-
 
 def _fmt_price(p: float) -> str:
     """Format a price cleanly — no scientific notation."""
@@ -587,7 +569,6 @@ def _fmt_price(p: float) -> str:
         return f"{p:,.2f}"
     else:
         return f"{p:.5f}"
-
 
 def _format_alert(alert: Dict) -> str:
     t = alert["type"]
@@ -700,11 +681,11 @@ def _format_alert(alert: Dict) -> str:
             f"{alert['note']}"
         )
 
-
 # ─── Persistence ─────────────────────────────────────────────────────────────
 
 def _store_alerts(alerts: List[Dict]):
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS hf_spread_alerts (
@@ -732,7 +713,6 @@ def _store_alerts(alerts: List[Dict]):
         ))
     conn.commit()
     conn.close()
-
 
 # ─── Main entry ──────────────────────────────────────────────────────────────
 
@@ -789,7 +769,6 @@ def _detect_conflicts(actionable: List[tuple]) -> Dict[str, List[str]]:
 
     return conflicts
 
-
 def _alert_allowed(alert: Dict) -> bool:
     """Send gate (Task 4.1): sub-1h timeframes collect data but never send;
     1h+ intramarket alerts additionally require >$10K market liquidity
@@ -803,7 +782,6 @@ def _alert_allowed(alert: Dict) -> bool:
         if min_liq and (alert.get("liquidity") or 0.0) <= min_liq:
             return False
     return True
-
 
 def scan_spreads(durations: Optional[List[str]] = None) -> List[Dict]:
     """
@@ -860,7 +838,23 @@ def scan_spreads(durations: Optional[List[str]] = None) -> List[Dict]:
                     reasons = "  |  ".join(conflicts[key])
                     lines.append(f"⚡ <i>Conflicting signals: {reasons}</i>")
                 lines.append(txt)
-            _send_telegram("\n".join(lines))
+            _msg = "\n".join(lines)
+            # Phase 3 SHADOW (2026-08-20): measure what a relevance tier would
+            # divert before enforcing anything. A scan with a single actionable
+            # row is monitoring, not a decision (Alert-Router-Plan §2).
+            # shadow=True -> recorded only; the direct send below stays
+            # authoritative until we have the numbers.
+            try:
+                import sys as _sys
+                _sys.path.insert(0, str(PROJECT_ROOT))
+                from signals.alert_dispatch import (TIER_CRITICAL, TIER_DIGEST,
+                                                    dispatch)
+                dispatch("hf_scan", _msg,
+                         TIER_CRITICAL if len(actionable) > 1 else TIER_DIGEST,
+                         shadow=True)
+            except Exception as _ex:  # noqa: BLE001 — shadow must never block
+                logger.warning(f"hf_scan shadow dispatch failed: {_ex}")
+            _send_telegram(_msg)
         suppressed = len(fresh) - len(actionable)
         logger.info(
             f"HF spread scan: {len(fresh)} fresh alerts, "
@@ -871,7 +865,6 @@ def scan_spreads(durations: Optional[List[str]] = None) -> List[Dict]:
         logger.debug(f"HF spread scan: {len(all_alerts)} alerts, all deduped")
 
     return fresh
-
 
 if __name__ == "__main__":
     import logging

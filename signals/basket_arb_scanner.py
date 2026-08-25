@@ -16,9 +16,7 @@ from typing import Dict, List, Optional, Tuple
 
 import httpx
 from loguru import logger
-
-
-GAMMA_API = "https://gamma-api.polymarket.com"
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
 
 # Thresholds
 MIN_ARB_EDGE_PCT = 0.5          # Minimum guaranteed profit % (after fees)
@@ -32,7 +30,6 @@ MIN_OUTCOMES = 2                # Need at least 2 outcomes
 # Cache
 _cache: Dict = {"data": None, "timestamp": 0}
 CACHE_TTL = 30  # 30s cache — arb windows close fast
-
 
 def _fetch_events(limit: int = 100) -> List[Dict]:
     """Fetch active events with multiple outcomes from Gamma API."""
@@ -57,7 +54,6 @@ def _fetch_events(limit: int = 100) -> List[Dict]:
         logger.error(f"Gamma events fetch failed: {e}")
         return []
 
-
 def _get_outcome_prices(market: Dict) -> Tuple[Optional[float], Optional[float]]:
     """Extract YES and NO prices from a market."""
     prices = market.get("outcomePrices")
@@ -71,7 +67,6 @@ def _get_outcome_prices(market: Dict) -> Tuple[Optional[float], Optional[float]]
         return yes_price, no_price
     except Exception:
         return None, None
-
 
 def scan_basket_arb() -> List[Dict]:
     """Scan for sum-to-one arbitrage opportunities.
@@ -203,7 +198,6 @@ def scan_basket_arb() -> List[Dict]:
     
     return signals
 
-
 def get_basket_arb_signals() -> Dict:
     """Main entry point with caching."""
     now = time.time()
@@ -233,7 +227,6 @@ def get_basket_arb_signals() -> Dict:
     
     return result
 
-
 # Bot-war detector
 def check_spread_compression(markets: List[Dict], window_minutes: int = 10) -> Dict:
     """Detect if arb spreads are collapsing (bot competition).
@@ -261,7 +254,6 @@ def check_spread_compression(markets: List[Dict], window_minutes: int = 10) -> D
         "should_pause": len(compressed) > 5 and (len(compressed) / max(len(markets), 1)) > 0.5,
         "compressed_markets": compressed[:10],
     }
-
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

@@ -20,7 +20,7 @@ SNAPSHOT_INTERVAL = 1800  # 30 minutes
 
 def _get_conn(db_path: str = None) -> sqlite3.Connection:
     """Get SQLite connection with WAL mode and busy timeout."""
-    conn = sqlite3.connect(db_path or str(DB_PATH), timeout=10)
+    conn = sqlite3.connect(db_path or str(DB_PATH), timeout=15)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn

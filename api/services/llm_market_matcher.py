@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 from loguru import logger
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma3:4b")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:cloud")
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "storage", "shadow_trades.db")
 
 SYSTEM_PROMPT = (
@@ -120,7 +120,7 @@ def _call_ollama(title_a: str, title_b: str) -> Optional[MatchResult]:
         "stream": False,
         "options": {
             "temperature": 0.1,
-            "num_predict": 150,
+            "num_predict": 1000,
         },
     }).encode()
 

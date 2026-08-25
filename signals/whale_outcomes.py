@@ -257,6 +257,8 @@ def backfill(meta: sqlite3.Connection) -> dict:
     pm = pm_lookup(p_slugs[:150]) if p_slugs else {}   # gamma is 1 call/slug; cap
 
     filled = resolved = 0
+    _COMMIT_EVERY = 50  # commit in chunks so the write txn never spans network I/O
+
     for r in due:
         info = (k if r["platform"] == "kalshi" else pm).get(r["market"])
         if not info:
@@ -304,6 +306,8 @@ def backfill(meta: sqlite3.Connection) -> dict:
         vals.append(r["alert_id"])
         meta.execute(f"UPDATE whale_outcomes SET {', '.join(sets)} WHERE alert_id=?", vals)
         filled += 1
+        if filled % _COMMIT_EVERY == 0:
+            meta.commit()  # release write lock periodically (see _COMMIT_EVERY)
     meta.commit()
     return {"due": len(due), "filled": filled, "resolved": resolved}
 

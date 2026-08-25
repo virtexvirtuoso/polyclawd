@@ -25,6 +25,7 @@ Usage:
     send_telegram(msg)
 """
 
+import html
 import os
 import re
 
@@ -45,51 +46,94 @@ def format_alert(
     links: list[str] | None = None,
     tags: list[str] | None = None,
 ) -> str:
-    """Two-tier alert format — newcomer-friendly + power user data."""
+    """Two-tier alert format — newcomer-friendly + power user data.
+
+    All caller-supplied text fields are HTML-escaped here (the message is
+    sent with parse_mode=HTML; raw </>/& in market titles 400 at Telegram —
+    "can't parse entities"). `links` is the one exception: documented as
+    containing intentional <a> markup, passed through verbatim.
+    """
+    esc = lambda s: html.escape(str(s), quote=False)  # noqa: E731
     lines = []
 
     # ── Tags ─────────────────────────────────────────────────────────
     if tags:
-        lines.append(" · ".join(tags))
+        lines.append(" · ".join(esc(t) for t in tags))
 
     # ── Header ───────────────────────────────────────────────────────
-    lines.append(f"{emoji} <b>#{rank}</b> · {alert_type.upper()}")
+    lines.append(f"{esc(emoji)} <b>#{rank}</b> · {esc(alert_type.upper())}")
 
     # ── Blank line after header ──────────────────────────────────────
     lines.append("")
 
     # ── Title ────────────────────────────────────────────────────────
-    lines.append(title)
+    lines.append(esc(title))
 
     # ── Price ─────────────────────────────────────────────────────────
     if direction and price_cents is not None:
-        lines.append(f"{direction} @ {price_cents}¢")
+        lines.append(f"{esc(direction)} @ {price_cents}¢")
     elif price_cents is not None:
         lines.append(f"{price_cents}¢")
 
     # ── Action (what happened) ───────────────────────────────────────
     if action:
-        lines.append(action)
+        lines.append(esc(action))
 
     # ── Signal + close time ─────────────────────────────────────────
     info_parts = []
     if signal_score:
-        info_parts.append(f"⭐ {signal_score}")
+        info_parts.append(f"⭐ {esc(signal_score)}")
     if close_info:
-        info_parts.append(close_info)
+        info_parts.append(esc(close_info))
     if info_parts:
         lines.append(" · ".join(info_parts))
 
     # ── Power user data line ─────────────────────────────────────────
     if data_line:
         lines.append("")
-        lines.append(f"📊 {data_line}")
+        lines.append(f"📊 {esc(data_line)}")
 
     # ── Links ────────────────────────────────────────────────────────
     if links:
         lines.append(" · ".join(links))
 
     return "\n".join(lines)
+
+
+def format_grid(header: list[str], rows: list[list[str]]) -> str:
+    """Render a monospace-aligned table as a Telegram <pre> block.
+
+    This is the ONLY way to get true column alignment in Telegram — normal
+    text is proportional-font, so space-padding never lines up. <pre> is
+    monospace, but you CANNOT nest <b>/<i> inside it (bold is sacrificed
+    inside the table).
+
+    Rules:
+      - Every cell is HTML-escaped (a team name with < or & inside <pre>
+        still breaks the parse).
+      - First column is left-aligned (labels); remaining columns are
+        right-aligned (numbers).
+      - Emoji are double-width in monospace and WILL break alignment — keep
+        them OUT of the aligned columns. Use ASCII markers (^/v, +/-, <-)
+        inside the table, or put the emoji in the HTML header line above it.
+
+    Returns the full "<pre>...</pre>" block (already escaped).
+    """
+    esc = lambda s: html.escape(str(s), quote=False)  # noqa: E731
+    ncols = max([len(header)] + [len(r) for r in rows])
+    norm = [list(r) + [""] * (ncols - len(r)) for r in ([header] + rows)]
+    widths = [0] * ncols
+    for r in norm:
+        for i, cell in enumerate(r):
+            widths[i] = max(widths[i], len(esc(cell)))
+    out = []
+    for r in norm:
+        cells = []
+        for i, cell in enumerate(r):
+            s = esc(cell)
+            cells.append(s.ljust(widths[i]) if i == 0 else s.rjust(widths[i]))
+        out.append("  ".join(cells).rstrip())
+    return "<pre>" + "\n".join(out) + "</pre>"
 
 
 def send_telegram(message: str) -> bool:

@@ -21,6 +21,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
+from config.polymarket_urls import CLOB_API  # polyproxy: central URL config
 
 logger = logging.getLogger("hf_paper_trader")
 
@@ -32,8 +34,6 @@ if SIGNALS_PATH not in sys.path:
 DB_PATH = os.getenv("HF_DB_PATH",
     str(Path(__file__).parent.parent / "storage" / "shadow_trades.db"))
 
-GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API = "https://clob.polymarket.com"
 HF_ENGINE_URL = "http://127.0.0.1:8422"
 VIRTUOSO_EDGE_URL = "http://localhost:8002/api/polymarket/edge"
 
@@ -41,7 +41,6 @@ VIRTUOSO_EDGE_URL = "http://localhost:8002/api/polymarket/edge"
 OPENCLAW_GATEWAY = "http://localhost:18789"
 ALERT_ENABLED = True
 ALERT_MIN_CONFIDENCE = 0.60  # Only alert on >= 60% confidence
-
 
 def _send_alert(message: str, silent: bool = False):
     """Send alert via polyclawd bot (alert_formatter → direct Bot API)."""
@@ -53,7 +52,6 @@ def _send_alert(message: str, silent: bool = False):
         return
     except Exception as e:
         logger.debug(f"HF alert send failed: {e}")
-
 
 # ============================================================================
 # Signal Sources
@@ -68,7 +66,6 @@ def _fetch_json(url: str, timeout: int = 5) -> Optional[Dict]:
         logger.debug(f"Fetch error {url}: {e}")
         return None
 
-
 def get_trigger_signal() -> Optional[Dict]:
     """Read the current trigger signal from Virtuoso polymarket edge endpoint."""
     data = _fetch_json(VIRTUOSO_EDGE_URL)
@@ -78,11 +75,9 @@ def get_trigger_signal() -> Optional[Dict]:
         return None
     return data
 
-
 def get_hf_engine_state() -> Optional[Dict]:
     """Read current HF engine state (Binance/Oracle prices)."""
     return _fetch_json(f"{HF_ENGINE_URL}/state")
-
 
 def get_neg_vig_opportunities() -> List[Dict]:
     """Check for negative vig opportunities."""
@@ -90,7 +85,6 @@ def get_neg_vig_opportunities() -> List[Dict]:
     if not data:
         return []
     return data.get("opportunities", [])
-
 
 # ============================================================================
 # Market Matching
@@ -171,7 +165,6 @@ def find_tradeable_market(asset: str, direction: str) -> Optional[Dict]:
     except Exception as e:
         logger.error(f"Market matching error: {e}")
         return None
-
 
 # ============================================================================
 # Paper Position Opening
@@ -273,7 +266,6 @@ def open_hf_paper_position(
         logger.error(f"Paper position error: {e}")
         return {"opened": False, "reason": str(e)}
 
-
 def _log_hf_trade(market, direction, trigger_type, confidence,
                   edge_pct, bet_size, entry_price, strength):
     """Log HF trade to dedicated table for performance tracking."""
@@ -314,7 +306,6 @@ def _log_hf_trade(market, direction, trigger_type, confidence,
         conn.close()
     except Exception as e:
         logger.error(f"HF trade log error: {e}")
-
 
 # ============================================================================
 # Main Processing Pipeline
@@ -513,7 +504,6 @@ def process_hf_signals() -> Dict:
     
     return results
 
-
 # ============================================================================
 # HF Performance Stats
 # ============================================================================
@@ -594,7 +584,6 @@ def get_hf_performance() -> Dict:
     except Exception as e:
         logger.error(f"HF performance error: {e}")
         return {"error": str(e)}
-
 
 # ============================================================================
 # Auto-resolve HF positions
@@ -714,7 +703,6 @@ def resolve_hf_positions() -> Dict:
         logger.error(f"HF resolve error: {e}")
         return {"error": str(e)}
 
-
 def send_daily_summary():
     """Send a daily HF performance summary to Telegram."""
     perf = get_hf_performance()
@@ -742,7 +730,6 @@ def send_daily_summary():
     )
     
     return {"sent": True, "total": total, "pnl": pnl}
-
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

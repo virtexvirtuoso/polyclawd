@@ -15,6 +15,7 @@ State: storage/shadow_trades.db (auto-migrated tables)
 """
 
 from __future__ import annotations
+from config.polymarket_urls import clob_url, gamma_url  # polyproxy: central URL config
 
 import json
 import os
@@ -22,8 +23,9 @@ import socket
 import sqlite3
 import sys
 import time
-import urllib.request
 import urllib.parse
+
+import requests
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,9 +39,9 @@ from scripts.alert_formatter import send_telegram
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ESPN_MMA       = "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard"
-POLY_EVENTS    = "https://gamma-api.polymarket.com/events"
+POLY_EVENTS    = gamma_url("/events")
 ODDS_API_BASE  = "https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/"
-CLOB_BOOK      = "https://clob.polymarket.com/book"
+CLOB_BOOK      = clob_url("/book")
 
 ODDS_API_KEY   = os.environ.get("ODDS_API_KEY", "")
 LINE_DRIFT_PP  = 10.0    # pp shift to fire drift alert (UFC swings hard between rounds)
@@ -109,9 +111,11 @@ def _get(url: str, params: Optional[dict] = None, timeout: int = 12) -> Optional
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "polyclawd/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode())
+        # requests, not urllib: ESPN's edge 403s Python's urllib TLS fingerprint
+        # (silent outage Aug 4-16 2026; urllib3's handshake passes)
+        r = requests.get(url, headers={"User-Agent": "polyclawd/1.0"}, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
     except Exception as e:
         print(f"[ufc_monitor] GET {url[:70]} → {e}", flush=True)
         return None
@@ -641,11 +645,11 @@ def check_edge_inversion(conn: sqlite3.Connection, fight: Dict,
 
     # Look for open shadow trades matching this fight
     rows = conn.execute("""
-        SELECT id, market_title, side, entry_price, confidence
+        SELECT id, market, side, entry_price, confidence
         FROM shadow_trades
         WHERE resolved = 0
           AND category = 'ufc'
-          AND (market_title LIKE ? OR market_title LIKE ?)
+          AND (market LIKE ? OR market LIKE ?)
     """, (f"%{fa}%", f"%{fb}%")).fetchall()
 
     for row in rows:
@@ -653,9 +657,9 @@ def check_edge_inversion(conn: sqlite3.Connection, fight: Dict,
         entry = row["entry_price"] / 100.0 if row["entry_price"] else 0
 
         # Determine current fair value
-        if _nmatch(fa, row["market_title"]):
+        if _nmatch(fa, row["market"]):
             fair = pin.get("a", 0.5)
-        elif _nmatch(fb, row["market_title"]):
+        elif _nmatch(fb, row["market"]):
             fair = pin.get("b", 0.5)
         else:
             continue

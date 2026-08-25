@@ -18,7 +18,7 @@ import json
 import os
 import random
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 
 try:
     import websockets
@@ -38,6 +38,17 @@ except Exception:  # pragma: no cover
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 MC_HOST, MC_PORT = "localhost", 11211
 BOOK_TTL = 15            # exptime: a dead WS auto-expires -> readers see staleness
+
+# Fast-move detection (Phase 3 latency fix, 2026-07-10): a >=10pp mid move
+# within 60s usually means sharp flow repricing a live-game event before the
+# scoreboard catches up. Events published to poly:moves:recent; the scheduler
+# burst loop consumes them and fires the live monitors immediately.
+MOVE_PP = 0.10           # mid move threshold (absolute probability)
+MOVE_WINDOW = 60         # s — lookback for the move
+MOVE_COOLDOWN = 180      # s — min gap between events per token
+MOVE_WARMUP = 90         # s — suppress move events after (re)connect and per-token
+                         #     first sight: first snapshot vs stale prior is not a move
+MOVES_TTL = 300          # s — poly:moves:recent expiry
 PUBLISH_INTERVAL = 0.4   # coalescing flush cadence (latest-wins per token)
 STATUS_INTERVAL = 5.0
 SOURCE = "polymarket_ws"
@@ -164,6 +175,12 @@ class PolyWS:
         self.desired = set(tokens)       # token universe we want subscribed
         self.subscribed = set()          # tokens sent on the current connection
         self._last_shed = time.time()
+        self.mid_hist = {}               # token -> deque[(ts, mid)] for move detection
+        self.move_last = {}              # token -> ts of last move event
+        self.move_warmup_until = 0.0     # global warm-up gate (set on each connect)
+        self.tok_seen = {}               # token -> ts first observed (per-token warm-up)
+        self.recent_moves = []           # rolling list published to poly:moves:recent
+        self.moves_dirty = False
 
     # ---------- reconciliation ----------
     def _note_shape(self, et, ev):
@@ -247,6 +264,38 @@ class PolyWS:
             self.mc = aiomcache.Client(MC_HOST, MC_PORT, pool_size=2)
         return self.mc
 
+    def _check_move(self, tok, snap):
+        """Detect >=MOVE_PP mid moves within MOVE_WINDOW and queue an event."""
+        bb, ba = snap.get("best_bid"), snap.get("best_ask")
+        if bb is None or ba is None:
+            return
+        try:
+            mid = (float(bb) + float(ba)) / 2.0
+        except (TypeError, ValueError):
+            return
+        now = time.time()
+        hist = self.mid_hist.setdefault(tok, deque())
+        hist.append((now, mid))
+        while hist and now - hist[0][0] > MOVE_WINDOW:
+            hist.popleft()
+        old = hist[0][1]
+        # Warm-up: after (re)connect or first sight of a token, the "old" mid is
+        # either missing or stale — deltas are snapshot artifacts, not real moves.
+        first = self.tok_seen.setdefault(tok, now)
+        if now < self.move_warmup_until or now - first < MOVE_WARMUP:
+            return
+        if abs(mid - old) < MOVE_PP:
+            return
+        if now - self.move_last.get(tok, 0.0) < MOVE_COOLDOWN:
+            return
+        self.move_last[tok] = now
+        ev = {"token_id": tok, "from": round(old, 3), "to": round(mid, 3),
+              "delta": round(mid - old, 3), "ts": round(now, 1)}
+        self.recent_moves = [m for m in self.recent_moves
+                             if now - m["ts"] < MOVES_TTL] + [ev]
+        self.moves_dirty = True
+        print(f"[move] ...{tok[-10:]} {old:.2f} -> {mid:.2f} within {MOVE_WINDOW}s")
+
     async def _publish_loop(self):
         if not self.publish:
             return
@@ -261,10 +310,20 @@ class PolyWS:
                 snap = self._snapshot(tok)
                 if snap is None:
                     continue
+                self._check_move(tok, snap)
                 try:
                     await mc.set(f"poly:book:{tok}".encode(),
                                  json.dumps(snap).encode(), exptime=BOOK_TTL)
                     self.published["book"] += 1
+                except Exception:
+                    pass
+            if self.moves_dirty:
+                self.moves_dirty = False
+                try:
+                    await mc.set(b"poly:moves:recent",
+                                 json.dumps(self.recent_moves).encode(),
+                                 exptime=MOVES_TTL)
+                    self.published["move"] += 1
                 except Exception:
                     pass
             for tok in ttoks:
@@ -323,6 +382,9 @@ class PolyWS:
             self.subscribed = set(sub)
             self.connected = True
             self._conn_start = time.time()
+            # Reset move detection: history from before the reconnect is stale.
+            self.move_warmup_until = time.time() + MOVE_WARMUP
+            self.mid_hist.clear()
             print(f"[sub] {len(sub)} tokens | publish={self.publish}")
             if _sh is not None:
                 try:

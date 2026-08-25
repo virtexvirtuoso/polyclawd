@@ -5,6 +5,7 @@ Free API, no key required. Covers NBA, NFL, NHL, MLB, NCAAF, NCAAB.
 Provides moneyline odds from 6+ books, converts to implied probabilities,
 and compares against Polymarket single-game markets for edge detection.
 """
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 
 import json
 import re
@@ -209,7 +210,7 @@ def find_polymarket_sports_edges(sport: str = "nba", min_edge: float = 5.0) -> L
     # Fetch Polymarket sports markets
     try:
         r = httpx.get(
-            "https://gamma-api.polymarket.com/events",
+            gamma_url("/events"),
             params={"active": "true", "closed": "false", "limit": 100,
                     "order": "volume24hr", "ascending": "false"},
             timeout=20,

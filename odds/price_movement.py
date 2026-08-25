@@ -224,14 +224,28 @@ def classify_movement(snapshots: List[PriceSnapshot]) -> dict:
         elif avg_first - avg_second > 1.0:
             spread_trend = "narrowing"
 
+    # Poly price convergence check (for markets without soft book data, e.g. weather)
+    # If poly_price is moving toward consensus_fair, the edge is shrinking.
+    poly_converging = False
+    polys = [s.poly_price for s in snapshots if s.poly_price is not None]
+    if len(polys) >= 3 and len(fairs) >= 3:
+        # Compute edge (fair - poly) at start and end
+        edge_start = fairs[0] - polys[0]
+        edge_end = fairs[-1] - polys[-1]
+        # If |edge| is shrinking by more than 1pp, it's converging
+        if abs(edge_start) - abs(edge_end) > 0.015:  # 1pp shrinkage
+            poly_converging = True
+
     # Pattern classification
     abs_delta = abs(consensus_delta)
-    if abs_delta < 1.0:
+    if abs_delta < 1.0 and not poly_converging:
         pattern = "stable"
     elif spread_trend == "narrowing":
         pattern = "converging"  # edge closing — soft catching up to sharp
     elif spread_trend == "widening":
         pattern = "diverging"  # edge growing — sharp moving away from soft
+    elif poly_converging:
+        pattern = "converging"  # edge closing — poly converging on fair (no soft book)
     else:
         pattern = "sharp_lead"  # sharp moved, spread unchanged
 

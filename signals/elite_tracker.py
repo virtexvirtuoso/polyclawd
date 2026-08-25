@@ -22,12 +22,13 @@ import time
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
+from config.polymarket_urls import POLYMARKET_DATA_API as PM_DATA_API  # polyproxy: central URL config
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent
 META_DB = BASE_DIR / "storage" / "whale_meta.db"
-PM_DATA_API = "https://data-api.polymarket.com"
 
 # ── Config ──────────────────────────────────────────────────────────
 MIN_TRADE_USD = 500           # Min trade size to alert on
@@ -36,7 +37,6 @@ CONSENSUS_WINDOW = 6 * 3600   # 6h — window to detect convergence
 CONSENSUS_MIN_WALLETS = 2     # 2+ elites = consensus
 STATE_FILE = Path("/tmp/elite_tracker_state.json")
 
-
 def _load_state() -> dict:
     try:
         with open(STATE_FILE) as f:
@@ -44,11 +44,9 @@ def _load_state() -> dict:
     except (FileNotFoundError, json.JSONDecodeError):
         return {"seen": {}, "market_wallets": {}}
 
-
 def _save_state(state: dict):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
-
 
 def _fetch_json(url: str, timeout: int = 12):
     try:
@@ -58,7 +56,6 @@ def _fetch_json(url: str, timeout: int = 12):
     except Exception as e:
         logger.warning("Fetch failed %s: %s", url[:60], e)
         return None
-
 
 def get_elite_wallets() -> dict:
     """Load elite wallets ($100K+ net, 55%+ WR) from whale_meta.db.
@@ -86,9 +83,8 @@ def get_elite_wallets() -> dict:
         }
     return elites
 
-
 SCAN_LOOKBACK = 600  # Only alert on trades from last 10 minutes
-GAMMA_API  = "https://gamma-api.polymarket.com"
+
 ODDS_API   = "https://api.the-odds-api.com/v4"
 ODDS_KEY   = os.environ.get("ODDS_API_KEY", "")
 
@@ -104,7 +100,6 @@ TENNIS_SPORT_MAP: list[tuple[str, str]] = [
     ("wimbledon",       "tennis_atp_wimbledon"),   # default to ATP if ambiguous
 ]
 
-
 def _fetch_event_end(slug: str) -> str | None:
     """Fetch event end_date from PM Gamma API. Cached per process."""
     if not slug:
@@ -117,7 +112,6 @@ def _fetch_event_end(slug: str) -> str | None:
         end = data[0].get("endDate") or data[0].get("end_date_iso")
     _end_date_cache[slug] = end
     return end
-
 
 def _mins_to_end(end_date_str: str) -> float | None:
     """Parse ISO end_date → minutes until resolution. Negative = already resolved."""
@@ -134,7 +128,6 @@ def _mins_to_end(end_date_str: str) -> float | None:
     except Exception:
         return None
 
-
 def _devig_pinnacle(outcomes: list[dict]) -> dict[str, float]:
     """Return {player_name: devigged_prob} from Pinnacle h2h outcomes."""
     raw = {o["name"]: 1.0 / o["price"] for o in outcomes if o.get("price", 0) > 0}
@@ -142,7 +135,6 @@ def _devig_pinnacle(outcomes: list[dict]) -> dict[str, float]:
     if total <= 0:
         return {}
     return {name: prob / total for name, prob in raw.items()}
-
 
 def _get_vegas_prob(title: str, participant: str) -> float | None:
     """
@@ -193,7 +185,6 @@ def _get_vegas_prob(title: str, participant: str) -> float | None:
                 return matched
     return None
 
-
 def fetch_elite_trades(elite_addrs: list, limit: int = 100) -> list:
     """Fetch recent trades for elite wallets from PM Data API.
     Only returns trades from the last SCAN_LOOKBACK seconds."""
@@ -228,7 +219,6 @@ def fetch_elite_trades(elite_addrs: list, limit: int = 100) -> list:
                 })
     return all_trades
 
-
 def _send_tg(msg: str) -> bool:
     """Send alert via the shared alert formatter."""
     try:
@@ -237,7 +227,6 @@ def _send_tg(msg: str) -> bool:
     except Exception as e:
         logger.error("TG send failed: %s", e)
         return False
-
 
 def _format_individual(
     wallet_info: dict,
@@ -331,7 +320,6 @@ def _format_individual(
     lines += ["", link]
     return "\n".join(lines)
 
-
 def _format_consensus(market_title: str, wallets: list, slug: str = "") -> str:
     """Format consensus alert when 2+ elites converge on same market."""
     n = len(wallets)
@@ -373,7 +361,6 @@ def _format_consensus(market_title: str, wallets: list, slug: str = "") -> str:
     lines.append("")
     lines.append(link)
     return "\n".join(lines)
-
 
 def run_scan() -> dict:
     """Main scan loop. Returns stats dict."""
@@ -513,7 +500,6 @@ def run_scan() -> dict:
         "individual_sent": individual_sent,
         "consensus_sent": consensus_sent,
     }
-
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

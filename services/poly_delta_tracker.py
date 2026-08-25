@@ -12,23 +12,23 @@ delta = mid_at_T - entry_price
 Surfaces in daily summary as avg_poly_delta by signal source.
 Called from scheduler tick_5min — lightweight, only processes fills < 20min old.
 """
+
 import json
 import sqlite3
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 from loguru import logger
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DB_PATH = PROJECT_ROOT / "storage" / "shadow_trades.db"
-GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API = "https://clob.polymarket.com"
-
 
 def _ensure_columns():
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.execute("PRAGMA journal_mode=WAL")
     existing = {row[1] for row in conn.execute("PRAGMA table_info(shadow_trades)")}
     for col in ("poly_delta_60", "poly_delta_300"):
@@ -36,7 +36,6 @@ def _ensure_columns():
             conn.execute(f"ALTER TABLE shadow_trades ADD COLUMN {col} REAL")
     conn.commit()
     conn.close()
-
 
 def _fetch_json(url: str, timeout: int = 8) -> Optional[dict]:
     try:
@@ -46,7 +45,6 @@ def _fetch_json(url: str, timeout: int = 8) -> Optional[dict]:
     except Exception as e:
         logger.debug("poly_delta fetch failed {}: {}", url, e)
         return None
-
 
 def _get_mid_price(market_id: str, side: str) -> Optional[float]:
     """Fetch PM CLOB mid for a market_id (hex condition_id) + side."""
@@ -73,9 +71,10 @@ def _get_mid_price(market_id: str, side: str) -> Optional[float]:
         if outcome.upper() == side_upper and i < len(clob_token_ids):
             token_id = clob_token_ids[i]
             break
-    if token_id is None and clob_token_ids:
-        token_id = clob_token_ids[0]
     if not token_id:
+        # No outcome matched `side` (e.g. named-outcome market + side "NO").
+        # Guessing token[0] here measured the WRONG outcome — refuse instead.
+        logger.debug("poly_delta: side {} matches no outcome for {}", side, market_id)
         return None
 
     book = _fetch_json(f"{CLOB_API}/book?token_id={token_id}")
@@ -88,50 +87,67 @@ def _get_mid_price(market_id: str, side: str) -> Optional[float]:
         return None
     return round((bids[0] + asks[0]) / 2, 4)
 
-
 def run_once():
     """Process pending poly delta snapshots. Called every 5 minutes."""
     _ensure_columns()
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.execute("PRAGMA journal_mode=WAL")
-    now_iso = datetime.now(timezone.utc).isoformat()
+    # Cutoffs computed in Python so both comparison sides share the ISO-T
+    # format. Comparing against sqlite datetime() (space-separated) could
+    # never match same-day rows — deltas were only written by a once-nightly
+    # sweep just after UTC midnight, with real lag anywhere from 1min to 24h.
+    now = datetime.now(timezone.utc)
+    cut_60 = (now - timedelta(seconds=60)).isoformat()
+    floor_60 = (now - timedelta(minutes=10)).isoformat()
+    cut_300 = (now - timedelta(seconds=300)).isoformat()
+    floor_300 = (now - timedelta(minutes=20)).isoformat()
 
     # Fills needing delta_60: filled 60s–10min ago, delta_60 not set
-    rows_60 = conn.execute("""
+    rows_60 = conn.execute(
+        """
         SELECT id, market_id, side, entry_price
         FROM shadow_trades
         WHERE platform = 'polymarket'
           AND resolved = 0
+          AND entry_price IS NOT NULL
           AND poly_delta_60 IS NULL
-          AND timestamp <= datetime(?, '-60 seconds')
-          AND timestamp >= datetime(?, '-10 minutes')
-    """, (now_iso, now_iso)).fetchall()
+          AND timestamp <= ?
+          AND timestamp >= ?
+    """,
+        (cut_60, floor_60),
+    ).fetchall()
 
     # Fills needing delta_300: filled 5–20min ago, delta_300 not set (delta_60 already captured)
-    rows_300 = conn.execute("""
+    rows_300 = conn.execute(
+        """
         SELECT id, market_id, side, entry_price
         FROM shadow_trades
         WHERE platform = 'polymarket'
           AND resolved = 0
+          AND entry_price IS NOT NULL
           AND poly_delta_300 IS NULL
           AND poly_delta_60 IS NOT NULL
-          AND timestamp <= datetime(?, '-300 seconds')
-          AND timestamp >= datetime(?, '-20 minutes')
-    """, (now_iso, now_iso)).fetchall()
+          AND timestamp <= ?
+          AND timestamp >= ?
+    """,
+        (cut_300, floor_300),
+    ).fetchall()
 
     conn.close()
 
     updated_60, updated_300 = 0, 0
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.execute("PRAGMA journal_mode=WAL")
 
     for row_id, market_id, side, entry_price in rows_60:
         mid = _get_mid_price(market_id, side)
         if mid is None:
             continue
-        delta = round(mid - (entry_price or 0.5), 4)
+        delta = round(mid - entry_price, 4)
         conn.execute(
             "UPDATE shadow_trades SET poly_delta_60 = ? WHERE id = ?",
             (delta, row_id),
@@ -142,7 +158,7 @@ def run_once():
         mid = _get_mid_price(market_id, side)
         if mid is None:
             continue
-        delta = round(mid - (entry_price or 0.5), 4)
+        delta = round(mid - entry_price, 4)
         conn.execute(
             "UPDATE shadow_trades SET poly_delta_300 = ? WHERE id = ?",
             (delta, row_id),
@@ -155,7 +171,8 @@ def run_once():
     if updated_60 or updated_300:
         logger.info(
             "poly_delta_tracker: delta_60={} delta_300={} updated",
-            updated_60, updated_300,
+            updated_60,
+            updated_300,
         )
 
     return {"updated_60": updated_60, "updated_300": updated_300}

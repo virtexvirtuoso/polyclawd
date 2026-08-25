@@ -15,6 +15,7 @@ Contract:
 """
 
 from __future__ import annotations
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 
 import json
 import sqlite3
@@ -23,8 +24,8 @@ import urllib.request
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent.parent / "storage" / "shadow_trades.db"
-GAMMA_URL = "https://gamma-api.polymarket.com/markets?condition_ids={}"
-GAMMA_TOKEN_URL = "https://gamma-api.polymarket.com/markets?clob_token_ids={}"
+GAMMA_URL = gamma_url("/markets?condition_ids={}")
+GAMMA_TOKEN_URL = gamma_url("/markets?clob_token_ids={}")
 TIMEOUT_S = 5
 
 

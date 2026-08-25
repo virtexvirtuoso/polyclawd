@@ -31,10 +31,11 @@ from typing import Dict, List, Optional, Tuple
 
 import httpx
 from loguru import logger
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
+from config.polymarket_urls import clob_url  # polyproxy: central URL config
+from config.polymarket_urls import POLYMARKET_DATA_API as DATA_API  # polyproxy: central URL config
 
 # ── Config ──────────────────────────────────────────────────────────
-DATA_API = "https://data-api.polymarket.com"
-GAMMA_API = "https://gamma-api.polymarket.com"
 
 MIN_TRADE_SIZE = 5_000        # Only analyze trades ≥ $5K
 SCAN_LIMIT = 200              # Trades per poll
@@ -78,16 +79,15 @@ HIGH_SPECIFICITY = {
 LOW_SPECIFICITY = ["weather", "temperature", "up or down", "5m", "15m", "30m",
                    "1h", "updown"]
 
-
 # ── DB Setup ────────────────────────────────────────────────────────
 
 def _get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     _init_tables(conn)
     return conn
-
 
 def _init_tables(conn: sqlite3.Connection):
     conn.execute("""CREATE TABLE IF NOT EXISTS insider_wallets (
@@ -136,7 +136,6 @@ def _init_tables(conn: sqlite3.Connection):
         ON insider_trades(resolved)""")
     conn.commit()
 
-
 # ── API Helpers ─────────────────────────────────────────────────────
 
 _http = None
@@ -147,7 +146,6 @@ def _client() -> httpx.Client:
         _http = httpx.Client(timeout=15, headers={"User-Agent": "Polyclawd/2.0"})
     return _http
 
-
 def fetch_recent_trades(limit: int = SCAN_LIMIT) -> List[Dict]:
     """Fetch most recent trades from Polymarket."""
     try:
@@ -157,7 +155,6 @@ def fetch_recent_trades(limit: int = SCAN_LIMIT) -> List[Dict]:
     except Exception as e:
         logger.warning("Trade fetch failed: {}", e)
     return []
-
 
 def get_wallet_first_trade(address: str) -> Optional[float]:
     """Get timestamp of wallet's first trade on Polymarket.
@@ -190,7 +187,6 @@ def get_wallet_first_trade(address: str) -> Optional[float]:
         logger.debug("Wallet age lookup failed for {}: {}", address[:12], e)
     return None
 
-
 def get_wallet_positions(address: str) -> List[Dict]:
     """Get wallet's current positions to calculate concentration."""
     try:
@@ -202,7 +198,6 @@ def get_wallet_positions(address: str) -> List[Dict]:
     except Exception as e:
         logger.debug("Position fetch failed for {}: {}", address[:12], e)
     return []
-
 
 def _cache_wallet(address: str, first_trade_ts: float):
     """Cache wallet first trade timestamp."""
@@ -216,7 +211,6 @@ def _cache_wallet(address: str, first_trade_ts: float):
          datetime.now(timezone.utc).isoformat()))
     conn.commit()
     conn.close()
-
 
 # ── Scoring Functions ───────────────────────────────────────────────
 
@@ -242,7 +236,6 @@ def score_wallet_age(first_trade_ts: Optional[float]) -> float:
     else:
         return 0
 
-
 def score_bet_size(size_usd: float, market_volume: float = 0) -> float:
     """Score 0-100 based on bet size."""
     if size_usd >= 500_000:
@@ -266,7 +259,6 @@ def score_bet_size(size_usd: float, market_volume: float = 0) -> float:
     
     return score
 
-
 def score_event_specificity(title: str) -> float:
     """Score 0-100 based on event type. Military/regulatory = high."""
     title_lower = title.lower()
@@ -283,7 +275,6 @@ def score_event_specificity(title: str) -> float:
                 return score_val
     
     return 40  # Unknown category — moderate
-
 
 def score_concentration(recent_trades: List[Dict], current_trade: Dict) -> float:
     """Score 0-100 based on how concentrated the wallet's activity is."""
@@ -308,7 +299,6 @@ def score_concentration(recent_trades: List[Dict], current_trade: Dict) -> float
         return 40
     else:
         return 10
-
 
 def score_timing(title: str, event_slug: str = "") -> float:
     """Score 0-100 based on how close to resolution.
@@ -354,7 +344,6 @@ def score_timing(title: str, event_slug: str = "") -> float:
     
     return 30  # Unknown resolution time
 
-
 def calculate_insider_score(trade: Dict, wallet_first_ts: Optional[float],
                             recent_activity: List[Dict]) -> Dict:
     """Calculate composite insider score for a trade."""
@@ -387,7 +376,6 @@ def calculate_insider_score(trade: Dict, wallet_first_ts: Optional[float],
         "timing_score": timing,
     }
 
-
 # ── Main Scanner ────────────────────────────────────────────────────
 
 # Track already-processed tx hashes to avoid re-alerting
@@ -396,14 +384,12 @@ def calculate_insider_score(trade: Dict, wallet_first_ts: Optional[float],
 _SEEN_TXS_FILE = Path("/tmp/insider_seen_txs.json")
 _seen_txs_max = 10_000
 
-
 def _load_seen_txs() -> set:
     try:
         with open(_SEEN_TXS_FILE) as f:
             return set(json.load(f))
     except Exception:
         return set()
-
 
 def _save_seen_txs(seen: set) -> None:
     try:
@@ -413,7 +399,6 @@ def _save_seen_txs(seen: set) -> None:
             json.dump(items, f)
     except Exception:
         pass
-
 
 def scan_for_insiders() -> List[Dict]:
     """Main scan: fetch trades, filter large ones, score wallets.
@@ -494,7 +479,6 @@ def scan_for_insiders() -> List[Dict]:
     
     return results
 
-
 def _store_insider_trade(result: Dict):
     """Store detected insider trade in DB."""
     conn = _get_db()
@@ -529,7 +513,6 @@ def _store_insider_trade(result: Dict):
     
     conn.commit()
     conn.close()
-
 
 # ── Alert Functions ─────────────────────────────────────────────────
 
@@ -578,7 +561,6 @@ def send_alerts(results: List[Dict]):
 
         send_telegram(msg)
 
-
 # ── Resolution Tracking ────────────────────────────────────────────
 
 def resolve_insider_trades():
@@ -601,7 +583,7 @@ def resolve_insider_trades():
         try:
             # Check if market has resolved via CLOB API
             # (market_id is a hex condition_id; Gamma /markets/{id} expects numeric IDs)
-            r = _client().get(f"https://clob.polymarket.com/markets/{market_id}")
+            r = _client().get(clob_url(f"/markets/{market_id}"))
             if r.status_code != 200:
                 # Fallback: try Gamma with condition_id query param
                 r = _client().get(f"{GAMMA_API}/markets", params={"condition_id": market_id})
@@ -670,7 +652,6 @@ def resolve_insider_trades():
     if resolved_count:
         logger.info("Insider resolution: {} trades resolved", resolved_count)
 
-
 # ── API Endpoints Data ──────────────────────────────────────────────
 
 def get_recent_insiders(limit: int = 20, min_score: float = 40) -> List[Dict]:
@@ -688,7 +669,6 @@ def get_recent_insiders(limit: int = 20, min_score: float = 40) -> List[Dict]:
     conn.close()
     return [dict(r) for r in rows]
 
-
 def get_insider_leaderboard(min_bets: int = 2) -> List[Dict]:
     """Get top insider wallets by score and win rate."""
     conn = _get_db()
@@ -700,7 +680,6 @@ def get_insider_leaderboard(min_bets: int = 2) -> List[Dict]:
     """, (min_bets,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
-
 
 # ── CLI ─────────────────────────────────────────────────────────────
 

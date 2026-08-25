@@ -6,6 +6,7 @@ Features:
 - 6-hour result caching
 - Expanded topic matching (40+ topics)
 """
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 
 import asyncio
 import json
@@ -171,7 +172,7 @@ class CrossPlatformEdgeScanner:
         """Fetch active Polymarket events from Gamma API."""
         prices = []
         try:
-            url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=500"
+            url = gamma_url("/events?active=true&closed=false&limit=500")
             data = self._fetch_url(url)
             if not data:
                 return prices
@@ -673,7 +674,7 @@ class CrossPlatformEdgeScanner:
                             if not cand_sig.entities:
                                 continue
                             is_match, conf, _ = signatures_match(anchor_sig, cand_sig, min_entity_overlap=1)
-                            if is_match and conf > best_entity_conf and conf >= 0.3:
+                            if is_match and conf > best_entity_conf and conf >= 0.6:
                                 best_candidate = cand_m
                                 best_entity_conf = conf
                     else:

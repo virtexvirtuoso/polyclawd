@@ -12,6 +12,7 @@ prices YES at 0.265 → buy NO at 0.735).
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -202,6 +203,12 @@ def execute_tradeable_weather_edges(signals: list) -> dict:
                     client_order_ref=client_order_ref,
                     category="weather_resolution",
                     market_title=(market_title or "")[:120],
+                    reasoning={
+                        "trigger_source": "weather_resolution",
+                        "edge_pct": exec_edge,
+                        "reasoning": f"{direction} {city} resolution (edge={edge_pp:.1f}pp)",
+                        "raw_json": json.dumps(sig, default=str),
+                    },
                 )
                 action = result.get("action", "unknown")
                 if action in ("maker_filled", "taker_filled"):

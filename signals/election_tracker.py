@@ -8,8 +8,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from loguru import logger
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
 
-GAMMA_API = "https://gamma-api.polymarket.com"
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 
 SNAPSHOT_DIR = Path(__file__).parent.parent / "storage" / "election_snapshots"
@@ -119,7 +119,6 @@ NON_US_KEYWORDS = [
     "brexit", "referendum", "tate's party",
 ]
 
-
 def _kalshi_auth_headers() -> dict:
     """Get auth headers for Kalshi API calls, importing from kalshi_edge if available."""
     try:
@@ -129,7 +128,6 @@ def _kalshi_auth_headers() -> dict:
         return _get_auth_headers()
     except Exception:
         return {"User-Agent": "polyclawd/1.0"}
-
 
 def _api_get(url: str, params: dict = None, timeout: int = 30) -> any:
     """Simple GET request returning parsed JSON. Injects Kalshi auth when needed."""
@@ -142,7 +140,6 @@ def _api_get(url: str, params: dict = None, timeout: int = 30) -> any:
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
-
 
 def _is_us_election(title: str) -> bool:
     """Filter for US-specific election markets."""
@@ -160,7 +157,6 @@ def _is_us_election(title: str) -> bool:
         "attorney general", "secretary of state", "lieutenant governor",
     ]
     return any(kw in t for kw in us_keywords)
-
 
 def classify_race(title: str, ticker: str = "") -> str:
     """Classify an election market into race category."""
@@ -192,7 +188,6 @@ def classify_race(title: str, ticker: str = "") -> str:
     if "house" in t or "speaker" in t or "congress" in t:
         return "house"
     return "other"
-
 
 def _extract_state(title: str, ticker: str = "") -> str:
     """Extract US state abbreviation from title or ticker."""
@@ -231,7 +226,6 @@ def _extract_state(title: str, ticker: str = "") -> str:
             return abbr
     return ""
 
-
 def _extract_district(title: str, ticker: str = "") -> str:
     """Extract congressional district from title or ticker (e.g., 'CA-45')."""
     # Kalshi tickers: REPHOUSECA45-26 → CA-45
@@ -252,7 +246,6 @@ def _extract_district(title: str, ticker: str = "") -> str:
         if state:
             return f"{state}-{m.group(2)}"
     return ""
-
 
 def _discover_poly_election_tags() -> list[str]:
     """Discover election-related tag slugs from Polymarket by probing candidates."""
@@ -299,7 +292,6 @@ def _discover_poly_election_tags() -> list[str]:
 
     return result
 
-
 def _parse_outcomes(market: dict) -> list[dict]:
     """Parse outcomes from either Polymarket or Kalshi market data."""
     outcomes = []
@@ -344,7 +336,6 @@ def _parse_outcomes(market: dict) -> list[dict]:
         outcomes.append({"name": yes_name, "price": round(yes_price, 4)})
         outcomes.append({"name": no_name, "price": round(1 - yes_price, 4)})
     return outcomes
-
 
 # ── Polymarket Fetcher ────────────────────────────────────────────────────
 
@@ -426,12 +417,10 @@ def fetch_polymarket_elections() -> list[dict]:
     logger.info("Polymarket elections: {} markets from {} tag queries", len(markets), len(tag_slugs))
     return markets
 
-
 # ── Kalshi Dynamic Ticker Discovery ──────────────────────────────────────
 
 _kalshi_ticker_cache = {"prefixes": set(), "ts": 0}
 _KALSHI_DISCOVERY_TTL = 3600 * 6  # 6 hours
-
 
 def _get_kalshi_election_prefixes() -> tuple:
     """Return known + dynamically discovered Kalshi election ticker prefixes."""
@@ -452,7 +441,6 @@ def _get_kalshi_election_prefixes() -> tuple:
     if _kalshi_ticker_cache["prefixes"]:
         return tuple(KALSHI_ELECTION_PREFIXES) + tuple(_kalshi_ticker_cache["prefixes"])
     return KALSHI_ELECTION_PREFIXES
-
 
 def _learn_kalshi_ticker(event_ticker: str, title: str):
     """Learn new ticker prefixes from Kalshi events we successfully process."""
@@ -487,7 +475,6 @@ def _learn_kalshi_ticker(event_ticker: str, title: str):
             }))
         except Exception:
             pass
-
 
 # ── Kalshi Fetcher ────────────────────────────────────────────────────────
 
@@ -587,7 +574,6 @@ def fetch_kalshi_elections() -> list[dict]:
     logger.info("Kalshi elections: {} markets", len(markets))
     return markets
 
-
 # ── Snapshot & Delta ──────────────────────────────────────────────────────
 
 def _extract_party_control(markets: list[dict]) -> dict:
@@ -653,7 +639,6 @@ def _extract_party_control(markets: list[dict]) -> dict:
 
     return control
 
-
 def snapshot_elections() -> dict:
     """Fetch all election markets and build a snapshot."""
     poly = fetch_polymarket_elections()
@@ -682,7 +667,6 @@ def snapshot_elections() -> dict:
     }
     return snapshot
 
-
 def save_snapshot(snapshot: dict) -> Path:
     """Save snapshot to dated JSON file + SQLite trend DB."""
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -700,7 +684,6 @@ def save_snapshot(snapshot: dict) -> Path:
 
     return path
 
-
 def load_snapshot(date_str: str) -> dict | None:
     """Load a snapshot by date string (YYYY-MM-DD)."""
     path = SNAPSHOT_DIR / f"{date_str}.json"
@@ -708,7 +691,6 @@ def load_snapshot(date_str: str) -> dict | None:
         return None
     with open(path) as f:
         return json.load(f)
-
 
 def compute_deltas(current: dict, previous: dict) -> dict:
     """Compute week-over-week price changes between snapshots."""
@@ -759,7 +741,6 @@ def compute_deltas(current: dict, previous: dict) -> dict:
     movers.sort(key=lambda x: abs(x["delta"]), reverse=True)
 
     return {"deltas": deltas, "top_movers": movers[:15]}
-
 
 def compute_trends(current_snapshot: dict, days: int = 30) -> dict:
     """Build time-series trends from SQLite trend DB.
@@ -885,7 +866,6 @@ def compute_trends(current_snapshot: dict, days: int = 30) -> dict:
         "volatility": volatility[:10],
         "days_of_data": days_of_data,
     }
-
 
 def _compute_insights(markets: list[dict], party_control: dict) -> dict:
     """Compute operative-grade insights from market data."""
@@ -1120,7 +1100,6 @@ def _compute_insights(markets: list[dict], party_control: dict) -> dict:
 
     return insights
 
-
 def _dedupe_state_races(markets: list[dict], category: str) -> dict:
     """Deduplicate markets per race, picking best data source.
 
@@ -1159,7 +1138,6 @@ def _dedupe_state_races(markets: list[dict], category: str) -> dict:
                     "district": m.get("district", ""),
                 }
     return by_key
-
 
 def _extract_rd_prices(outcomes: list[dict], question: str) -> tuple[float, float]:
     """Extract Republican and Democrat prices from outcomes."""
@@ -1214,7 +1192,6 @@ def _extract_rd_prices(outcomes: list[dict], question: str) -> tuple[float, floa
     elif d_price > 0 and r_price == 0:
         r_price = round(1 - d_price, 4)
     return r_price, d_price
-
 
 def _compute_cross_platform_spreads(markets: list[dict], predictit_markets: list[dict] | None = None) -> list[dict]:
     """Find races where platforms disagree most (Polymarket, Kalshi, PredictIt)."""
@@ -1335,7 +1312,6 @@ def _compute_cross_platform_spreads(markets: list[dict], predictit_markets: list
     spreads.sort(key=lambda x: -x["spread_pp"])
     return spreads
 
-
 # Known 2028 presidential candidates and their party
 KNOWN_2028_CANDIDATES = {
     "jd vance": "R", "ron desantis": "R", "vivek ramaswamy": "R",
@@ -1354,7 +1330,6 @@ KNOWN_2028_CANDIDATES = {
     "hillary clinton": "D", "michelle obama": "D", "tim walz": "D",
     "alexandria ocasio-cortez": "D", "aoc": "D",
 }
-
 
 def _group_presidential_candidates(markets: list[dict]) -> dict:
     """Group individual 'Will X win the 2028 presidential election?' markets by candidate."""
@@ -1424,7 +1399,6 @@ def _group_presidential_candidates(markets: list[dict]) -> dict:
         "d_total_prob": round(sum(c["price"] for c in d_candidates), 4),
     }
 
-
 def _fetch_fec_overlay(snapshot_markets):
     """Fetch FEC campaign finance data (runs in thread pool).
 
@@ -1453,7 +1427,6 @@ def _fetch_fec_overlay(snapshot_markets):
         logger.warning("FEC overlay failed (non-fatal): {}", e)
         return {"fundraising": {}, "money_vs_odds": [], "fec_candidates_tracked": 0}
 
-
 def _fetch_predictit_overlay(snapshot_markets):
     """Fetch PredictIt cross-platform spreads (runs in thread pool)."""
     try:
@@ -1467,7 +1440,6 @@ def _fetch_predictit_overlay(snapshot_markets):
         logger.warning("PredictIt overlay failed (non-fatal): {}", e)
         return {"predictit_spreads": [], "predictit_count": 0}
 
-
 def _fetch_manifold_overlay(snapshot_markets):
     """Fetch Manifold Markets divergence (runs in thread pool)."""
     try:
@@ -1479,7 +1451,6 @@ def _fetch_manifold_overlay(snapshot_markets):
     except Exception as e:
         logger.warning("Manifold overlay failed (non-fatal): {}", e)
         return {"manifold_spreads": [], "manifold_count": 0}
-
 
 def _fetch_ie_spending_overlay():
     """Fetch FEC IE spending data (runs in thread pool)."""
@@ -1493,7 +1464,6 @@ def _fetch_ie_spending_overlay():
     except Exception as e:
         logger.warning("FEC IE overlay failed (non-fatal): {}", e)
         return {"ie_spending": {}, "spending_surges": []}
-
 
 def _fetch_gdelt_overlay():
     """Read the precomputed GDELT overlay from disk.
@@ -1511,7 +1481,6 @@ def _fetch_gdelt_overlay():
         logger.warning("GDELT cache read failed (non-fatal): {}", e)
     return {"candidate_sentiment": [], "state_sentiment": [], "narrative_shifts": []}
 
-
 def _fetch_rcp_overlay(markets):
     """Fetch RealClearPolling data (runs in thread pool)."""
     try:
@@ -1520,7 +1489,6 @@ def _fetch_rcp_overlay(markets):
     except Exception as e:
         logger.warning("RCP overlay failed (non-fatal): {}", e)
         return {"poll_data": {}, "poll_shifts": [], "poll_market_divergences": []}
-
 
 def _fetch_efiling_overlay():
     """Fetch FEC real-time eFiling data (runs in thread pool)."""
@@ -1531,7 +1499,6 @@ def _fetch_efiling_overlay():
         logger.warning("FEC eFiling overlay failed (non-fatal): {}", e)
         return {"efiling_alerts": [], "efiling_recent": [], "efiling_by_race": [], "efiling_count": 0}
 
-
 def _fetch_wiki_overlay():
     """Fetch Wikipedia pageview data (runs in thread pool)."""
     try:
@@ -1540,7 +1507,6 @@ def _fetch_wiki_overlay():
     except Exception as e:
         logger.warning("Wiki pageviews overlay failed (non-fatal): {}", e)
         return {"wiki_pageviews": [], "wiki_spikes": [], "wiki_tracked": 0}
-
 
 def _fetch_structural_overlay():
     """Fetch Ballotpedia structural data (race ratings, deadlines, calendar)."""
@@ -1553,7 +1519,6 @@ def _fetch_structural_overlay():
                 "tossup_races": [], "candidate_changes": [], "upcoming_primaries": [],
                 "imminent_deadlines": []}
 
-
 def _fetch_fred_overlay():
     """Fetch FRED economic indicators."""
     try:
@@ -1563,7 +1528,6 @@ def _fetch_fred_overlay():
         logger.warning("FRED overlay failed (non-fatal): {}", e)
         return {"available": False, "indicators": {}, "incumbent_score": {}}
 
-
 def _fetch_gtrends_overlay():
     """Fetch Google Trends data (runs in thread pool)."""
     try:
@@ -1572,7 +1536,6 @@ def _fetch_gtrends_overlay():
     except Exception as e:
         logger.warning("Google Trends overlay failed (non-fatal): {}", e)
         return {"gtrends_candidates": [], "gtrends_spikes": [], "gtrends_tracked": 0}
-
 
 def _fetch_crypto_money_overlay():
     """Fetch crypto-industry money overlay: FEC super PACs + LDA CLARITY lobbying.
@@ -1610,7 +1573,6 @@ def _fetch_crypto_money_overlay():
         logger.warning("Crypto vote alignment overlay failed (non-fatal): {}", e)
         result["vote_alignment"] = {"matched_recipients": 0, "vote_meta": {}}
     return result
-
 
 def _classify_policy_category(title: str, ticker: str = "", tag_slug: str = "") -> str:
     """Classify a policy market into one of 6 categories.
@@ -1689,7 +1651,6 @@ def _classify_policy_category(title: str, ticker: str = "", tag_slug: str = "") 
     # Default: congress
     return "congress"
 
-
 def _discover_policy_tags() -> list[str]:
     """Discover active Polymarket policy tag slugs via /tags endpoint.
 
@@ -1752,7 +1713,6 @@ def _discover_policy_tags() -> list[str]:
 
     return result
 
-
 _KALSHI_POLICY_KEYWORDS = [
     # Foreign policy
     "ukraine", "russia", "iran", "israel", "gaza", "taiwan", "nato",
@@ -1775,7 +1735,6 @@ _KALSHI_POLICY_KEYWORDS = [
     "doge", "h1b", "pardon", "visa", "student debt", "infrastructure",
     "voting rights", "redistrict", "census", "jobless claim",
 ]
-
 
 def _discover_kalshi_policy_series() -> list[str]:
     """Discover Kalshi policy series by scanning /series and keyword-filtering.
@@ -1869,7 +1828,6 @@ def _discover_kalshi_policy_series() -> list[str]:
 
     return result
 
-
 # Search-based enrichment queries for policy markets that don't appear under
 # any discoverable Polymarket tag (e.g. "Clarity Act signed into law in 2026"
 # is tagged 'crypto'/'trump'/'us-law'/'politics' — none of which are returned
@@ -1907,7 +1865,6 @@ _POLY_SEARCH_NOISE_TOKENS = (
     "etf inflow", "etf outflow", "open interest", "funding rate",
 )
 
-
 def _is_policy_relevant_title(title: str) -> bool:
     """Heuristic policy filter for search-based enrichment results."""
     t = (title or "").lower()
@@ -1916,7 +1873,6 @@ def _is_policy_relevant_title(title: str) -> bool:
     if any(tok in t for tok in _POLY_SEARCH_NOISE_TOKENS):
         return False
     return True
-
 
 def _fetch_polymarket_policy_search(
     queries: list[str], seen_event_ids: set, seen_event_slugs: set
@@ -1976,7 +1932,6 @@ def _fetch_polymarket_policy_search(
                     "source": "search_enrichment",
                 })
     return enriched
-
 
 def _fetch_policy_polymarket() -> list[dict]:
     """Fetch policy markets from Polymarket (congress, SCOTUS, tariffs)."""
@@ -2047,10 +2002,8 @@ def _fetch_policy_polymarket() -> list[dict]:
     )
     return markets
 
-
 _kalshi_markets_cache = {"markets": [], "ts": 0}
 _KALSHI_MARKETS_TTL = 3600  # 1 hour — cache fetched markets to avoid repeated 429s
-
 
 def _fetch_policy_kalshi() -> list[dict]:
     """Fetch policy markets from Kalshi (all 6 policy categories).
@@ -2130,7 +2083,6 @@ def _fetch_policy_kalshi() -> list[dict]:
     logger.info("Policy Kalshi: {} markets from {} series", len(markets), len(all_series))
     return markets
 
-
 _STOP_WORDS = frozenset({
     "a", "an", "the", "will", "by", "before", "in", "of", "to", "and",
     "or", "on", "for", "at", "be", "is", "are", "was", "were", "it",
@@ -2140,11 +2092,9 @@ _STOP_WORDS = frozenset({
     "what", "which", "who", "whom", "how", "when", "where", "about",
 })
 
-
 def _tokenize(text: str) -> list[str]:
     """Tokenize text into lowercase words with stop-word removal."""
     return [w for w in re.findall(r'\w+', text.lower()) if w not in _STOP_WORDS]
-
 
 def _tfidf_similarity(a: str, b: str, corpus: list[list[str]]) -> float:
     """TF-IDF weighted cosine similarity between two texts given a corpus.
@@ -2185,7 +2135,6 @@ def _tfidf_similarity(a: str, b: str, corpus: list[list[str]]) -> float:
     mag_b = sqrt(sum(v * v for v in vb.values())) or 1
     return dot / (mag_a * mag_b)
 
-
 _POLICY_MATCH_THRESHOLD = 0.55
 _MACRO_MATCH_THRESHOLD = 0.70  # Higher bar for macro (many similar-looking markets)
 
@@ -2193,7 +2142,6 @@ _MACRO_MATCH_THRESHOLD = 0.70  # Higher bar for macro (many similar-looking mark
 _BRACKET_RE = re.compile(
     r'\d+[btmk]?\s*(?:to|and|or more|or less|above|below|between|\+)', re.I
 )
-
 
 def _is_bracket_mismatch(q1: str, q2: str) -> bool:
     """Detect when two questions are same topic but different numeric brackets.
@@ -2221,7 +2169,6 @@ def _is_bracket_mismatch(q1: str, q2: str) -> bool:
     if c1 and c2 and not c1.intersection(c2):
         return True
     return False
-
 
 def _match_policy_cross_platform(poly: list[dict], kalshi: list[dict]) -> list[dict]:
     """Find cross-platform policy market pairs with meaningful spread.
@@ -2323,7 +2270,6 @@ def _match_policy_cross_platform(poly: list[dict], kalshi: list[dict]) -> list[d
     matches.sort(key=lambda x: -x["spread_pp"])
     return matches
 
-
 def _fetch_policy_pulse_overlay() -> dict:
     """Fetch and assemble Policy Pulse data (SCOTUS, Congress, Trade/Tariffs).
 
@@ -2361,7 +2307,6 @@ def _fetch_policy_pulse_overlay() -> dict:
         "poly_count": len(poly),
         "kalshi_count": len(kalshi),
     }}
-
 
 def generate_report(core_only: bool = False) -> dict:
     """Main entry point — generate full election report with deltas.
@@ -2712,7 +2657,6 @@ def generate_report(core_only: bool = False) -> dict:
         "insights": insights,
     }
 
-
 # ── Midterm Analysis Engine ──────────────────────────────────────────────
 
 # 2026 Class II Senate seats — incumbent party (as of 2025)
@@ -2732,7 +2676,6 @@ SENATE_2026_INCUMBENTS = {
 CURRENT_SENATE = {"R": 53, "D": 47}  # includes independents caucusing with D
 CURRENT_HOUSE = {"R": 220, "D": 215}  # approximate
 CURRENT_GOVERNORS = {"R": 28, "D": 22}  # approximate
-
 
 def compute_midterm_analysis(markets: list, party_control: dict,
                              ie_spending: dict = None) -> dict:
@@ -2991,7 +2934,6 @@ def compute_midterm_analysis(markets: list, party_control: dict,
         },
     }
 
-
 # ── Vault Markdown Generator ─────────────────────────────────────────────
 
 def _compute_composite_score(control: dict) -> tuple[float, str, str]:
@@ -3033,7 +2975,6 @@ def _compute_composite_score(control: dict) -> tuple[float, str, str]:
 
     return score, label, phase
 
-
 def _format_volume(vol: float) -> str:
     """Format volume with abbreviations."""
     if vol >= 1_000_000_000:
@@ -3043,7 +2984,6 @@ def _format_volume(vol: float) -> str:
     if vol >= 1_000:
         return f"${vol / 1_000:.0f}K"
     return f"${vol:.0f}"
-
 
 def generate_vault_markdown(report: dict) -> str:
     """Generate Intelligence Brief-style markdown report for Obsidian vault.
@@ -3311,7 +3251,6 @@ def generate_vault_markdown(report: dict) -> str:
     ]
 
     return "\n".join(lines)
-
 
 # ── CLI Entry Point ───────────────────────────────────────────────────────
 

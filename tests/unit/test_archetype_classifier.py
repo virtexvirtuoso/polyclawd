@@ -96,16 +96,16 @@ class TestKillRules:
     """Test kill rule logic."""
 
     def test_k3_cheap_entry(self):
-        """K3: trade below 15c is killed (floor lowered 30c->15c on 2026-06-20)."""
-        killed, reason, arch = _check_kill_rules("Bitcoin Up or Down on Feb 14?", 10)
+        """K3: Any trade below 30c should be killed."""
+        killed, reason, arch = _check_kill_rules("Bitcoin Up or Down on Feb 14?", 25)
         assert killed
         assert "K3" in reason
-        assert "15c" in reason
+        assert "30c" in reason
 
     def test_k3_at_boundary(self):
-        """K3: Exactly 15c should NOT be killed by K3 (floor is < 15)."""
-        killed, reason, arch = _check_kill_rules("Bitcoin Up or Down on Feb 14?", 15)
-        assert not killed  # 15c is not < 15
+        """K3: Exactly 30c should NOT be killed by K3."""
+        killed, reason, arch = _check_kill_rules("Bitcoin Up or Down on Feb 14?", 30)
+        assert not killed  # 30c is not < 30
 
     def test_k1_intraday(self):
         """K1: Intraday up/down should be killed."""
@@ -135,11 +135,10 @@ class TestKillRules:
         assert killed
         assert "K2" in reason
 
-    def test_k2_price_above_hard_kill_high_price(self):
-        """K2: price_above is a hard kill at ANY price (2026-06-06: was a <45c gate)."""
+    def test_k2_price_above_not_cheap(self):
+        """K2: price_above with normal entry (>=45c) should NOT be killed."""
         killed, reason, arch = _check_kill_rules("Will BTC be above $68,000?", 65)
-        assert killed
-        assert "K2" in reason
+        assert not killed
         assert arch == "price_above"
 
     def test_k6_unknown_archetype_cheap(self):
@@ -162,11 +161,10 @@ class TestKillRules:
         assert reason == ""
         assert arch == "daily_updown"
 
-    def test_price_above_killed_even_at_high_price(self):
-        """price_above hard-killed even near-certain (99c) — no edge zone found."""
-        killed, reason, arch = _check_kill_rules("Will BTC be above $68,000?", 99)
-        assert killed
-        assert "K2" in reason
+    def test_price_above_normal_passes(self):
+        """price_above at normal price should pass all kill rules."""
+        killed, reason, arch = _check_kill_rules("Will BTC be above $68,000?", 70)
+        assert not killed
         assert arch == "price_above"
 
     def test_parlay_passes(self):
@@ -197,7 +195,7 @@ class TestKillRules:
     def test_k3_takes_priority_over_k1(self):
         """K3 (price) fires before K1 (archetype) since it's checked first."""
         killed, reason, arch = _check_kill_rules(
-            "Bitcoin Up or Down - Feb 14, 2:00PM ET", 10
+            "Bitcoin Up or Down - Feb 14, 2:00PM ET", 20
         )
         assert killed
         assert "K3" in reason  # K3 fires first, not K1

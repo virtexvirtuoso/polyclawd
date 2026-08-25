@@ -15,12 +15,11 @@ import sqlite3, json, urllib.request, time, sys
 from collections import defaultdict
 from pathlib import Path
 from datetime import datetime, timezone
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 SRC_DB = Path("/var/www/virtuosocrypto.com/polyclawd/storage/whale_scanner.db")
 PRED_DB = Path("/var/www/virtuosocrypto.com/polyclawd/storage/whale_predictions.db")
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
-GAMMA_API = "https://gamma-api.polymarket.com"
-
 PRED_TABLE = """
 CREATE TABLE IF NOT EXISTS whale_predictions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -506,19 +505,19 @@ def _send_summary(text: str) -> None:
         sys.path.insert(0, str(PRED_DB.parent.parent))
         from scripts.openclaw_alerts import alert_openclaw
 
-        print(f"[send] telegram ok={alert_openclaw(text, parse_mode=None)}")
-    except Exception as e:
-        print(f"[send] failed: {e}")
-    try:
+        # LIVE since 2026-08-21: routed through the tier-2 batch queue instead
+        # of a direct push. The former direct alert_openclaw() send was removed
+        # at the same time — keeping both would double-deliver every resolution.
         import hashlib
 
         from signals.alert_dispatch import dispatch
 
-        dispatch(
-            "whale_resolutions", text, tier=2, shadow=True,
+        ok = dispatch(
+            "whale_resolutions", text, tier=2,
             dedup_key="resolutions:" + hashlib.sha1(text.encode()).hexdigest()[:16])
+        print(f"[send] whale_resolutions queued ok={ok}")
     except Exception as e:
-        print(f"[shadow-dispatch] whale_resolutions failed: {e}")
+        print(f"[send] failed: {e}")
 
 
 if __name__ == "__main__":

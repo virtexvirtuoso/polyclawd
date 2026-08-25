@@ -56,46 +56,53 @@ def basic_no_vig(p_a: float, p_b: float) -> Tuple[float, float]:
 
 def shin_no_vig(p_fav: float, p_dog: float) -> Tuple[float, float]:
     """
-    Shin method for unbalanced lines.
+    Shin (1992) devig for 2-outcome markets. Solves the proper Shin equation
 
-    Better than basic no-vig for heavy favorites (-300 or worse).
-    The Shin model assumes bookmakers set odds to protect against
-    informed bettors (insiders), which creates asymmetric vig distribution.
+        sqrt(z^2 + 4(1-z)*p_fav^2/s) + sqrt(z^2 + 4(1-z)*p_dog^2/s) = 2
+
+    for the informed-bettor fraction z in [0, 0.999] via Newton's method,
+    then returns true probabilities (favorite, underdog) summing to 1.
+
+    Matches sports_edge_common.devig_shin for n=2. Better than basic no-vig
+    for heavy favorites because it removes the vig asymmetrically.
 
     Returns true probabilities (favorite, underdog).
 
-    Reference: Shin (1991, 1992, 1993) papers on bookmaker behavior.
+    Reference: Shin (1991, 1992, 1993). Verified 2026-08-23.
     """
-    Z = p_fav + p_dog  # overround / total implied probability
-
-    if Z <= 1.0:  # No vig case
+    s = p_fav + p_dog  # overround
+    if s <= 1.0:  # No vig
         return p_fav, p_dog
 
-    # Shin factor calculation
-    # For a two-outcome market, we solve for s (informed bettor fraction)
-    # using: sum(sqrt(p_i^2 + s*(1-s)) - s) = 1
-    try:
-        # Quadratic approximation for 2-outcome markets
-        discriminant = p_fav**2 + p_dog**2 - (Z**2 - 2 * Z + 2)
-        if discriminant < 0:
-            discriminant = 0
-        s = (Z - math.sqrt(max(0, 2 - (1 - p_fav) ** 2 - (1 - p_dog) ** 2))) / (2 * Z - 2)
-        s = max(0, min(s, 0.5))  # Clamp to valid range [0, 0.5]
-    except (ValueError, ZeroDivisionError):
-        # Fallback to simple approximation
-        s = (Z - 1) / 2
+    # Newton solve for z. For n=2: f(z) = r_f + r_d - 2 = 0
+    # where r_i = sqrt(z^2 + 4(1-z)*p_i^2/s)
+    # f'(z) = (2z - 4*p_fav^2/s)/(2*r_f) + (2z - 4*p_dog^2/s)/(2*r_d)
+    z = 0.0
+    for _ in range(60):
+        r_f = math.sqrt(z * z + 4.0 * (1.0 - z) * p_fav * p_fav / s)
+        r_d = math.sqrt(z * z + 4.0 * (1.0 - z) * p_dog * p_dog / s)
+        f = r_f + r_d - 2.0
+        if r_f > 0 and r_d > 0:
+            df = ((2.0 * z - 4.0 * p_fav * p_fav / s) / (2.0 * r_f)
+                  + (2.0 * z - 4.0 * p_dog * p_dog / s) / (2.0 * r_d))
+        else:
+            df = -1.0
+        if abs(df) < 1e-12:
+            break
+        z_new = z - f / df
+        z = max(0.0, min(0.999, z_new))
+        if abs(f) < 1e-10:
+            break
 
-    # Calculate true probabilities using Shin formula
-    denom = 1 - 2 * s
-    if abs(denom) < 0.001:  # Avoid division by near-zero
+    # True probabilities: pi_i = (sqrt(z^2 + 4(1-z)*p_i^2/s) - z) / (2*(1-z))
+    denom = 2.0 * (1.0 - z)
+    if abs(denom) < 1e-6:
         return basic_no_vig(p_fav, p_dog)
 
-    true_fav = (p_fav - s) / denom
-    true_dog = (p_dog - s) / denom
-
-    # Ensure valid probabilities and normalize
-    true_fav = max(0, min(1, true_fav))
-    true_dog = max(0, min(1, true_dog))
+    r_f = math.sqrt(z * z + 4.0 * (1.0 - z) * p_fav * p_fav / s)
+    r_d = math.sqrt(z * z + 4.0 * (1.0 - z) * p_dog * p_dog / s)
+    true_fav = (r_f - z) / denom
+    true_dog = (r_d - z) / denom
 
     total = true_fav + true_dog
     if total > 0:
@@ -103,7 +110,6 @@ def shin_no_vig(p_fav: float, p_dog: float) -> Tuple[float, float]:
         true_dog /= total
 
     return true_fav, true_dog
-
 
 def get_consensus_true_prob(bookmaker_odds: List[dict], outcome: str) -> Optional[float]:
     """

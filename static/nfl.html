@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
+<title>Polyclawd — NFL Edge Dashboard</title>
+<style>
+  :root{--bg:var(--pc-bg);--card:var(--pc-panel);--card2:var(--pc-raised);--border:var(--pc-line);--dim:var(--pc-dim);
+        --text:var(--pc-ink);--green:var(--pc-up);--red:var(--pc-down);--amber:var(--pc-warn);--accent:var(--pc-accent);}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;padding:20px;max-width:1200px;margin:0 auto}
+  a{color:var(--accent);text-decoration:none}
+  .hero{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px}
+  h1{font-size:26px}.sub{color:var(--dim);font-size:13px;margin-top:4px}
+  .nav{margin-bottom:16px;font-size:13px}.nav a{margin-right:14px;color:var(--dim)}.nav a:hover{color:var(--text)}
+  .status{text-align:right;font-size:12px;color:var(--dim)}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px}
+  .dot.live{background:var(--green);box-shadow:0 0 6px var(--green)}
+  .dot.stale{background:var(--amber)}.dot.err{background:var(--red)}
+  .tabs{display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap}
+  .tab{padding:8px 14px;background:var(--card);border:1px solid var(--border);border-radius:8px;cursor:pointer;font-size:13px}
+  .tab.active{background:var(--accent);border-color:var(--accent)}
+  .panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px}
+  .panel h2{font-size:15px;margin-bottom:12px;color:var(--text)}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px}
+  .stat{background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:14px}
+  .stat .label{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+  .stat .val{font-size:24px;font-weight:700;margin-top:4px}
+  .stat .val.green{color:var(--green)}.stat .val.red{color:var(--red)}.stat .val.amber{color:var(--amber)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--border)}
+  th{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+  tr:hover td{background:var(--card2)}
+  .buy{color:var(--green);font-weight:600}.sell{color:var(--red);font-weight:600}
+  .edge-pos{color:var(--green)}.edge-neg{color:var(--red)}
+  .empty{color:var(--dim);text-align:center;padding:30px}
+  .pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600}
+  .pill.buy{background:rgba(0,200,120,.15);color:var(--green)}
+  .pill.sell{background:rgba(255,80,80,.15);color:var(--red)}
+  .meta{color:var(--dim);font-size:12px}
+</style>
+</head>
+<body>
+<div class="hero">
+  <div>
+    <h1>🏈 NFL Edge Dashboard</h1>
+    <div class="sub">Moneyline edges: devigged sportsbook consensus vs Polymarket game markets</div>
+  </div>
+  <div class="status"><span class="dot" id="dot"></span><span id="status">loading…</span></div>
+</div>
+<div class="nav">
+  <a href="index.html">Home</a>
+  <a href="baseball.html">Baseball</a>
+  <a href="soccer.html">Soccer</a>
+  <a href="ufc.html">UFC</a>
+  <a href="nfl.html">NFL</a>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="edges">Live Edges</div>
+  <div class="tab" data-tab="trades">Shadow Trades</div>
+</div>
+
+<!-- EDGES TAB -->
+<div id="tab-edges">
+  <div class="stats" id="edge-stats"></div>
+  <div class="panel">
+    <h2>Moneyline Edges <span style="color:var(--dim);font-weight:400;font-size:12px">(|edge| ≥ 3%)</span></h2>
+    <div id="edges-table"><div class="empty">Loading edges…</div></div>
+  </div>
+</div>
+
+<!-- TRADES TAB -->
+<div id="tab-trades" style="display:none">
+  <div class="stats" id="trade-stats"></div>
+  <div class="panel">
+    <h2>Open Shadow Trades</h2>
+    <div id="open-table"><div class="empty">Loading…</div></div>
+  </div>
+  <div class="panel">
+    <h2>Recent Resolved Trades</h2>
+    <div id="recent-table"><div class="empty">Loading…</div></div>
+  </div>
+</div>
+
+<script>
+const EDGE_API = '/polyclawd/api/nfl/edge?min_edge=0.03';
+const DASH_API = '/polyclawd/api/nfl/dashboard';
+
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function setStatus(ok, msg){
+  document.getElementById('dot').className = 'dot ' + (ok ? 'live' : 'err');
+  document.getElementById('status').textContent = msg;
+}
+
+async function loadEdges(){
+  try{
+    const r = await fetch(EDGE_API);
+    const d = await r.json();
+    setStatus(true, 'updated ' + new Date(d.timestamp).toLocaleTimeString());
+    const edges = d.edges || [];
+    const buys = edges.filter(e=>e.direction==='BUY').length;
+    const sells = edges.filter(e=>e.direction==='SELL').length;
+    const maxEdge = edges.length ? Math.max(...edges.map(e=>Math.abs(e.edge_pct||0))) : 0;
+    document.getElementById('edge-stats').innerHTML = `
+      <div class="stat"><div class="label">Total Edges</div><div class="val">${edges.length}</div></div>
+      <div class="stat"><div class="label">BUY</div><div class="val green">${buys}</div></div>
+      <div class="stat"><div class="label">SELL</div><div class="val red">${sells}</div></div>
+      <div class="stat"><div class="label">Max Edge</div><div class="val amber">${maxEdge.toFixed(1)}%</div></div>`;
+    if(!edges.length){
+      document.getElementById('edges-table').innerHTML = '<div class="empty">No edges ≥ 3% right now (off-season or market efficient).</div>';
+      return;
+    }
+    const rows = edges.map(e=>`
+      <tr>
+        <td><strong>${esc(e.participant)}</strong></td>
+        <td>${esc(e.event)}</td>
+        <td>${(e.book_prob||0).toFixed(1)}%</td>
+        <td>${(e.polymarket_price||0).toFixed(1)}%</td>
+        <td class="${e.edge_pct>=0?'edge-pos':'edge-neg'}">${e.edge_pct>=0?'+':''}${(e.edge_pct||0).toFixed(1)}%</td>
+        <td><span class="pill ${e.direction==='BUY'?'buy':'sell'}">${e.direction}</span></td>
+        <td style="color:var(--dim)">${e.commence_time?new Date(e.commence_time).toLocaleString():''}</td>
+      </tr>`).join('');
+    document.getElementById('edges-table').innerHTML = `
+      <table><thead><tr><th>Team</th><th>Game</th><th>Book</th><th>Poly</th><th>Edge</th><th>Signal</th><th>Kickoff</th></tr></thead>
+      <tbody>${rows}</tbody></table>`;
+  }catch(err){
+    setStatus(false, 'edge load failed: ' + err.message);
+  }
+}
+
+async function loadTrades(){
+  try{
+    const r = await fetch(DASH_API);
+    const d = await r.json();
+    const res = d.resolved||{};
+    const open = d.open_trades||[];
+    const recent = d.recent_trades||[];
+    document.getElementById('trade-stats').innerHTML = `
+      <div class="stat"><div class="label">Open</div><div class="val">${d.open_count||0}</div></div>
+      <div class="stat"><div class="label">Resolved</div><div class="val">${res.total||0}</div></div>
+      <div class="stat"><div class="label">Win Rate</div><div class="val ${(res.win_rate||0)>=50?'green':'red'}">${(res.win_rate||0).toFixed(1)}%</div></div>
+      <div class="stat"><div class="label">PnL</div><div class="val ${(res.total_pnl||0)>=0?'green':'red'}">$${(res.total_pnl||0).toFixed(2)}</div></div>`;
+    document.getElementById('open-table').innerHTML = open.length ? `
+      <table><thead><tr><th>Market</th><th>Side</th><th>Entry</th><th>Conf</th><th>Opened</th></tr></thead>
+      <tbody>${open.map(t=>`<tr><td>${esc(t.market)}</td><td>${esc(t.side)}</td><td>${(t.entry_price||0).toFixed(1)}¢</td><td>${t.confidence!=null?t.confidence.toFixed(1):'—'}</td><td style="color:var(--dim)">${t.timestamp?new Date(t.timestamp).toLocaleString():''}</td></tr>`).join('')}</tbody></table>`
+      : '<div class="empty">No open NFL shadow trades.</div>';
+    document.getElementById('recent-table').innerHTML = recent.length ? `
+      <table><thead><tr><th>Market</th><th>Side</th><th>Entry</th><th>Outcome</th><th>PnL</th><th>Resolved</th></tr></thead>
+      <tbody>${recent.map(t=>`<tr><td>${esc(t.market)}</td><td>${esc(t.side)}</td><td>${(t.entry_price||0).toFixed(1)}¢</td><td>${esc(t.outcome)}</td><td class="${(t.pnl||0)>=0?'edge-pos':'edge-neg'}">$${(t.pnl||0).toFixed(2)}</td><td style="color:var(--dim)">${t.resolved_at?new Date(t.resolved_at).toLocaleString():''}</td></tr>`).join('')}</tbody></table>`
+      : '<div class="empty">No resolved NFL trades yet.</div>';
+  }catch(err){
+    document.getElementById('open-table').innerHTML = '<div class="empty">dashboard load failed: ' + esc(err.message) + '</div>';
+  }
+}
+
+document.querySelectorAll('.tab').forEach(t=>{
+  t.addEventListener('click', ()=>{
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    t.classList.add('active');
+    document.getElementById('tab-edges').style.display = t.dataset.tab==='edges' ? '' : 'none';
+    document.getElementById('tab-trades').style.display = t.dataset.tab==='trades' ? '' : 'none';
+    if(t.dataset.tab==='trades') loadTrades();
+  });
+});
+
+loadEdges();
+setInterval(loadEdges, 120000);
+</script>
+</body>
+</html>

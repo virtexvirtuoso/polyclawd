@@ -15,10 +15,8 @@ from typing import Dict, List, Optional
 
 import httpx
 from loguru import logger
-
-
-DATA_API = "https://data-api.polymarket.com"
-GAMMA_API = "https://gamma-api.polymarket.com"
+from config.polymarket_urls import POLYMARKET_DATA_API as DATA_API  # polyproxy: central URL config
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
 
 # Thresholds
 MIN_WHALE_VOLUME = 200          # Min total volume to qualify as whale in recent trades
@@ -40,7 +38,6 @@ BECKER_WHALES = [
 _cache: Dict = {"data": None, "timestamp": 0}
 CACHE_TTL = 300  # 5 min
 
-
 def _fetch(url: str, params: dict = None, timeout: int = 15) -> Optional[any]:
     """Fetch with error handling."""
     try:
@@ -53,7 +50,6 @@ def _fetch(url: str, params: dict = None, timeout: int = 15) -> Optional[any]:
     except Exception as e:
         logger.debug(f"Fetch failed {url}: {e}")
         return None
-
 
 def discover_whales(trade_limit: int = TRADE_FETCH_LIMIT) -> List[Dict]:
     """Discover active whale wallets from recent trade activity."""
@@ -92,14 +88,12 @@ def discover_whales(trade_limit: int = TRADE_FETCH_LIMIT) -> List[Dict]:
     logger.info(f"Discovered {len(whales)} whales from {len(trades)} recent trades")
     return whales[:MAX_WALLETS_TO_SCAN]
 
-
 def fetch_wallet_positions(address: str) -> List[Dict]:
     """Fetch active positions for a wallet from data API."""
     data = _fetch(f"{DATA_API}/positions", {"user": address})
     if not data or not isinstance(data, list):
         return []
     return data
-
 
 def _resolve_condition_to_question(condition_id: str) -> str:
     """Look up market question from condition ID via CLOB API.
@@ -110,7 +104,6 @@ def _resolve_condition_to_question(condition_id: str) -> str:
     if data and isinstance(data, dict):
         return (data.get("question") or data.get("description") or "")[:100]
     return ""
-
 
 def scan_whale_positions(whales: List[Dict] = None) -> Dict:
     """Scan whale positions and aggregate by market."""
@@ -210,7 +203,6 @@ def scan_whale_positions(whales: List[Dict] = None) -> Dict:
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
-
 def find_signal_overlaps(our_signals: List[Dict], whale_data: Dict) -> List[Dict]:
     """Find overlaps between our signals and whale positions."""
     overlaps = []
@@ -244,7 +236,6 @@ def find_signal_overlaps(our_signals: List[Dict], whale_data: Dict) -> List[Dict
     
     overlaps.sort(key=lambda x: (x["agrees"], x["whale_count"]), reverse=True)
     return overlaps
-
 
 def get_copy_trade_signals() -> Dict:
     """Main entry point with caching."""
@@ -301,7 +292,6 @@ def get_copy_trade_signals() -> Dict:
     _cache["data"] = result
     _cache["timestamp"] = now
     return result
-
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

@@ -257,92 +257,135 @@ def _short_title(title: str) -> str:
     return title
 
 
-def format_alert(row, p: dict) -> str:
-    sev = row["severity"]
-    when = datetime.fromtimestamp(row["ts"], tz=timezone.utc).strftime("%H:%M UTC")
 
-    name = p.get("title", "") or row["market"]
+def _signal_tier(reasons: str) -> tuple:
+    """Return (emoji, label) for signal quality tier.
+    MEGA FILL > WHALE FILL > FLOW BURST > BOOK SIGNAL."""
+    if 'mega_single_trade' in reasons:
+        return ('⚡', 'MEGA FILL')
+    if 'whale_single_trade' in reasons:
+        return ('🐋', 'WHALE FILL')
+    if ('flow_mag' in reasons or 'vol_spike' in reasons) and (
+            'taker_YES' in reasons or 'taker_NO' in reasons or 'taker_BUY' in reasons):
+        return ('📈', 'FLOW BURST')
+    return ('📖', 'BOOK SIGNAL')
+
+
+def _flow_label(fy: float, fn: float) -> str:
+    """'one-sided', '85% YES', or '' for at-a-glance flow direction summary."""
+    total = (fy or 0) + (fn or 0)
+    if total < 500:
+        return ''
+    if not fn or fn <= 0:
+        return 'one-sided'
+    if not fy or fy <= 0:
+        return 'one-sided'
+    ratio = max(fy, fn) / total
+    if ratio >= 0.85:
+        dominant = 'YES' if fy > fn else 'NO'
+        return f'{ratio * 100:.0f}% {dominant}'
+    return ''
+
+
+def format_alert_compact(row, p: dict) -> str:
+    """One-line summary for secondary alerts in a batch."""
+    reasons = row["reasons"]
+    tier_emoji, _ = _signal_tier(reasons)
+    cat_emoji = _infer_category(p.get("title", "") or row["market"], row["market"])
+    short = _short_title(p.get("title", "") or row["market"])
+    dir_emoji, dir_text, flow_d = _alert_direction(p, reasons)
+    bid = p.get("best_bid")
+    bid_c = int(bid * 100) if bid is not None else None
+    signal = _human_reasons(reasons)
+    parts = [short]
+    price_str = f"{bid_c}¢" if bid_c is not None else ""
+    if dir_emoji and dir_text != "NO SIGNAL":
+        parts.append(f"{dir_emoji} {price_str}")
+    if flow_d:
+        parts.append(f"${flow_d:,.0f}")
+    if signal:
+        parts.append(signal)
+    return f"{tier_emoji} {cat_emoji} {' · '.join(parts)}"
+
+
+def format_alert(row, p: dict) -> str:
+    """Action-first alert. Tier on line 1, decision on line 3, signal on line 4."""
+    reasons = row["reasons"]
+    tier_emoji, tier_label = _signal_tier(reasons)
+    cat_emoji = _infer_category(p.get("title", "") or row["market"], row["market"])
+    platform_name = row["platform"].capitalize()
+    short = _short_title(p.get("title", "") or row["market"])
     ticker = row["market"]
 
-    dir_emoji, dir_text, flow_d = _alert_direction(p, row["reasons"])
-    action_px = _action_price(p)
-    ci = closes_in(p.get("close_time", ""))
-
+    dir_emoji, dir_text, flow_d = _alert_direction(p, reasons)
     bid = p.get("best_bid")
     ask = p.get("best_ask")
     mid = p.get("mid", 0) or ((bid or 0) + (ask or 0)) / 2
-    bid_d = p.get("bid_depth", 0)
-    ask_d = p.get("ask_depth", 0)
-    oi = p.get("open_interest", 0)
-    vol = p.get("volume", 0)
-    score = row["score"]
-    reasons = row["reasons"]
-    fy = p.get("flow_yes", 0)
-    fn = p.get("flow_no", 0)
-
-    cat_emoji = _infer_category(name, ticker)
-    short = _short_title(name)
     bid_c = int(bid * 100) if bid is not None else None
     ask_c = int(ask * 100) if ask is not None else None
     spread_pct = (ask - bid) / mid * 100 if (bid is not None and ask is not None and mid) else None
-    oiv_ratio = oi / vol if (oi and vol) else 0
 
-    # Line 1: Header
-    lines = [f"{cat_emoji} <b>#{sev}</b>"]
+    fy = p.get("flow_yes", 0) or 0
+    fn = p.get("flow_no", 0) or 0
+    score = row["score"]
+    ci = closes_in(p.get("close_time", ""))
+    signal = _human_reasons(reasons)
+    flow_lbl = _flow_label(fy, fn)
 
-    # Line 2: Short title
-    lines.append(short)
-    lines.append("")  # spacer
-
-    # Line 3: Direction + Price + Flow + Score
-    action_bits = []
-    if dir_emoji and dir_text:
-        action_bits.append(f"{dir_emoji} {dir_text}")
-    if bid_c is not None and ask_c is not None:
-        action_bits.append(f"{bid_c}¢/{ask_c}¢")
-        if spread_pct is not None and spread_pct < 5:
-            action_bits.append(f"spread {spread_pct:.1f}%")
-    if flow_d:
-        action_bits.append(f"${flow_d:,.0f}")
-    action_bits.append(f"{score}/10")
-    lines.append(" · ".join(action_bits))
-
-    # Line 4: Flow breakdown + Depth
-    flow_bits = []
-    if fy or fn:
-        flow_bits.append(f"Y ${fy:,.0f} / N ${fn:,.0f}")
-    if bid_d or ask_d:
-        flow_bits.append(f"D ${bid_d/1000:.0f}K/${ask_d/1000:.0f}K")
-    if flow_bits:
-        lines.append(" · ".join(flow_bits))
-
-    # Line 5: OI + Close
-    health_bits = []
-    if oi:
-        health_bits.append(f"OI ${oi/1000:.0f}K")
-    if oiv_ratio > 0:
-        health_bits.append(f"OIV {oiv_ratio:.2f}")
-    if ci:
-        health_bits.append(f"→ {ci}")
-    if health_bits:
-        lines.append(" · ".join(health_bits))
-    lines.append("")  # spacer
-
-    # Line 6: Implication
     imp = _implication(score, flow_d, fy, fn, bid, ask, reasons, dir_text)
     if imp:
-        lines.append(imp)
+        # "💡 🟢 STRONG ENTRY · whale · tight" → "🟢 STRONG ENTRY"
+        action_label = imp.replace("💡 ", "").split(" · ")[0].strip()
+    else:
+        action_label = f"{dir_emoji} {dir_text}" if (dir_emoji and dir_text != "NO SIGNAL") else ""
 
-    # Line 6: Trigger
-    signal = _human_reasons(reasons)
+    lines = []
+
+    # L1: Signal tier · category · platform
+    lines.append(f"{tier_emoji} <b>{tier_label}</b> · {cat_emoji} {platform_name}")
+
+    # L2: Market name
+    lines.append(short)
+    lines.append("")
+
+    # L3: THE decision line — action + price + flow (most important, read first)
+    decision_parts = []
+    if action_label:
+        decision_parts.append(action_label)
+    if bid_c is not None and ask_c is not None:
+        decision_parts.append(f"{bid_c}¢/{ask_c}¢")
+        if spread_pct is not None and spread_pct < 5:
+            decision_parts.append(f"spread {spread_pct:.1f}%")
+    elif bid_c is not None:
+        decision_parts.append(f"{bid_c}¢")
+    if flow_d:
+        decision_parts.append(f"${flow_d:,.0f}")
+    lines.append(" · ".join(decision_parts))
+
+    # L4: Signal evidence + flow direction label
+    sig_parts = []
     if signal:
-        lines.append(signal)
-    lines.append("")  # spacer
+        sig_parts.append(signal)
+    if flow_lbl and "taker" not in signal:
+        sig_parts.append(flow_lbl)
+    if sig_parts:
+        lines.append(" · ".join(sig_parts))
 
-    # Line 7: Links
+    # L5: Flow split + close time
+    ctx_parts = []
+    if fy or fn:
+        ctx_parts.append(f"Y ${fy:,.0f} / N ${fn:,.0f}")
+    if ci:
+        ctx_parts.append(ci)
+    if ctx_parts:
+        lines.append(" · ".join(ctx_parts))
+
+    lines.append("")
+
+    # L6: Link only — dashboard available on tap
     lines.append(market_link(row["platform"], ticker))
-    lines.append(f"<a href='{DASHBOARD_URL}'>Dashboard</a>")
     return "\n".join(lines)
+
 
 
 def _send_telegram_message(text: str) -> bool:
@@ -388,7 +431,7 @@ def main():
         except ValueError:
             cursor = 0
 
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT * FROM whale_alerts WHERE id > ? AND severity = 'CRITICAL' ORDER BY id",
@@ -403,9 +446,9 @@ def main():
         print("NO_NEW_WHALE_ALERTS")
         return
 
-    MAX_FULL = 8
-    # Parse payloads once; rank by REAL dollars, not score — score saturates
-    # at 10 on game-day churn (2026-06-11: 1,732 CRITICALs in 24h, all 10/10).
+    # Parse payloads; sort by signal tier first, then flow dollars.
+    # Score saturates at 10 during game-day churn — tier is the quality signal.
+    _TIER_ORDER = {'MEGA FILL': 0, 'WHALE FILL': 1, 'FLOW BURST': 2, 'BOOK SIGNAL': 3}
     parsed = []
     for r in rows:
         try:
@@ -413,20 +456,31 @@ def main():
         except json.JSONDecodeError:
             payload = {}
         parsed.append((r, payload, payload.get("flow_dollars") or 0))
-    parsed.sort(key=lambda x: -x[2])
+    parsed.sort(key=lambda x: (_TIER_ORDER.get(_signal_tier(x[0]["reasons"])[1], 9), -x[2]))
 
     total_usd = sum(d for _, _, d in parsed)
-    out = [f"🦈 WHALE SHARK — {len(rows)} alert(s) | ≈${total_usd:,.0f} total flow\n"]
-    for r, payload, _ in parsed[:MAX_FULL]:
-        out.append(format_alert(r, payload))
+    count = len(parsed)
+    label = "alert" if count == 1 else "alerts"
+    out = [f"🦈 {count} whale {label} · ≈${total_usd:,.0f} flow\n"]
+
+    # Top pick — full detail
+    top_row, top_payload, _ = parsed[0]
+    out.append(format_alert(top_row, top_payload))
+
+    # Secondary alerts — compact one-liners
+    MAX_COMPACT = 5
+    secondary = parsed[1:MAX_COMPACT + 1]
+    if secondary:
         out.append("")
-    if len(rows) > MAX_FULL:
-        hidden_usd = sum(d for _, _, d in parsed[MAX_FULL:])
-        out.append(
-            f"(+{len(rows) - MAX_FULL} more ≈${hidden_usd:,.0f} — full tape: {DASHBOARD_URL})"
-        )
-    else:
-        out.append(f"live tape: {DASHBOARD_URL}")
+        out.append("─" * 16)
+        for r, pl, _ in secondary:
+            out.append(format_alert_compact(r, pl))
+        if count > MAX_COMPACT + 1:
+            hidden_n = count - MAX_COMPACT - 1
+            hidden_usd = sum(d for _, _, d in parsed[MAX_COMPACT + 1:])
+            out.append(f"  +{hidden_n} more ≈${hidden_usd:,.0f}")
+
+    out.append(f"\n<a href='{DASHBOARD_URL}'>Full tape</a>")
     text = "\n".join(out)
     print(text)
 

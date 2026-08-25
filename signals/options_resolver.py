@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 from loguru import logger
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
+from config.polymarket_urls import CLOB_API  # polyproxy: central URL config
 
 # Paths
 BASE_DIR = Path(__file__).parent.parent
@@ -38,8 +40,7 @@ OPTIONS_DB = Path(
 SHADOW_DB = STORAGE_DIR / "shadow_trades.db"
 
 # Polymarket APIs
-GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API = "https://clob.polymarket.com"
+
 UA = {"User-Agent": "Mozilla/5.0 polyclawd-options-resolver"}
 
 # Tracked tickers (same as options_implied.py)
@@ -49,7 +50,6 @@ NAMES = ["NVDA", "META", "MSFT", "AAPL", "AMZN"]
 RATE_DELAY = 2.0
 
 # ─── DB Init ─────────────────────────────────────────────────────────
-
 
 def get_options_db() -> sqlite3.Connection:
     """Get connection to options_implied.db."""
@@ -61,7 +61,6 @@ def get_options_db() -> sqlite3.Connection:
     _init_tables(conn)
     return conn
 
-
 def get_shadow_db() -> sqlite3.Connection:
     """Get connection to shadow_trades.db."""
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
@@ -70,7 +69,6 @@ def get_shadow_db() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
-
 
 def _init_tables(conn: sqlite3.Connection):
     """Create options_forecast_log table if not exists."""
@@ -96,9 +94,7 @@ def _init_tables(conn: sqlite3.Connection):
     """)
     conn.commit()
 
-
 # ─── Polymarket API ──────────────────────────────────────────────────
-
 
 def _fetch_json(url: str, timeout: int = 10) -> Optional[Any]:
     """Fetch JSON. Returns None on any failure."""
@@ -109,7 +105,6 @@ def _fetch_json(url: str, timeout: int = 10) -> Optional[Any]:
     except Exception as e:
         logger.debug(f"options_resolver fetch failed: {url[:60]} - {e}")
         return None
-
 
 def _get_resolved_close_events(ticker: str) -> List[Dict]:
     """Fetch resolved Polymarket events matching a ticker's close markets.
@@ -141,7 +136,6 @@ def _get_resolved_close_events(ticker: str) -> List[Dict]:
         and ("week" in e.get("slug", "").lower() or "close" in e.get("slug", "").lower())
     ]
 
-
 def _check_clob_resolution(condition_id: str) -> Optional[str]:
     """Check CLOB API for definitive resolution.
     Returns 'YES', 'NO', or None if still open.
@@ -163,7 +157,6 @@ def _check_clob_resolution(condition_id: str) -> Optional[str]:
             elif token.get("outcome") == "No" and float(token.get("price", 0)) > 0.9:
                 return "NO"
     return None
-
 
 def _get_market_outcome_from_event(event: Dict) -> Dict[str, str]:
     """Get resolution outcome per market in a closed event.
@@ -204,9 +197,7 @@ def _get_market_outcome_from_event(event: Dict) -> Dict[str, str]:
 
     return results
 
-
 # ─── Resolution Matching ─────────────────────────────────────────────
-
 
 def _get_unresolved_options_implied_rows(conn) -> List[Dict]:
     """Get rows from options_implied table with poly_market_id that haven't
@@ -225,7 +216,6 @@ def _get_unresolved_options_implied_rows(conn) -> List[Dict]:
     """).fetchall()
     return [dict(r) for r in rows]
 
-
 def _get_matching_shadow_trade(conn, poly_market_id: str) -> Optional[Dict]:
     """Find an unresolved shadow trade with matching market_id."""
     row = conn.execute(
@@ -235,15 +225,12 @@ def _get_matching_shadow_trade(conn, poly_market_id: str) -> Optional[Dict]:
     ).fetchone()
     return dict(row) if row else None
 
-
 def _determine_predicted_side(z_score: float) -> str:
     """z < 0 → implied < poly → market underpriced → BUY YES
     z > 0 → implied > poly → market overpriced → SELL (= BUY NO)"""
     return "YES" if z_score < 0 else "NO"
 
-
 # ─── Main Resolution Scan ────────────────────────────────────────────
-
 
 def scan_resolved_options_markets() -> Dict[str, Any]:
     """Main entry point. Checks all tracked tickers for resolved markets,
@@ -376,9 +363,7 @@ def scan_resolved_options_markets() -> Dict[str, Any]:
 
     return result
 
-
 # ─── Accuracy Stats ──────────────────────────────────────────────────
-
 
 def get_options_accuracy_summary() -> Dict[str, Any]:
     """Return accuracy stats by ticker, market_type, and z-score bucket
@@ -461,9 +446,7 @@ def get_options_accuracy_summary() -> Dict[str, Any]:
         "collection": {"resolved": total, "target": 30, "pct": min(100, round(total / 30 * 100, 1))},
     }
 
-
 # ─── CLI ─────────────────────────────────────────────────────────────
-
 
 if __name__ == "__main__":
     import logging as builtin_logging

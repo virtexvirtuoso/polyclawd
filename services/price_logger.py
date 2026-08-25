@@ -22,17 +22,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
+from config.polymarket_urls import CLOB_API  # polyproxy: central URL config
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DB_PATH = PROJECT_ROOT / "storage" / "shadow_trades.db"
 
-CLOB_API = "https://clob.polymarket.com"
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
-
 
 def _ensure_table():
     """Create position_price_log table if it doesn't exist."""
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS position_price_log (
@@ -51,7 +51,6 @@ def _ensure_table():
     conn.commit()
     conn.close()
 
-
 def _fetch_url(url: str, timeout: int = 10):
     """Fetch JSON from URL."""
     try:
@@ -61,7 +60,6 @@ def _fetch_url(url: str, timeout: int = 10):
     except Exception as e:
         logger.debug("Price fetch failed for {}: {}", url, e)
         return None
-
 
 def _fetch_position_price(pos: dict) -> tuple:
     """Fetch current YES token price for a position. Returns (position_id, price)."""
@@ -90,7 +88,6 @@ def _fetch_position_price(pos: dict) -> tuple:
 
     return (pos_id, None)
 
-
 def log_position_prices():
     """
     Fetch and log current prices for all open positions.
@@ -98,7 +95,8 @@ def log_position_prices():
     """
     _ensure_table()
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT id, market_id, platform, side, entry_price, strategy "
@@ -123,7 +121,8 @@ def log_position_prices():
             inserts.append((pos_id, now, round(price, 6), None))
 
     if inserts:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(DB_PATH), timeout=15)
+        conn.execute("PRAGMA busy_timeout=8000")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executemany(
             "INSERT INTO position_price_log (position_id, timestamp, market_price, edge_current) "
@@ -135,7 +134,6 @@ def log_position_prices():
 
     logger.info("Price logger: logged {}/{} open positions", len(inserts), len(positions))
     return len(inserts)
-
 
 if __name__ == "__main__":
     n = log_position_prices()

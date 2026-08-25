@@ -100,7 +100,8 @@ def _send(embeds: list, content: str = "", alert_type: str = "",
 def _portfolio_context() -> dict:
     """Get current portfolio snapshot for embedding in alerts."""
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(DB_PATH), timeout=15)
+        conn.execute("PRAGMA busy_timeout=8000")
         conn.row_factory = sqlite3.Row
         state = conn.execute("SELECT * FROM paper_portfolio_state ORDER BY id DESC LIMIT 1").fetchone()
         bankroll = float(state["bankroll"]) if state else 10000

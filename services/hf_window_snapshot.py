@@ -29,11 +29,11 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from loguru import logger
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DB_PATH = PROJECT_ROOT / "storage" / "shadow_trades.db"
 
-GAMMA_API = "https://gamma-api.polymarket.com"
 BTC_WIZ_URL = "http://127.0.0.1:8004"
 DERIV_URL = "http://127.0.0.1:8003"
 HF_ENGINE_URL = "http://127.0.0.1:8422"
@@ -54,7 +54,6 @@ HL_COIN_MAP = {
 
 # Coinbase-supported assets (not all assets are on CB; skip silently if unavailable)
 CB_SUPPORTED = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
-
 
 def _ensure_table():
     conn = sqlite3.connect(str(DB_PATH), timeout=30)
@@ -112,7 +111,6 @@ def _ensure_table():
     conn.commit()
     conn.close()
 
-
 def _fetch_json(url: str, timeout: int = 5) -> Optional[Dict]:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd-WindowSnap/1.0"})
@@ -121,7 +119,6 @@ def _fetch_json(url: str, timeout: int = 5) -> Optional[Dict]:
     except Exception as e:
         logger.debug(f"Fetch error {url}: {e}")
         return None
-
 
 def _hl_post(payload: Dict, timeout: int = 8) -> Optional[object]:
     """POST to Hyperliquid Info API."""
@@ -138,7 +135,6 @@ def _hl_post(payload: Dict, timeout: int = 8) -> Optional[object]:
     except Exception as e:
         logger.debug(f"HL API error: {e}")
         return None
-
 
 def _get_microstructure(asset: str) -> Dict:
     """
@@ -218,7 +214,6 @@ def _get_microstructure(asset: str) -> Dict:
 
     return result
 
-
 def _get_cb_premium(asset: str, hl_price: Optional[float]) -> Optional[float]:
     """
     Coinbase premium in bps vs Hyperliquid price.
@@ -239,7 +234,6 @@ def _get_cb_premium(asset: str, hl_price: Optional[float]) -> Optional[float]:
         logger.debug(f"CB premium error ({asset}): {e}")
         return None
 
-
 def _get_wiz_signal() -> Dict:
     """Fetch BTC Wiz composite signal — used as regime filter only."""
     data = _fetch_json(f"{BTC_WIZ_URL}/signals/composite")
@@ -250,7 +244,6 @@ def _get_wiz_signal() -> Dict:
         "score": inner.get("score"),
         "direction": inner.get("signal_type") or inner.get("label"),
     }
-
 
 def _get_deriv_signal(asset: str = "BTC") -> Dict:
     """Fetch Derivatives API fusion signal for an asset from port 8003."""
@@ -269,7 +262,6 @@ def _get_deriv_signal(asset: str = "BTC") -> Dict:
             "falling" if (oi.get("oi_change_pct", 0) or 0) < -1 else "flat"
         ),
     }
-
 
 def _get_confluence(asset: str = "BTC") -> Dict:
     """Read confluence score from memcached via hf_enrichment."""
@@ -296,7 +288,6 @@ def _get_confluence(asset: str = "BTC") -> Dict:
         logger.debug(f"Confluence read error ({asset}): {e}")
         return {}
 
-
 def _get_cex_price(asset: str) -> Optional[float]:
     """Get current CEX price from hf_engine state."""
     state = _fetch_json(f"{HF_ENGINE_URL}/state")
@@ -305,7 +296,6 @@ def _get_cex_price(asset: str) -> Optional[float]:
         if asset in prices:
             return prices[asset].get("binance_price")
     return None
-
 
 def _discover_live_hf_markets(duration: str) -> List[Dict]:
     """Discover live 1h or 4h markets via Gamma events endpoint."""
@@ -368,7 +358,6 @@ def _discover_live_hf_markets(duration: str) -> List[Dict]:
     except Exception as e:
         logger.error(f"Market discovery error ({duration}): {e}")
         return []
-
 
 def snapshot_window_open(duration: str = "1h") -> Dict:
     """
@@ -481,7 +470,6 @@ def snapshot_window_open(duration: str = "1h") -> Dict:
     logger.info(f"Window snapshot: {written} rows for {duration} window at {window_time}")
     return {"written": written, "duration": duration, "window_time": window_time, "markets": len(markets)}
 
-
 def backfill_outcomes() -> Dict:
     """Join resolved hf_market_resolutions against hf_window_snapshots."""
     _ensure_table()
@@ -525,7 +513,6 @@ def backfill_outcomes() -> Dict:
         logger.info(f"Window snapshot outcomes backfilled: {updated}")
     return {"updated": updated}
 
-
 def get_conditional_wr(duration: str = "1h", asset: str = "BTC",
                         wiz_min: float = 0, wiz_max: float = 100) -> Dict:
     """Query conditional win rate from collected window snapshots."""
@@ -561,7 +548,6 @@ def get_conditional_wr(duration: str = "1h", asset: str = "BTC",
     finally:
         conn.close()
 
-
 def get_snapshot_stats() -> Dict:
     """Stats on collected window snapshots."""
     _ensure_table()
@@ -585,7 +571,6 @@ def get_snapshot_stats() -> Dict:
         }
     finally:
         conn.close()
-
 
 if __name__ == "__main__":
     import json as _json

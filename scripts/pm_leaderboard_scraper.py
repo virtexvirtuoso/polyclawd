@@ -12,8 +12,9 @@ Discovery paths:
 Also fires Telegram alerts when:
   - A new wallet is discovered on the leaderboard (not in pm_wallets)
   - A wallet graduates to smart status during refresh
-  - Fast-track: wallets with net_pnl >= FAST_TRACK_PNL promoted without
-    win_rate/trades requirement (event specialists with large PnL but few markets)
+
+Fast-track (promotion on net_pnl alone) was REMOVED 2026-08-21 — see
+alert_graduations() for the evidence.
 
 Cron: every 6 hours (scheduler tick_6h) — leaderboard doesn't change fast.
 State: storage/whale_meta.db (pm_wallets table)
@@ -31,6 +32,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
+from config.polymarket_urls import data_url  # polyproxy: central URL config
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
@@ -41,13 +43,18 @@ META_DB_PATH = BASE_DIR / "storage" / "whale_meta.db"
 
 
 def _shadow_dispatch(pipeline: str, message: str, dedup_key: str) -> None:
-    """Task 5.3 Step 1 (shadow rollout): mirror the direct send into the
-    dispatch queue (tier 2, shadow=True) so alert_shadow_log can be compared
-    against actual sends after 48h. The direct send stays authoritative.
+    """LIVE since 2026-08-21 (was shadow from 2026-07-22). Routes through the
+    tier-2 batch queue: one grouped message per pipeline per ~15 min instead of
+    one Telegram push per event.
+
+    The caller's direct send MUST be removed when calling this — leaving both
+    double-delivers. That is exactly what the Gate-2 runbook got wrong for
+    mlb odds_moved: it said "remove shadow=True" without noting the send below
+    it was unconditional.
     dedup_key encodes entity+state (F3), never just the pipeline name."""
     try:
         from signals.alert_dispatch import dispatch
-        dispatch(pipeline, message, tier=2, shadow=True, dedup_key=dedup_key)
+        dispatch(pipeline, message, tier=2, dedup_key=dedup_key)
     except Exception as e:  # never let shadow plumbing break a live pipeline
         print(f"[shadow-dispatch] {pipeline} failed: {e}", flush=True)
 
@@ -127,9 +134,13 @@ _CATEGORY_LEADERBOARD_URLS = [
     "/leaderboard/economics/monthly/profit",
 ]
 
-# PnL threshold for fast-track smart promotion (no win_rate/trades requirement).
-# Sports/event specialists can have $1M+ PnL with <20 trades — normal gate rejects them.
-FAST_TRACK_PNL = 500_000
+# Fast-track promotion (net_pnl alone, no win_rate/trades requirement) was
+# REMOVED 2026-08-21. `net_pnl` for a wallet with no closed positions is 100%
+# mark-to-market on OPEN bets, and those marks evaporate: the 12 zero-closed
+# fast-tracked wallets carried a stored $47.8M and are worth $234K live today
+# (11/12 under $1K). Kept as documentation only — do not reintroduce without
+# re-running the falsifier in the vault write-up.
+_FAST_TRACK_PNL_RETIRED = 500_000
 
 
 def scrape_category_leaderboard(path: str) -> List[Dict]:
@@ -279,9 +290,15 @@ def seed_wallets(conn: sqlite3.Connection, entries: List[Dict]) -> Dict:
             if rank is not None:
                 updates.extend(["rank_last_seen=?", "rank_scraped_at=?"])
                 params.extend([rank, int(now)])
-                # Check for rank improvement ≥10 positions (lower = better)
+                # Check for rank improvement ≥10 positions (lower = better).
+                # SAME-BOARD ONLY (2026-08-21): rank_at_seed belongs to the
+                # wallet's source_category, but rank_last_seen is overwritten by
+                # whichever category page was scraped most recently. Comparing
+                # across boards manufactures phantom jumps — e.g. seeded #37 in
+                # economics, later seen #3 on the crypto board, reads as +34.
                 seed_rank = existing["rank_at_seed"]
-                if seed_rank and rank and (seed_rank - rank) >= 10:
+                same_board = (existing["source_category"] or category) == category
+                if same_board and seed_rank and rank and (seed_rank - rank) >= 10:
                     rank_risers.append({
                         "wallet": wallet,
                         "name": name or existing["name"],
@@ -307,9 +324,12 @@ def alert_new_discoveries(new_wallets: List[Dict]) -> None:
     if not new_wallets:
         return
 
-    # Only alert for significant wallets (>$100k volume or >$10k PnL)
+    # Only alert for significant wallets with POSITIVE edge:
+    #   - PnL > $10k (profitable), OR
+    #   - Volume > $100k AND PnL > 0 (high-volume but must be green)
+    # Volume traps (negative PnL, zero closed) are excluded.
     significant = [w for w in new_wallets
-                   if abs(w["pnl"]) > 10_000 or w["volume"] > 100_000]
+                   if w["pnl"] > 10_000 or (w["volume"] > 100_000 and w["pnl"] > 0)]
     if not significant:
         return
 
@@ -326,13 +346,12 @@ def alert_new_discoveries(new_wallets: List[Dict]) -> None:
             name = f"{addr[:6]}…{addr[-4:]}"
         else:
             name = raw_name
-        pnl_tag = f"📈 <b>+${w['pnl']:,.0f}</b>" if w["pnl"] > 0 else f"📉 -${abs(w['pnl']):,.0f}"
+        pnl_tag = f"📈 <b>+${w['pnl']:,.0f}</b>"
         lines.append(f"<b>{name}</b>  {pnl_tag}")
         lines.append(f"   Vol ${w['volume']:,.0f} · queued for evaluation")
     lines.append("")
     lines.append("⏳ Will promote to smart-wallet tier if they meet win-rate criteria.")
 
-    send_telegram("\n".join(lines))
     _shadow_dispatch(
         "leaderboard_wallets", "\n".join(lines),
         "discovered:" + "|".join(sorted(w["wallet"] for w in significant)))
@@ -341,6 +360,42 @@ def alert_new_discoveries(new_wallets: List[Dict]) -> None:
 # ── Rank velocity alert ───────────────────────────────────────────────────────
 _RANK_RISER_DEDUP_FILE = Path("/tmp/rank_riser_dedup.json")
 _RANK_RISER_TTL = 24 * 3600
+_RISER_MIN_PNL = 10_000     # same positive-edge bar as alert_new_discoveries —
+                            # thin categories let negative-PnL wallets climb 20+ spots
+_GRINDER_SHARE_MAX = 0.5    # >50% of open positions in 5m/15m up/down = grinder
+_UP_DOWN_RE = re.compile(r"up[\s-]*or[\s-]*down|updown|up-down", re.IGNORECASE)
+
+
+def _fetch_positions(wallet: str) -> Optional[List[Dict]]:
+    """Open positions for a wallet from the PM data-api (None on failure)."""
+    url = data_url(f"/positions?user={wallet}&limit=100")
+    req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as r:
+            data = json.loads(r.read().decode())
+        return data if isinstance(data, list) else None
+    except Exception as e:
+        print(f"[leaderboard] positions fetch failed {wallet[:10]}…: {e}", flush=True)
+        return None
+
+
+def _short_cycle_share(wallet: str) -> Optional[float]:
+    """Fraction of open positions in short-cycle up/down markets (None = unknown)."""
+    positions = _fetch_positions(wallet)
+    if not positions:
+        return None
+    hits = sum(
+        1 for p in positions
+        if _UP_DOWN_RE.search(f"{p.get('title', '')} {p.get('slug', '')} {p.get('eventSlug', '')}")
+    )
+    return hits / len(positions)
+
+
+def _ensure_grinder_column(conn: sqlite3.Connection) -> None:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(pm_wallets)")}
+    if "grinder" not in cols:
+        conn.execute("ALTER TABLE pm_wallets ADD COLUMN grinder INTEGER DEFAULT 0")
+        conn.commit()
 
 
 def _rank_riser_recently_alerted(wallet: str) -> bool:
@@ -367,10 +422,41 @@ def _rank_riser_mark_alerted(wallet: str) -> None:
 
 
 def alert_rank_risers(risers: List[Dict]) -> None:
-    """Alert when a wallet jumps ≥10 leaderboard positions since initial seeding."""
+    """Alert when a wallet jumps ≥10 leaderboard positions since initial seeding.
+
+    Noise filters (2026-08-18, alert-layer only — seeding + graduation math
+    still see every wallet):
+      - PnL floor: thin categories (economics/culture) let negative-PnL wallets
+        climb 20+ spots by being "less red" than a tiny field.
+      - Grinder tag: monthly-green wallets farming 5m/15m up/down markets are
+        not smart money; tagged grinder=1 once so they never re-alert.
+    API failure fails OPEN — never lose a real riser to a data-api blip.
+    """
     if not risers:
         return
-    new_risers = [r for r in risers if not _rank_riser_recently_alerted(r["wallet"])]
+    candidates = [r for r in risers if (r.get("pnl") or 0) >= _RISER_MIN_PNL]
+    candidates = [r for r in candidates if not _rank_riser_recently_alerted(r["wallet"])]
+    if not candidates:
+        return
+
+    conn = get_db()
+    _ensure_grinder_column(conn)
+    new_risers = []
+    for r in candidates:
+        row = conn.execute(
+            "SELECT grinder FROM pm_wallets WHERE wallet=?", (r["wallet"],)
+        ).fetchone()
+        if row and row["grinder"]:
+            continue
+        share = _short_cycle_share(r["wallet"])
+        if share is not None and share > _GRINDER_SHARE_MAX:
+            conn.execute("UPDATE pm_wallets SET grinder=1 WHERE wallet=?", (r["wallet"],))
+            conn.commit()
+            print(f"[leaderboard] riser {r['wallet'][:10]}… tagged grinder "
+                  f"({share:.0%} up/down) — suppressed", flush=True)
+            continue
+        new_risers.append(r)
+    conn.close()
     if not new_risers:
         return
 
@@ -390,7 +476,6 @@ def alert_rank_risers(risers: List[Dict]) -> None:
             f"   #{r['seed_rank']} → #{r['current_rank']}  (+{jump} positions)  ${r['pnl']:,.0f} PnL"
         )
     lines.append("\n⚠️ Not yet in smart-wallet tier — tracking for graduation.")
-    send_telegram("\n".join(lines))
     _shadow_dispatch(
         "rising_wallets", "\n".join(lines),
         "riser:" + "|".join(sorted(
@@ -429,13 +514,25 @@ def _grad_mark_alerted(top_wallet: str) -> None:
 def alert_graduations(conn: sqlite3.Connection) -> int:
     """Check for wallets that meet smart criteria but aren't flagged. Promote + alert.
 
-    Three graduation paths:
-      1. Standard: closed_positions >= 20 AND win_rate >= 0.62 AND net_pnl >= 5000
-      2. Fast-track: net_pnl >= FAST_TRACK_PNL (event specialists, e.g. WC bettors
-         with $500K+ but fewer than 20 closed positions)
-      3. Skill: sign-randomization gate (skill_n >= 30, p <= 0.05, positive mean
+    Two graduation paths (fast-track removed 2026-08-21):
+      1. Standard: closed_positions >= 20 AND win_rate >= 0.62 AND net_pnl >= 100000
+         (threshold matches whale_wallets.SMART_MIN_NET — a lower bar here just
+         promotes wallets that refresh_wallets().is_smart demotes on the next pass)
+      2. Skill: sign-randomization gate (skill_n >= 30, p <= 0.05, positive mean
          probability-point return) — luck-controlled, catches low-WR longshot
          specialists the WR path can't see. Fields written by refresh_wallets.
+
+    REMOVED: fast-track on `net_pnl >= 500_000` alone. For a wallet with no closed
+    positions that figure is entirely mark-to-market on open bets — the 12 such
+    wallets promoted this way carried a stored $47.8M and are worth $234K live
+    (11/12 under $1K; Fisher vs control p=1.1e-8). High-PnL wallets that DO have a
+    record average 36.5% WR against this function's own 0.62 bar (n=15, p=3.3e-5).
+
+    ORDER BY is skill_ret, NOT net_pnl. That ordering was the actual cause of the
+    frozen roster: all 20 LIMIT slots were consumed every cycle by high-net_pnl
+    fast-trackers, which the staleness gate then demoted, while ~109 legitimate
+    skill/standard candidates never reached the LIMIT at all. SQLite sorts NULL
+    last under DESC, so skill-gated wallets rank ahead of standard-path ones.
     """
     rows = conn.execute("""
         SELECT wallet, name, closed_positions, ROUND(win_rate*100,1) as wr_pct,
@@ -443,13 +540,12 @@ def alert_graduations(conn: sqlite3.Connection) -> int:
         FROM pm_wallets
         WHERE smart = 0
           AND (
-            (closed_positions >= 20 AND win_rate >= 0.62 AND net_pnl >= 5000)
-            OR net_pnl >= ?
+            (closed_positions >= 20 AND win_rate >= 0.62 AND net_pnl >= 100000)
             OR (skill_n >= 30 AND skill_p <= 0.05 AND skill_ret > 0)
           )
-        ORDER BY net_pnl DESC
+        ORDER BY skill_ret DESC, net_pnl DESC
         LIMIT 20
-    """, (FAST_TRACK_PNL,)).fetchall()
+    """).fetchall()
 
     if not rows:
         return 0
@@ -459,12 +555,33 @@ def alert_graduations(conn: sqlite3.Connection) -> int:
     wallets_to_promote = [r["wallet"] for r in rows]
     promo_conn = get_db()
     try:
+        # Stamp refreshed/last_seen: a leaderboard-seeded row carries
+        # refreshed=0 and the update branch never touches last_seen, so
+        # demote_stale_wallets() saw every promotion as instantly stale and
+        # reverted it — promote 20 / demote 20, every cycle, forever.
+        _now = time.time()
+        _cur = promo_conn.executemany(
+            "UPDATE pm_wallets SET smart=1, refreshed=?, last_seen=? WHERE wallet=?",
+            [(_now, _now, w) for w in wallets_to_promote],
+        )
+        _rows_promoted = _cur.rowcount
+        # Enqueue so refresh_wallets() re-verifies against LIVE stats inside the
+        # staleness TTL, rather than the leaderboard snapshot it was promoted on.
         promo_conn.executemany(
-            "UPDATE pm_wallets SET smart=1 WHERE wallet=?",
-            [(w,) for w in wallets_to_promote],
+            "INSERT INTO pm_wallet_seen (wallet, name, dollars, last_seen)"
+            " VALUES (?,?,0,?)"
+            " ON CONFLICT(wallet) DO UPDATE SET last_seen=excluded.last_seen",
+            [(r["wallet"], r["name"], _now) for r in rows],
         )
         promo_conn.commit()
-        print(f"[leaderboard] Promoted {len(wallets_to_promote)} wallets to smart=1", flush=True)
+        # Report the OBSERVED row count, not the intent — this line previously
+        # printed "Promoted 20" on every cycle while smart=1 stayed frozen at 76.
+        # rowcount of the UPDATE only — NOT total_changes, which would also
+        # count the pm_wallet_seen upsert and overstate the promotion by ~2x.
+        if _rows_promoted != len(wallets_to_promote):
+            print(f"[leaderboard] WARNING: selected {len(wallets_to_promote)} for promotion "
+                  f"but only {_rows_promoted} rows changed", flush=True)
+        print(f"[leaderboard] Promoted {_rows_promoted} wallets to smart=1", flush=True)
     finally:
         promo_conn.close()
 
@@ -498,10 +615,9 @@ def alert_graduations(conn: sqlite3.Connection) -> int:
         else:
             name = raw_name
         medal = medals[i]
-        fast_track = r["net"] >= FAST_TRACK_PNL and (not r["wr_pct"] or r["closed_positions"] < 20)
         skill = ((r["skill_n"] or 0) >= 30 and r["skill_p"] is not None
                  and r["skill_p"] <= 0.05 and (r["skill_ret"] or 0) > 0)
-        tag = " ⚡ fast-track" if fast_track else (f" 🎯 skill p={r['skill_p']:.3f}" if skill else "")
+        tag = f" 🎯 skill p={r['skill_p']:.3f}" if skill else " 📊 standard"
         lines.append(f"{medal} <b>{name}</b>{tag}")
         wr_str = f"{r['wr_pct']}% WR · " if r["wr_pct"] else ""
         lines.append(f"   {wr_str}{r['closed_positions']} trades · <b>${r['net']:+,.0f}</b>")
@@ -511,7 +627,6 @@ def alert_graduations(conn: sqlite3.Connection) -> int:
     lines.append("✅ Signal scores will now be boosted when these wallets enter markets.")
 
     _grad_mark_alerted(top_wallet)
-    send_telegram("\n".join(lines))
     _shadow_dispatch(
         "graduation", "\n".join(lines),
         f"graduated:{top_wallet}:{len(rows)}")

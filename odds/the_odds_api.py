@@ -22,6 +22,7 @@ To activate:
        from this module instead of soccer_edge.get_soccer_edge_summary
     5. Watch source_health table for the_odds_api row + Discord alerts
 """
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 
 import os
 import json
@@ -100,7 +101,7 @@ def normalize_team(team: str) -> List[str]:
 def _fetch_polymarket_soccer_sync() -> list:
     try:
         resp = _requests.get(
-            "https://gamma-api.polymarket.com/events",
+            gamma_url("/events"),
             params={"closed": "false", "limit": "200"}, timeout=30,
         )
         return resp.json()

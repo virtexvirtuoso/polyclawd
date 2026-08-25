@@ -28,12 +28,16 @@ import os
 import sqlite3
 import time
 import urllib.request
+
+import requests
 import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
+from config.polymarket_urls import CLOB_API  # polyproxy: central URL config
 
 # ── Load env from /etc/default/polyclawd or .env.discord when running outside systemd ──
 _ENV_FILES = ["/etc/default/polyclawd", str(Path(__file__).parent.parent / ".env.discord")]
@@ -66,8 +70,7 @@ CLOB_RATE_DELAY = 2.5            # seconds between CLOB API calls
 ODDS_API_RECHECK_INTERVAL = 1800  # re-fetch book odds at most every 30min per trade
 
 # ── APIs ───────────────────────────────────────────────────────────────────
-GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API = "https://clob.polymarket.com"
+
 ESPN_API = "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard"
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
@@ -93,16 +96,14 @@ MLB_TEAMS: Dict[str, str] = {
     "white sox": "Chicago White Sox", "yankees": "New York Yankees",
 }
 
-
 # ── DB helpers ─────────────────────────────────────────────────────────────
 
 def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
-
 
 def migrate_schema(conn: sqlite3.Connection) -> None:
     """Add monitor columns to shadow_trades if missing."""
@@ -121,7 +122,6 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE shadow_trades ADD COLUMN {col} {col_type}")
             logger.info(f"migrate: added shadow_trades.{col}")
     conn.commit()
-
 
 def get_active_mlb_trades(conn: sqlite3.Connection) -> List[Dict]:
     """Return unresolved Polymarket MLB shadow trades (MLB-only by team name match)."""
@@ -145,18 +145,17 @@ def get_active_mlb_trades(conn: sqlite3.Connection) -> List[Dict]:
             result.append(d)
     return result
 
-
 # ── CLOB price fetch ───────────────────────────────────────────────────────
 
 def _fetch_json(url: str, timeout: int = 10) -> Optional[dict]:
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
+        # requests, not urllib: ESPN's edge 403s Python's urllib TLS fingerprint
+        r = requests.get(url, headers={"User-Agent": "Polyclawd/2.0"}, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
     except Exception as e:
         logger.warning(f"fetch failed {url}: {e}")
         return None
-
 
 # ── Gamma baseball price cache ────────────────────────────────────────────
 # Gamma API ?condition_id= filter is broken (returns wrong markets).
@@ -165,7 +164,6 @@ def _fetch_json(url: str, timeout: int = 10) -> Optional[dict]:
 _GAMMA_BASEBALL_CACHE: Dict[str, Tuple] = {}
 _GAMMA_CACHE_TIME: float = 0
 _GAMMA_CACHE_TTL = 10  # seconds
-
 
 def _refresh_gamma_cache():
     """Fetch all baseball events and build condition_id → price map."""
@@ -203,12 +201,10 @@ def _refresh_gamma_cache():
     except Exception as e:
         logger.warning(f"Gamma cache refresh failed: {e}")
 
-
 def _gamma_lookup(condition_id: str) -> Optional[Tuple]:
     """Return (outcomePrices, clobTokenIds) from cache, or None."""
     _refresh_gamma_cache()
     return _GAMMA_BASEBALL_CACHE.get(condition_id)
-
 
 def get_clob_token_ids(condition_id: str) -> Tuple[Optional[str], Optional[str]]:
     """Return (yes_token_id, no_token_id) for a Polymarket condition_id.
@@ -261,7 +257,6 @@ def get_clob_token_ids(condition_id: str) -> Tuple[Optional[str], Optional[str]]
         no_id = ids[1]
     return yes_id, no_id
 
-
 def get_gamma_price(condition_id: str, side: str) -> Optional[float]:
     """Get true price from Gamma events cache for a baseball condition ID.
     Falls back to CLOB mid if not found in cache.
@@ -276,7 +271,6 @@ def get_gamma_price(condition_id: str, side: str) -> Optional[float]:
             logger.debug(f"get_gamma_price: {condition_id[:16]} side={side} -> {p:.4f}")
             return round(p, 4)
     return None
-
 
 def get_mid_price_for_side(condition_id: str, side: str) -> Optional[float]:
     """
@@ -326,7 +320,6 @@ def get_mid_price_for_side(condition_id: str, side: str) -> Optional[float]:
         return None
     return round(1.0 - mid if invert else mid, 4)
 
-
 # ── ESPN game state ────────────────────────────────────────────────────────
 
 def get_espn_games() -> List[Dict]:
@@ -374,15 +367,28 @@ def get_espn_games() -> List[Dict]:
             })
     return games
 
+# Non-MLB league prefixes — markets from these leagues can collide with MLB
+# team aliases (e.g. "KBO: LG Twins vs. Kia Tigers" matched Detroit Tigers,
+# shadow trade id=136, 2026-06-08). Never treat these as MLB.
+NON_MLB_LEAGUES = ("kbo", "npb", "cpbl", "lidom", "lmb", "kbl", "ncaa")
+
+
+# Non-MLB league prefixes — markets from these leagues can collide with MLB
+# team aliases (e.g. "KBO: LG Twins vs. Kia Tigers" matched Detroit Tigers,
+# shadow trade id=136, 2026-06-08). Never treat these as MLB.
+NON_MLB_LEAGUES = ("kbo", "npb", "cpbl", "lidom", "lmb", "kbl", "ncaa")
+
 
 def _team_in_title(title: str) -> Optional[str]:
     """Extract MLB team keyword from market title. Returns lowercase alias or None."""
     t = title.lower()
+    if any(t.startswith(f"{lg}:") or f" {lg}:" in t or f"({lg})" in t
+           for lg in NON_MLB_LEAGUES):
+        return None
     for alias in sorted(MLB_TEAMS, key=len, reverse=True):  # longest first
         if alias in t:
             return alias
     return None
-
 
 def match_trade_to_game(
     trade: Dict, espn_games: List[Dict]
@@ -396,7 +402,6 @@ def match_trade_to_game(
             return game
     return None
 
-
 # ── Book odds helpers ──────────────────────────────────────────────────────
 
 def _american_to_prob(odds: float) -> float:
@@ -404,7 +409,6 @@ def _american_to_prob(odds: float) -> float:
     if odds < 0:
         return (-odds) / (-odds + 100)
     return 100 / (odds + 100)
-
 
 def get_book_prob_for_trade(trade: Dict, odds_games: List[Dict]) -> Optional[float]:
     """
@@ -442,7 +446,6 @@ def get_book_prob_for_trade(trade: Dict, odds_games: List[Dict]) -> Optional[flo
                         return round(devigged[i], 4)
     return None
 
-
 # ── Trade lifecycle ────────────────────────────────────────────────────────
 
 def activate_trade(
@@ -479,7 +482,6 @@ def activate_trade(
         f"tp={tp:.3f} sl={sl:.3f}"
     )
 
-
 def close_trade(
     conn: sqlite3.Connection,
     trade: Dict,
@@ -512,14 +514,12 @@ def close_trade(
         f"entry={entry:.3f} exit={exit_price:.3f} pnl={pnl:+.4f}"
     )
 
-
 def mark_checked(conn: sqlite3.Connection, trade_id: int) -> None:
     conn.execute(
         "UPDATE shadow_trades SET last_checked_at = ? WHERE id = ?",
         (datetime.now(timezone.utc).isoformat(), trade_id),
     )
     conn.commit()
-
 
 # ── Decision logic ─────────────────────────────────────────────────────────
 
@@ -567,20 +567,17 @@ def check_pregame_sweep(
 
     return None
 
-
 def check_stop_loss(trade: Dict, current_price: float) -> bool:
     sl = trade.get("stop_loss_price")
     if sl is None:
         sl = float(trade.get("entry_price", 0)) * STOP_LOSS_MULTIPLIER
     return current_price <= float(sl)
 
-
 def check_take_profit(trade: Dict, current_price: float) -> bool:
     tp = trade.get("take_profit_price")
     if tp is None:
         tp = float(trade.get("entry_price", 1)) * TAKE_PROFIT_MULTIPLIER
     return current_price >= float(tp)
-
 
 def check_edge_inverted(
     trade: Dict, current_price: float, current_book_prob: Optional[float]
@@ -596,7 +593,6 @@ def check_edge_inverted(
         return current_price >= book_no_prob
     return current_book_prob - current_price <= 0
 
-
 # ── Discord alert ──────────────────────────────────────────────────────────
 
 _REASON_EMOJI = {
@@ -606,7 +602,6 @@ _REASON_EMOJI = {
     "pregame_invalidated": "⚠️",
     "game_final": "🏁",
 }
-
 
 def send_discord_alert(trade: Dict, reason: str, exit_price: float) -> None:
     if not DISCORD_WEBHOOK_URL:
@@ -659,7 +654,6 @@ def send_discord_alert(trade: Dict, reason: str, exit_price: float) -> None:
                 logger.warning(f"Discord alert HTTP {resp.status}")
     except Exception as e:
         logger.warning(f"Discord alert failed: {e}")
-
 
 # ── Main loop ──────────────────────────────────────────────────────────────
 
@@ -776,7 +770,6 @@ def run_monitor() -> None:
             logger.debug(f"id={trade_id}: no trigger, continuing to monitor")
 
     logger.info("=== ingame_monitor done ===")
-
 
 if __name__ == "__main__":
     run_monitor()

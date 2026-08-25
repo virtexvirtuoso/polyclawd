@@ -3,9 +3,12 @@ ESPN Odds Scraper
 Free API that provides DraftKings odds for all major US sports
 No API key required, unlimited calls
 """
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 
 import json
 import urllib.request
+
+import requests
 from datetime import datetime
 from typing import List, Dict, Optional
 from dataclasses import dataclass
@@ -51,9 +54,10 @@ def fetch_odds(sport: str = "nfl") -> List[GameOdds]:
     url = f"{ESPN_API}/{sport_path}/{league}/scoreboard"
     
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
+        # requests, not urllib: ESPN's edge 403s Python's urllib TLS fingerprint
+        resp = requests.get(url, headers={"User-Agent": "Polyclawd/1.0"}, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
     except Exception as e:
         logger.error(f"ESPN fetch error: {e}")
         return []
@@ -350,7 +354,7 @@ async def get_espn_edges(min_edge: float = 5.0) -> Dict:
     # Fetch Polymarket events
     try:
         req = urllib.request.Request(
-            "https://gamma-api.polymarket.com/events?closed=false&limit=200",
+            gamma_url("/events?closed=false&limit=200"),
             headers={"User-Agent": "Polyclawd/1.0"}
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
@@ -436,9 +440,10 @@ def get_injuries(sport: str = "nfl") -> List[Dict]:
     url = f"{ESPN_API}/{sport_path}/{league}/injuries"
     
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
+        # requests, not urllib: ESPN's edge 403s Python's urllib TLS fingerprint
+        resp = requests.get(url, headers={"User-Agent": "Polyclawd/1.0"}, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
     except Exception as e:
         logger.error(f"ESPN injuries error: {e}")
         return []
@@ -519,9 +524,10 @@ def get_standings(sport: str = "nfl") -> List[Dict]:
     url = f"{ESPN_API}/{sport_path}/{league}/standings"
     
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
+        # requests, not urllib: ESPN's edge 403s Python's urllib TLS fingerprint
+        resp = requests.get(url, headers={"User-Agent": "Polyclawd/1.0"}, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
     except Exception as e:
         logger.error(f"ESPN standings error: {e}")
         return []

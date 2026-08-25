@@ -28,6 +28,7 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Optional
+from config.polymarket_urls import POLYMARKET_DATA_API as PM_DATA_API  # polyproxy: central URL config
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -35,7 +36,6 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent
 META_DB_PATH = BASE_DIR / "storage" / "whale_meta.db"
-PM_DATA_API = "https://data-api.polymarket.com"
 
 # Smart-wallet criteria (re-weighted 2026-06-12 after the phantom-winrate
 # investigation): NET profit is the primary signal — "show me the money".
@@ -52,7 +52,6 @@ QUEUE_MIN_USD      = 100.0   # don't bother tracking wallets below this burst si
 WALLET_STALE_HOURS = 72        # No activity → demote
 WALLET_SLIDING_WR = 0.45       # Last 50 trades below this → demote
 WALLET_MIN_TRADES_30D = 5      # Fewer than 5 trades in 30 days → demote
-
 
 def get_meta_db(path: Optional[Path] = None) -> sqlite3.Connection:
     db_path = Path(path) if path else META_DB_PATH
@@ -141,7 +140,6 @@ def get_meta_db(path: Optional[Path] = None) -> sqlite3.Connection:
     conn.commit()
     return conn
 
-
 def _fetch_json(url: str, timeout: int = 20):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
@@ -149,7 +147,6 @@ def _fetch_json(url: str, timeout: int = 20):
             return json.loads(r.read().decode())
     except Exception:
         return None
-
 
 def queue_wallet_seen(conn, wallet: str, name: str, dollars: float):
     """Called by the scanner: remember a wallet that drove a flow burst."""
@@ -163,7 +160,6 @@ def queue_wallet_seen(conn, wallet: str, name: str, dollars: float):
         "  name = excluded.name, last_seen = excluded.last_seen",
         (wallet, name or "", dollars, time.time()))
 
-
 def get_smart_wallets(conn) -> dict:
     """wallet -> {name, win_rate, closed, net_pnl, source_category, is_bot} for all currently-smart wallets."""
     return {r["wallet"]: {"name": r["name"], "win_rate": r["win_rate"],
@@ -172,9 +168,7 @@ def get_smart_wallets(conn) -> dict:
                           "is_bot": r["is_bot"] or 0}
             for r in conn.execute("SELECT * FROM pm_wallets WHERE smart=1")}
 
-
 POSITIONS_PAGE_CAP = 6   # x500 rows; bounds refresh cost per wallet
-
 
 def compute_stats(rows: list) -> dict:
     """Outcome-honest record from raw position rows.
@@ -209,7 +203,6 @@ def compute_stats(rows: list) -> dict:
             "net": realized + unrealized,
             "concentration": concentration}
 
-
 def fetch_wallet_stats(wallet: str) -> Optional[dict]:
     """Full-history track record from the public positions endpoint."""
     rows = []
@@ -221,7 +214,6 @@ def fetch_wallet_stats(wallet: str) -> Optional[dict]:
         if len(d) < 500:
             break
     return compute_stats(rows)
-
 
 def demote_stale_wallets(conn) -> dict:
     """Demote smart wallets that have gone stale or underperforming."""
@@ -284,7 +276,6 @@ def demote_stale_wallets(conn) -> dict:
         logger.info(f"Demoted: {r}")
     return {"demoted": demoted, "reasons": reasons}
 
-
 def compute_correlations(conn):
     """Compute pairwise market overlap between all smart wallets."""
     now = time.time()
@@ -330,7 +321,6 @@ def compute_correlations(conn):
                 (wa, wb, round(overlap_pct, 4), len(overlap), round(agreement, 4), now))
     conn.commit()
 
-
 def compute_wallet_archetype_pnl(conn):
     """Aggregate per-wallet, per-archetype P&L from whale_follows."""
     now = time.time()
@@ -356,7 +346,6 @@ def compute_wallet_archetype_pnl(conn):
             (r["wallet"], r["archetype"], r["trades"], r["wins"], r["pnl"], concentration, now))
     conn.commit()
 
-
 def _alert_graduation(name: str, stats: dict, wr: float) -> None:
     """Fire Telegram alert when a wallet graduates to smart status."""
     try:
@@ -372,13 +361,11 @@ def _alert_graduation(name: str, stats: dict, wr: float) -> None:
     except Exception:
         pass  # Don't crash refresh on alert failure
 
-
 def is_smart(stats: dict) -> bool:
     if stats["closed"] < SMART_MIN_CLOSED:
         return False
     wr = stats["wins"] / stats["closed"]
     return wr >= SMART_MIN_WIN_RATE and stats.get("net", stats["realized"]) >= SMART_MIN_NET
-
 
 def refresh_wallets(conn, cap: int = 60) -> dict:
     """Drain the seen-queue (biggest flow first) + re-refresh stale smart
@@ -448,7 +435,6 @@ def refresh_wallets(conn, cap: int = 60) -> dict:
     return {"refreshed": refreshed, "promoted": promoted, "demoted": demoted,
             "queue_left": conn.execute("SELECT COUNT(*) FROM pm_wallet_seen").fetchone()[0],
             "stale_demoted": demotion["demoted"]}
-
 
 def track_exits(conn) -> dict:
     """Track position exits for smart wallets.
@@ -565,7 +551,6 @@ def track_exits(conn) -> dict:
     conn.commit()
     return {"tracked": tracked, "exits": exits_logged}
 
-
 def summary(conn) -> str:
     total = conn.execute("SELECT COUNT(*) FROM pm_wallets").fetchone()[0]
     smart = conn.execute("SELECT COUNT(*) FROM pm_wallets WHERE smart=1").fetchone()[0]
@@ -578,7 +563,6 @@ def summary(conn) -> str:
                      f"{r['win_rate']:.0%} over {r['closed_positions']} closed, "
                      f"${r['realized_pnl']:,.0f} realized")
     return "\n".join(lines)
-
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")

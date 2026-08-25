@@ -8,11 +8,14 @@ Extends the `signals/alert_governor.py` pattern: state in shadow_trades.db
 scheduler ~every 15 min, so timing decisions live in DB timestamps, never
 process memory).
 
-Tiers (D1: tier 3 digest deferred):
+Tiers:
   1 (TIER_CRITICAL) — send immediately; on failure enqueue for redelivery
                       on the next drain (D2: the queue IS the durable retry).
   2 (TIER_BATCH)    — enqueue; drain() flushes rows older than 15 min as ONE
                       message per pipeline group.
+  3 (TIER_DIGEST)   — enqueue; drain_digest() (2x-daily cron) flushes ALL rows
+                      as one sectioned digest. Exempt from the 6h sweep (own
+                      15h cap) — plan Change 3, critic finding 2026-07-22.
   4 (TIER_SUPPRESS) — never send; log to alert_suppressed_log only.
 
 shadow=True (rollout mode): enqueue with shadow=1; drain() only RECORDS what
@@ -30,6 +33,7 @@ duplicate is cheaper than a missed alert).
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -39,18 +43,46 @@ from typing import Optional
 
 from scripts.openclaw_alerts import alert_openclaw
 
+# Batch/digest sends are forced parse_mode=None (see _batch_text) -- combining
+# independently-authored HTML fragments under one HTML parse risks one bad
+# fragment breaking the whole message. But callers (mlb_live_monitor.py,
+# cross_sport_drift.py, soccer_live_monitor.py) hard-code <b>/<i> tags into
+# their message text unconditionally, with no awareness they might get
+# force-plain-texted here. Without stripping, those tags show up literally
+# in the delivered Telegram message (found 2026-08-19, message #42709 -- same
+# underlying mismatch class as the smart_wallet_alert.py convergence bug
+# fixed earlier the same day, different code path).
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
 DB_PATH = Path(__file__).resolve().parent.parent / "storage" / "shadow_trades.db"
 
-TIER_CRITICAL, TIER_BATCH, TIER_SUPPRESS = 1, 2, 4  # 3 reserved for digest (deferred, D1)
+TIER_CRITICAL, TIER_BATCH, TIER_DIGEST, TIER_SUPPRESS = 1, 2, 3, 4
 
 BATCH_WINDOW_SEC = 15 * 60
 MAX_AGE_SEC = 6 * 3600
+# Tier-3 digest rows must survive from the morning flush to the 23:30 ET one —
+# exempt from the 6h sweep, with a 15h cap so a dead flusher can't hoard forever.
+MAX_AGE_DIGEST_SEC = 15 * 3600
+
+# Intended routing per vault Alert-Router-Plan-80pct-Actionable §3 (2026-07-22).
+# Callers pass tier explicitly; this map documents the plan for pipelines that
+# adopt dispatch() without local tier logic. Edge-carrying odds_moved/run_scored
+# events stay tier 1 AT THE CALLER (plan Changes 1-2) — the map holds the
+# no-edge default.
+DEFAULT_TIERS = {
+    "entry": 1, "close": 1, "fade": 1, "new_edge": 1, "convergence": 1,
+    "graduation": 1, "prop_edge": 1, "weather_fade": 1, "scanner_state_change": 1,
+    "odds_moved": 3, "run_scored": 3, "hf_scan": 3, "wallet_moves": 3,
+    "rising_wallets": 3, "leaderboard_wallets": 3, "ufc_drift": 3, "credit": 3,
+    "soccer_scorers": 3,
+    "spend_limit": 4, "agent_chat": 4, "timeout": 4, "stub": 4,
+}
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    con = sqlite3.connect(str(db_path), timeout=0.5)
+    con = sqlite3.connect(str(db_path), timeout=5)
     con.row_factory = sqlite3.Row
-    con.execute("PRAGMA busy_timeout=500")
+    con.execute("PRAGMA busy_timeout=5000")
     return con
 
 
@@ -71,9 +103,13 @@ def _ensure_tables(con: sqlite3.Connection) -> None:
             ts INTEGER, pipeline TEXT, dedup_key TEXT, message TEXT, reason TEXT
         );
         CREATE TABLE IF NOT EXISTS alert_shadow_log (
-            ts INTEGER, pipeline TEXT, n_events INTEGER, message TEXT
+            ts INTEGER, pipeline TEXT, n_events INTEGER, message TEXT, tier INTEGER
         );
     """)
+    # Migration (Gate 1 queryability): pre-2026-07-22 shadow logs lack `tier`.
+    cols = [r[1] for r in con.execute("PRAGMA table_info(alert_shadow_log)")]
+    if "tier" not in cols:
+        con.execute("ALTER TABLE alert_shadow_log ADD COLUMN tier INTEGER")
 
 
 def _begin_immediate(con: sqlite3.Connection) -> bool:
@@ -142,6 +178,8 @@ def dispatch(pipeline: str, message: str, tier: int, *,
                enqueue for redelivery on next drain (D2: queue = durable retry).
     Tier 2 -> INSERT INTO alert_queue(ts, pipeline, tier, dedup_key, message);
               duplicate (pipeline, dedup_key) within open batch is ignored.
+    Tier 3 -> enqueue for the 2x-daily digest (drain_digest); same fail-open
+              contention semantics as tier 2; exempt from the 6h sweep.
     Tier 4 -> INSERT INTO alert_suppressed_log only. Returns True.
     shadow=True (rollout mode): enqueue with shadow=1 + log, but drain() only
               RECORDS what it would have batched (alert_shadow_log) — it never
@@ -168,7 +206,17 @@ def dispatch(pipeline: str, message: str, tier: int, *,
             print(f"[dispatch] suppress-log failed: {ex}", flush=True)
         return True
 
-    if tier == TIER_BATCH:
+    if tier in (TIER_BATCH, TIER_DIGEST):
+        # REAL FIX (2026-08-19, message #42709): tier-2/3 are ALWAYS delivered
+        # parse_mode=None (drain()/drain_digest() hardcode it), but the
+        # formatters (mlb_live_monitor.py, cross_sport_drift.py,
+        # soccer_live_monitor.py) embed <b>/<i> tags assuming HTML for their
+        # tier-1 direct sends. Normalize at the choke point where the
+        # parse-mode decision is made: strip tags at enqueue so the queue
+        # stores exactly what will actually be sent (plain text), instead of
+        # HTML that gets force-plain-texted downstream and shows raw tags.
+        # The _batch_text() strip below is now a redundant safety net.
+        message = _HTML_TAG_RE.sub("", message)
         queued = _try_enqueue(path, now, pipeline, tier, dedup_key, message, parse_mode, shadow=0)
         if queued is None:  # F4: contention -> fail open to direct send
             return bool(alert_openclaw(message, parse_mode=parse_mode))
@@ -185,7 +233,13 @@ def _batch_text(pipeline: str, rows: list) -> str:
     fmt = lambda ts: datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M")  # noqa: E731
     header = (f"📨 {pipeline} — {len(rows)} events "
               f"({fmt(min(r['ts'] for r in rows))}–{fmt(max(r['ts'] for r in rows))})")
-    return "\n".join([header] + [r["message"] for r in rows])
+    # Row messages are authored by individual formatters (mlb_live_monitor.py,
+    # cross_sport_drift.py, soccer_live_monitor.py) that hard-code <b>/<i>
+    # tags assuming parse_mode=HTML. This batcher always sends parse_mode=None
+    # (see callers below), so raw tags must be stripped or they show up
+    # literally in Telegram (found 2026-08-19, message #42709).
+    body = [_HTML_TAG_RE.sub("", r["message"]) for r in rows]
+    return "\n".join([header] + body)
 
 
 def _delete_ids(con: sqlite3.Connection, ids: list) -> None:
@@ -215,23 +269,29 @@ def drain(db_path=None, now=None, force=False) -> int:
         if not _begin_immediate(con):
             return 0  # a peer holds the DB — next tick retries
 
-        # F2: drop rows older than 6h to the suppressed log — no infinite replay.
+        # F2: drop stale rows to the suppressed log — no infinite replay.
+        # Tier-3 digest rows are EXEMPT from the 6h sweep (they must survive to
+        # the 23:30 flush) and instead get a 15h cap (plan Change 3).
+        stale_pred = "(tier != ? AND ts < ?) OR (tier = ? AND ts < ?)"
+        stale_args = (TIER_DIGEST, now - MAX_AGE_SEC, TIER_DIGEST, now - MAX_AGE_DIGEST_SEC)
         stale = con.execute(
-            "SELECT * FROM alert_queue WHERE ts < ?", (now - MAX_AGE_SEC,)).fetchall()
+            f"SELECT * FROM alert_queue WHERE {stale_pred}", stale_args).fetchall()
         for r in stale:
-            _suppress_log(con, now, r["pipeline"], r["dedup_key"], r["message"], "expired>6h")
+            reason = "expired>6h" if r["tier"] != TIER_DIGEST else "expired>15h"
+            _suppress_log(con, now, r["pipeline"], r["dedup_key"], r["message"], reason)
         if stale:
-            con.execute("DELETE FROM alert_queue WHERE ts < ?", (now - MAX_AGE_SEC,))
+            con.execute(f"DELETE FROM alert_queue WHERE {stale_pred}", stale_args)
 
         # Shadow rows past the window: record what WOULD have been batched, never send.
         shadow_rows = con.execute(
-            "SELECT * FROM alert_queue WHERE shadow=1 AND ts <= ? ORDER BY pipeline, ts",
+            "SELECT * FROM alert_queue WHERE shadow=1 AND ts <= ? ORDER BY pipeline, tier, ts",
             (cutoff,)).fetchall()
-        for pipeline, grp in groupby(shadow_rows, key=lambda r: r["pipeline"]):
+        for (pipeline, tier), grp in groupby(shadow_rows, key=lambda r: (r["pipeline"], r["tier"])):
             grp = list(grp)
             con.execute(
-                "INSERT INTO alert_shadow_log (ts, pipeline, n_events, message) VALUES (?,?,?,?)",
-                (now, pipeline, len(grp), _batch_text(pipeline, grp)))
+                "INSERT INTO alert_shadow_log (ts, pipeline, n_events, message, tier) "
+                "VALUES (?,?,?,?,?)",
+                (now, pipeline, len(grp), _batch_text(pipeline, grp), tier))
         if shadow_rows:
             con.execute("DELETE FROM alert_queue WHERE shadow=1 AND ts <= ?", (cutoff,))
 
@@ -263,6 +323,88 @@ def drain(db_path=None, now=None, force=False) -> int:
         return sent
     except Exception as ex:  # noqa: BLE001 — drain bugs must not kill the tick task
         print(f"[dispatch] drain error: {ex}", flush=True)
+        try:
+            con.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
+    finally:
+        try:
+            con.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _is_noise(row) -> bool:
+    """True for no-edge tier-3 rows that are pure heartbeat (no actionable
+    signal). 2026-08-24: filtered from digest body, counted in summary only."""
+    msg = row["message"] or ""
+    return "no PM gap" in msg
+
+
+def drain_digest(db_path=None, now=None) -> int:
+    """2x-daily digest flusher (plan Change 3; cron 10:00 / 23:30 ET). Flushes
+    ALL non-shadow tier-3 rows regardless of age as ONE combined message with a
+    section per pipeline. Deliberately NOT drain(force=True) — that would also
+    flush tier-2 batches early and break their 15-min semantics. At-least-once:
+    rows are deleted only after the send returns ok.
+
+    2026-08-24: 'no PM gap' noise rows are counted in the summary header but
+    excluded from the detail body — every line in the digest is now actionable.
+    When there are zero signal rows, a one-line heartbeat is sent instead of an
+    empty body."""
+    path = Path(db_path) if db_path else DB_PATH
+    if now is None:
+        now = time.time()
+    elif isinstance(now, datetime):
+        now = now.timestamp()
+    now = int(now)
+    try:
+        con = _connect(path)
+    except Exception as ex:  # noqa: BLE001
+        print(f"[dispatch] digest connect failed: {ex}", flush=True)
+        return 0
+    try:
+        _ensure_tables(con)
+        if not _begin_immediate(con):
+            return 0  # a peer holds the DB — the next cron slot retries
+        rows = con.execute(
+            "SELECT * FROM alert_queue WHERE shadow=0 AND tier=? ORDER BY pipeline, ts",
+            (TIER_DIGEST,)).fetchall()
+        con.commit()
+        if not rows:
+            return 0
+
+        noise_rows = [r for r in rows if _is_noise(r)]
+        signal_rows = [r for r in rows if not _is_noise(r)]
+        n_total = len(rows)
+        n_noise = len(noise_rows)
+        n_signal = len(signal_rows)
+
+        label = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%b %d %H:%M UTC")
+
+        if not signal_rows:
+            # Heartbeat only — system alive, nothing actionable.
+            header = (f"📊 Digest — {label} — {n_total} events | "
+                      f"{n_noise} noise | 0 signals\n"
+                      f"(No actionable edges this window. System watching.)")
+            if alert_openclaw(header, parse_mode=None):
+                _delete_ids(con, [r["id"] for r in rows])
+                return 1
+            return 0
+
+        # Summary header + detail sections for signal rows only.
+        header = (f"📊 Digest — {label} — {n_total} events | "
+                  f"{n_noise} noise | {n_signal} signals")
+        sections = [header]
+        for pipeline, grp in groupby(signal_rows, key=lambda r: r["pipeline"]):
+            sections.append(_batch_text(pipeline, list(grp)))
+        if alert_openclaw("\n\n".join(sections), parse_mode=None):
+            _delete_ids(con, [r["id"] for r in rows])
+            return 1
+        return 0
+    except Exception as ex:  # noqa: BLE001 — digest bugs must not kill the cron
+        print(f"[dispatch] digest error: {ex}", flush=True)
         try:
             con.rollback()
         except Exception:  # noqa: BLE001

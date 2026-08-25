@@ -31,8 +31,10 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent
 META_DB_PATH = BASE_DIR / "storage" / "whale_meta.db"
-CLOB_REST_URL = "https://clob.polymarket.com/orderbook"
-CLOB_MARKETS_URL = "https://clob.polymarket.com/markets"
+from config.polymarket_urls import clob_url  # polyproxy: central URL config
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
+CLOB_REST_URL = clob_url("/orderbook")  # proxied when POLYPROXY_BASE set
+CLOB_MARKETS_URL = clob_url("/markets")
 
 # Thresholds
 MIN_RESTING_USD = 5000.0  # $5K minimum to be a "large" resting order
@@ -104,8 +106,8 @@ def _get_whale_active_markets(meta) -> list:
 def _resolve_token_id(market_slug: str) -> Optional[str]:
     """Resolve a Polymarket slug to a CLOB token ID via Gamma API."""
     # Gamma API is the reliable way to resolve slugs to token IDs
-    gamma_url = f"https://gamma-api.polymarket.com/markets?slug={market_slug}"
-    gamma_data = _fetch_json(gamma_url)
+    gamma_request_url = gamma_url(f"/markets?slug={market_slug}")
+    gamma_data = _fetch_json(gamma_request_url)
     if gamma_data:
         # Gamma can return a list (multiple) or a dict (single market)
         if isinstance(gamma_data, dict):

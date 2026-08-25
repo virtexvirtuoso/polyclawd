@@ -240,7 +240,8 @@ def check_kill_rules(title: str, entry_price: float, side: str, signal_archetype
 def _load_resolved_trades() -> list:
     """Load all resolved trades from DB for WR calculation."""
     try:
-        db = sqlite3.connect(str(DB_PATH))
+        db = sqlite3.connect(str(DB_PATH), timeout=15)
+        db.execute("PRAGMA busy_timeout=8000")
         db.row_factory = sqlite3.Row
 
         trades = []

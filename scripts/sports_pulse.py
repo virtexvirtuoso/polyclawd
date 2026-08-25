@@ -12,16 +12,16 @@ import hashlib, json, re, sqlite3, sys, time, urllib.request, urllib.parse, os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from config.polymarket_urls import GAMMA_API as GAMMA  # polyproxy: central URL config
 
 # ── Config ────────────────────────────────────────────────────────────────────
 API         = "http://127.0.0.1:8420"
-GAMMA       = "https://gamma-api.polymarket.com"
+
 DB_PATH     = "/var/www/virtuosocrypto.com/polyclawd/storage/shadow_trades.db"
 WATCH_PATH  = "/var/www/virtuosocrypto.com/polyclawd/storage/watch_list.json"
 WC_EVENT_ID = "30615"
 TG_CHAT_ID  = "468298295"
 CONVERGENCE_LOOKBACK_HOURS = 8
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -55,11 +55,9 @@ def _get(url: str, timeout: int = 12) -> Optional[dict | list]:
             print(f"[WARN] GET {url[:80]} failed: {e}", file=sys.stderr)
         return None
 
-
 def _api(path: str, **params) -> Optional[dict | list]:
     qs = ("?" + urllib.parse.urlencode(params)) if params else ""
     return _get(f"{API}{path}{qs}")
-
 
 def _c(price: float) -> str:
     """Format 0–1 price as cents string."""
@@ -70,14 +68,12 @@ def _c(price: float) -> str:
         return f"{cents:.1f}¢"
     return f"{int(round(cents))}¢"
 
-
 def _usd(n: float) -> str:
     if n >= 1_000_000:
         return f"${n/1_000_000:.1f}M"
     if n >= 1_000:
         return f"${n/1_000:.0f}K"
     return f"${n:.0f}"
-
 
 def _pnl_str(entry: float, current: float, usd_in: float) -> str:
     """Compute paper P&L for a YES position: shares × (current - entry)."""
@@ -88,17 +84,14 @@ def _pnl_str(entry: float, current: float, usd_in: float) -> str:
     sign = "+" if pnl >= 0 else ""
     return f"{sign}{_usd(pnl)}"
 
-
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
-
 def _db() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
-
+    return sqlite3.connect(DB_PATH, timeout=15)
+    conn.execute("PRAGMA busy_timeout=8000")
 
 # ── Data fetchers ──────────────────────────────────────────────────────────────
-
 
 def fetch_recent_results(hours: int = 36, tag_slug: str = "fifa-world-cup") -> list[dict]:
     """
@@ -184,7 +177,6 @@ def fetch_wc_outrights(top_n: int = 8) -> list[dict]:
     results.sort(key=lambda x: -x["price"])
     return results[:top_n]
 
-
 def fetch_hot_markets(limit: int = 8) -> list[dict]:
     """Top markets by 24h volume — direct from Gamma API only."""
     gamma_url = (f"{GAMMA}/markets?active=true&closed=false&limit=10"
@@ -215,7 +207,6 @@ def fetch_hot_markets(limit: int = 8) -> list[dict]:
 
     return filtered
 
-
 def fetch_whale_flow(limit: int = 25) -> tuple[list[dict], list[dict]]:
     """Returns (live_flow, resolved_flow) — separated by market status."""
     now = _now_utc()
@@ -245,7 +236,6 @@ def fetch_whale_flow(limit: int = 25) -> tuple[list[dict], list[dict]]:
         (resolved if is_resolved else live).append(a)
 
     return live, resolved
-
 
 def fetch_resolving_today() -> list[dict]:
     """Markets closing in the next 24h — pulled directly from Gamma API."""
@@ -288,7 +278,6 @@ def fetch_resolving_today() -> list[dict]:
     results.sort(key=lambda x: x["end_date"])
     return results[:8]
 
-
 def fetch_convergences(hours: int = CONVERGENCE_LOOKBACK_HOURS) -> list[dict]:
     """Recent smart wallet convergences from DB, with market titles."""
     cutoff = int(time.time()) - hours * 3600
@@ -327,7 +316,6 @@ def fetch_convergences(hours: int = CONVERGENCE_LOOKBACK_HOURS) -> list[dict]:
 
     return results
 
-
 def _gamma_price(slug_or_condition: str) -> Optional[float]:
     """Fetch current YES price for a PM market."""
     if slug_or_condition.startswith("0x"):
@@ -342,7 +330,6 @@ def _gamma_price(slug_or_condition: str) -> Optional[float]:
             pass
     return None
 
-
 def _kalshi_price(ticker: str) -> tuple[Optional[float], str]:
     """Fetch current Kalshi YES price.
     Returns (price, status) where status is 'ok' | 'illiquid' | 'not_found'.
@@ -356,7 +343,6 @@ def _kalshi_price(ticker: str) -> tuple[Optional[float], str]:
     # Returned a response but no bids — market exists but is illiquid
     return None, "illiquid"
 
-
 def load_watch_list() -> dict:
     """Load watch_list.json — gracefully handle missing file."""
     try:
@@ -367,7 +353,6 @@ def load_watch_list() -> dict:
     except Exception as e:
         print(f"[WARN] watch_list.json load failed: {e}", file=sys.stderr)
         return {"positions": [], "arbs": [], "wallets": []}
-
 
 def grade_positions(positions: list[dict]) -> list[dict]:
     """Fetch live prices and compute P&L for each watched position."""
@@ -395,7 +380,6 @@ def grade_positions(positions: list[dict]) -> list[dict]:
 
     return graded
 
-
 def grade_arbs(arbs: list[dict]) -> list[dict]:
     """Fetch live prices for tracked arbs and compute current spread."""
     graded = []
@@ -421,7 +405,6 @@ def grade_arbs(arbs: list[dict]) -> list[dict]:
 
     return graded
 
-
 # ── Formatting ─────────────────────────────────────────────────────────────────
 
 def _fmt_ago(ago_min: int) -> str:
@@ -430,7 +413,6 @@ def _fmt_ago(ago_min: int) -> str:
     h = ago_min // 60
     m = ago_min % 60
     return f"{h}h{m:02d}m ago" if m else f"{h}h ago"
-
 
 def _fmt_time_et(iso: str) -> str:
     if not iso:
@@ -443,7 +425,6 @@ def _fmt_time_et(iso: str) -> str:
     except Exception:
         return iso[:16]
 
-
 def _convergence_tier(ago_min: int, n_wallets: int) -> str:
     """Signal quality tier based on recency and wallet count."""
     if ago_min < 5 and n_wallets >= 3:
@@ -453,7 +434,6 @@ def _convergence_tier(ago_min: int, n_wallets: int) -> str:
     if ago_min < 30:
         return "🟡 Broad"
     return "📊 Gradual"
-
 
 def format_pulse(
     recent_results: list,
@@ -672,7 +652,6 @@ def format_pulse(
 
     return "\n".join(lines)
 
-
 def _derive_actions(wc, convergences, arbs, whale_live) -> list[str]:
     """Heuristic action derivation from live data."""
     actions = []
@@ -710,7 +689,6 @@ def _derive_actions(wc, convergences, arbs, whale_live) -> list[str]:
         actions.append("No high-conviction action items at this time")
 
     return actions
-
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -792,7 +770,6 @@ def main():
         else:
             print("[skip] status unchanged since last send (kv state hash)", file=sys.stderr)
 
-
 # ── Status change detection (Task 4.2, 2026-07-16 alert overhaul) ────────────
 # Skip the send when the report (timestamps stripped) hashes identically to the
 # last sent one. Hash lives in a kv row in shadow_trades.db — restart-proof,
@@ -804,21 +781,17 @@ _TS_STRIP_RE = re.compile(
     r"|[A-Z][a-z]{2} \d{1,2}, \d{4}"                   # Jul 16, 2026
 )
 
-
 def _normalize_for_hash(text: str) -> str:
     return _TS_STRIP_RE.sub("", text or "")
-
 
 def _status_hash(text: str) -> str:
     return hashlib.sha256(_normalize_for_hash(text).encode()).hexdigest()
 
-
 def _kv_conn(db_path=None) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path or DB_PATH), timeout=10)
+    conn = sqlite3.connect(str(db_path or DB_PATH), timeout=15)
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
     return conn
-
 
 def should_send_status(text: str, db_path=None, now=None) -> bool:
     """False only when the normalized report matches the stored hash AND we are
@@ -842,7 +815,6 @@ def should_send_status(text: str, db_path=None, now=None) -> bool:
         return True
     return row is None or row[0] != _status_hash(text)
 
-
 def record_status_sent(text: str, db_path=None) -> None:
     """Persist the hash of a successfully composed+sent report. Best-effort."""
     try:
@@ -857,7 +829,6 @@ def record_status_sent(text: str, db_path=None) -> None:
             conn.close()
     except Exception as e:
         print(f"[WARN] status-hash store failed: {e}", file=sys.stderr)
-
 
 def _send_telegram(text: str):
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -883,7 +854,6 @@ def _send_telegram(text: str):
         except Exception as e:
             print(f"[ERROR] TG send failed: {e}", file=sys.stderr)
         time.sleep(0.5)
-
 
 if __name__ == "__main__":
     main()

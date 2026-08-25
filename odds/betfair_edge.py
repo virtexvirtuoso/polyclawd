@@ -2,6 +2,7 @@
 Betfair Exchange Edge Finder
 Compares Betfair Exchange odds (via The Odds API) with Polymarket
 """
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 
 import requests
 import asyncio
@@ -27,6 +28,8 @@ class BetfairEdge:
     edge_pct: Optional[float]
     direction: Optional[str]
     poly_market_id: Optional[str] = None
+    no_price: Optional[float] = None   # PM NO ask (1 - YES bid), executable
+    liquidity: Optional[float] = None  # PM market liquidity (USD)
 
 
 def decimal_to_prob(price: float) -> float:
@@ -73,7 +76,7 @@ def _fetch_polymarket_sync() -> dict:
     """Fetch Polymarket events"""
     try:
         resp = requests.get(
-            "https://gamma-api.polymarket.com/events", params={"closed": "false", "limit": "300"}, timeout=30
+            gamma_url("/events"), params={"closed": "false", "limit": "300"}, timeout=30
         )
         return resp.json() if resp.status_code == 200 else []
     except Exception as e:
@@ -91,7 +94,7 @@ SPORT_MAPPINGS = {
     "mma_mixed_martial_arts": {"polymarket_search": "UFC", "sport_name": "UFC"},
     "tennis_atp_french_open": {"polymarket_search": "French Open", "sport_name": "Tennis"},
     "tennis_atp_wimbledon": {"polymarket_search": "Wimbledon", "sport_name": "Tennis"},
-    "politics_us_presidential_election_winner": {"polymarket_search": "President", "sport_name": "Politics"},
+    "politics_us_presidential_election_winner": {"polymarket_search": "Presidential Election Winner", "sport_name": "Politics"},
 }
 
 # Team name normalization
@@ -114,8 +117,8 @@ def normalize_name(name: str) -> list[str]:
     return [name]
 
 
-def find_polymarket_price(selection: str, poly_events: list, search_term: str) -> tuple[Optional[float], Optional[str]]:
-    """Find matching Polymarket price for a selection"""
+def find_polymarket_price(selection: str, poly_events: list, search_term: str) -> tuple[Optional[dict], Optional[str]]:
+    """Find matching Polymarket market for a selection. Returns (market_dict, market_id)."""
     selection_variations = normalize_name(selection)
 
     for event in poly_events:
@@ -125,13 +128,16 @@ def find_polymarket_price(selection: str, poly_events: list, search_term: str) -
 
         for market in event.get("markets", []):
             question = market.get("question", "")
-            price = market.get("bestAsk", 0)
             market_id = market.get("id", "")
+
+            # Skip nomination markets when comparing general election odds
+            if "nomination" in question.lower() or "nominee" in title:
+                continue
 
             # Check if selection matches
             for var in selection_variations:
                 if var.lower() in question.lower():
-                    return (float(price) if price else None, market_id)
+                    return (market, market_id)
 
     return (None, None)
 
@@ -178,18 +184,43 @@ async def find_betfair_edges(sports: list[str] = None, min_edge: float = 0.02) -
 
                         betfair_prob = decimal_to_prob(price)
 
-                        # Find Polymarket match
-                        poly_price, market_id = find_polymarket_price(
+                        # Find Polymarket match (full market dict for liquidity + NO price)
+                        market, market_id = find_polymarket_price(
                             selection, poly_events, mapping["polymarket_search"]
                         )
 
                         edge = None
                         direction = None
+                        poly_price = None
+                        no_price = None
+                        liquidity = None
 
-                        if poly_price and poly_price > 0:
-                            edge = betfair_prob - poly_price
-                            if abs(edge) >= min_edge:
-                                direction = "BUY" if edge > 0 else "SELL"
+                        if market:
+                            yes_ask = market.get("bestAsk")
+                            yes_bid = market.get("bestBid")
+                            liquidity = market.get("liquidity")
+                            try:
+                                yes_ask = float(yes_ask) if yes_ask else None
+                                yes_bid = float(yes_bid) if yes_bid else None
+                                liquidity = float(liquidity) if liquidity else None
+                            except (TypeError, ValueError):
+                                yes_ask = yes_bid = liquidity = None
+
+                            # Executable NO ask = 1 - YES bid (what you pay to buy NO)
+                            if yes_bid is not None:
+                                no_price = 1.0 - yes_bid
+
+                            # Spread-aware executable edge, both sides:
+                            #   BUY YES edge = betfair_prob - yes_ask  (pay ask)
+                            #   BUY NO  edge = yes_bid - betfair_prob  (pay 1-bid)
+                            if yes_ask is not None and betfair_prob > yes_ask:
+                                edge = betfair_prob - yes_ask
+                                direction = "BUY YES"
+                                poly_price = yes_ask
+                            elif yes_bid is not None and betfair_prob < yes_bid:
+                                edge = yes_bid - betfair_prob
+                                direction = "BUY NO"
+                                poly_price = no_price
 
                         if edge is not None and abs(edge) >= min_edge:
                             event_name = (
@@ -206,6 +237,8 @@ async def find_betfair_edges(sports: list[str] = None, min_edge: float = 0.02) -
                                     edge_pct=edge,
                                     direction=direction,
                                     poly_market_id=market_id,
+                                    no_price=no_price,
+                                    liquidity=liquidity,
                                 )
                             )
 

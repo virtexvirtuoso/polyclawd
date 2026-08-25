@@ -20,6 +20,8 @@ from typing import Dict, List, Optional, Any
 import re
 
 from loguru import logger
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
+from config.polymarket_urls import CLOB_API  # polyproxy: central URL config
 
 # Paths (mirrors shadow_tracker.py)
 BASE_DIR = Path(__file__).parent.parent
@@ -27,26 +29,21 @@ STORAGE_DIR = BASE_DIR / "storage"
 DB_PATH = STORAGE_DIR / "shadow_trades.db"
 
 # Polymarket APIs
-GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API = "https://clob.polymarket.com"
 
 # Rate limiting: 0.5s between CLOB calls (public endpoint, no auth required)
 RATE_DELAY = 0.5
 
-
 # ─── DB Init ─────────────────────────────────────────────────────────
-
 
 def get_db() -> sqlite3.Connection:
     """Get SQLite connection (WAL mode, shared with shadow_tracker)."""
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     _init_tables(conn)
     return conn
-
 
 def _init_tables(conn: sqlite3.Connection):
     """Create baseball_forecast_log table if not exists."""
@@ -79,9 +76,7 @@ def _init_tables(conn: sqlite3.Connection):
     except sqlite3.OperationalError:
         pass  # Column already exists
 
-
 # ─── Polymarket API Calls ────────────────────────────────────────────
-
 
 def _fetch_json(url: str, params: dict = None, timeout: int = 10) -> Optional[Any]:
     """Fetch JSON from a URL with User-Agent. Returns None on failure."""
@@ -98,7 +93,6 @@ def _fetch_json(url: str, params: dict = None, timeout: int = 10) -> Optional[An
         logger.debug(f"baseball_resolver fetch failed: {url[:60]} - {e}")
         return None
 
-
 def _get_resolved_baseball_events() -> List[Dict]:
     """Fetch resolved baseball events from Polymarket Gamma API.
 
@@ -114,7 +108,6 @@ def _get_resolved_baseball_events() -> List[Dict]:
     if not isinstance(data, list):
         return []
     return [e for e in data if " vs. " in (e.get("title", "") or "")]
-
 
 def _get_moneyline_outcome(event: Dict) -> Optional[str]:
     """Extract the winning outcome from a resolved game event's moneyline market.
@@ -156,7 +149,6 @@ def _get_moneyline_outcome(event: Dict) -> Optional[str]:
         return None
     return None
 
-
 def _check_clob_resolution(condition_id: str) -> Optional[str]:
     """Check CLOB API for definitive resolution of a condition.
     Returns 'YES', 'NO', or None if unresolved.
@@ -179,9 +171,7 @@ def _check_clob_resolution(condition_id: str) -> Optional[str]:
                 return "NO"
     return None
 
-
 # ─── Shadow Trade Matching ───────────────────────────────────────────
-
 
 def _get_unresolved_baseball_trades(conn: sqlite3.Connection) -> List[Dict]:
     """Get all unresolved shadow trades with baseball strategy."""
@@ -199,9 +189,7 @@ def _get_unresolved_baseball_trades(conn: sqlite3.Connection) -> List[Dict]:
     except sqlite3.OperationalError:
         return []
 
-
 # ─── Resolution Logic ────────────────────────────────────────────────
-
 
 def _find_matching_event(
     shadow_trade: Dict, event_by_market_id: Dict, resolved_events: List[Dict]
@@ -230,7 +218,6 @@ def _find_matching_event(
                 return event
     return None
 
-
 def _extract_teams_from_title(title: str) -> tuple:
     """Extract (team_a, team_b) from a game title."""
     if not title:
@@ -240,13 +227,10 @@ def _extract_teams_from_title(title: str) -> tuple:
         return (parts[0].strip(), parts[1].strip())
     return ("", "")
 
-
 # ─── Main Resolution Scan ────────────────────────────────────────────
-
 
 def _norm_name(s: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", (s or "").lower()).strip()
-
 
 def _names_match(a: str, b: str) -> bool:
     """Loose team/outcome match: exact, containment, or shared last token
@@ -258,7 +242,6 @@ def _names_match(a: str, b: str) -> bool:
         return True
     return na.split()[-1] == nb.split()[-1]
 
-
 def _parse_bet(market_str: str):
     """('<bet_label>', '<market_type>') from the shadow 'market' text
     '<title> — <bet_label> <Moneyline|Spread|Total>'. bet_label is a team
@@ -269,7 +252,6 @@ def _parse_bet(market_str: str):
     mt = m.group(1).lower() if m else "moneyline"
     label = re.sub(r"\s+(Moneyline|Spread|Total)$", "", part).strip()
     return label, mt
-
 
 def score_baseball_trade(market_str: str, side: str, entry_price: float, winner_name: str):
     """Pure scorer. side 'YES'=BUY, 'NO'=SELL. winner_name = the winning Polymarket
@@ -286,7 +268,6 @@ def score_baseball_trade(market_str: str, side: str, entry_price: float, winner_
     eff_entry = p if is_buy else (1.0 - p)        # price of the token actually held
     pnl = (1.0 - eff_entry) if bet_won else -eff_entry
     return (1 if bet_won else 0), round(pnl, 4)
-
 
 def _clob_winner(market_id: str):
     """(winner_name, winner_index) for a closed/resolved market, else None (open)."""
@@ -305,7 +286,6 @@ def _clob_winner(market_id: str):
             pass
     return None
 
-
 def _capture_clv_mid(market_id: str) -> Optional[float]:
     """Fetch the current YES midpoint from CLOB for CLV tracking.
     Returns the YES mid price (0-1) or None on failure."""
@@ -320,7 +300,6 @@ def _capture_clv_mid(market_id: str) -> Optional[float]:
         return float(tokens[0].get("price", 0))
     except (ValueError, TypeError, IndexError):
         return None
-
 
 def scan_resolved_baseball_games(batch_size: int = 200) -> Dict[str, Any]:
     """Resolve unresolved baseball shadow trades (moneyline/spread/total) against
@@ -423,9 +402,7 @@ def scan_resolved_baseball_games(batch_size: int = 200) -> Dict[str, Any]:
         )
     return result
 
-
 # ─── CLI ─────────────────────────────────────────────────────────────
-
 
 if __name__ == "__main__":
     import logging as builtin_logging

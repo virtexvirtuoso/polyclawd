@@ -9,6 +9,7 @@ COMPREHENSIVE FETCHING:
 - Fetches ALL markets via /markets endpoint with pagination  
 - Specifically discovers entertainment/sports props (Super Bowl, halftime, Grammy, Oscar, etc.)
 """
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 
 import requests
 import asyncio
@@ -428,7 +429,7 @@ def _fetch_polymarket_sync() -> List[dict]:
     """Fetch Polymarket events"""
     try:
         resp = requests.get(
-            "https://gamma-api.polymarket.com/events",
+            gamma_url("/events"),
             params={"closed": "false", "limit": "500"},
             timeout=30
         )

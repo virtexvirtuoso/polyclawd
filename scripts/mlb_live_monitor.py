@@ -12,9 +12,25 @@ NOTE: Does NOT handle stop-loss/take-profit — that belongs to ingame_monitor.p
 
 Cron: */5 * * * * (filter to game hours in deployment)
 State: storage/shadow_trades.db (auto-migrated tables)
+
+FIELD FRESHNESS CONVENTION (2026-08-23):
+  Every field in an alert is either LIVE (changes during the game) or STATIC
+  (fixed pre-game). A STATIC field must NEVER be presented as live in-game
+  state. Rules:
+    - LIVE fields (score, on-mound pitcher, Vegas line, PM price) must come
+      from a source that updates in real time (ESPN situation.pitcher, Odds
+      API in-play odds, PM CLOB BBO).
+    - STATIC fields (probables/starters, lineups, pre-game odds) must be
+      labeled as such ("Probable starters") or overridden by a live source
+      once the game is in progress.
+    - When adding a new alert field, ask: "does this change during the
+      game?" If yes, it must be fetched live, not from a pre-game snapshot.
+  Origin: 2026-08-23 on-mound bug — alert showed pre-game starters (Rodon/
+  Soriano) in the 6th inning. Fixed by reading ESPN situation.pitcher.
 """
 
 from __future__ import annotations
+from config.polymarket_urls import clob_url, gamma_url  # polyproxy: central URL config
 
 import json
 import os
@@ -22,8 +38,9 @@ import socket
 import sqlite3
 import sys
 import time
-import urllib.request
 import urllib.parse
+
+import requests
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,13 +50,15 @@ BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
 from odds.monitor_gate import gated_fetch_json, LIVE_BOOKS
 
-from scripts.alert_formatter import send_telegram
+from scripts.alert_formatter import format_grid, send_telegram
+from signals.alert_dispatch import TIER_CRITICAL, TIER_DIGEST, dispatch
+from signals.alert_governor import Leg, govern, purge_stale
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ESPN_MLB       = "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard"
-POLY_EVENTS    = "https://gamma-api.polymarket.com/events"
+POLY_EVENTS    = gamma_url("/events")
 ODDS_API_BASE  = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/"
-CLOB_BOOK      = "https://clob.polymarket.com/book"
+CLOB_BOOK      = clob_url("/book")
 
 ODDS_API_KEY   = os.environ.get("ODDS_API_KEY", "")
 LINE_DRIFT_PP  = 8.0     # pp shift to fire drift alert (MLB swings more than soccer)
@@ -49,8 +68,21 @@ BLOWOUT_LATE_DIFF = 4
 WHALE_SIZE     = 30000   # CLOB book wall threshold (lower liquidity than WC)
 WHALE_DEDUP_S  = 1800    # suppress re-alert for same wall within 30 min
 EDGE_FLOOR     = 0.02    # close shadow trade if edge drops below 2pp
-PM_GAP_PP      = 6.0     # min pp gap between PM and Vegas to flag in alerts
+PM_GAP_PP      = 15.0    # min pp gap between PM and Vegas to flag in alerts (raised 6→15 2026-08-23: 6-15pp is PM-lag/spread noise, not a confirmed edge; real signals were 16-19pp)
 PM_STALE_PP    = 35.0    # gap above this = Endgame MM not active / no live in-game liquidity
+# Vegas-tier EV filter (2026-08-23, from edge_calibration): the BUY-side edge is
+# regime-dependent. Buying cheap underdogs (<40% Vegas) = +15pp EV; buying
+# favorites (>60%) = +9.3pp EV; the middle (40-60%) is NEGATIVE EV (-6 to -10pp).
+# Only fire signals in the +EV tiers. VEGAS_UNDERDOG_MAX / VEGAS_FAVORITE_MIN are
+# the Vegas devig probability bounds that define the +EV regimes.
+VEGAS_UNDERDOG_MAX = 0.40   # Vegas prob below this = +EV underdog buy
+VEGAS_FAVORITE_MIN = 0.60   # Vegas prob above this = +EV favorite buy
+
+
+def _in_positive_ev_tier(vegas_prob: float) -> bool:
+    """True if a Vegas devig prob is in a +EV regime (underdog <40% or favorite >60%).
+    The 40-60% middle is negative EV per edge_calibration and is suppressed."""
+    return vegas_prob < VEGAS_UNDERDOG_MAX or vegas_prob > VEGAS_FAVORITE_MIN
 RUN_ALERT_COOLDOWN_MIN = 45  # per-game run-trigger TG cooldown while edge signature unchanged (92 sends/day on 2026-07-05 without it)
 
 DB_PATH  = BASE_DIR / "storage" / "shadow_trades.db"
@@ -199,9 +231,11 @@ def _get(url: str, params: Optional[dict] = None, timeout: int = 12) -> Optional
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "polyclawd/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode())
+        # requests, not urllib: ESPN's edge 403s Python's urllib TLS fingerprint
+        # (silent outage Aug 4-16 2026; urllib3's handshake passes)
+        r = requests.get(url, headers={"User-Agent": "polyclawd/1.0"}, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
     except Exception as e:
         print(f"[mlb_monitor] GET {url[:70]} → {e}", flush=True)
         return None
@@ -270,8 +304,46 @@ def _nmatch(a: str, b: str) -> bool:
 
 
 # ── ESPN ──────────────────────────────────────────────────────────────────────
+ESPN_STALE_ALERT_AFTER = 6 * 3600   # page if no successful scoreboard fetch for 6h
+ESPN_ALERT_COOLDOWN    = 24 * 3600  # at most one page per day
+
+
+def _espn_health(ok: bool) -> None:
+    """Staleness alarm for the scoreboard feed. State lives in the DB, not
+    memory — scheduler restarts must not reset the clock. Born from the
+    Aug 4-16 2026 outage: ESPN 403'd urllib for 12 days and every poll
+    printed a routine "No active games" with nobody paged."""
+    try:
+        conn = sqlite3.connect(str(DB_PATH), timeout=15)
+        conn.execute("CREATE TABLE IF NOT EXISTS espn_fetch_health ("
+                     "source TEXT PRIMARY KEY, last_ok_ts INTEGER, last_alert_ts INTEGER)")
+        now = int(time.time())
+        if ok:
+            conn.execute(
+                "INSERT INTO espn_fetch_health (source, last_ok_ts, last_alert_ts) "
+                "VALUES ('mlb_scoreboard', ?, 0) "
+                "ON CONFLICT(source) DO UPDATE SET last_ok_ts=excluded.last_ok_ts", (now,))
+        else:
+            row = conn.execute("SELECT last_ok_ts, last_alert_ts FROM espn_fetch_health "
+                               "WHERE source='mlb_scoreboard'").fetchone()
+            if row is None:
+                conn.execute("INSERT INTO espn_fetch_health VALUES ('mlb_scoreboard', ?, 0)", (now,))
+            elif now - row[0] > ESPN_STALE_ALERT_AFTER and now - row[1] > ESPN_ALERT_COOLDOWN:
+                hours = (now - row[0]) // 3600
+                dispatch("mlb_scanner_health",
+                         f"🚨 MLB monitor blind: no successful ESPN scoreboard fetch for {hours}h — "
+                         f"in-game alerts (direct + shadow) are NOT flowing.", TIER_CRITICAL)
+                conn.execute("UPDATE espn_fetch_health SET last_alert_ts=? "
+                             "WHERE source='mlb_scoreboard'", (now,))
+        conn.commit()
+        conn.close()
+    except Exception as ex:  # noqa: BLE001 — health check must never block the poll
+        print(f"[mlb_monitor] espn health check failed: {ex}", flush=True)
+
+
 def fetch_espn_games() -> List[Dict]:
     data = _get(ESPN_MLB)
+    _espn_health(data is not None)
     if not data:
         return []
     games = []
@@ -293,10 +365,18 @@ def fetch_espn_games() -> List[Dict]:
             hs = as_ = 0
             home_pitcher = away_pitcher = ""
 
+            # Map team.id -> (homeAway, displayName) so we can attribute the
+            # live on-mound pitcher (situation.pitcher) to the right side.
+            team_id_to_side = {}
+            for c in comp.get("competitors", []):
+                tid = c.get("team", {}).get("id")
+                if tid:
+                    team_id_to_side[str(tid)] = c.get("homeAway")
+
             for c in comp.get("competitors", []):
                 name = c.get("team", {}).get("displayName", "")
                 score = int(c.get("score", 0) or 0)
-                # Pitcher from probables list
+                # Pitcher from probables list (pre-game starters)
                 pitcher = ""
                 for p in c.get("probables", []):
                     pitcher = p.get("athlete", {}).get("displayName", "")
@@ -306,6 +386,21 @@ def fetch_espn_games() -> List[Dict]:
                     home, hs, home_pitcher = name, score, pitcher
                 else:
                     away, as_, away_pitcher = name, score, pitcher
+
+            # In-progress: the probables list is the PRE-GAME starters and never
+            # updates. Override with the LIVE on-mound pitcher from
+            # situation.pitcher so the alert shows who is actually pitching now.
+            if status == "in":
+                sit = comp.get("situation", {}) or {}
+                on_mound = (sit.get("pitcher") or {}).get("athlete") or {}
+                on_mound_name = on_mound.get("displayName", "")
+                on_mound_team = str((on_mound.get("team") or {}).get("id", ""))
+                if on_mound_name and on_mound_team in team_id_to_side:
+                    side = team_id_to_side[on_mound_team]
+                    if side == "home":
+                        home_pitcher = on_mound_name
+                    else:
+                        away_pitcher = on_mound_name
 
             if home and away:
                 gid = f"{home.lower().replace(' ', '_')}_{away.lower().replace(' ', '_')}"
@@ -347,11 +442,19 @@ def fetch_pinnacle(home: str, away: str) -> Optional[Dict[str, float]]:
                 if mkt["key"] != "h2h":
                     continue
                 valid = [o for o in mkt["outcomes"] if o.get("price", 0) and o["price"] > 1.0]
-                if len(valid) < 2:
+                # COMPLETE outcome set required (2026-08-21). `len(valid) < 2`
+                # let a 3-way soccer market be devigged from only 2 outcomes:
+                # the pair then normalises to 1.0, inflating BOTH by the missing
+                # outcome's share (~25pp on soccer) — 4x the 6pp trigger. The
+                # old `total < 0.5` guard does not catch it: 2 of 3 outcomes
+                # sums to ~0.78 with vig and passes.
+                if len(valid) < 2 or len(valid) != len(mkt["outcomes"]):
                     continue
                 raw = {o["name"]: 1.0 / o["price"] for o in valid}
                 total = sum(raw.values())
-                if total < 0.5:
+                # Raw implied probabilities must sum to 1 + vig. Outside a sane
+                # band the book's prices are malformed, stale or incomplete.
+                if not (0.95 <= total <= 1.50):
                     continue
                 devigged = {k: v / total for k, v in raw.items()}
                 upd = mkt.get("last_update", bm.get("last_update", ""))
@@ -749,7 +852,18 @@ def check_run_trigger(conn: sqlite3.Connection, game: Dict,
 
     if hp or ap:
         lines.append("")
-        lines.append(f"On the mound: <b>{hp or '?'}</b> vs <b>{ap or '?'}</b>")
+        if game.get("status") == "in":
+            # In-progress: only the live on-mound pitcher is accurate. The
+            # other side's probable is stale (starter already out), so don't
+            # fabricate a matchup.
+            if hp and ap:
+                lines.append(f"On the mound: <b>{hp}</b> ({home}) vs <b>{ap}</b> ({away})")
+            elif hp:
+                lines.append(f"On the mound: <b>{hp}</b> ({home})")
+            elif ap:
+                lines.append(f"On the mound: <b>{ap}</b> ({away})")
+        else:
+            lines.append(f"Probable starters: <b>{hp or '?'}</b> vs <b>{ap or '?'}</b>")
 
     if pin:
         lines.append("")
@@ -760,6 +874,7 @@ def check_run_trigger(conn: sqlite3.Connection, game: Dict,
 
     trade_signals: List[str] = []
     signal_keys: List[str] = []
+    signal_legs: List[Leg] = []
     if tokens and pin:
         lines.append("")
         lines.append("Is Polymarket keeping up?")
@@ -780,9 +895,15 @@ def check_run_trigger(conn: sqlite3.Connection, game: Dict,
             elif abs(gap) >= PM_GAP_PP:
                 direction = "cheaper" if gap > 0 else "pricier"
                 action = "BUY" if gap > 0 else "SELL"
-                lines.append(f"  ⚠️ <b>{name} wins</b>: Polymarket {poly_p:.0%}  ← <b>{abs(gap):.0f}pts {direction} than Vegas</b>")
-                trade_signals.append(f"→ <b>{action} {name} wins YES</b> at {poly_p:.0%}  (Vegas: {pin_p:.0%})")
-                signal_keys.append(f"{action}:{name}")
+                # Vegas-tier EV filter (2026-08-23): only fire in +EV regimes.
+                # The 40-60% middle is negative EV per edge_calibration.
+                if not _in_positive_ev_tier(pin_p):
+                    lines.append(f"  ⏸ <b>{name} wins</b>: Polymarket {poly_p:.0%}  (gap {abs(gap):.0f}pts but mid-tier {pin_p:.0%} — negative EV, suppressed)")
+                else:
+                    lines.append(f"  ⚠️ <b>{name} wins</b>: Polymarket {poly_p:.0%}  ← <b>{abs(gap):.0f}pts {direction} than Vegas</b>")
+                    trade_signals.append(f"→ <b>{action} {name} wins YES</b> at {poly_p:.0%}  (Vegas: {pin_p:.0%})")
+                    signal_keys.append(f"{action}:{name}")
+                    signal_legs.append(Leg(name, abs(gap), action))
             else:
                 lines.append(f"  ✅ <b>{name} wins</b>: Polymarket {poly_p:.0%}  (matches Vegas)")
 
@@ -802,35 +923,34 @@ def check_run_trigger(conn: sqlite3.Connection, game: Dict,
     # Runs and pitcher changes are still tracked in DB snapshots above
     if not trade_signals and not walls_found:
         event = "Pitcher change" if pitcher_changed and not score_changed else "Run"
+        # LIVE (Gate 2 completed 2026-08-20): the no-edge remainder feeds the
+        # tier-3 digest instead of vanishing silently.
+        try:
+            dispatch("run_scored", f"{event}: {home} {hs}–{as_} {away}",
+                     TIER_DIGEST)
+        except Exception as ex:  # noqa: BLE001 — digest must never block
+            print(f"[mlb_monitor] digest dispatch failed: {ex}", flush=True)
         print(f"[mlb_monitor] {event} {home} {hs}-{as_} {away} — no edge/wall, suppressed", flush=True)
         return
 
-    # Per-game cooldown: an in-play PM/Vegas gap persists across runs, so without
-    # this every run scored re-alerts the same edge (92 sends on 2026-07-05).
-    # Edge signature changes (flip/new team) alert immediately.
-    signature = "|".join(sorted(signal_keys))
-    srow = conn.execute(
-        "SELECT last_sent_ts, last_signature FROM mlb_run_alert_state WHERE game_id=?",
-        (gid,),
-    ).fetchone()
-    if srow and srow["last_signature"] == signature:
-        try:
-            age_min = (datetime.now(timezone.utc)
-                       - datetime.fromisoformat(srow["last_sent_ts"])).total_seconds() / 60.0
-        except (TypeError, ValueError):
-            age_min = RUN_ALERT_COOLDOWN_MIN
-        if age_min < RUN_ALERT_COOLDOWN_MIN:
-            print(f"[mlb_monitor] Run alert suppressed (same edge, cooldown "
-                  f"{age_min:.0f}m/{RUN_ALERT_COOLDOWN_MIN}m) {home} {hs}-{as_} {away}", flush=True)
-            return
+    # Escalation-aware dedup (alert_governor): suppresses the same edge state,
+    # fires instantly on gap widening >=5pp / direction flip / new leg. Replaces
+    # the plain 45-min signature cooldown (92 sends on 2026-07-05 incident).
+    # Governor state is seeded from mlb_run_alert_state on first run (C4).
+    verdict = govern("mlb_run", gid, signal_legs)
+    if not verdict.should_send:
+        print(f"[mlb_monitor] Run alert governed ({','.join(verdict.reasons) or 'same-state'}) "
+              f"{home} {hs}-{as_} {away}", flush=True)
+        return
 
-    send_telegram("\n".join(lines))
+    send_telegram(verdict.decorate("\n".join(lines)))
+    # Legacy state kept in sync as a rollback path (no longer gates anything).
     conn.execute(
         "INSERT OR REPLACE INTO mlb_run_alert_state (game_id, last_sent_ts, last_signature) VALUES (?, ?, ?)",
-        (gid, datetime.now(timezone.utc).isoformat(), signature),
+        (gid, datetime.now(timezone.utc).isoformat(), "|".join(sorted(signal_keys))),
     )
     conn.commit()
-    print(f"[mlb_monitor] Run/pitcher alert: {home} {hs}-{as_} {away}", flush=True)
+    print(f"[mlb_monitor] Run/pitcher alert ({verdict.action}): {home} {hs}-{as_} {away}", flush=True)
 
 
 # ── Alert 2: Line Drift ───────────────────────────────────────────────────────
@@ -904,36 +1024,43 @@ def check_line_drift(conn: sqlite3.Connection, game: Dict,
         return
 
     score_line = f"{home} <b>{hs}–{as_}</b> {away}  ({detail})  <i>{fired_ts}</i>"
+    trade_signals: List[str] = []
+    grid_rows: List[list] = []
+    comparison_lines: List[str] = []
+
+    for d in outcome_data:
+        sym = "↑" if d["move"] > 0 else "↓"
+        moved = abs(d["move"]) >= LINE_DRIFT_PP
+        move_str = f"{sym}{abs(d['move']):.0f}pts" if moved else f"{d['move']:+.0f}pts"
+        label = f"{d['name']} wins"
+        grid_rows.append([label, f"{d['prev']:.0%}", f"{d['now']:.0%}", move_str])
+
+        if d["poly"] is not None and d["gap"] is not None:
+            if abs(d["gap"]) >= PM_STALE_PP:
+                comparison_lines.append(f"<b>{label}</b>: Polymarket {d['poly']:.0%}  ⏸ stale — Endgame not active")
+            elif abs(d["gap"]) >= PM_GAP_PP:
+                direction = "cheaper" if d["gap"] > 0 else "pricier"
+                action = "BUY" if d["gap"] > 0 else "SELL"
+                # Vegas-tier EV filter (2026-08-23): only fire in +EV regimes.
+                if not _in_positive_ev_tier(d["now"]):
+                    comparison_lines.append(f"<b>{label}</b>: Polymarket {d['poly']:.0%}  (gap {abs(d['gap']):.0f}pts but mid-tier {d['now']:.0%} — negative EV, suppressed)")
+                else:
+                    comparison_lines.append(f"<b>{label}</b>: Polymarket {d['poly']:.0%}  ← <b>{abs(d['gap']):.0f}pts {direction} than Vegas</b>")
+                    trade_signals.append(f"→ <b>{action} {label} YES</b> at {d['poly']:.0%}  (Vegas: {d['now']:.0%})")
+            else:
+                comparison_lines.append(f"<b>{label}</b>: Polymarket {d['poly']:.0%}  (in line)")
+        else:
+            comparison_lines.append(f"<b>{label}</b>: Polymarket —")
+
     lines = [
         f"⚡ <b>ODDS MOVED</b> — MLB | {score_line}",
         "",
         "Vegas shifted big:",
         "",
+        format_grid(["Outcome", "Prev", "Now", "Move"], grid_rows),
+        "",
     ]
-    trade_signals: List[str] = []
-
-    for d in outcome_data:
-        sym = "↑" if d["move"] > 0 else "↓"
-        moved = abs(d["move"]) >= LINE_DRIFT_PP
-        move_tag = f"  <b>{sym}{abs(d['move']):.0f}pts</b>" if moved else f"  {d['move']:+.0f}pts"
-        label = f"{d['name']} wins"
-
-        lines.append(f"<b>{label}</b>")
-        lines.append(f"   {d['prev']:.0%} → <b>{d['now']:.0%}</b>{move_tag}")
-
-        if d["poly"] is not None and d["gap"] is not None:
-            if abs(d["gap"]) >= PM_STALE_PP:
-                lines.append(f"   Polymarket: {d['poly']:.0%}  ⏸ stale — Endgame not active")
-            elif abs(d["gap"]) >= PM_GAP_PP:
-                direction = "cheaper" if d["gap"] > 0 else "pricier"
-                action = "BUY" if d["gap"] > 0 else "SELL"
-                lines.append(f"   Polymarket: {d['poly']:.0%}  ← <b>{abs(d['gap']):.0f}pts {direction} than Vegas</b>")
-                trade_signals.append(f"→ <b>{action} {label} YES</b> at {d['poly']:.0%}  (Vegas: {d['now']:.0%})")
-            else:
-                lines.append(f"   Polymarket: {d['poly']:.0%}  (in line)")
-        else:
-            lines.append(f"   Polymarket: —")
-        lines.append("")
+    lines.extend(comparison_lines)
 
     if trade_signals:
         lines.append("━━━━━━━━━━━━━━━━")
@@ -945,7 +1072,8 @@ def check_line_drift(conn: sqlite3.Connection, game: Dict,
         for d in outcome_data:
             signal = None
             if d["poly"] is not None and d["gap"] is not None \
-               and abs(d["gap"]) >= PM_GAP_PP and abs(d["gap"]) < PM_STALE_PP:
+               and abs(d["gap"]) >= PM_GAP_PP and abs(d["gap"]) < PM_STALE_PP \
+               and _in_positive_ev_tier(d["now"]):
                 signal = "BUY" if d["gap"] > 0 else "SELL"
             conn.execute(
                 """INSERT INTO mlb_odds_moved_log
@@ -960,8 +1088,33 @@ def check_line_drift(conn: sqlite3.Connection, game: Dict,
     except Exception as ex:
         print(f"[mlb_monitor] odds_moved_log write failed: {ex}", flush=True)
 
-    send_telegram("\n".join(lines))
-    print(f"[mlb_monitor] Line drift alert: {gid}", flush=True)
+    # Escalation-aware dedup (alert_governor) — drift had NO cooldown before
+    # (3x Orioles/Royals sends in 10min at burst cadence, 2026-07-10). Magnitude
+    # is the current devig LEVEL in pp so cumulative walks >=5pp re-fire as
+    # upgrades; same-level re-reads suppress. Score deliberately NOT in state (C2).
+    drift_legs = [Leg(d["name"], d["now"] * 100, "up" if d["move"] > 0 else "down")
+                  for d in outcome_data if abs(d["move"]) >= LINE_DRIFT_PP]
+    verdict = govern("mlb_line_drift", gid, drift_legs)
+    if not verdict.should_send:
+        print(f"[mlb_monitor] Line drift governed ({','.join(verdict.reasons) or 'same-state'}): {gid}", flush=True)
+        return
+
+    # LIVE (Gate 2 completed 2026-08-20): a Vegas move with no Polymarket gap
+    # is not a decision — it goes to the tier-3 digest, not Telegram.
+    # NOTE: the early return is load-bearing. Dropping shadow=True without it
+    # would deliver the same event twice (digest + the direct send below).
+    if not trade_signals:
+        try:
+            dispatch("odds_moved",
+                     f"{home} {hs}–{as_} {away} — Vegas moved, no PM gap",
+                     TIER_DIGEST)
+        except Exception as ex:  # noqa: BLE001 — digest must never block
+            print(f"[mlb_monitor] digest dispatch failed: {ex}", flush=True)
+        print(f"[mlb_monitor] Line drift {gid} — no PM gap, digested", flush=True)
+        return
+
+    send_telegram(verdict.decorate("\n".join(lines)))
+    print(f"[mlb_monitor] Line drift alert ({verdict.action}): {gid}", flush=True)
 
 
 # ── Alert 3: Edge Inversion ───────────────────────────────────────────────────
@@ -1019,6 +1172,13 @@ def check_edge_inversion(conn: sqlite3.Connection, game: Dict,
                 f"Vegas <b>{int(round(pin_prob*100))}%</b>\n"
                 f"\n{verdict}\n{rec}"
             )
+            # Governor guards the two-process race (burst + tick both reading the
+            # open trade before either commits close_reason): once per trade, ever.
+            verdict = govern("mlb_edge_inversion", f"trade:{row['id']}",
+                             [Leg(reason, abs(current_edge * 100), reason)])
+            if not verdict.should_send:
+                print(f"[mlb_monitor] Edge inversion governed: {row['id']}", flush=True)
+                continue
             send_telegram(msg)
             print(f"[mlb_monitor] Edge inversion: {row['id']} {reason}", flush=True)
 
@@ -1033,6 +1193,7 @@ def main() -> None:
 
     if not active:
         print("[mlb_monitor] No active games.", flush=True)
+        purge_stale()  # governor housekeeping (blind spot #8) — cheap, off-slate only
         conn.close()
         return
 

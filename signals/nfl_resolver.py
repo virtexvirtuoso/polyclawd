@@ -9,6 +9,7 @@ Runs on the 30min scheduler tick during NFL season.
 """
 
 from __future__ import annotations
+from config.polymarket_urls import CLOB_API  # polyproxy: central URL config
 
 import json
 import sqlite3
@@ -21,8 +22,6 @@ from loguru import logger
 
 BASE_DIR = Path(__file__).parent.parent
 DB_PATH = BASE_DIR / "storage" / "shadow_trades.db"
-CLOB_API = "https://clob.polymarket.com"
-
 
 def _fetch_json(url: str, timeout: int = 10):
     try:
@@ -32,9 +31,8 @@ def _fetch_json(url: str, timeout: int = 10):
     except Exception:
         return None
 
-
 def _get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
@@ -47,14 +45,12 @@ def _get_conn() -> sqlite3.Connection:
             pass
     return conn
 
-
 def _clv(side: str, entry_price: float, closing_yes_mid: Optional[float]) -> Optional[float]:
     if closing_yes_mid is None or entry_price is None:
         return None
     held_close = closing_yes_mid if (side or "YES").upper() == "YES" else (1.0 - closing_yes_mid)
     held_entry = entry_price if (side or "YES").upper() == "YES" else (1.0 - entry_price)
     return round(held_close - held_entry, 4) if held_entry > 0 else None
-
 
 def scan_resolved_nfl_trades() -> dict:
     """Resolve NFL shadow trades via CLOB + capture CLV."""
@@ -144,7 +140,6 @@ def scan_resolved_nfl_trades() -> dict:
     conn.commit()
     conn.close()
     return result
-
 
 if __name__ == "__main__":
     r = scan_resolved_nfl_trades()

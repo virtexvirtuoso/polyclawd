@@ -19,6 +19,8 @@ from typing import Dict, List, Optional
 import httpx
 
 from odds.edge_math import net_arb_edge
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
+from config.polymarket_urls import CLOB_API  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +33,6 @@ except ImportError:
     HAS_RESILIENT = False
 
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
-GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API = "https://clob.polymarket.com"
 
 # Thresholds
 MIN_SPREAD_PCT = 2       # Minimum spread in pp — even tight arbs are useful signals
@@ -53,7 +53,6 @@ STOPWORDS = {
     'which', 'who', 'whom', 'yes', 'no',
 }
 
-
 def _tokenize(text: str) -> List[str]:
     """Extract meaningful tokens from market title."""
     text = text.lower()
@@ -61,7 +60,6 @@ def _tokenize(text: str) -> List[str]:
     text = re.sub(r'[$,]', '', text)
     tokens = re.findall(r'[a-z]+|[0-9]+', text)
     return [t for t in tokens if t not in STOPWORDS and len(t) > 1]
-
 
 def _cosine_similarity(tokens_a: List[str], tokens_b: List[str]) -> float:
     """Simple TF-based cosine similarity between two token lists."""
@@ -80,7 +78,6 @@ def _cosine_similarity(tokens_a: List[str], tokens_b: List[str]) -> float:
     if mag_a == 0 or mag_b == 0:
         return 0.0
     return dot / (mag_a * mag_b)
-
 
 def _extract_subject(title: str) -> str:
     """Extract the core subject/entity from a market title for matching validation.
@@ -114,7 +111,6 @@ def _extract_subject(title: str) -> str:
     parts = sorted(entities) + sorted(n for n in names if len(n) > 3) + sorted(numbers)
     return " ".join(parts).lower() if parts else ""
 
-
 def _question_type(title: str) -> str:
     """Classify the question type to prevent matching different question kinds."""
     t = title.lower()
@@ -145,7 +141,6 @@ def _question_type(title: str) -> str:
         return "who_will"
     
     return "general"
-
 
 def _subjects_compatible(title_a: str, title_b: str, subj_a: str, subj_b: str) -> bool:
     """Check if two markets are about the same thing AND asking the same question.
@@ -186,7 +181,6 @@ def _subjects_compatible(title_a: str, title_b: str, subj_a: str, subj_b: str) -
     
     return True
 
-
 def _fetch_json(url: str, params: dict = None, timeout: int = 15, source_name: str = None) -> Optional[dict]:
     """Fetch JSON with error handling and optional resilient wrapper."""
     def _do_fetch():
@@ -203,7 +197,6 @@ def _fetch_json(url: str, params: dict = None, timeout: int = 15, source_name: s
     except Exception as e:
         logger.warning(f"Fetch failed {url}: {e}")
         return None
-
 
 def fetch_kalshi_active(limit: int = 500) -> List[Dict]:
     """Fetch active Kalshi markets via events endpoint (has nested markets with volume)."""
@@ -256,7 +249,6 @@ def fetch_kalshi_active(limit: int = 500) -> List[Dict]:
     
     logger.info(f"Kalshi: fetched {len(markets)} active markets with volume")
     return markets
-
 
 def fetch_polymarket_active(limit: int = 200) -> List[Dict]:
     """Fetch active Polymarket markets with decent volume."""
@@ -330,7 +322,6 @@ def fetch_polymarket_active(limit: int = 200) -> List[Dict]:
                     seen.add(mid)
     
     return markets
-
 
 def find_arb_opportunities(
     kalshi_markets: List[Dict],
@@ -502,7 +493,6 @@ def find_arb_opportunities(
 
     return result
 
-
 def _arb_to_shadow_signal(opp: dict) -> dict:
     """Map a cross-platform arb opportunity -> directional buy-leg shadow signal.
 
@@ -528,7 +518,6 @@ def _arb_to_shadow_signal(opp: dict) -> dict:
             f"vs {opp.get('sell_platform')})"
         ),
     }
-
 
 def scan_cross_platform_arb() -> Dict:
     """Main entry point: fetch markets from both platforms and find arb opportunities."""
@@ -607,7 +596,6 @@ def scan_cross_platform_arb() -> Dict:
     _cache["data"] = result
     _cache["timestamp"] = now
     return result
-
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

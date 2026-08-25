@@ -7,6 +7,7 @@ import json, os, sys, time
 from datetime import date, datetime, timezone
 from pathlib import Path
 import requests
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -393,7 +394,7 @@ def print_recon(og, lineup, pbm):
     # Use team city/nickname words (>4 chars) to match event titles
     away_words = [w for w in away_team.split() if len(w) > 4]
     home_words = [w for w in home_team.split() if len(w) > 4]
-    events = _fetch("https://gamma-api.polymarket.com/events?tag_slug=baseball&limit=100&closed=false")
+    events = _fetch(gamma_url("/events?tag_slug=baseball&limit=100&closed=false"))
     found = False
     if events:
         event_list = events if isinstance(events, list) else events.get("data", [])

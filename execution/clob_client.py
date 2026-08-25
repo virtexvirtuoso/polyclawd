@@ -87,6 +87,7 @@ Side strings are plain "BUY" / "SELL".
 """
 
 from __future__ import annotations
+from config.polymarket_urls import clob_url  # polyproxy: central URL config
 
 import logging
 import os
@@ -222,8 +223,8 @@ def _open_order_to_dict(order) -> dict:
 #
 # The production VPS's DEFAULT route egresses in Singapore, a jurisdiction
 # Polymarket blocks. Only traffic whose destination IP falls inside the
-# `proton-ie` WireGuard tunnel's AllowedIPs actually reaches Polymarket from
-# Ireland. Polymarket sits behind Cloudflare and rotates IPs. On 2026-08-19
+# `proton-my` WireGuard tunnel's AllowedIPs actually reaches Polymarket from
+# Kuala Lumpur. Polymarket sits behind Cloudflare and rotates IPs. On 2026-08-19
 # 12:49Z the single live order attempt failed with "Trading restricted in
 # your region ... /CLOB/geoblock" because relayer-v2.polymarket.com (the
 # host the SDK posts ORDERS to) had rotated to an IP outside the tunnel. A
@@ -263,7 +264,7 @@ def assert_egress_tunneled() -> None:
     """Fail closed if order traffic would leave via the geo-blocked default route.
 
     Active only when POLYCLAWD_EGRESS_REQUIRE_SRC is set (e.g. "10.2.0.2", the
-    proton-ie tunnel source address). Unset => guard inactive, so dev machines
+    proton-my tunnel source address). Unset => guard inactive, so dev machines
     and tests are unaffected. Raises ClobError when a checked host would egress
     from an unexpected source address.
     """
@@ -299,7 +300,7 @@ def get_tick_size(token_id: str) -> float:
     0.1, 0.01, 0.001, 0.0001.
     """
     resp = _requests.get(
-        "https://clob.polymarket.com/tick-size",
+        clob_url("/tick-size"),
         params={"token_id": token_id},
         timeout=10,
     )

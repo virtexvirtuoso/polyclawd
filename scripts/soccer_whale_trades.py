@@ -13,6 +13,7 @@ soccer game outcome. Dedup by transaction hash stored in sqlite.
 """
 
 from __future__ import annotations
+from config.polymarket_urls import POLYMARKET_DATA_API as DATA_API  # polyproxy: central URL config
 
 import json
 import os
@@ -25,6 +26,7 @@ import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
@@ -36,8 +38,7 @@ from scripts.whale_thresholds import TRADE_FLOOR
 TRADE_WHALE_USDC  = TRADE_FLOOR["soccer"]  # 0k — data-driven floor (2026-06-19 study)
 NEAR_SETTLED_HI   = 0.90   # suppress alerts when YES >= 90% (near-resolved)
 NEAR_SETTLED_LO   = 0.10   # suppress alerts when YES <= 10% (near-resolved)
-DATA_API          = "https://data-api.polymarket.com"
-GAMMA_API         = "https://gamma-api.polymarket.com"
+
 # data-api global feed: 500 trades ≈ 9s at current PM volume.
 # We paginate until we've covered POLL_LOOKBACK_S seconds of trades (≥ our 60s tick).
 POLL_LOOKBACK_S   = 90      # cover 1.5x the tick interval to avoid edge gaps
@@ -53,7 +54,6 @@ def get_db() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=8000")
     return conn
-
 
 def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript("""
@@ -73,7 +73,6 @@ def migrate(conn: sqlite3.Connection) -> None:
     """)
     conn.commit()
 
-
 # ── HTTP ──────────────────────────────────────────────────────────────────────
 def _get(url: str, params: Optional[dict] = None, timeout: int = 12) -> Optional[object]:
     if params:
@@ -85,7 +84,6 @@ def _get(url: str, params: Optional[dict] = None, timeout: int = 12) -> Optional
     except Exception as e:
         print(f"[soccer_whale_trades] GET {url[:70]} → {e}", flush=True)
         return None
-
 
 # ── Memcached (sync raw protocol) ────────────────────────────────────────────
 def _mc_get(key: str, timeout: float = 0.4) -> Optional[bytes]:
@@ -110,7 +108,6 @@ def _mc_get(key: str, timeout: float = 0.4) -> Optional[bytes]:
     except Exception:
         return None
 
-
 def _mc_set(key: str, value: str, exptime: int = 600, timeout: float = 0.4) -> None:
     try:
         payload = value.encode()
@@ -123,7 +120,6 @@ def _mc_set(key: str, value: str, exptime: int = 600, timeout: float = 0.4) -> N
     except Exception:
         pass
 
-
 def mc_get_trade(token_id: str) -> Optional[Dict]:
     """Read last trade from WS memcached store."""
     raw = _mc_get(f"poly:trade:{token_id}")
@@ -133,7 +129,6 @@ def mc_get_trade(token_id: str) -> Optional[Dict]:
         return json.loads(raw)
     except Exception:
         return None
-
 
 def mc_register_tokens(token_ids: List[str]) -> None:
     """Register tokens with the WS service (adds to poly:ws:registered)."""
@@ -150,7 +145,6 @@ def mc_register_tokens(token_ids: List[str]) -> None:
     merged = list(cur)[:500]
     _mc_set("poly:ws:registered", json.dumps(merged), exptime=600)
 
-
 # ── Token resolution ──────────────────────────────────────────────────────────
 def _nmatch(a: str, b: str) -> bool:
     a, b = a.lower().strip(), b.lower().strip()
@@ -165,7 +159,6 @@ def _nmatch(a: str, b: str) -> bool:
         if alias in b or b in alias:
             return True
     return False
-
 
 def get_tokens_for_game(conn: sqlite3.Connection, game_id: str,
                         home: str, away: str) -> Dict[str, Tuple[str, str]]:
@@ -239,7 +232,6 @@ def get_tokens_for_game(conn: sqlite3.Connection, game_id: str,
 
     return tokens
 
-
 # ── Trade fetching ────────────────────────────────────────────────────────────
 def get_live_ws_trade(token_id: str) -> Optional[Dict]:
     """Read most recent trade from WS memcached — None if not streaming."""
@@ -254,7 +246,6 @@ def get_live_ws_trade(token_id: str) -> Optional[Dict]:
         "timestamp": int(float(t.get("ts", 0) or 0) / 1000),  # ms → s
         "source": "ws",
     }
-
 
 def get_global_trades(watched_tokens: set, since_ts: int = 0) -> List[Dict]:
     """Poll data-api global trade feed, filter to our watched tokens.
@@ -303,7 +294,6 @@ def get_global_trades(watched_tokens: set, since_ts: int = 0) -> List[Dict]:
             break
 
     return out
-
 
 # ── Main logic ────────────────────────────────────────────────────────────────
 def run() -> None:
@@ -449,7 +439,6 @@ def run() -> None:
     print(f"[soccer_whale_trades] Alerted {len(alerted)} whale trade(s)", flush=True)
     conn.close()
 
-
 def _fire_alert(home: str, away: str, outcome: str, direction: str,
                 size_usdc: float, price: float, price_note: str,
                 lag: str, game_meta: Optional[Dict] = None) -> None:
@@ -469,7 +458,6 @@ def _fire_alert(home: str, away: str, outcome: str, direction: str,
     lines.append(f"💵 <b>{direction} {outcome}</b> — ${size_usdc:,.0f} @ {price_note}")
     send_telegram("\n".join(lines))
     print(f"[soccer_whale_trades] Alert: {outcome} {direction} ${size_usdc:,.0f}@{price:.0%} ({lag})", flush=True)
-
 
 if __name__ == "__main__":
     run()

@@ -38,11 +38,14 @@ def _telegram_http_send(message: str, silent: bool = False, parse_mode: Optional
         "text": message,
         "disable_notification": "true" if silent else "false",
     }
-    if parse_mode:  # omit entirely for plain text (avoids 400 on stray _ / * in data)
-        fields["parse_mode"] = parse_mode
-    payload = urllib.parse.urlencode(fields).encode()
 
-    def _attempt() -> tuple:
+    def _payload(with_parse: bool) -> bytes:
+        f = dict(fields)
+        if with_parse and parse_mode:  # omit entirely for plain text (avoids 400 on stray _ / * in data)
+            f["parse_mode"] = parse_mode
+        return urllib.parse.urlencode(f).encode()
+
+    def _attempt(payload: bytes) -> tuple:
         try:
             req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=payload)
             with urllib.request.urlopen(req, timeout=15) as resp:
@@ -65,13 +68,25 @@ def _telegram_http_send(message: str, silent: bool = False, parse_mode: Optional
             print(f"[OpenClaw] telegram HTTP send failed: {e}")
             return False, f"err:{e}"
 
-    ok, err = _attempt()
-    if not ok and _is_transient(err):
-        # ONE inline retry only (decision D2): durable retries belong to the
-        # dispatch queue, not sleeps — this runs in an executor thread, and
-        # long backoffs would starve the finite thread pool.
-        time.sleep(5)
-        ok, err = _attempt()
+    def _send(payload: bytes) -> tuple:
+        ok, err = _attempt(payload)
+        if not ok and _is_transient(err):
+            # ONE inline retry only (decision D2): durable retries belong to the
+            # dispatch queue, not sleeps — this runs in an executor thread, and
+            # long backoffs would starve the finite thread pool.
+            time.sleep(5)
+            ok, err = _attempt(payload)
+        return ok, err
+
+    ok, err = _send(_payload(True))
+    if not ok and parse_mode and err.startswith("http_400") and "can't parse entities" in err:
+        # Deterministic formatting 400 (unescaped < / _ / * in dynamic content):
+        # deliver plain rather than drop (plan §6 step 10 — was ~5% of sends).
+        # The degraded marker keeps the caller's formatting bug visible in the
+        # ledger without counting as a delivery failure.
+        ok, err = _send(_payload(False))
+        if ok:
+            err = "degraded:entity_400_plain_fallback"
     return ok, err
 
 
@@ -110,7 +125,9 @@ def _ledger_log(ok: bool, channel: str, parse_mode, msg_len: int, err: str = "")
         pass
 
 
-def alert_openclaw(message: str, channel: str = "telegram", silent: bool = False, parse_mode: Optional[str] = None) -> bool:
+def alert_openclaw(
+    message: str, channel: str = "telegram", silent: bool = False, parse_mode: Optional[str] = None
+) -> bool:
     """Ledger-wrapped sender: records every delivery attempt (with failure
     reason), then returns only the boolean result — the public signature is
     frozen (9 pipelines call it). Messages over the Telegram limit are split

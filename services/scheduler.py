@@ -31,6 +31,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 os.chdir(PROJECT_ROOT)
 
 from services import task_state
+from db import connect as db_connect
 
 DB_PATH = PROJECT_ROOT / "storage" / "shadow_trades.db"
 HEALTH_URL = "http://127.0.0.1:8420/health"
@@ -68,7 +69,7 @@ _state = {
 # ============================================================================
 
 def _db():
-    conn = sqlite3.connect(str(DB_PATH), timeout=15)
+    conn = db_connect(str(DB_PATH))
     conn.execute("PRAGMA busy_timeout=8000")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -374,7 +375,7 @@ def _milestone_already_sent(strategy: str) -> bool:
     Backfilled as ALREADY-SENT for any strategy present in the historical
     alerts ledger, so the 2026-08-21 repair cannot replay old milestones."""
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = db_connect(str(DB_PATH))
         conn.execute("CREATE TABLE IF NOT EXISTS scheduler_kv (k TEXT PRIMARY KEY, v TEXT)")
         row = conn.execute("SELECT v FROM scheduler_kv WHERE k=?",
                            (f"milestone_sent:{strategy}",)).fetchone()
@@ -387,7 +388,7 @@ def _milestone_already_sent(strategy: str) -> bool:
 
 def _mark_milestone_sent(strategy: str) -> None:
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = db_connect(str(DB_PATH))
         conn.execute("CREATE TABLE IF NOT EXISTS scheduler_kv (k TEXT PRIMARY KEY, v TEXT)")
         conn.execute("INSERT OR REPLACE INTO scheduler_kv (k, v) VALUES (?, ?)",
                      (f"milestone_sent:{strategy}", str(int(time.time()))))
@@ -408,7 +409,7 @@ def task_stop_silence_alarm(db_path=None, now=None):
     process memory. Healthy = silent."""
     path = str(db_path or DB_PATH)
     now_ts = int(now if now is not None else time.time())
-    conn = sqlite3.connect(path)
+    conn = db_connect(path)
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=5000")
@@ -1137,7 +1138,7 @@ def task_smart_wallet_resolve():
     from scripts.smart_wallet_alert import (SHADOW_DB, init_shadows,
                                             resolve_shadows,
                                             settle_via_market_resolution)
-    conn = sqlite3.connect(str(SHADOW_DB))
+    conn = db_connect(str(SHADOW_DB))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000")
     try:
@@ -2147,7 +2148,7 @@ def task_db_maintenance():
 
     # VACUUM in separate connection (can't run inside transaction)
     try:
-        conn2 = sqlite3.connect(str(DB_PATH), timeout=15)
+        conn2 = db_connect(str(DB_PATH))
         conn2.execute("PRAGMA busy_timeout=5000")
         conn2.execute("VACUUM")
         conn2.close()

@@ -12,6 +12,7 @@ import logging
 import time
 import urllib.request
 import json
+from config.polymarket_urls import data_url, gamma_url  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,7 @@ def _try_redeem_position(market_id: str, position_id: int) -> str:
         return f"error:{exc}"
 
 _DEPOSIT_WALLET = "0xa495c42d60521ee28e1da237c0bab560d5095777"
-_PM_POSITIONS_URL = f"https://data-api.polymarket.com/positions?user={_DEPOSIT_WALLET}&sizeThreshold=0.01"
+_PM_POSITIONS_URL = data_url(f"/positions?user={_DEPOSIT_WALLET}&sizeThreshold=0.01")
 
 
 def _fetch_pm_positions() -> list[dict]:
@@ -123,7 +124,7 @@ def _fetch_pm_positions() -> list[dict]:
 def _fetch_gamma_market(market_id: str) -> dict:
     """Fetch a single market from Gamma API to check resolution."""
     try:
-        url = f"https://gamma-api.polymarket.com/markets/{market_id}"
+        url = gamma_url(f"/markets/{market_id}")
         req = urllib.request.Request(url, headers={"User-Agent": "polyclawd/1.0"})
         with urllib.request.urlopen(req, timeout=8) as r:
             return json.loads(r.read().decode()) or {}
@@ -158,7 +159,7 @@ def _fetch_redeem_payouts() -> "dict[str, float] | None":
     condition can never inherit the winning outcome's payout.
     None = activity feed unreachable (caller must skip the heuristic)."""
     try:
-        url = f"https://data-api.polymarket.com/activity?user={_DEPOSIT_WALLET}&limit=500"
+        url = data_url(f"/activity?user={_DEPOSIT_WALLET}&limit=500")
         req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
         acts = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
         if not isinstance(acts, list):
@@ -197,7 +198,7 @@ _FILL_DRIFT_ALERT_COOLDOWN_S = 3600
 def _fetch_trade_activity_usd(since_ts: int) -> tuple:
     """(count, total_usd) of TRADE rows in wallet activity newer than since_ts.
     Raises on failure — caller decides how to degrade."""
-    url = f"https://data-api.polymarket.com/activity?user={_DEPOSIT_WALLET}&limit=500"
+    url = data_url(f"/activity?user={_DEPOSIT_WALLET}&limit=500")
     req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
     acts = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
     if not isinstance(acts, list):
@@ -394,7 +395,12 @@ def check_resolutions(conn) -> list[dict]:
             result_emoji = "🏆"
             result_label = "WIN"
         else:
-            pnl = round(-cost_usd, 4)
+            # Entry fees are tracked separately from cost_usd (record_real_fill
+            # stores cost_usd = notional, fee_paid_total = fees), so a total loss
+            # costs the basis PLUS the fees paid to acquire it. The WIN branch
+            # above and the redeem branch both deduct fee_total; this branch
+            # omitted it, understating every resolution-loss by the entry fee.
+            pnl = round(-cost_usd - fee_total, 4)
             exit_price = 0.0
             result_emoji = "💀"
             result_label = "LOSS"
@@ -688,9 +694,43 @@ def run() -> dict:
             gov.set_bankroll(true_bankroll)
             # Also sync deployed_usd so governor cap math reflects manual positions
             gov.set_deployed(deployed)
+
+            # ── Rule 2 (DAILY_HALT) inputs ──────────────────────────────────
+            # Neither field had ANY production caller before this block:
+            # record_realized_loss() and set_unrealized_loss() were dead code,
+            # so the governor evaluated 0.00 + 0.00 >= threshold every cycle and
+            # the daily-loss circuit breaker could never fire. Both are derived
+            # from the ledger here rather than accumulated, so repeated syncs
+            # are idempotent.
+            from execution.live_position_tracker import (
+                realized_loss_today,
+                realized_pnl_from_ledger,
+                unrealized_loss_from_snapshot,
+            )
+            ledger_realized, _ = realized_pnl_from_ledger(conn)
+            daily_loss = realized_loss_today(conn)
+            unrealized_loss = unrealized_loss_from_snapshot(conn)
+
+            gov.set_realized_pnl(ledger_realized)
+            gov.set_unrealized_loss(unrealized_loss)
+
+            # Day boundary: daily_loss is DERIVED from positions closed since
+            # UTC midnight, so it self-zeroes overnight. reset_day() has no
+            # other caller anywhere in the tree, so without this the FIRST trip
+            # would become a permanent unattended halt.
+            if (gov.state() == "DAILY_HALT"
+                    and daily_loss + unrealized_loss < live_config.daily_loss_halt()):
+                logger.info("position_sync: clearing stale DAILY_HALT "
+                            "(daily_loss $%.2f + unrealized $%.2f < limit $%.2f)",
+                            daily_loss, unrealized_loss, live_config.daily_loss_halt())
+                gov.reset_day()
+            gov.set_daily_loss(daily_loss)
+
             gov_conn.close()
-            logger.info("position_sync: bankroll synced → $%.2f (liquid $%.2f + deployed $%.2f)",
-                        true_bankroll, clob_liquid, deployed)
+            logger.info("position_sync: bankroll synced → $%.2f (liquid $%.2f + deployed $%.2f) | "
+                        "realized $%.2f daily_loss $%.2f unrealized_loss $%.2f state %s",
+                        true_bankroll, clob_liquid, deployed,
+                        ledger_realized, daily_loss, unrealized_loss, gov.state())
         except Exception as bk_exc:
             logger.debug("position_sync: bankroll sync failed: %s", bk_exc)
 

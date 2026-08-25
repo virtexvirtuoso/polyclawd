@@ -19,7 +19,8 @@ from __future__ import annotations
 import json
 import os
 import urllib.parse
-import urllib.request
+
+import requests
 from datetime import timedelta
 
 from signals import scorer_resolution as sr
@@ -34,9 +35,10 @@ SOFT = "draftkings,fanduel,betrivers,onexbet,skybet"
 
 
 def _get_json(url, headers=None, timeout=30):
-    req = urllib.request.Request(url, headers={**_UA, **(headers or {})})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode())
+    # requests, not urllib: ESPN's edge 403s Python's urllib TLS fingerprint
+    r = requests.get(url, headers={**_UA, **(headers or {})}, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
 
 
 # ── live odds fetch for the PAPER pipeline scan ──────────────────────────────────

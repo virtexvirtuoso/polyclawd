@@ -25,6 +25,7 @@ from api.deps import get_settings, get_storage_service
 from api.middleware import verify_api_key
 from api.models import TradeRequest, TradeResponse
 from api.services.storage import StorageService
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -33,7 +34,6 @@ logger = logging.getLogger(__name__)
 limiter = Limiter(key_func=get_remote_address)
 
 # Constants
-GAMMA_API = "https://gamma-api.polymarket.com"
 SIMMER_API = "https://api.simmer.markets/api/sdk"
 SIMMER_MAX_TRADE = 100.0
 

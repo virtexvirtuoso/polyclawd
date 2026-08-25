@@ -15,6 +15,7 @@ Polymarket game market structure (from Gamma API, tag_slug=baseball):
 
 Usage:
     from baseball_edge import get_baseball_edge_summary
+from config.polymarket_urls import GAMMA_API as POLYMARKET_GAMMA  # polyproxy: central URL config
     summary = await get_baseball_edge_summary()
 """
 
@@ -64,7 +65,6 @@ except ImportError:
 _LINE_MOVEMENT: Dict[str, Dict] = {}
 _LINE_MOVEMENT_WINDOW = 10800  # 3 hours for movement tracking
 
-
 def _is_stale_game(commence_time: str) -> bool:
     """Check if a game starts in <30min or has already started.
     Returns True if too stale to trade."""
@@ -77,7 +77,6 @@ def _is_stale_game(commence_time: str) -> bool:
         return mins_to_start < 30
     except (ValueError, TypeError):
         return True
-
 
 def _update_line_movement(game_id: str, team: str, best_odds: int, market_type: str = "moneyline") -> Dict:
     """Record a line movement observation and return delta info.
@@ -118,9 +117,6 @@ def _update_line_movement(game_id: str, team: str, best_odds: int, market_type: 
         }
         return {"delta_3h": None, "delta_ticks": 0, "direction": "first_observation"}
 
-
-
-POLYMARKET_GAMMA = "https://gamma-api.polymarket.com"
 DEFAULT_MIN_EDGE = 0.05  # 5%
 
 # Canonical Odds API team name → Polymarket title variants
@@ -157,18 +153,15 @@ MLB_TEAM_ALIASES: Dict[str, List[str]] = {
     "Washington Nationals": ["Washington Nationals", "Nationals"],
 }
 
-
 # MLBEdge is now an alias for sec.Edge (migrated 2026-06-22, blocker B1).
 # sec.Edge has backward-compat properties: .game_title, .bet_team, .odds_api_prob, .polymarket_price
 MLBEdge = sec.Edge
-
 
 def _team_in_title(team: str, title: str) -> bool:
     """Check if a team name or any alias appears in a Polymarket event title."""
     title_lower = title.lower()
     aliases = MLB_TEAM_ALIASES.get(team, [team])
     return any(alias.lower() in title_lower for alias in aliases)
-
 
 def _fetch_polymarket_baseball_sync() -> List[Dict]:
     """Synchronous fetch of Polymarket baseball events (tag_slug=baseball)."""
@@ -184,13 +177,11 @@ def _fetch_polymarket_baseball_sync() -> List[Dict]:
         logger.error(f"Polymarket baseball fetch failed: {e}")
         return []
 
-
 async def get_polymarket_baseball_events() -> List[Dict]:
     """Async wrapper for Polymarket baseball event fetch."""
     loop = asyncio.get_event_loop()
     with ThreadPoolExecutor() as pool:
         return await loop.run_in_executor(pool, _fetch_polymarket_baseball_sync)
-
 
 def _find_matching_event(
     home_team: str, away_team: str, poly_events: List[Dict]
@@ -207,7 +198,6 @@ def _find_matching_event(
         if _team_in_title(home_team, title) and _team_in_title(away_team, title):
             return event
     return None
-
 
 def _extract_moneyline_prices(
     event: Dict, home_team: str, away_team: str
@@ -257,7 +247,6 @@ def _extract_moneyline_prices(
             return price1, price0, market.get("conditionId", market.get("id", ""))
 
     return None
-
 
 def _extract_spread_prices(
     event: Dict, target_team: str, target_point: float
@@ -326,7 +315,6 @@ def _extract_spread_prices(
         return target_cover, opp_cover, market.get("conditionId", market.get("id", ""))
     return None
 
-
 def _extract_total_prices(
     event: Dict, target_point: float
 ) -> Optional[Tuple[float, float, str]]:
@@ -373,7 +361,6 @@ def _extract_total_prices(
         return price0, price1, market.get("conditionId", market.get("id", ""))
     return None
 
-
 def _devig_two_way(odds_a: int, odds_b: int) -> Tuple[float, float]:
     """
     Remove bookmaker vig from a two-outcome market.
@@ -383,7 +370,6 @@ def _devig_two_way(odds_a: int, odds_b: int) -> Tuple[float, float]:
     p_b = _american_to_implied_prob(odds_b)
     total = p_a + p_b
     return p_a / total, p_b / total
-
 
 # ─── Moneyline consensus devig — dedup'd to the shared core ──────────
 # Per-book devig -> weighted consensus now lives in sports_edge_common (one
@@ -398,24 +384,20 @@ def _get_mlb_weights() -> Dict[str, float]:
     except ImportError:
         return {}  # falls back to global BOOK_WEIGHTS inside sec.*
 
-
 def _consensus_devig(game: Dict) -> Dict[str, float]:
     """MLB moneyline true-probs via the shared weighted consensus (2-way)."""
     return sec.consensus_devig_2way(game, "h2h", weights=_get_mlb_weights())
-
 
 def _best_odds_per_team(game: Dict) -> Dict[str, int]:
     """Raw h2h odds from the highest-weighted book with both teams (display /
     line-movement only). Delegates to the shared core."""
     return sec.consensus_best_odds(game, "h2h", weights=_get_mlb_weights())
 
-
 # _best_spreads / _best_totals removed: spreads & totals now use per-book weighted
 # consensus via sec.consensus_devig_spreads / sec.consensus_devig_totals (see the
 # SPREADS / TOTALS blocks in find_baseball_edges). The old best-of-all helpers
 # cherry-picked the most favorable line per side across books, collapsing the
 # overround and manufacturing phantom edges.
-
 
 async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdge]:
     """
@@ -551,7 +533,6 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
                     ))
                 _update_line_movement(game_id, label.replace(" ", ""), american_odds, "total")
 
-
     # --- Executable-edge enrichment. Midpoint edge above is vs Polymarket's
     # last/mid price; the executable price is the ask walked to size. (P3.4)
     # Optionally use the live WS book (POLY_WS_CONSUME=1) and register tokens
@@ -667,7 +648,6 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
     edges.sort(key=lambda e: abs(e.edge_pct), reverse=True)
     return edges
 
-
 async def get_baseball_edge_summary(min_edge: float = DEFAULT_MIN_EDGE) -> Dict:
     """
     MLB edge summary for `/api/baseball/edge` response.
@@ -738,7 +718,6 @@ async def get_baseball_edge_summary(min_edge: float = DEFAULT_MIN_EDGE) -> Dict:
             for e in edges[:5]
         ],
     }
-
 
 if __name__ == "__main__":
     async def _test():

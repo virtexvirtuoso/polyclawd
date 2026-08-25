@@ -37,8 +37,11 @@ import sys
 import time
 from pathlib import Path
 from typing import Callable, Optional
+from config.polymarket_urls import clob_url, data_url  # polyproxy: central URL config
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE_DIR))
+from signals.alert_dispatch import TIER_DIGEST, dispatch  # noqa: E402
 # Canonical project shadow DB (NOT the stray 0-byte repo-root file) — matches
 # signals/shadow_tracker.py and services/scheduler.py.
 SHADOW_DB = BASE_DIR / "storage" / "shadow_trades.db"
@@ -540,7 +543,25 @@ def check_and_fire(
             try:
                 from scripts.alert_formatter import send_telegram
 
-                send_telegram(_format_alert(rec))
+                # Relevance split (2026-08-20, restored 2026-08-21 after the change
+                # was clobbered by a polyclawd-deploy from the stale Mac tree).
+                # One wallet taking a position is monitoring, not a decision ->
+                # tier-3 digest. Convergence (>=2 wallets), fades and exits still
+                # page. NOTE: execution is NOT affected either way — fired.append()
+                # sits outside this block, so the executor sees every record.
+                _msg = _format_alert(rec)
+                if rec["alert_type"] in ("entry", "refire"):
+                    _kind = "add" if rec["alert_type"] == "refire" else "entry"
+                    try:
+                        _line = (f"{_kind}: {rec['title'][:70]} — {rec['outcome']} "
+                                 f"@ {(rec.get('price_at_alert') or 0) * 100:.0f}¢, "
+                                 f"${(rec.get('cumulative_usd') or 0):,.0f} "
+                                 f"({rec.get('num_fills') or 0} fills)")
+                    except Exception:  # noqa: BLE001 — never lose the event to formatting
+                        _line = _msg
+                    dispatch("wallet_moves", _line, TIER_DIGEST)
+                else:
+                    send_telegram(_msg)
             except Exception:  # noqa: BLE001 - delivery must never break the scan
                 print(f"SMART_WALLET_ALERT per-wallet send failed: {sys.exc_info()[1]}", file=sys.stderr)
         fired.append(rec)
@@ -817,8 +838,66 @@ def resolve_shadows(shadow_conn, settle: Callable[[dict], Optional[float]]) -> i
     return n
 
 
+def settle_via_market_resolution(row: dict) -> Optional[float]:
+    """GROUND TRUTH settlement: the market's own resolution from CLOB.
+
+    Returns 1.0 if the held outcome won, 0.0 if it lost, None if the market has
+    not resolved yet (leave the shadow unresolved — it will be picked up later).
+
+    Replaces settle_via_wallet_positions as the primary settler (2026-08-21).
+    That function graded from the alerting wallet's `realizedPnl`, which is
+    booked TRADING pnl, not resolution payout: a whale who buys at 15c and
+    trims at 18c books rp>0 and was graded a WIN with closing_price=1.0 on a
+    market that never resolved. Cheap positions trim up easily, expensive ones
+    trim down, which is why the stored win rate ran INVERSE to entry price
+    (85% at 10-20c, 34% at 80-90c). Re-grading 1,250 shadows against CLOB
+    resolution found the stored labels agreed with reality **41.6%** of the
+    time — worse than a coin flip — and flipped the measured edge from a
+    claimed +1.43/$ to -0.179/$ (95% CI [-0.253,-0.055], clustered by wallet).
+
+    Assumption (verified): CLOB `tokens[]` is ordered to match outcome_index.
+    Cross-checking by outcome NAME against by INDEX gave 0 disagreements in
+    853 rows, and the by-index reading yields a plausible 33.9% true win rate
+    at a 40.3c mean price (the inverse would be 66% at 40c — impossible).
+    """
+    import urllib.request
+
+    cid, oidx = row.get("market"), row.get("outcome_index")
+    if not cid or oidx is None:
+        return None
+    try:
+        req = urllib.request.Request(
+            clob_url(f"/markets/{cid}"),
+            headers={"User-Agent": "Polyclawd/2.0"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception:  # noqa: BLE001 — unreachable market = not yet resolvable
+        return None
+    if not isinstance(data, dict) or not data.get("closed"):
+        return None  # still open — do NOT guess
+    tokens = data.get("tokens") or []
+    try:
+        idx = int(oidx)
+    except (TypeError, ValueError):
+        return None
+    if idx < 0 or idx >= len(tokens):
+        return None
+    winner = tokens[idx].get("winner")
+    if winner is None:
+        return None  # closed but not yet finalised
+    return 1.0 if winner else 0.0
+
+
 def settle_via_wallet_positions(row: dict) -> Optional[float]:
-    """COMPLETE-RULE settlement from the alerting wallet's own position for the
+    """DEPRECATED 2026-08-21 — DO NOT USE FOR GRADING. Retained for reference.
+
+    Grades from the wallet's realizedPnl (booked trading pnl), NOT resolution
+    payout, so it mislabels trimmed-but-unresolved positions as WINs. Measured
+    agreement with actual market outcomes: 41.6%. Use
+    settle_via_market_resolution() instead.
+
+    COMPLETE-RULE settlement from the alerting wallet's own position for the
     market (the wallet bought it, so it still holds the row). Validated in the
     2026-06-23 follow-through backtest. No single PM field works alone:
       realizedPnl>0 -> redeemed winner; realizedPnl<0 -> sold at a loss;
@@ -835,7 +914,7 @@ def settle_via_wallet_positions(row: dict) -> Optional[float]:
         return None
     try:
         req = urllib.request.Request(
-            f"https://data-api.polymarket.com/positions?user={wallet}&limit=500",
+            data_url(f"/positions?user={wallet}&limit=500"),
             headers={"User-Agent": "Polyclawd/2.0"},
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
@@ -879,7 +958,7 @@ def main() -> None:
     conn = sqlite3.connect(str(SHADOW_DB))
     conn.row_factory = sqlite3.Row
     init_shadows(conn)
-    n = resolve_shadows(conn, settle_via_wallet_positions)
+    n = resolve_shadows(conn, settle_via_market_resolution)
     row = conn.execute(
         "SELECT COUNT(*) c, "
         " SUM(CASE WHEN resolved=1 THEN 1 ELSE 0 END) res, "

@@ -9,13 +9,14 @@ normal shadow pipeline. Overlaps without a Polymarket condition_id are skipped
 
 Called from scheduler (see services/scheduler.py task_manifold_shadow).
 """
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 import json
 import urllib.request
 
 from loguru import logger
 
 MIN_EDGE_PP = 8.0
-GAMMA_EVENTS = "https://gamma-api.polymarket.com/events?closed=false&limit=200"
+GAMMA_EVENTS = gamma_url("/events?closed=false&limit=200")
 
 
 def _edge_to_signal(edge: dict) -> dict:

@@ -27,7 +27,7 @@ MIN_SAMPLES_PER_BIN = 5
 
 
 def _get_conn(db_path: str = None) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path or str(DB_PATH), timeout=10)
+    conn = sqlite3.connect(db_path or str(DB_PATH), timeout=15)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
