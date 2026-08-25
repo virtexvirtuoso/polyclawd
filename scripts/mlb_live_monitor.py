@@ -920,16 +920,12 @@ def check_run_trigger(conn: sqlite3.Connection, game: Dict,
     walls_found: List[str] = []
 
     # Only send TG alerts when there's actionable edge (PM gap or whale wall)
-    # Runs and pitcher changes are still tracked in DB snapshots above
+    # Runs and pitcher changes are still tracked in DB snapshots above.
+    # 2026-08-24: stopped dispatching no-edge events to tier-3 digest — they're
+    # pure score-update noise (140+ per digest) with zero actionable content.
+    # Already logged to stdout + DB snapshots; no need to spam the digest.
     if not trade_signals and not walls_found:
         event = "Pitcher change" if pitcher_changed and not score_changed else "Run"
-        # LIVE (Gate 2 completed 2026-08-20): the no-edge remainder feeds the
-        # tier-3 digest instead of vanishing silently.
-        try:
-            dispatch("run_scored", f"{event}: {home} {hs}–{as_} {away}",
-                     TIER_DIGEST)
-        except Exception as ex:  # noqa: BLE001 — digest must never block
-            print(f"[mlb_monitor] digest dispatch failed: {ex}", flush=True)
         print(f"[mlb_monitor] {event} {home} {hs}-{as_} {away} — no edge/wall, suppressed", flush=True)
         return
 

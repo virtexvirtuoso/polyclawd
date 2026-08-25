@@ -337,9 +337,19 @@ def drain(db_path=None, now=None, force=False) -> int:
 
 def _is_noise(row) -> bool:
     """True for no-edge tier-3 rows that are pure heartbeat (no actionable
-    signal). 2026-08-24: filtered from digest body, counted in summary only."""
+    signal). 2026-08-24: filtered from digest body, counted in summary only.
+    2026-08-24: also filter MLB run_scored score updates ('Run:' / 'Pitcher
+    change:') — no-edge score noise that was spamming 140+ lines per digest."""
     msg = row["message"] or ""
-    return "no PM gap" in msg
+    if "no PM gap" in msg:
+        return True
+    # MLB in-game monitor no-edge score updates (dispatch stopped 2026-08-24,
+    # but existing queued rows still need filtering)
+    if row.get("pipeline") == "run_scored" and (
+        msg.startswith("Run:") or msg.startswith("Pitcher change:")
+    ):
+        return True
+    return False
 
 
 def drain_digest(db_path=None, now=None) -> int:
