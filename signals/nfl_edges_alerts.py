@@ -31,7 +31,7 @@ DB_PATH = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
 
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA busy_timeout=8000")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS nfl_edge_alert_dedup (
             game_id TEXT NOT NULL,
@@ -125,15 +125,48 @@ def run_nfl_edge_alerts(edges: list, min_exec_edge: float = MIN_EXEC_EDGE,
     # Send
     try:
         from scripts.openclaw_alerts import alert_openclaw
-        lines = ["🏈 NFL Edge Alerts"]
+        lines = ["🏈 <b>NFL Edge Alerts</b>"]
+        lines.append("")
         for e in to_alert[:8]:
-            tag = _overlay_tag(e)
+            exec_pp = (e.executable_edge or 0) * 100
+            depth = e.fillable_usd or 0
+            net_pp = (getattr(e, "net_edge_pct", None) or exec_pp)
+            price_cents = (e.executable_price or 0) * 100
+            # Confidence tier
+            if net_pp >= 8 and depth >= 25000:
+                tier = "🔥"
+            elif net_pp >= 5 and depth >= 10000:
+                tier = "✅"
+            else:
+                tier = "⚠️"
+            # Build context line from overlay data
+            ctx_parts = []
+            sa = getattr(e, "strength_agree", None)
+            if sa is not None:
+                ctx_parts.append("Model agrees" if sa else "Model conflicts")
+            se = getattr(e, "situational_edge_pct", None)
+            if se is not None:
+                ctx_parts.append(f"situational {se*100:+.1f}pp")
+            hqb = getattr(e, "home_qb", None)
+            aqb = getattr(e, "away_qb", None)
+            if hqb and hqb.get("status") and hqb.get("status") != "healthy":
+                ctx_parts.append(f"Home QB {hqb.get('status')}")
+            if aqb and aqb.get("status") and aqb.get("status") != "healthy":
+                ctx_parts.append(f"Away QB {aqb.get('status')}")
+            ctx = "  |  ".join(ctx_parts) if ctx_parts else ""
+            # Action direction
+            direction = e.direction or "BUY"
+            action = "BUY YES" if direction.upper() in ("BUY", "YES", "OVER") else f"BUY {direction.upper()}"
+            lines.append(f"{tier} <b>{e.event_title}</b>")
+            lines.append(f"   {e.participant} — {action} @ {price_cents:.0f}¢")
+            if ctx:
+                lines.append(f"   {ctx}")
             lines.append(
-                f"• {e.event_title} — {e.participant} "
-                f"({e.direction} @ {e.executable_price * 100:.0f}¢)\n"
-                f"   exec edge {e.executable_edge * 100:+.1f}% · depth ${e.fillable_usd:.0f}"
-                + (f" · {tag}" if tag else "")
+                f"   Edge +{net_pp:.1f}pp (net of fees) · depth ${depth:,.0f}"
             )
+            lines.append("")
+        lines.append("━" * 20)
+        lines.append("💡 Buy on Polymarket at the listed price. Edge = Vegas prob minus PM price, net of taker fees.")
         alert_openclaw("\n".join(lines))
     except Exception as ex:
         logger.debug(f"nfl edge alert send failed: {ex}")

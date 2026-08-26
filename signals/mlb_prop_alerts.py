@@ -113,7 +113,7 @@ def _db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")
     _init_tables(conn)
     return conn
 
@@ -607,13 +607,66 @@ def _push_alerts(rows: List[Dict]) -> None:
     # Telegram via OpenClaw gateway.
     try:
         from scripts.openclaw_alerts import alert_openclaw
-        lines = ["⚾ MLB Prop Edges (lineup-confirmed)"]
+        lines = ["⚾ <b>MLB Prop Edges</b> (lineup-confirmed)"]
+        lines.append("")
         for r in rows[:8]:
+            player = r.get('player', '?')
+            stat = r.get('stat_label', '?')
+            line = r.get('prop_line', '?')
+            hr = r.get('hit_rate_pct', 0) or 0
+            book = r.get('book_over_pct', 0) or 0
+            edge = r.get('edge_pct', 0) or 0
+            cal_edge = r.get('adj_edge_pct', edge)
+            games = r.get('games_sampled', 0) or 0
+            away = r.get('away_team', '')
+            home = r.get('home_team', '')
+            matchup = f"{away} @ {home}" if away and home else (home or away or '')
+            # Enrichment fields (from mlb_enrichment + statcast)
+            opp_p = r.get('opp_pitcher', '')
+            p_hand = r.get('pitcher_hand', '')
+            pf = r.get('park_factor')
+            platoon = r.get('platoon_mult')
+            adj_hr = r.get('adj_hit_rate_pct')
+            xstats = r.get('xstats', {})
+            sc_adj = r.get('statcast_adj')
+            # Confidence tier
+            if cal_edge >= 15 and games >= 20:
+                tier = "🔥"
+            elif cal_edge >= 10 and games >= 15:
+                tier = "✅"
+            else:
+                tier = "⚠️"
+            # Build context line
+            ctx_parts = []
+            if opp_p:
+                hand_tag = f" ({p_hand}HP)" if p_hand and p_hand != "?" else ""
+                ctx_parts.append(f"vs {opp_p}{hand_tag}")
+            if pf and abs(pf - 1.0) > 0.03:
+                pf_tag = "Coors" if pf > 1.15 else (f"park {pf:.2f}x" if pf < 0.95 else "")
+                if pf_tag:
+                    ctx_parts.append(pf_tag)
+            if platoon and abs(platoon - 1.0) > 0.03:
+                ctx_parts.append(f"platoon {platoon:.2f}x")
+            if sc_adj and abs(sc_adj - 1.0) > 0.03:
+                ctx_parts.append(f"Statcast {sc_adj:.2f}x")
+            ctx = "  |  ".join(ctx_parts) if ctx_parts else ""
+            # Build the alert block
+            lines.append(f"{tier} <b>{player}</b> {stat} o{line}")
+            lines.append(f"   {matchup}")
+            if ctx:
+                lines.append(f"   {ctx}")
             lines.append(
-                f"• {r.get('player')} {r.get('stat_label')} o{r.get('prop_line')} — "
-                f"hit {r.get('hit_rate_pct')}% vs book {r.get('book_over_pct')}% "
-                f"(+{r.get('edge_pct')}pp)"
+                f"   Hit {hr:.0f}% (L{games}) vs book {book:.0f}% → "
+                f"<b>+{cal_edge:.1f}pp</b> edge"
             )
+            if adj_hr is not None and abs(adj_hr - hr) > 1:
+                lines.append(
+                    f"   Adj: {adj_hr:.0f}% (park+platoon+statcast)"
+                )
+            lines.append("")
+        lines.append("━" * 20)
+        lines.append("💡 <b>How to act:</b> Buy OVER on Polymarket/Kalshi at ~{book:.0f}¢. Edge = hit rate minus book implied prob.".format(book=book))
+        lines.append("Calibrated edge accounts for park, platoon, and Statcast adjustments.")
         alert_openclaw("\n".join(lines))
     except Exception as e:  # pragma: no cover
         logger.debug(f"telegram prop alert skipped: {e}")
