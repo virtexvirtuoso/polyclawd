@@ -481,7 +481,8 @@ def report(con, min_edge, send=False):
 def main():
     ap = argparse.ArgumentParser(description="Path 2 BTTS/totals paper CLV logger.")
     ap.add_argument("--db", default=DB_DEFAULT)
-    ap.add_argument("--sport", default="soccer_epl")
+    ap.add_argument("--sport", default="soccer_epl", help="single sport (back-compat)")
+    ap.add_argument("--sports", default="", help="comma-separated sports; overrides --sport")
     ap.add_argument("--min-edge", type=float, default=5.0)
     ap.add_argument("--window-hours", type=float, default=8.0)
     ap.add_argument("--snapshot", action="store_true")
@@ -494,7 +495,10 @@ def main():
 
     con = db_connect(args.db)
     if args.snapshot:
-        live_snapshot(con, args.sport, args.window_hours, min_edge=args.min_edge)
+        sports = [s.strip() for s in args.sports.split(",") if s.strip()] or [args.sport]
+        for sport in sports:
+            print(f"[sport] {sport}")
+            live_snapshot(con, sport, args.window_hours, min_edge=args.min_edge)
     if args.void_before or args.void_event:
         print("[void] manual void of alerts — wiring left to scorer logger for now.")
     if args.report or not (args.snapshot or args.void_before or args.void_event):
