@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from api.middleware import verify_api_key
 from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 from config.polymarket_urls import POLYMARKET_DATA_API  # polyproxy: central URL config
+from signals.source_win_rates import SOURCE_TO_STRATEGY, lookup as lookup_empirical_counts
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -124,13 +125,29 @@ def save_source_outcomes(outcomes: dict):
     """Save source outcomes."""
     _save_json(SOURCE_OUTCOMES_FILE, outcomes)
 
+N_FLOOR = 5  # min resolved empirical trades before they blend into the prior
+
 def get_source_win_rate(source: str) -> float:
-    """Get win rate for a signal source."""
+    """Get win rate for a signal source.
+
+    Blends the seed prior from source_outcomes.json with empirical resolved
+    outcomes from storage/shadow_trades.db (read-only, via
+    signals.source_win_rates.lookup). Unmapped sources, or sources with fewer
+    than N_FLOOR resolved trades, keep their prior exactly. Result is clamped
+    to [0.20, 0.80]. This read path never writes source_outcomes.json.
+    """
     outcomes = load_source_outcomes()
-    data = outcomes.get(source, {"wins": 1, "losses": 1, "total": 2})
-    if data["total"] == 0:
-        return 0.5
-    return data["wins"] / data["total"]
+    prior = outcomes.get(source, {"wins": 1, "losses": 1, "total": 2})
+    prior_total = prior.get("total", prior.get("wins", 1) + prior.get("losses", 1))
+    wins, total = lookup_empirical_counts(source)
+    if prior_total == 0 and total == 0:
+        return 0.5  # preserve legacy zero-data behavior
+    prior_wr = prior.get("wins", 1) / max(prior_total, 1)
+    if total < N_FLOOR:
+        wr = prior_wr
+    else:
+        wr = (prior.get("wins", 1) + wins) / (prior_total + total)
+    return min(0.80, max(0.20, wr))
 
 def record_outcome(source: str, won: bool, market_title: str = ""):
     """Record a trade outcome for Bayesian learning."""
@@ -538,98 +555,6 @@ def calculate_bayesian_confidence(raw_score: float, source: str, market: str, si
         "final_confidence": round(min(100, final_confidence), 1)
     }
 
-def calculate_bayesian_confidence_v2(
-    raw_scores: dict,      # {source: base_confidence}
-    source_stats: dict,    # {source: {wins, total, direction}}
-    alpha: float = 4.0,
-    max_multiplier: float = 1.8
-) -> dict:
-    """
-    Improved Bayesian confidence with:
-    - Laplace smoothing (prevents overfitting on small samples)
-    - Weighted average combination (weight by win rate)
-    - Disagreement penalty (reduces confidence when sources conflict)
-    - Capped multipliers (prevents runaway confidence)
-    
-    Args:
-        raw_scores: Dict of {source_name: base_confidence_score}
-        source_stats: Dict of {source_name: {wins, total, direction}}
-        alpha: Laplace smoothing parameter (default 4.0)
-        max_multiplier: Cap on Bayesian multiplier (default 1.8)
-    
-    Returns:
-        Dict with final_confidence, breakdown, and agreement info
-    """
-    bayesian_confs = {}
-    smoothed_wrs = {}
-    directions = {}  # Track YES/NO per source
-    
-    for source, base in raw_scores.items():
-        stats = source_stats.get(source, {"wins": 0, "total": 0})
-        wins = stats.get("wins", 0)
-        total = stats.get("total", 0)
-        
-        # Laplace smoothed win rate
-        smoothed_wr = laplace_smoothed_win_rate(wins, total, alpha)
-        smoothed_wrs[source] = smoothed_wr
-        
-        # Capped multiplier (prevents runaway from high win rates)
-        multiplier = min(smoothed_wr / 0.5, max_multiplier)
-        
-        # Normalize base to valid range
-        normalized_base = min(100, max(0, base))
-        
-        bayesian_confs[source] = normalized_base * multiplier
-        directions[source] = stats.get("direction", "YES")
-    
-    if not bayesian_confs:
-        return {"final_confidence": 50, "breakdown": {}}
-    
-    # Weighted average (weight = smoothed win rate)
-    # Sources with better track records have more influence
-    total_weight = sum(smoothed_wrs.values())
-    if total_weight > 0:
-        weighted_conf = sum(
-            bayesian_confs[s] * smoothed_wrs[s] 
-            for s in bayesian_confs
-        ) / total_weight
-    else:
-        weighted_conf = sum(bayesian_confs.values()) / len(bayesian_confs)
-    
-    # Agreement/disagreement check
-    unique_directions = set(directions.values())
-    agreement_count = len(bayesian_confs)
-    has_disagreement = len(unique_directions) > 1
-    
-    # Agreement multiplier with penalty for conflicts
-    if has_disagreement:
-        agreement_mult = 0.85  # 15% penalty for conflicting signals
-    elif agreement_count >= 3:
-        agreement_mult = 1.30  # 30% boost for 3+ agreeing sources
-    elif agreement_count == 2:
-        agreement_mult = 1.15  # 15% boost for 2 agreeing sources
-    else:
-        agreement_mult = 1.0   # No adjustment for single source
-    
-    final_conf = min(100, weighted_conf * agreement_mult)
-    
-    return {
-        "final_confidence": round(final_conf, 1),
-        "weighted_base": round(weighted_conf, 1),
-        "agreement_multiplier": agreement_mult,
-        "has_disagreement": has_disagreement,
-        "source_count": agreement_count,
-        "breakdown": {
-            source: {
-                "base": raw_scores[source],
-                "bayesian": round(bayesian_confs[source], 1),
-                "win_rate": round(smoothed_wrs[source] * 100, 1),
-                "direction": directions.get(source, "YES")
-            }
-            for source in raw_scores
-        }
-    }
-
 def combined_decision_score(edge_pct: float, confidence: float) -> dict:
     """
     Combined edge + confidence decision metric.
@@ -867,8 +792,16 @@ def aggregate_all_signals() -> dict:
 # ============================================================================
 
 @router.get("/signals")
-async def get_all_signals():
-    """Get aggregated signals from all sources."""
+def get_all_signals():
+    """Get aggregated signals from all sources.
+
+    Declared sync (``def``, not ``async def``) on purpose: ``aggregate_all_signals``
+    is fully synchronous and performs ~15 sequential blocking urllib/SSL fetches.
+    In an ``async def`` handler those blocking reads ran ON the asyncio event
+    loop and stalled every other request on the worker — a measured /health went
+    from 1.7ms to 60s (then to connection refusals) while /signals was in flight.
+    FastAPI runs sync path operations in its threadpool, keeping the loop free.
+    """
     try:
         result = aggregate_all_signals()
         logger.info(f"Signal aggregation: {result.get('total_signals', 0)} signals from {len(result.get('sources', {}))} sources")
@@ -893,7 +826,7 @@ async def get_mispriced_category_strategy_signals():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/signals/news")
-async def get_news_signals():
+def get_news_signals():
     """Get signals specifically from news sources (Google News + Reddit)."""
     try:
         from news_signal import (
@@ -938,7 +871,16 @@ async def get_news_signals():
         return {"error": str(e), "enabled": False}
 
 @router.post("/signals/auto-trade")
-async def auto_trade_on_signals(
+def auto_trade_on_signals(
+    # Sync `def` on purpose (2026-08-25): this handler calls the fully-synchronous
+    # aggregate_all_signals() (~15 sequential blocking fetches, up to ~49s). As
+    # `async def` it ran that on the event loop and blocked every other request on
+    # the process. FastAPI runs a sync def in its threadpool instead.
+    #
+    # Safe to parallelise because this endpoint is read-only despite the name: it
+    # returns a PROPOSED trade list and places no orders (see the note in its
+    # response). Verified — aggregate_all_signals makes 0 write calls and the
+    # handler mutates nothing. Execution happens in /paper/buy and /simmer/trade.
     max_trades: int = Query(5, ge=1, le=10, description="Max trades to execute"),
     max_per_trade: float = Query(100, ge=10, le=500, description="Max $ per trade"),
     min_confidence: float = Query(10, ge=0, le=100, description="Minimum confidence score"),
@@ -1011,7 +953,7 @@ async def auto_trade_on_signals(
 # ============================================================================
 
 @router.get("/volume/spikes")
-async def get_volume_spikes(
+def get_volume_spikes(
     threshold: float = Query(2.0, ge=1.0, le=5, description="Z-score threshold (2.0 = 2 std devs above mean)"),
     method: str = Query("zscore", description="Detection method: 'zscore' or 'ratio'")
 ):
@@ -1030,7 +972,7 @@ async def get_volume_spikes(
 # ============================================================================
 
 @router.get("/resolution/approaching")
-async def get_approaching_resolution(
+def get_approaching_resolution(
     hours: int = Query(48, ge=1, le=168, description="Hours until resolution threshold")
 ):
     """Find markets approaching resolution - volatility opportunities."""
@@ -1041,7 +983,7 @@ async def get_approaching_resolution(
         raise HTTPException(status_code=500, detail="Resolution scan failed")
 
 @router.get("/resolution/imminent")
-async def get_imminent_resolution():
+def get_imminent_resolution():
     """Markets resolving within 24 hours - highest volatility potential."""
     try:
         result = scan_resolution_timing(24)
@@ -1060,7 +1002,7 @@ async def get_imminent_resolution():
 # ============================================================================
 
 @router.get("/correlation/violations")
-async def get_correlation_violations(
+def get_correlation_violations(
     min_violation: float = Query(3.0, ge=1.0, le=20.0, description="Minimum violation % to report")
 ):
     """
@@ -1091,7 +1033,7 @@ async def get_correlation_violations(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/correlation/entities")
-async def get_market_entities():
+def get_market_entities():
     """
     Get all entities (teams, people) with multiple related markets.
     
@@ -1234,13 +1176,17 @@ async def get_source_statistics():
         outcomes = load_source_outcomes()
         stats = []
 
-        for source, data in outcomes.items():
-            win_rate = data["wins"] / data["total"] if data["total"] > 0 else 0.5
+        for source in sorted(set(outcomes) | set(SOURCE_TO_STRATEGY)):
+            data = outcomes.get(source, {"wins": 1, "losses": 1, "total": 2})
+            emp_wins, emp_total = lookup_empirical_counts(source)
+            win_rate = get_source_win_rate(source)
             stats.append({
                 "source": source,
                 "wins": data["wins"],
                 "losses": data["losses"],
                 "total": data["total"],
+                "empirical_wins": emp_wins,
+                "empirical_total": emp_total,
                 "win_rate": round(win_rate * 100, 1),
                 "bayesian_multiplier": round(win_rate / 0.5, 2)
             })
@@ -1270,7 +1216,7 @@ async def record_trade_outcome(
         raise HTTPException(status_code=500, detail="Failed to record outcome")
 
 @router.get("/confidence/market/{market_id}")
-async def get_market_confidence(market_id: str):
+def get_market_confidence(market_id: str):  # sync: aggregate_all_signals() blocks
     """Get confidence scoring for a specific market across all signal sources."""
     try:
         signals = aggregate_all_signals()
@@ -1404,7 +1350,7 @@ async def get_conflict_stats():
         raise HTTPException(status_code=500, detail="Failed to load conflict stats")
 
 @router.get("/conflicts/active")
-async def get_active_conflicts():
+def get_active_conflicts():  # sync: aggregate_all_signals() blocks (see GET /signals)
     """Get currently active signal conflicts (opposing signals on same market)."""
     try:
         signals = aggregate_all_signals()
@@ -1633,7 +1579,7 @@ async def get_portfolio_status():
             from pathlib import Path
             db_path = Path(__file__).resolve().parent.parent / "storage" / "shadow_trades.db"
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
-            conn.execute("PRAGMA busy_timeout=8000")
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM paper_positions WHERE status='open'"
@@ -1789,7 +1735,7 @@ async def get_portfolio_equity_curve():
         import sqlite3
         db_path = STORAGE_DIR / "shadow_trades.db"
         conn = sqlite3.connect(str(db_path))
-        conn.execute("PRAGMA busy_timeout=8000")
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT timestamp, bankroll FROM paper_portfolio_state ORDER BY timestamp ASC"
@@ -1819,7 +1765,7 @@ async def get_copy_trade_data():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/signals/cross-platform-arb")
-async def get_cross_platform_arb():
+def get_cross_platform_arb():
     """Scan for cross-platform arbitrage between Kalshi and Polymarket."""
     try:
         from cross_platform_arb import scan_cross_platform_arb
@@ -1932,7 +1878,7 @@ async def get_calibration_report():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/signals/calibration/{source}")
-async def get_source_calibration(source: str):
+def get_source_calibration(source: str):
     """Calibration curve for a specific signal source."""
     try:
         from calibrator import build_calibration_curve, get_signal_decay
@@ -2030,7 +1976,7 @@ async def weather_dashboard():
 
         def _build():
             conn = sqlite3.connect(_DB_PATH)
-            conn.execute("PRAGMA busy_timeout=8000")
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.row_factory = sqlite3.Row
             try:
                 # ── paper_positions: every weather row, ordered by close ──
@@ -2252,7 +2198,7 @@ async def kalshi_fade_dashboard():
 
         def _build():
             conn = sqlite3.connect(str(_DB_PATH), timeout=10)
-            conn.execute("PRAGMA busy_timeout=8000")
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.row_factory = sqlite3.Row
             try:
                 rows = conn.execute(
@@ -2375,7 +2321,7 @@ async def scan_weather():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/signals/tweets")
-async def scan_tweet_counts():
+def scan_tweet_counts():
     """Scan tweet count bracket markets using Monte Carlo vs xtracker data."""
     try:
         from tweet_count_scanner import scan_all_tweet_markets
@@ -2432,13 +2378,19 @@ async def get_wr_buckets():
     try:
         import sqlite3
         db = sqlite3.connect(str(STORAGE_DIR / "shadow_trades.db"))
-        db.execute("PRAGMA busy_timeout=8000")
+        db.execute("PRAGMA busy_timeout=30000")
         db.row_factory = sqlite3.Row
 
         from mispriced_category_signal import classify_archetype
 
         # Shadow trades
-        shadow = db.execute("SELECT market, side, entry_price, outcome, platform FROM shadow_trades WHERE resolved=1").fetchall()
+        # NULL / VOID outcomes and side='PASS' cannot express side == outcome
+        # and would be scored as losses — same filter as
+        # signals.empirical_confidence._load_resolved_trades.
+        shadow = db.execute(
+            "SELECT market, side, entry_price, outcome, platform FROM shadow_trades "
+            "WHERE resolved=1 AND outcome IN ('YES','NO') AND side IN ('YES','NO')"
+        ).fetchall()
         # Paper trades
         paper = db.execute("SELECT market_title as market, side, entry_price, status, platform FROM paper_positions WHERE status IN ('won','lost')").fetchall()
 
@@ -2550,7 +2502,7 @@ async def basket_arb_signals():
     return get_basket_arb_signals()
 
 @router.get("/basket-arb/compression")
-async def basket_arb_compression():
+def basket_arb_compression():
     """Check if arb spreads are compressed (bot competition)."""
     from signals.basket_arb_scanner import check_spread_compression, _fetch_events
     events = _fetch_events(limit=50)
@@ -2575,7 +2527,7 @@ async def copy_trade_whales():
     return {"whales": whales, "count": len(whales)}
 
 @router.get("/copy-trade/positions")
-async def copy_trade_positions():
+def copy_trade_positions():
     """Get aggregated whale positions by market."""
     from signals.copy_trade_watcher import discover_whales, scan_whale_positions
     whales = discover_whales()
@@ -2607,7 +2559,7 @@ async def get_risk_guards():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/signals/strike-scanner")
-async def strike_scanner():
+def strike_scanner():
     """Scan crypto strike markets for volatility-based mispricing signals."""
     try:
         from strike_probability import get_calculator
@@ -2663,7 +2615,7 @@ def _match_outcomes(alerts: list) -> list:
 
     try:
         conn = sqlite3.connect(str(db_path))
-        conn.execute("PRAGMA busy_timeout=8000")
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.row_factory = sqlite3.Row
 
         # Get all resolved positions
@@ -3299,7 +3251,7 @@ def _filter_clarity_markets(policy_pulse: dict) -> list:
     return relevant
 
 @router.get("/signals/clarity")
-async def get_clarity_widget_data():
+def get_clarity_widget_data():
     """Lightweight payload for the CLARITY Act tracker widget.
 
     Returns only CLARITY-relevant markets + crypto industry money overlay.
@@ -3381,7 +3333,7 @@ async def get_vpin_for_slug(slug: str):
     return result
 
 @router.get("/signals/vpin-scan")
-async def get_vpin_scan(
+def get_vpin_scan(
     top_n: int = Query(20, ge=5, le=50, description="Number of markets to scan"),
 ):
     """Scan top-N liquid markets for VPIN, ranked by VPIN score.
@@ -3694,7 +3646,7 @@ async def get_theta_decay_all():
         raise HTTPException(status_code=500, detail="Theta decay scan failed")
 
 @router.get("/signals/theta-decay/{archetype}")
-async def get_theta_decay_single(archetype: str):
+def get_theta_decay_single(archetype: str):
     """Get theta decay curve for a single archetype.
 
     Args:
@@ -3856,7 +3808,7 @@ async def get_cross_sport_calibration():
 
     def _query():
         conn = sqlite3.connect(str(DB), timeout=10)
-        conn.execute("PRAGMA busy_timeout=8000")
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.row_factory = sqlite3.Row
 
         result = {"sports": {}, "scan_log": {}, "ce5_reconciliation": {}}
@@ -4034,7 +3986,7 @@ async def get_price_movement(sport: str = "baseball_mlb", hours: float = 24.0):
         try:
             from odds.price_movement import DB_PATH
             conn = sqlite3.connect(str(DB_PATH), timeout=10)
-            conn.execute("PRAGMA busy_timeout=8000")
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT COUNT(*) as n FROM price_movement_log WHERE sport=?",
@@ -4146,7 +4098,7 @@ async def weather_forecast_log():
                           "storage", "shadow_trades.db")
         try:
             conn = sqlite3.connect(db)
-            conn.execute("PRAGMA busy_timeout=8000")
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.row_factory = sqlite3.Row
 
             total = conn.execute("SELECT COUNT(*) FROM weather_forecast_log").fetchone()[0]

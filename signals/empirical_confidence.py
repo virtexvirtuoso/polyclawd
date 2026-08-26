@@ -241,14 +241,21 @@ def _load_resolved_trades() -> list:
     """Load all resolved trades from DB for WR calculation."""
     try:
         db = sqlite3.connect(str(DB_PATH), timeout=15)
-        db.execute("PRAGMA busy_timeout=8000")
+        db.execute("PRAGMA busy_timeout=30000")
         db.row_factory = sqlite3.Row
 
         trades = []
 
-        # Shadow trades
+        # Shadow trades. A win is side == outcome, so rows that cannot express
+        # that comparison must be filtered out rather than left to evaluate
+        # False: outcome NULL (never written), 'VOID' (market voided) and
+        # side 'PASS' (non-directional) would each be scored as a LOSS and
+        # depress every archetype bucket. On prod 2026-08-26 that was 34 of
+        # 367 rows (39.8% reported vs 43.8% actual). See tests/unit/
+        # test_empirical_confidence_loader.py.
         for t in db.execute(
-            "SELECT market, side, entry_price, outcome, platform FROM shadow_trades WHERE resolved=1"
+            "SELECT market, side, entry_price, outcome, platform FROM shadow_trades "
+            "WHERE resolved=1 AND outcome IN ('YES','NO') AND side IN ('YES','NO')"
         ).fetchall():
             trades.append(
                 {
