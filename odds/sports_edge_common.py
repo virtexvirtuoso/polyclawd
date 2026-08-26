@@ -703,7 +703,11 @@ def enrich_executable_edge(edge: Edge, outcome_index: int, target_usd: float = 1
 
 def fee_adjusted_edge(edge: Edge) -> Optional[float]:
     """Executable edge net of the real Polymarket sports taker fee
-    (0.03 * p * (1-p); 0% on winnings). None if not enriched."""
+    (0.05 * p * (1-p); 0% on winnings). None if not enriched.
+
+    FEE_RATE_REFRESH_2026_08_26: was documented and computed at 0.03, the
+    March-2026 launch rate; Polymarket raised sports to 0.05 in July 2026.
+    The rate itself lives in fee_model.TAKER_RATE (pinned by tests)."""
     if edge.executable_edge is None or edge.executable_price is None:
         return None
     return edge.executable_edge - taker_fee_fraction(
@@ -838,7 +842,7 @@ def log_scan_batch(edges: List[Edge], cfg: SportConfig, alerted_ids: Optional[se
     try:
         conn = sqlite3.connect(str(DB_PATH), timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA busy_timeout=30000")
         _init_scan_log(conn)
         now = datetime.now(timezone.utc).isoformat()
         alerted = alerted_ids or set()
@@ -961,7 +965,7 @@ def log_enrichment(shadow_trade_id: Optional[int], sport: str,
     try:
         conn = sqlite3.connect(str(DB_PATH), timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA busy_timeout=30000")
         _init_enrichment(conn)
         conn.execute(
             """INSERT OR REPLACE INTO edge_enrichment

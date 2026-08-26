@@ -26,8 +26,8 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 
-from odds.edge_math import net_arb_edge
 from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
+from execution.fee_model import taker_fee_fraction  # ARB_FEE_MODEL_SSOT: fee basis
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -122,6 +122,53 @@ def _get_market_prices(market: dict) -> tuple:
         return 0.0, 0.0
 
 
+# ARB_FEE_MODEL_SSOT 2026-08-26 -- Gamma /markets carries no `category`, but it
+# does carry Polymarket's own per-market `feeType`, which is the authoritative
+# category signal (same pattern as odds/kalshi_props.py, which reads Kalshi's
+# `fee_type` off the raw market). Observed set over the 200 highest-volume open
+# markets on 2026-08-26: the eight strings below, plus None on every
+# feesEnabled=false market (45/45, zero mixed cases).
+#
+# Residual risk, documented deliberately: the RATES in fee_model.TAKER_RATE come
+# from docs.polymarket.com (verified 2026-06-02), but this feeType -> category
+# BINDING is a name match, not something Polymarket documents. A new or renamed
+# feeType therefore fails closed (returns None) instead of silently taking
+# fee_model's 0.05 `.get` default -- `tech_fees` is live right now and has no
+# TAKER_RATE entry.
+_FEE_TYPE_TO_CATEGORY = {
+    "sports_fees_v2": "sports",
+    "sports_fees_v3": "sports",
+    "politics_fees": "politics",
+    "crypto_fees_v2": "crypto",
+    "economics_fees": "economics",
+    "culture_fees": "culture",
+    "weather_fees": "weather",
+    "finance_prices_fees": "finance",
+    # FEE_RATE_REFRESH_2026_08_26: `tech` gained a documented rate (0.04), so
+    # tech_fees no longer has to fail closed.
+    "tech_fees": "tech",
+}
+
+
+def _arb_fee_fraction(market: dict, yes_price: float, no_price: float) -> Optional[float]:
+    """Total Polymarket taker fee for BOTH legs of a single-market YES+NO arb.
+
+    Returned as a fraction of $1 face value per contract-pair, or None when the
+    fee is not determinable -- the caller must then treat the market as NOT
+    actionable rather than assume a rate (precedent: poly_executable_edge.py,
+    "an unknown category must not silently" get a fee).
+    """
+    if "feesEnabled" not in market:
+        return None  # payload drift -> fail closed, never a silent zero
+    if not market["feesEnabled"]:
+        return 0.0
+    category = _FEE_TYPE_TO_CATEGORY.get(market.get("feeType"))
+    if category is None:
+        return None
+    return (taker_fee_fraction(yes_price, "polymarket", category)
+            + taker_fee_fraction(no_price, "polymarket", category))
+
+
 def _scan_new_markets() -> dict:
     """Scan for newly created markets."""
     try:
@@ -184,16 +231,42 @@ async def arb_scan(limit: int = Query(default=50, ge=1, le=100)):
             total = yes_price + no_price
             if total < 0.99 or total > 1.01:
                 # For underpriced (total < 1.0): buy both YES+NO, collect $1
-                # Polymarket charges ~2% on net winnings
+                # Fees come from execution.fee_model (see _arb_fee_fraction).
                 if total < 0.99:
-                    gross_return = (1.0 / total) - 1.0
-                    profit = 1.0 - total
-                    poly_fee = profit * 0.02
-                    slippage = 0.005
-                    net_return = gross_return - poly_fee - slippage
-                    net_edge_pp = round(net_return * 100, 2)
+                    profit = 1.0 - total            # dollars per contract
+                    # ARB_FEE_MODEL_SSOT 2026-08-26: the basis here used to be
+                    # `profit * 0.02` ("~2% on net winnings"), which contradicted
+                    # execution/fee_model.py -- the SSOT already used by
+                    # odds/edge_math, sports_edge_common, poly_executable_edge and
+                    # ufc_prop_edge. fee_model charges rate*p*(1-p) PER SHARE, PER
+                    # LEG, and 0% on winnings (docs.polymarket.com, verified
+                    # 2026-06-02). Settled by Mr. V 2026-08-26 in favour of
+                    # fee_model. The old basis under-charged by 19-44x, leaving
+                    # `actionable_count` roughly 40x too loose. None = fee not
+                    # determinable -> excluded from actionable_count below.
+                    poly_fee = _arb_fee_fraction(market, yes_price, no_price)
+                    # TWO_LEG_SLIPPAGE 2026-08-26: buying YES *and* NO crosses two
+                    # spreads, so slippage applies per leg (review finding).
+                    slippage = 0.005 * 2
+                    if poly_fee is None:
+                        fee_pp = None
+                        net_edge_pp = 0.0
+                        net_return_pct = 0.0
+                    else:
+                        fee_pp = round(poly_fee * 100, 2)
+                        # UNIT FIX 2026-08-26: costs are per-contract DOLLARS and
+                        # must be divided by the capital deployed (== total, since
+                        # you buy both legs and collect $1) before they can reduce
+                        # a return.
+                        net_cost = poly_fee + slippage
+                        net_return = (profit - net_cost) / total if total > 0 else 0.0
+                        net_return_pct = round(net_return * 100, 2)
+                        # True percentage points: profit per contract, minus costs.
+                        net_edge_pp = round((profit - net_cost) * 100, 2)
                 else:
+                    fee_pp = None
                     net_edge_pp = 0.0  # Can't short; no actionable adjustment
+                    net_return_pct = 0.0
                 
                 opportunities.append({
                     "market_id": market["id"],
@@ -202,7 +275,9 @@ async def arb_scan(limit: int = Query(default=50, ge=1, le=100)):
                     "no_price": no_price,
                     "total": total,
                     "spread": abs(1.0 - total),
+                    "fee_pp": fee_pp,
                     "net_edge_pp": net_edge_pp,
+                    "net_return_pct": net_return_pct,
                     "type": "underpriced" if total < 0.99 else "overpriced",
                 })
 
@@ -211,15 +286,29 @@ async def arb_scan(limit: int = Query(default=50, ge=1, le=100)):
         
         # Fee assumption documentation
         fee_info = {
-            "polymarket_fee_pct": 2.0,
-            "slippage_pct": 0.5,
-            "note": "Polymarket charges ~2%% on net winnings. Overpriced markets (>1.0) not actionable for retail (can't short)."
+            "fee_basis": "execution.fee_model.taker_fee_fraction",
+            "formula": "category_rate * p * (1-p) per share, charged on EACH leg; 0% on winnings",
+            "source": "docs.polymarket.com fees (verified 2026-06-02); per-market category from Gamma feeType",
+            "slippage_pct_per_leg": 0.5,
+            "note": (
+                "Markets with feesEnabled=false pay no taker fee. An unrecognised feeType "
+                "yields fee_pp=null and is excluded from actionable_count rather than "
+                "assuming a default rate. Overpriced markets (>1.0) are not actionable "
+                "for retail (can't short)."
+            ),
         }
         
         return {
             "count": len(opportunities),
             "opportunities": opportunities[:20],
-            "actionable_count": sum(1 for o in opportunities if o["net_edge_pp"] >= 2.0 and o["type"] == "underpriced"),
+            # ARB_FEE_MODEL_SSOT: fee_pp is None when the fee could not be
+            # determined; such a market is never counted as actionable.
+            "actionable_count": sum(
+                1 for o in opportunities
+                if o["fee_pp"] is not None
+                and o["net_edge_pp"] >= 2.0
+                and o["type"] == "underpriced"
+            ),
             "fee_info": fee_info,
             "scanned_at": datetime.now().isoformat()
         }
@@ -348,13 +437,13 @@ async def search_markets(
 
 
 @router.get("/markets/new")
-async def get_new_markets():
+def get_new_markets():
     """Detect newly created markets on Polymarket."""
     return _scan_new_markets()
 
 
 @router.get("/markets/opportunities")
-async def get_market_opportunities(
+def get_market_opportunities(
     min_liquidity: float = Query(default=1000, description="Minimum liquidity USD")
 ):
     """Get new markets with enough liquidity to trade."""
@@ -399,7 +488,7 @@ async def get_market_details(market_id: str):
 # ============================================================================
 
 @router.get("/vegas/quota")
-async def get_odds_api_quota():
+def get_odds_api_quota():
     """Check The Odds API usage and remaining quota.
     
     Free tier: 500 calls/month
@@ -1066,7 +1155,7 @@ async def get_baseball_prop_alerts(
 
 
 @router.get("/baseball/props/scan-analytics")
-async def get_baseball_scan_analytics():
+def get_baseball_scan_analytics():
     """Control-sample analytics over mlb_prop_scan_log (WS-D): calibration-integrity
     overlay (alerted vs below-threshold control realized hit%), lookback-window
     predictive power (L7/10/15/20), and scan-window timing. Defends the Gate-2
@@ -1943,7 +2032,7 @@ async def get_polyrouter_platforms():
 # ============================================================================
 
 @router.get("/metaculus/questions")
-async def get_metaculus_questions(
+def get_metaculus_questions(
     limit: int = Query(default=50, ge=1, le=200),
     min_forecasters: int = Query(default=30, ge=1)
 ):
@@ -1986,7 +2075,7 @@ async def get_metaculus_edge(
 # ============================================================================
 
 @router.get("/polymarket/events")
-async def get_polymarket_events(
+def get_polymarket_events(
     limit: int = Query(default=100, ge=1, le=500)
 ):
     """Fetch active Polymarket events directly from Gamma API."""
@@ -2066,7 +2155,7 @@ async def get_polymarket_microstructure(slug: str):
 # ============================================================================
 
 @router.get("/polymarket/whale-wall-scan")
-async def whale_wall_scan(top_n: int = Query(default=15, ge=5, le=30)):
+def whale_wall_scan(top_n: int = Query(default=15, ge=5, le=30)):
     """Scan top Polymarket markets for orderbook imbalances (≥3:1 bid/ask ratio)."""
     try:
         from signals.whale_wall_scanner import scan_whale_walls

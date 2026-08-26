@@ -64,7 +64,7 @@ def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(META_DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=8000")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
@@ -541,7 +541,7 @@ def alert_graduations(conn: sqlite3.Connection) -> int:
         WHERE smart = 0
           AND (
             (closed_positions >= 20 AND win_rate >= 0.62 AND net_pnl >= 100000)
-            OR (skill_n >= 30 AND skill_p <= 0.05 AND skill_ret > 0)
+            OR (skill_n >= 30 AND skill_p <= 0.05 AND skill_ret > 0 AND net_pnl >= 10000)
           )
         ORDER BY skill_ret DESC, net_pnl DESC
         LIMIT 20

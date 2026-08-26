@@ -676,9 +676,7 @@ def _format_alert(rec: dict) -> str:
     fill_cents = rec["price_at_alert"] * 100
     cents_display = f"~{fill_cents:.1f}¢"
 
-    # Plain-English side label: what position does this wallet actually hold?
-    # Buying NO = betting the NO outcome (Under, Won't happen, etc.)
-    # Buying YES = betting the YES outcome
+    # Plain-English side label
     if is_exit:
         side = f"Sold {'NO' if is_no else 'YES'}"
         action = "Exited"
@@ -686,10 +684,11 @@ def _format_alert(rec: dict) -> str:
         side = f"{'NO' if is_no else 'YES'}"
         action = "Accumulated"
 
-    # Wallet stats line
+    # Wallet stats line with path label
     wr = rec.get("wallet_wr")
     pnl = rec.get("wallet_pnl")
     trades = rec.get("wallet_trades")
+    cat = rec.get("source_category") or ""
     stats_parts = []
     if wr is not None:
         stats_parts.append(f"{wr*100:.0f}% WR")
@@ -697,22 +696,52 @@ def _format_alert(rec: dict) -> str:
         stats_parts.append(f"{trades} trades")
     if pnl is not None:
         stats_parts.append(f"${pnl:,.0f} lifetime")
-    stats_line = "   " + " · ".join(stats_parts) if stats_parts else ""
+    if cat:
+        stats_parts.append(cat)
+    stats_line = "  ·  ".join(stats_parts) if stats_parts else ""
 
-    return (
-        f"{head}\n"
-        f"\n"
-        f"<b>{rec['name']}</b>{stats_line}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"{rec['title']}\n"
-        f"\n"
+    # Confidence tier based on wallet track record
+    if pnl is not None and pnl >= 100000 and wr is not None and wr >= 0.62:
+        tier = "🔥"  # Standard path — proven big money
+    elif pnl is not None and pnl >= 25000:
+        tier = "✅"  # Skill path with decent bankroll
+    else:
+        tier = "⚠️"  # Smaller wallet — lower confidence
+
+    # Market URL
+    slug = rec.get("market_slug") or ""
+    market_url = f"https://polymarket.com/event/{slug}" if slug else ""
+
+    # Build alert
+    lines = [head, ""]
+    lines.append(f"{tier} <b>{rec['name']}</b>")
+    if stats_line:
+        lines.append(f"   {stats_line}")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(rec["title"])
+    if market_url:
+        lines.append(f"🔗 {market_url}")
+    lines.append("")
+    lines.append(
         f"{action} <b>${rec['cumulative_usd']:,.0f}</b> → <b>{side} @ {cents_display}</b>  ({rec['num_fills']} fills)"
-        + (f"\n📐 {rec['size_hint']}" if rec.get("size_hint") else "")
-        + ((f"\n🔻 Our graded follows of this wallet run {rec['fade_clv']*100:+.0f}¢/$1 "
-            f"(n={rec['fade_n']}) — consider <b>{'YES' if is_no else 'NO'} @ ~"
-            f"{(1 - rec['price_at_alert'])*100:.0f}¢</b> (fading their {side})")
-           if rec["alert_type"] == "fade" else "")
     )
+    if rec.get("size_hint"):
+        lines.append(f"📐 {rec['size_hint']}")
+    if rec["alert_type"] == "fade":
+        lines.append(
+            f"🔻 Our graded follows of this wallet run {rec['fade_clv']*100:+.0f}¢/$1 "
+            f"(n={rec['fade_n']}) — consider <b>{'YES' if is_no else 'NO'} @ ~"
+            f"{(1 - rec['price_at_alert'])*100:.0f}¢</b> (fading their {side})"
+        )
+    # Action instruction for entry/refire
+    if rec["alert_type"] in ("entry", "refire") and not is_exit:
+        lines.append("")
+        lines.append(
+            f"💡 Follow on Polymarket: buy {side} @ ~{fill_cents:.0f}¢. "
+            f"Smart wallet with {wr*100:.0f}% WR over {trades} trades."
+        )
+
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #
@@ -768,6 +797,7 @@ def fills_from_trades(trades: list, smart: dict) -> list:
                 "wallet_pnl": sw.get("net_pnl"),
                 "wallet_trades": sw.get("closed_positions") or sw.get("closed"),
                 "source_category": sw.get("source_category"),
+            "market_slug": meta.get("slug", ""),
                 "is_bot": sw.get("is_bot", 0),
             }
         )
@@ -788,6 +818,7 @@ def run_from_scan(meta_conn, shadow_conn, trades: list, gamma: dict, smart: dict
             "price": g.get("last_price"),
             "title": (g.get("question") or "")[:80],
             "close_time": g.get("endDate") or "",
+            "slug": g.get("slug") or "",
         }
 
     return check_and_fire(meta_conn, shadow_conn, fills, meta_for)

@@ -36,7 +36,36 @@ KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 
 # Thresholds
 MIN_SPREAD_PCT = 2       # Minimum spread in pp — even tight arbs are useful signals
-MIN_SIMILARITY = 0.60    # Higher sim threshold — quality over quantity
+# ARB_SIMILARITY_THRESHOLD_FIX 2026-08-26: 0.60 -> 0.80.
+# At 0.60 the TF-IDF matcher paired DIFFERENT QUESTIONS because shared
+# boilerplate dominates and the distinguishing entity is a small token.
+# Measured over 11,418 logged pairs:
+#   sim 0.67 (n=5086) "X ... Democratic nominee"  vs "X win the 2028 ELECTION"   FALSE
+#   sim 0.71 (n=1641) same nominee-vs-election class                             FALSE
+#   sim 0.72 (n=2925) "Will ISRAEL KATZ be next PM" vs "Will GADI EIZENKOT ..."   FALSE (different person)
+#   sim 0.83 (n=1025) "X ... Democratic nominee"  vs "X win the 2028 NOMINATION"  TRUE
+#   sim 0.86 (n=420)  same-person nomination pair                                TRUE
+#   sim 1.00 (n=455)  identical titles                                           TRUE
+# 0.80 sits in the empty band between the top false (0.714/0.722) and the
+# lowest true (0.833): drops 9,655 false pairs (84.6%), keeps all 1,900 true.
+# EVIDENCE CAVEAT (corrected after independent review 2026-08-26): the counts
+# above are ROW-weighted. The table holds 11,555 rows but only **26 DISTINCT
+# market pairs**, re-logged every 30 min for ~70 days. The real evidence is
+# ~20 false pairs dropped and ~6 true pairs kept, from just two templates
+# (US-2028 nomination, Israel PM). Six positives is thin for a live-money gate.
+# The band is also NOT empty: sim=0.756 exists (a Zelenskyy/Putin NEGATION pair),
+# so the true margin above the top non-match is 0.044, not 0.078.
+#
+# RESIDUAL RISK #1 (PRIMARY, now mitigated): STOPWORDS strips not/no/above/
+# below/more/less, so OPPOSITE questions score sim=1.000 — raising this
+# threshold made them MORE likely to survive, not less. See ARB_POLARITY_GUARD.
+# RESIDUAL RISK #2: still no entity check; two different subjects in the same
+# template could exceed 0.80 (Israel Katz vs Gadi Eizenkot scored 0.722).
+# RESIDUAL RISK #3: sample is censored — arb_alert logs only MAX_LOG=10 per scan
+# sorted by the OLD inflated metric, biasing the evidence against low-spread
+# genuine pairs. A required question-noun match would generalise better than any
+# cosine cutoff calibrated on two templates.
+MIN_SIMILARITY = 0.80
 MIN_VOLUME = 10000       # Minimum volume on both sides
 MAX_RESULTS = 50         # Maximum arb opportunities to return
 
@@ -52,6 +81,53 @@ STOPWORDS = {
     'win', 'not', 'above', 'below', 'between', 'what', 'how', 'when', 'where',
     'which', 'who', 'whom', 'yes', 'no',
 }
+
+# ARB_POLARITY_GUARD 2026-08-26 -------------------------------------------------
+# STOPWORDS strips 'not'/'no'/'above'/'below'/'more'/'less', so semantically
+# OPPOSITE questions tokenize identically and score sim=1.000. Verified live:
+#   "BTC above 100k" vs "BTC below 100k"      -> 1.000
+#   "inflation more than 3%" vs "less than 3%" -> 1.000
+#   "Trump win" vs "Trump not win"             -> 1.000
+# Such a pair shows a ~100pp spread, sorts to the TOP, and clears every gate.
+# Guard on the RAW titles instead of editing STOPWORDS (which would shift every
+# similarity score and invalidate the MIN_SIMILARITY calibration).
+_POLARITY_GROUPS = [
+    # (side_a_markers, side_b_markers)
+    ({" not ", "n't ", " never ", " fails to ", " fail to ", " without "}, set()),
+    ({" above ", " over ", " greater than ", " higher than ", " at least "},
+     {" below ", " under ", " less than ", " lower than ", " at most ", " fewer than "}),
+    ({" more than ", " increase", " rise", " gain"},
+     {" less than ", " decrease", " fall", " drop", " lose"}),
+]
+
+
+def _polarity_key(title: str) -> tuple:
+    """Return a comparable polarity signature for a raw market title."""
+    t = " " + (title or "").lower().replace("?", " ").replace(",", " ") + " "
+    key = []
+    for side_a, side_b in _POLARITY_GROUPS:
+        a = any(m in t for m in side_a)
+        b = any(m in t for m in side_b)
+        key.append((a, b))
+    return tuple(key)
+
+
+def _polarity_compatible(title_a: str, title_b: str) -> bool:
+    """False when two titles express OPPOSITE directions of the same question.
+
+    Only rejects on an explicit disagreement (one side asserts a direction the
+    other contradicts). Titles with no polarity markers are always compatible, so
+    ordinary matches such as nomination-vs-nomination are unaffected.
+    """
+    ka, kb = _polarity_key(title_a), _polarity_key(title_b)
+    for (a_pos, a_neg), (b_pos, b_neg) in zip(ka, kb):
+        if (a_pos and b_neg) or (a_neg and b_pos):
+            return False
+        # Bare negation group: side_b is empty, so disagreement is pos-vs-absent.
+        if b_neg is False and a_neg is False and a_pos != b_pos:
+            return False
+    return True
+# -------------------------------------------------------------------------------
 
 def _tokenize(text: str) -> List[str]:
     """Extract meaningful tokens from market title."""
@@ -372,6 +448,13 @@ def find_arb_opportunities(
             
             # Subject compatibility check — prevent "election occurs?" vs "AOC wins?"
             if not _subjects_compatible(km["title"], pm["title"], k_subject, poly_subjects[pi]):
+                continue
+
+            # ARB_POLARITY_GUARD: reject semantically OPPOSITE questions that the
+            # tokenizer scores as identical (see _polarity_compatible above).
+            if not _polarity_compatible(km["title"], pm["title"]):
+                logger.debug("arb: polarity mismatch, dropped | K=%s | P=%s",
+                             km["title"][:60], pm["title"][:60])
                 continue
             
             # Calculate spread (both directions)

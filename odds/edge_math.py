@@ -428,29 +428,61 @@ def net_arb_edge(
         - buy_fee: taker fee fraction on the buy leg (at buy_price)
         - sell_fee: taker fee fraction on the sell/close leg (at sell_price)
         - slippage: slippage fraction deducted
-        - net_edge_pp: net edge in percentage points (e.g. 4.2 for 4.2pp)
+        - gross_edge_pp: (sell - buy) * 100, the guaranteed profit per contract
+        - net_edge_pp: gross_edge_pp minus fees & slippage, in TRUE percentage
+          points. Invariant: net_edge_pp <= gross_edge_pp (== spread_pp).
+        - capital_per_contract: buy_price + (1 - sell_price), both legs
+        - net_return / net_return_pct: return on that both-leg capital
     """
-    # Gross return
-    gross_return = (sell_price / buy_price) - 1.0 if buy_price > 0 else 0.0
+    # ARB_EDGE_PP_UNIT_FIX 2026-08-26 --------------------------------------
+    # Previously: gross_return = (sell/buy) - 1, then net_edge_pp = net*100.
+    # That is a RATIO scaled by 100, not percentage points, and it exceeded
+    # spread_pp on 11,418/11,418 logged rows (3,428 of them >100pp, which is
+    # impossible for a binary market). It was also wrong as a return: (sell/buy)-1
+    # measures return on the BUY leg alone.
+    #
+    # A cross-platform arb is HEDGED. Selling YES on the other venue means buying
+    # NO at (1 - sell_price), so both legs tie up capital and exactly one leg
+    # settles at $1:
+    #     capital = buy_price + (1 - sell_price)
+    #     profit  = 1 - capital = sell_price - buy_price
+    # Hence the edge in percentage points is (sell - buy)*100 minus costs, which
+    # is spread_pp minus costs -- restoring the invariant net_edge_pp <= spread_pp
+    # (see tests/test_net_arb_edge_units.py).
+    # -----------------------------------------------------------------------
+
+    # Gross edge in PERCENTAGE POINTS: guaranteed profit per contract.
+    gross_edge_pp = (sell_price - buy_price) * 100.0
 
     # Each leg is a taker fill at its own price (real 2026 fee schedules).
     buy_fee = taker_fee_fraction(buy_price, buy_platform, category)
     sell_fee = taker_fee_fraction(sell_price, sell_platform, category)
-
-    # Slippage deduction
     slippage = estimated_slippage
 
-    # Net return after all costs
-    net_return = gross_return - buy_fee - sell_fee - slippage
+    # Costs are fractions of contract value -> convert to percentage points.
+    # TWO_LEG_SLIPPAGE 2026-08-26: a cross-platform arb crosses TWO spreads
+    # (buy leg + sell leg), so slippage applies per leg. Counting it once
+    # understated cost by ~0.5pp on every pair (review finding).
+    cost_pp = (buy_fee + sell_fee + 2.0 * slippage) * 100.0
+    net_edge_pp = gross_edge_pp - cost_pp
 
-    # Net edge in percentage points
-    net_edge_pp = net_return * 100.0
+    # Return on the capital actually deployed across BOTH legs.
+    capital = buy_price + (1.0 - sell_price)
+    if capital > 0:
+        gross_return = (gross_edge_pp / 100.0) / capital
+        net_return = (net_edge_pp / 100.0) / capital
+    else:
+        gross_return = 0.0
+        net_return = 0.0
 
     return {
+        "gross_edge_pp": round(gross_edge_pp, 2),
+        "net_edge_pp": round(net_edge_pp, 2),
+        "capital_per_contract": round(capital, 6),
         "gross_return": round(gross_return, 6),
         "net_return": round(net_return, 6),
+        "net_return_pct": round(net_return * 100.0, 2),
         "buy_fee": round(buy_fee, 6),
         "sell_fee": round(sell_fee, 6),
         "slippage": round(slippage, 6),
-        "net_edge_pp": round(net_edge_pp, 2),
     }

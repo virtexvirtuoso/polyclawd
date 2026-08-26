@@ -29,7 +29,6 @@ def _get_conn(db_path: str = None) -> sqlite3.Connection:
     """Get SQLite connection with WAL mode and busy timeout."""
     conn = db_connect(db_path or str(DB_PATH), timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -330,4 +329,24 @@ def ic_report(window_days: int = 30, db_path: str = None) -> dict:
             "warn": [f"Monitor '{s}' — IC below {IC_WARN}" for s in warn_list],
         },
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        # IC_REPORT_NO_DATA_STATUS 2026-08-26: an empty kill_list/warn_list used to
+        # be indistinguishable from "all signals healthy". signal_predictions has
+        # never been populated in production (record_signal_prediction() is called
+        # only by tests), so this endpoint returned a vacuous all-clear. Make the
+        # absence of data explicit so no consumer can read empty as healthy.
+        # calculate_ic() already does this via status="insufficient_data".
+        # "ok" requires at least one source with a COMPUTABLE IC. Without this,
+        # a report where every source is individually insufficient_data returned
+        # "ok" with empty kill/warn lists -- the same vacuous all-clear this
+        # status field was added to eliminate, just narrower (review 2026-08-26).
+        "sources_with_ic": len(valid_ics),
+        "status": ("no_data" if (sum(r["count"] for r in sources) + unresolved) == 0
+                   else ("insufficient_data"
+                         if (sum(r["count"] for r in sources) == 0 or not valid_ics)
+                         else "ok")),
+        "status_detail": ("signal_predictions is empty - no predictions have ever been "
+                          "recorded, so kill_list/warn_list being empty means UNKNOWN, "
+                          "not healthy"
+                          if (sum(r["count"] for r in sources) + unresolved) == 0
+                          else None),
     }
