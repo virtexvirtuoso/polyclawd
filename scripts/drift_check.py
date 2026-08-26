@@ -24,7 +24,12 @@ from datetime import datetime, timezone
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_DIR, "scripts"))
 
-DIRS = ["odds", "signals", "services", "api"]
+# 2026-08-26: was ["odds", "signals", "services", "api"]. That left execution/
+# (the real-money order path), config/ (phase limits), scripts/ (every cron) and
+# tests/ unwatched. An audit that day found 8 drifted files and 5 VPS-only test
+# files in those four directories, none of which this check had ever reported —
+# including the test that pinned a dead learning-loop query as correct behavior.
+DIRS = ["odds", "signals", "services", "api", "execution", "config", "scripts", "tests"]
 VPS_DIR = "/var/www/virtuosocrypto.com/polyclawd"
 LOG = os.path.expanduser("~/Library/Logs/polyclawd-drift-check.log")
 ALERT_ENV = os.path.expanduser("~/.config/polyclawd/alerts.env")
@@ -115,9 +120,18 @@ def main() -> int:
     vps_only = sorted(set(vps) - set(loc))
     local_only = sorted((set(loc) - set(vps)) - ALLOWLIST_LOCAL_ONLY)
 
+    # scripts/ and tests/ legitimately hold dozens of one-off local helpers that
+    # are never deployed, so LOCAL-only there is the normal state, not drift.
+    # Filtered rather than dropped: the count is always printed, because a
+    # silently suppressed class is how a monitor starts lying. DIFFER and
+    # VPS-only are NEVER filtered — those are the directions that lose work.
+    local_only_noise = [p for p in local_only if p.startswith(("scripts/", "tests/"))]
+    local_only = [p for p in local_only if p not in set(local_only_noise)]
+
+    noise_note = f", {len(local_only_noise)} local-only scripts/tests helpers not counted" if local_only_noise else ""
     total = len(differ) + len(vps_only) + len(local_only)
     if total == 0:
-        _log(f"OK in sync (local={len(loc)} vps={len(vps)}, allowlisted local-only ignored)")
+        _log(f"OK in sync (local={len(loc)} vps={len(vps)}, allowlisted local-only ignored{noise_note})")
         return 0
 
     def sample(lst, n=5):
@@ -128,6 +142,7 @@ def main() -> int:
         f"  DIFFER ({len(differ)}): {sample(differ)}" if differ else "",
         f"  VPS-only ({len(vps_only)}): {sample(vps_only)}" if vps_only else "",
         f"  LOCAL-only ({len(local_only)}): {sample(local_only)}" if local_only else "",
+        f"  (not counted: {len(local_only_noise)} local-only scripts/tests helpers)" if local_only_noise else "",
     ]
     body = "\n".join(l for l in lines if l)
     _log(body.replace("\n", " | "))
