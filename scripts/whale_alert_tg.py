@@ -11,6 +11,15 @@ Dedup logic:
     header becomes "DOUBLE CONFIRMATION"
 """
 import requests, json, os, time, re, html
+# Runnable as a script (scheduler/cron launch it as a subprocess, which does
+# NOT inherit the parent sys.path). Make the project root importable so the
+# module-level project imports below resolve either way.
+import sys as _sys
+from pathlib import Path as _Path
+_ROOT = str(_Path(__file__).resolve().parent.parent)
+if _ROOT not in _sys.path:
+    _sys.path.insert(0, _ROOT)
+
 from scripts.alert_formatter import send_telegram as send_tg
 
 # HTML-escape dynamic content — raw & < > in market titles 400 at Telegram

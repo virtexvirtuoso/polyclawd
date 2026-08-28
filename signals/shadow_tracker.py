@@ -21,6 +21,15 @@ import urllib.request
 from datetime import datetime, timedelta, timezone, date
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+# Runnable as a script (scheduler/cron launch it as a subprocess, which does
+# NOT inherit the parent sys.path). Make the project root importable so the
+# module-level project imports below resolve either way.
+import sys as _sys
+from pathlib import Path as _Path
+_ROOT = str(_Path(__file__).resolve().parent.parent)
+if _ROOT not in _sys.path:
+    _sys.path.insert(0, _ROOT)
+
 from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
@@ -46,7 +55,7 @@ def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")
     _init_tables(conn)
     return conn
 
@@ -676,8 +685,15 @@ def generate_daily_summary(target_date: Optional[str] = None) -> Dict[str, Any]:
 
     # Track actual sources from today's trades
     source_counts = {}
+    # sqlite3.Row has no .get(): it raises AttributeError, and indexing an
+    # absent column raises IndexError. Probe keys() once instead. This crashed
+    # every `summary` run, but was invisible behind the ModuleNotFoundError
+    # that killed the script at import time (fixed 2026-08-28).
+    _cols = day_trades[0].keys() if day_trades else ()
     for t in day_trades:
-        src = t.get("strategy") or t.get("source") or "unknown"
+        src = (t["strategy"] if "strategy" in _cols else None) \
+            or (t["source"] if "source" in _cols else None) \
+            or "unknown"
         source_counts[src] = source_counts.get(src, 0) + 1
 
     # Poly delta: avg adverse selection by signal source (last 7 days)

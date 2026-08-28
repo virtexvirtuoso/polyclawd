@@ -45,6 +45,44 @@ logging.basicConfig(
 )
 logger = logging.getLogger("scheduler")
 
+
+def _script_env() -> dict:
+    """Env for subprocess-launched project scripts.
+
+    A subprocess does NOT inherit the parent's sys.path, so a script with a
+    module-level `from config...` / `from signals...` import dies on
+    ModuleNotFoundError unless the project root is on PYTHONPATH. The cron
+    entries for these same scripts set PYTHONPATH explicitly; the scheduler
+    did not. See tests/test_scheduler_subprocess_imports.py.
+    """
+    env = os.environ.copy()
+    root = str(PROJECT_ROOT)
+    existing = env.get("PYTHONPATH", "")
+    if root not in existing.split(os.pathsep):
+        env["PYTHONPATH"] = f"{root}{os.pathsep}{existing}" if existing else root
+    return env
+
+
+def _run_script(argv, timeout, label):
+    """Run a project script with PYTHONPATH set, surfacing any failure.
+
+    capture_output=True with no returncode check is exactly how
+    task_shadow_resolution crashed on import every 5 minutes from 2026-06 to
+    2026-08-28 without a single log line.
+    """
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, env=_script_env()
+        )
+    except Exception as exc:
+        logger.error("%s failed to launch: %s", label, exc)
+        return None
+    if proc.returncode != 0:
+        logger.error(
+            "%s exited rc=%s: %s", label, proc.returncode, (proc.stderr or "")[-500:]
+        )
+    return proc
+
 # ============================================================================
 # State — persistent across ticks (advantage over cron)
 # ============================================================================
@@ -279,9 +317,9 @@ def task_shadow_resolution():
     """Resolve shadow trades + snapshot + summary."""
     venv = str(PROJECT_ROOT / "venv" / "bin" / "python3")
     for cmd in ["resolve", "snapshot", "summary"]:
-        subprocess.run(
+        _run_script(
             [venv, str(PROJECT_ROOT / "signals" / "shadow_tracker.py"), cmd],
-            capture_output=True, timeout=60,
+            timeout=60, label=f"shadow_tracker {cmd}",
         )
 
 
@@ -381,9 +419,9 @@ def task_hf_spread_15m():
 def task_resolution_scanner():
     """Tier 1 resolution certainty scanning."""
     venv = str(PROJECT_ROOT / "venv" / "bin" / "python3")
-    subprocess.run(
+    _run_script(
         [venv, str(PROJECT_ROOT / "signals" / "resolution_scanner.py"), "scan"],
-        capture_output=True, timeout=60,
+        timeout=60, label="resolution_scanner scan",
     )
 
 
@@ -977,7 +1015,7 @@ def task_arb_scan():
         from pathlib import Path
         proc = subprocess.run(
             [sys.executable, str(PROJECT_ROOT / "scripts" / "arb_alert.py")],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=60, env=_script_env(),
         )
         if proc.returncode != 0:
             logger.warning("arb_alert stderr: %s", proc.stderr[:300])
@@ -1089,7 +1127,7 @@ def _send_whale_alert_tg():
     try:
         proc = subprocess.run(
             [sys.executable, str(PROJECT_ROOT / "scripts" / "whale_alert_tg.py")],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, env=_script_env(),
         )
         if proc.returncode != 0:
             logger.warning("whale_alert_tg stderr: %s", proc.stderr[:300])
@@ -1712,7 +1750,7 @@ def task_arena_snapshot():
     venv = str(PROJECT_ROOT / "venv" / "bin" / "python3")
     result = subprocess.run(
         [venv, str(PROJECT_ROOT / "signals" / "ai_model_tracker.py"), "snapshot"],
-        capture_output=True, timeout=60, text=True,
+        capture_output=True, timeout=60, text=True, env=_script_env(),
     )
     if result.returncode != 0:
         logger.error(
