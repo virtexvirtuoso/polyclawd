@@ -587,6 +587,16 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
             _e.book_spread = _ex["spread"]
             _e.slippage_bps = _ex["slippage_bps"]
             _e.tradeable = _ex["tradeable"]
+            # fillable_usd and net_edge_pct were omitted here until 2026-08-28.
+            # This inline block is a copy of sec.enrich_executable_edge, and a
+            # PARTIAL copy is invisible: every field present looks right. The
+            # cost was total — sec.log_shadow gates on p2_depth_ok(fillable_usd),
+            # which returns "depth unavailable (book not fetched)" for None, so
+            # NO baseball edge could ever be logged as a shadow trade.
+            # tests/unit/test_enrichment_field_parity.py pins the two blocks
+            # to the same field set.
+            _e.fillable_usd = _ex.get("fillable_usd")
+            _e.net_edge_pct = sec.fee_adjusted_edge(_e)
         # Polymarket's own recent price drift (persistent momentum, survives restart)
         try:
             _pm = pee.poly_price_move(token_id=_tid, condition_id=_e.poly_market_id, outcome_index=_oi)
