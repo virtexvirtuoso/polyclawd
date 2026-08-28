@@ -246,23 +246,43 @@ def _load_resolved_trades() -> list:
 
         trades = []
 
-        # Shadow trades. A win is side == outcome, so rows that cannot express
-        # that comparison must be filtered out rather than left to evaluate
-        # False: outcome NULL (never written), 'VOID' (market voided) and
-        # side 'PASS' (non-directional) would each be scored as a LOSS and
-        # depress every archetype bucket. On prod 2026-08-26 that was 34 of
-        # 367 rows (39.8% reported vs 43.8% actual). See tests/unit/
+        # Shadow trades. A win is the SIGN OF pnl, not side == outcome --
+        # identical semantics to signals/source_win_rates.py, which is the
+        # other consumer of this table.
+        #
+        # `outcome` is the MARKET-frame resolution ('YES' = the first-listed
+        # outcome won), while the sports resolvers score the trade by NAME
+        # match against the picked team/total and write pnl from that verdict
+        # (baseball_resolver.py). So for sports rows side == outcome
+        # contradicts the resolver's own verdict: on prod 2026-08-26 it
+        # disagreed with sign(pnl) on 113 of 332 scoreable rows -- every one a
+        # baseball_moneyline / baseball_spread / baseball_total row -- and
+        # agreed on all 92 non-sports rows. Because classify_archetype() bins
+        # those baseball titles as 'other', 'sports_single_game' and
+        # 'sports_winner', six archetype|side buckets were affected.
+        #
+        # Row filter (also mirroring source_win_rates.py): rows that cannot
+        # express a win must be dropped, not left to evaluate False and be
+        # scored as a LOSS -- outcome NULL/'' (never written), 'VOID' (market
+        # voided), side 'PASS' (non-directional) and NULL pnl. On prod
+        # 2026-08-26 that was 35 of 367 resolved rows.
+        #
+        # pnl exactly 0 counts as a LOSS (`pnl > 0`), matching
+        # source_win_rates.py's `CASE WHEN pnl > 0 THEN 'won' ELSE 'lost'`.
+        # There are 0 such rows in production today; a true scratch is not a
+        # win once fees are paid. See tests/unit/
         # test_empirical_confidence_loader.py.
         for t in db.execute(
-            "SELECT market, side, entry_price, outcome, platform FROM shadow_trades "
-            "WHERE resolved=1 AND outcome IN ('YES','NO') AND side IN ('YES','NO')"
+            "SELECT market, side, entry_price, outcome, pnl, platform FROM shadow_trades "
+            "WHERE resolved=1 AND outcome IN ('YES','NO') AND side IN ('YES','NO') "
+            "AND pnl IS NOT NULL"
         ).fetchall():
             trades.append(
                 {
                     "title": t["market"] or "",
                     "side": t["side"] or "?",
                     "price": t["entry_price"] or 0,
-                    "won": t["side"] == t["outcome"],
+                    "won": t["pnl"] > 0,
                     "platform": t["platform"] or "unknown",
                 }
             )
