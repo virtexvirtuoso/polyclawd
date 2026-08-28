@@ -550,7 +550,7 @@ def sync_positions(conn) -> list[dict]:
         shares = float(pos.get("size", 0))
         cost_usd = float(pos.get("initialValue", entry_price * shares))
 
-        conn.execute(
+        _cur = conn.execute(
             "INSERT INTO live_positions "
             "(opened_at, market_id, market_slug, market_title, token_id, side, "
             "entry_price, shares, cost_usd, status, fee_paid_total, archetype) "
@@ -570,6 +570,33 @@ def sync_positions(conn) -> list[dict]:
                 "manual",
             ),
         )
+        # POSITION_SYNC_ENTRY_REASONING 2026-08-25: record WHY this row exists.
+        # Reconstructed positions previously carried no live_entry_reasoning row,
+        # so "every live position has a documented trigger" was false for this
+        # path. Best-effort ON PURPOSE: registering the position is the critical
+        # job here, so an audit-row failure must never roll it back (unlike the
+        # executor path, where the reasoning write IS atomic with the insert).
+        try:
+            from execution.live_db import record_entry_reasoning
+
+            record_entry_reasoning(
+                conn,
+                commit=False,
+                position_id=_cur.lastrowid,
+                ts=datetime.now(timezone.utc).isoformat(),
+                trigger_source="position_sync",
+                reasoning=(
+                    "discovered on-chain by position_sync reconciliation; "
+                    "not originated by a strategy executor"
+                ),
+                raw_json=json.dumps(pos, default=str),
+            )
+        except Exception as _reason_exc:  # noqa: BLE001 - audit must not block sync
+            logger.warning(
+                "position_sync: entry-reasoning write failed for %s: %s",
+                market_title,
+                _reason_exc,
+            )
         conn.commit()
         logger.info("position_sync: registered manual position %s @ %.2f", market_title, entry_price)
 
@@ -719,7 +746,9 @@ def run() -> dict:
                             daily_loss, unrealized_loss, live_config.daily_loss_halt())
                 gov.reset_day()
 
-            # ONE write transaction for the whole sync (was four).
+            # ONE write transaction for the whole sync (was four). Batching also
+            # makes the DAILY_HALT decision see a consistent snapshot instead of
+            # depending on setter order. See RiskGovernor.apply_sync.
             gov.apply_sync(bankroll=true_bankroll, deployed_usd=deployed,
                            realized_pnl=ledger_realized, daily_loss=daily_loss,
                            unrealized_loss=unrealized_loss)
