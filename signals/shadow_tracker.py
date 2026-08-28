@@ -145,6 +145,19 @@ def _init_tables(conn: sqlite3.Connection):
     except sqlite3.OperationalError:
         pass
 
+    # Migration: last_resolve_attempt enables FAIR ROTATION in resolve_trades.
+    # Without it the resolver took `ORDER BY timestamp ASC LIMIT 15` — the same
+    # 15 oldest rows every run. When those are permanently unresolvable (empty
+    # market_id, a closed market with no winner recorded, or a long-dated market
+    # still open months later) the window never advances and every newer row is
+    # starved. On prod 2026-08-28 that starved 42 resolvable rows behind a head
+    # of 15 that could never clear.
+    try:
+        conn.execute("ALTER TABLE shadow_trades ADD COLUMN last_resolve_attempt TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
 def _migrate_legacy_json(conn: sqlite3.Connection):
     """Import trades from legacy JSON file into SQLite."""
     if not LEGACY_JSON.exists():
@@ -395,9 +408,16 @@ def log_shadow_trade(signal: Dict) -> bool:
 # ============================================================================
 
 def _fetch_json(url: str, timeout: int = 8) -> Any:
-    """Fetch JSON with timeout."""
+    """Fetch JSON with timeout.
+
+    UA must NOT be browser-shaped: clob.polymarket.com returns 403 for
+    Mozilla/* (verified 2026-08-28: Mozilla/5.0 -> 403, Polyclawd/2.0 -> 200,
+    curl/8.5.0 -> 200). gamma-api does not block it, which is why this hid for
+    months. This fetcher backs _check_polymarket_resolution, so the 403 made
+    every Polymarket trade look "still open" and the resolver never advanced.
+    """
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
@@ -504,13 +524,27 @@ def resolve_trades(batch_size: int = 15, delay: float = 0.3) -> Dict[str, Any]:
     conn = get_db()
     _migrate_legacy_json(conn)
 
+    # Least-recently-attempted first (NULL = never tried), then oldest. This is
+    # a FAIR queue: a row that cannot resolve is stamped and moves to the back,
+    # so it can no longer block every row behind it. See the migration note on
+    # last_resolve_attempt.
     rows = conn.execute("""
         SELECT id, market_id, side, entry_price, market, platform
         FROM shadow_trades
         WHERE resolved = 0
-        ORDER BY timestamp ASC
+        ORDER BY COALESCE(last_resolve_attempt, '') ASC, timestamp ASC
         LIMIT ?
     """, (batch_size,)).fetchall()
+
+    # Stamp the whole batch up front: every row in it has now had its turn,
+    # whether or not the API gives us an outcome. Stamping only on success
+    # would reproduce the head-of-line block exactly.
+    _attempt_ts = datetime.now(timezone.utc).isoformat()
+    conn.executemany(
+        "UPDATE shadow_trades SET last_resolve_attempt = ? WHERE id = ?",
+        [(_attempt_ts, r["id"]) for r in rows],
+    )
+    conn.commit()
 
     if not rows:
         conn.close()

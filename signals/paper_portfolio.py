@@ -429,7 +429,7 @@ def _get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")
     _init_tables(conn)
     return conn
 
@@ -1674,7 +1674,7 @@ def _fetch_live_positions() -> dict:
 
     def _fetch(url, timeout=6):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
         except Exception:
@@ -2095,7 +2095,7 @@ def resolve_open_positions() -> dict:
 
     def _fetch(url, timeout=10):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
         except Exception:

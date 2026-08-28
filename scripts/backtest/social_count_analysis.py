@@ -6,7 +6,7 @@ from config.polymarket_urls import GAMMA_API as GAMMA  # polyproxy: central URL 
 def fetch(url, timeout=10):
     for attempt in range(3):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
             return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
         except:
             if attempt < 2: time.sleep(1)
