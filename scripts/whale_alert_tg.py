@@ -10,8 +10,11 @@ Dedup logic:
   - CLOB×scanner fusion: if whale_clob fired on same market within 15 min,
     header becomes "DOUBLE CONFIRMATION"
 """
-import requests, json, os, time, re
+import requests, json, os, time, re, html
 from scripts.alert_formatter import send_telegram as send_tg
+
+# HTML-escape dynamic content — raw & < > in market titles 400 at Telegram
+_esc = lambda s: html.escape(str(s), quote=False)
 
 API = "http://127.0.0.1:8420/api"
 STATE_FILE = "/tmp/whale_alert_tg_state.json"
@@ -535,11 +538,11 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
     lines = []
 
     # ── Header ───────────────────────────────────────────────────────
-    lines.append(f"{tag_str}{cat_emoji} <b>#{rank}</b> · {sev} · {score:.0f}/10 {verdict}")
+    lines.append(f"{tag_str}{cat_emoji} <b>#{rank}</b> · {_esc(sev)} · {score:.0f}/10 {verdict}")
     lines.append("")
 
     # ── Market name ──────────────────────────────────────────────────
-    lines.append(short)
+    lines.append(_esc(short))
     sub = alert.get("sub_title") or ""
     sub_clean = ""
     if sub and sub != short and sub != title:
@@ -557,9 +560,9 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
     # ── Price (with team name if applicable) ────────────────────────
     px_line = []
     if sub_clean:
-        px_line.append(f"<i>{sub_clean}</i>")
+        px_line.append(f"<i>{_esc(sub_clean)}</i>")
     if bid_c is not None:
-        px_line.append(f"{dir_str} @ {bid_c}¢" if dir_str else f"{bid_c}¢")
+        px_line.append(f"{_esc(dir_str)} @ {bid_c}¢" if dir_str else f"{bid_c}¢")
     if ask_c is not None and ask_c != bid_c:
         px_line.append(f"(ask {ask_c}¢)")
     if px_line:
@@ -577,9 +580,9 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
     whale_line = []
     if flow:
         if smart_name:
-            whale_line.append(f"🐋 <b>{smart_name}</b> · ${flow:,.0f} · {flow_dir_str}" if flow_dir_str else f"🐋 <b>{smart_name}</b> · ${flow:,.0f}")
+            whale_line.append(f"🐋 <b>{_esc(smart_name)}</b> · ${flow:,.0f} · {flow_dir_str}" if flow_dir_str else f"🐋 <b>{_esc(smart_name)}</b> · ${flow:,.0f}")
         elif flow_dir_str:
-            whale_line.append(f"🐋 Whale bought ${flow:,.0f} · {flow_dir_str} of flow")
+            whale_line.append(f"🐋 Whale bought ${flow:,.0f} · {_esc(flow_dir_str)} of flow")
         else:
             whale_line.append(f"🐋 ${flow:,.0f} flow")
     if whale_line:
@@ -588,9 +591,9 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
     # ── Close time ───────────────────────────────────────────────────
     ct = _close_time_str(close_iso)
     if ct:
-        lines.append(f"Closes {ct}")
+        lines.append(f"Closes {_esc(ct)}")
     elif htr is not None:
-        lines.append(f"{htr:.0f}h left")
+        lines.append(_esc(f"{htr:.0f}h left"))
     lines.append("")
 
     # ── Power user line: market size + triggers ─────────────────────
@@ -601,7 +604,7 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
         data.append(f"Volume ${vol/1000:.0f}K")
     hr = _human_reasons(reasons)
     if hr:
-        data.append(hr)
+        data.append(_esc(hr))
     if data:
         lines.append(f"📊 {' · '.join(data)}")
 

@@ -1,3 +1,4 @@
+import sqlite3
 """Tests for IC (Information Coefficient) tracker."""
 import time
 import pytest
@@ -185,6 +186,11 @@ class TestICReport:
         assert "warn_list" in result
         assert "recommendations" in result
         assert "generated_at" in result
+        # Added 2026-08-26: without these the status field could be deleted and
+        # this suite would stay green (review finding).
+        assert "status" in result
+        assert "status_detail" in result
+        assert "sources_with_ic" in result
 
     def test_report_empty_db(self, test_db):
         """Report with no data should return gracefully."""
@@ -192,6 +198,33 @@ class TestICReport:
         assert result["total_resolved"] == 0
         assert result["aggregate_ic"] is None
         assert len(result["sources"]) == 0
+        # An empty kill_list must NOT read as a clean bill of health.
+        assert result["status"] == "no_data"
+        assert result["status_detail"] is not None
+        assert result["kill_list"] == [] and result["warn_list"] == []
+
+
+    def test_resolved_but_no_computable_ic_is_not_ok(self, test_db):
+        """Sources resolved but below min sample must NOT return status 'ok'.
+
+        Regression for the narrowed vacuous all-clear: every source
+        insufficient_data individually, yet the report said "ok" with empty
+        kill/warn lists (review 2026-08-26).
+        """
+        import time as _t
+        conn = sqlite3.connect(test_db)
+        for i in range(4):
+            conn.execute(
+                "INSERT INTO signal_predictions "
+                "(timestamp, source, market_id, confidence, resolved, outcome) "
+                "VALUES (?,?,?,?,1,?)", (_t.time(), "srcA", f"m{i}", 0.6, 1.0))
+        conn.commit()
+        conn.close()
+        result = ic_report(window_days=30, db_path=test_db)
+        assert result["total_resolved"] == 4
+        assert result["sources_with_ic"] == 0
+        assert result["status"] == "insufficient_data"
+        assert result["kill_list"] == []
 
     def test_report_with_data(self, test_db):
         """Report with data should include per-source IC."""

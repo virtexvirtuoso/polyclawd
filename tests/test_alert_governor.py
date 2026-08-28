@@ -14,6 +14,11 @@ PASS = FAIL = 0
 
 
 def check(name, cond, detail=""):
+    # PYTEST_CHECK_RAISES_2026_08_26: this used to only count and print, so all 10 tests in this
+    # file passed unconditionally under pytest (verified with a deliberate failing
+    # check that still reported "1 passed"). It must raise. NOTE: unlike the other
+    # two files, this one already guards its runner with `if __name__ == "__main__"`,
+    # so it never crashed the suite -- it just went silently green.
     global PASS, FAIL
     if cond:
         PASS += 1
@@ -21,6 +26,7 @@ def check(name, cond, detail=""):
     else:
         FAIL += 1
         print(f"  ❌ {name} {detail}")
+        raise AssertionError(f"{name} {detail}".strip())
 
 
 def tmpdb():

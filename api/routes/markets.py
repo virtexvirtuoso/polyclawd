@@ -130,7 +130,7 @@ def _get_market_prices(market: dict) -> tuple:
 # feesEnabled=false market (45/45, zero mixed cases).
 #
 # Residual risk, documented deliberately: the RATES in fee_model.TAKER_RATE come
-# from docs.polymarket.com (verified 2026-06-02), but this feeType -> category
+# from docs.polymarket.com/trading/fees (re-verified 2026-08-26), but this
 # BINDING is a name match, not something Polymarket documents. A new or renamed
 # feeType therefore fails closed (returns None) instead of silently taking
 # fee_model's 0.05 `.get` default -- `tech_fees` is live right now and has no
@@ -288,7 +288,7 @@ async def arb_scan(limit: int = Query(default=50, ge=1, le=100)):
         fee_info = {
             "fee_basis": "execution.fee_model.taker_fee_fraction",
             "formula": "category_rate * p * (1-p) per share, charged on EACH leg; 0% on winnings",
-            "source": "docs.polymarket.com fees (verified 2026-06-02); per-market category from Gamma feeType",
+            "source": "docs.polymarket.com/trading/fees (re-verified 2026-08-26); per-market category from Gamma feeType",
             "slippage_pct_per_leg": 0.5,
             "note": (
                 "Markets with feesEnabled=false pay no taker fee. An unrecognised feeType "

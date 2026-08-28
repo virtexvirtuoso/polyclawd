@@ -16,6 +16,7 @@ Run via: systemd polyclawd-scheduler.service
 """
 
 import asyncio
+import html
 import logging
 import os
 import sqlite3
@@ -70,10 +71,8 @@ _state = {
 
 def _db():
     conn = db_connect(str(DB_PATH))
-    conn.execute("PRAGMA busy_timeout=8000")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -116,6 +115,27 @@ def _restart_service():
 
 _task_locks: dict = {}
 
+# SQLite write-lock contention here is transient by construction:
+# shadow_trades.db is ~160MB in WAL mode, written concurrently by this
+# scheduler, 2 uvicorn workers and ~20 crons. Measured, the write lock is
+# normally held <0.2s, but a few times a day a writer holds it long enough to
+# blow through busy_timeout. A task must not DIE on that — a retry a second
+# later almost always succeeds.
+_LOCK_RETRIES = 3
+_LOCK_BACKOFF_BASE = 1.5
+
+
+def _is_lock_error(exc: BaseException) -> bool:
+    """True only for transient SQLite busy/locked errors.
+
+    Deliberately narrow: schema, integrity and I/O errors must still fail fast
+    instead of being retried into a slow, silent loop.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return "database is locked" in msg or "database is busy" in msg
+
 
 def _run_safe(name: str, fn, *args, **kwargs):
     """Run a function, catching all exceptions.
@@ -123,14 +143,29 @@ def _run_safe(name: str, fn, *args, **kwargs):
     Per-task non-blocking lock: if the same task is already running (e.g.
     live-burst trigger overlapping the periodic tick), skip instead of
     running concurrently — the monitors are stateful (score-snap tables)
-    and the next tick picks up anything missed."""
+    and the next tick picks up anything missed.
+
+    Transient SQLite lock errors are retried with exponential backoff before
+    the task is declared failed."""
+    import random
     import threading
     lock = _task_locks.setdefault(name, threading.Lock())
     if not lock.acquire(blocking=False):
         logger.debug("Task %s already running — skipped", name)
         return None
     try:
-        return fn(*args, **kwargs)
+        for attempt in range(_LOCK_RETRIES):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:
+                if not _is_lock_error(e) or attempt == _LOCK_RETRIES - 1:
+                    raise
+                delay = _LOCK_BACKOFF_BASE ** attempt + random.uniform(0, 1)
+                logger.warning(
+                    "Task %s hit a SQLite lock (attempt %d/%d) — retrying in %.1fs: %s",
+                    name, attempt + 1, _LOCK_RETRIES, delay, e,
+                )
+                time.sleep(delay)
     except Exception as e:
         logger.exception("Task %s failed: %s", name, e)
     finally:
@@ -412,7 +447,6 @@ def task_stop_silence_alarm(db_path=None, now=None):
     conn = db_connect(path)
     try:
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=5000")
         # Writer (stop_evaluator) may not be deployed yet — create both tables
         # so registration order doesn't matter (plan Task 2.1 schema).
         conn.execute(
@@ -1140,7 +1174,6 @@ def task_smart_wallet_resolve():
                                             settle_via_market_resolution)
     conn = db_connect(str(SHADOW_DB))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000")
     try:
         init_shadows(conn)
         n = resolve_shadows(conn, settle_via_market_resolution)
@@ -1659,8 +1692,10 @@ def task_betfair_scan():
         lines = [f"⚡ Betfair Futures Edges ({len(to_alert)})"]
         for e in to_alert[:5]:
             pm_str = f"{e.polymarket_price*100:.0f}¢" if e.polymarket_price else "N/A"
+            sel = html.escape(e.selection, quote=False)
+            sprt = html.escape(e.sport, quote=False)
             lines.append(
-                f"  {e.selection} ({e.sport}): Betfair {e.betfair_prob*100:.1f}% vs PM {pm_str} → {e.edge_pct*100:+.1f}%"
+                f"  {sel} ({sprt}): Betfair {e.betfair_prob*100:.1f}% vs PM {pm_str} → {e.edge_pct*100:+.1f}%"
             )
         msg = "\n".join(lines)
         logger.info(msg)
@@ -2149,7 +2184,6 @@ def task_db_maintenance():
     # VACUUM in separate connection (can't run inside transaction)
     try:
         conn2 = db_connect(str(DB_PATH))
-        conn2.execute("PRAGMA busy_timeout=5000")
         conn2.execute("VACUUM")
         conn2.close()
         logger.info("DB maintenance: VACUUM complete")
