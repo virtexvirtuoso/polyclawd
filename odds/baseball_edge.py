@@ -15,7 +15,6 @@ Polymarket game market structure (from Gamma API, tag_slug=baseball):
 
 Usage:
     from baseball_edge import get_baseball_edge_summary
-from config.polymarket_urls import GAMMA_API as POLYMARKET_GAMMA  # polyproxy: central URL config
     summary = await get_baseball_edge_summary()
 """
 
@@ -32,6 +31,8 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 from loguru import logger
+
+from config.polymarket_urls import GAMMA_API as POLYMARKET_GAMMA  # polyproxy: central URL config
 
 try:  # shared order-book executable-edge enrichment
     from . import poly_executable_edge as pee
