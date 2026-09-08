@@ -221,23 +221,142 @@ WC_TEAM_CODES = {
 }
 
 
-def _extract_matchup_from_ticker(mkt: str) -> str | None:
-    """Extract team matchup from Kalshi World Cup ticker codes.
-    E.g. KXWCTOTAL-26JUN17GHAPAN-3 → Ghana vs Panama
+# ── Kalshi MLB team codes (3-char, from KXMLBGAME tickers) ──────────
+MLB_TEAM_CODES = {
+    "SEA": "Mariners", "BOS": "Red Sox", "STL": "Cardinals", "LAD": "Dodgers",
+    "NYY": "Yankees", "LAA": "Angels", "MIL": "Brewers", "CHC": "Cubs",
+    "TOR": "Blue Jays", "CLE": "Guardians", "NYM": "Mets", "TB": "Rays",
+    "SD": "Padres", "CIN": "Reds", "PHI": "Phillies", "AZ": "D-backs",
+    "BAL": "Orioles", "COL": "Rockies", "CWS": "White Sox", "HOU": "Astros",
+    "ATH": "Athletics", "TEX": "Rangers", "MIA": "Marlins", "KC": "Royals",
+    "DET": "Tigers", "MIN": "Twins", "SF": "Giants", "PIT": "Pirates",
+    "ATL": "Braves", "WSH": "Nationals",
+}
+
+
+def _extract_matchup_from_ticker(mkt: str):
+    """Extract matchup (+ first-pitch time) from Kalshi ticker codes.
+    World Cup: KXWCTOTAL-26JUN17GHAPAN-3 → ("Ghana vs Panama", None)
+    MLB: KXMLBGAME-26SEP011845SEABOS-BOS → ("Mariners @ Red Sox", "Sep 1, 6:45 PM ET")
+    Returns (matchup, game_time) — either may be None.
     """
+    # MLB game ticker: KXMLBGAME-<YY><MON><DD><HHMM ET><AWAY><HOME>-<SIDE>
+    # Combined segment is 5-6 chars (2-char codes exist: SD, TB, AZ, KC, SF).
+    m = re.search(r'KXMLBGAME-\d{2}([A-Z]{3})(\d{2})(\d{4})([A-Z]{5,6})-', mkt)
+    if m:
+        mon, day, hhmm, seg = m.groups()
+        for split_at in (3, 2):
+            away, home = seg[:split_at], seg[split_at:]
+            if away in MLB_TEAM_CODES and home in MLB_TEAM_CODES:
+                h = int(hhmm[:2])
+                h12 = h % 12 or 12
+                ampm = "AM" if h < 12 else "PM"
+                game_time = f"{mon.title()} {int(day)}, {h12}:{hhmm[2:]} {ampm} ET"
+                return f"{MLB_TEAM_CODES[away]} @ {MLB_TEAM_CODES[home]}", game_time
+    # World Cup tickers (existing behaviour)
     m = re.search(r'KXWC\w+-\d{2}\w+\d{2}([A-Z]{3,8})-', mkt)
     if not m:
-        return None
+        return None, None
     code_str = m.group(1)
     # Try 4-char split first (e.g. GHAPAN = GHA + PAN)
     if len(code_str) == 6:
         c1, c2 = code_str[:3], code_str[3:]
         if c1 in WC_TEAM_CODES and c2 in WC_TEAM_CODES:
-            return f"{WC_TEAM_CODES[c1]} vs {WC_TEAM_CODES[c2]}"
+            return f"{WC_TEAM_CODES[c1]} vs {WC_TEAM_CODES[c2]}", None
     # Try 3-char (e.g. POR = Portugal)
     if len(code_str) == 3 and code_str in WC_TEAM_CODES:
-        return WC_TEAM_CODES[code_str]
-    return None
+        return WC_TEAM_CODES[code_str], None
+    return None, None
+
+
+# ── Fair-value join: sharp-book devig vs whale entry (2026-09-01) ────
+# sport_line_snap only has LIVE-game rows (drift scanner self-gates on live
+# games), but whale alerts fire PRE-game — so fetch the devig on demand,
+# once per process run, through the same credit gate the monitors use.
+# Pattern copied from cross_sport_drift.fetch_pinnacle_sport: per-book 2-way
+# devig across sharp US books, averaged. Fail-closed: any miss → no line.
+MLB_TEAM_FULL = {
+    "SEA": "Seattle Mariners", "BOS": "Boston Red Sox", "STL": "St. Louis Cardinals",
+    "LAD": "Los Angeles Dodgers", "NYY": "New York Yankees", "LAA": "Los Angeles Angels",
+    "MIL": "Milwaukee Brewers", "CHC": "Chicago Cubs", "TOR": "Toronto Blue Jays",
+    "CLE": "Cleveland Guardians", "NYM": "New York Mets", "TB": "Tampa Bay Rays",
+    "SD": "San Diego Padres", "CIN": "Cincinnati Reds", "PHI": "Philadelphia Phillies",
+    "AZ": "Arizona Diamondbacks", "BAL": "Baltimore Orioles", "COL": "Colorado Rockies",
+    "CWS": "Chicago White Sox", "HOU": "Houston Astros", "ATH": "Athletics",
+    "TEX": "Texas Rangers", "MIA": "Miami Marlins", "KC": "Kansas City Royals",
+    "DET": "Detroit Tigers", "MIN": "Minnesota Twins", "SF": "San Francisco Giants",
+    "PIT": "Pittsburgh Pirates", "ATL": "Atlanta Braves", "WSH": "Washington Nationals",
+}
+_FV_SHARP_BOOKS = ("pinnacle", "draftkings", "fanduel", "betmgm", "williamhill_us", "fanatics")
+_FV_CACHE: dict = {}   # side_code -> fair_prob (per process run)
+
+
+def _fv_imp(price) -> float:
+    p = int(price)
+    return (100 / (100 + p)) if p > 0 else (-p / (-p + 100))
+
+
+def _mlb_fair_value(mkt: str):
+    """Devigged sharp-book consensus win prob for the alert's side.
+    Returns None on any miss (no key, gated, no line, date mismatch)."""
+    m = re.search(r'KXMLBGAME-(\d{2})([A-Z]{3})(\d{2})\d{4}[A-Z]{5,6}-([A-Z]{2,3})$', mkt)
+    if not m:
+        return None
+    yy, mon, day, side = m.groups()
+    months = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6, "JUL": 7,
+              "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+    if side not in MLB_TEAM_FULL or mon not in months:
+        return None
+    # Ticker date is the ET game date; commence_time is UTC — evening ET
+    # games roll to the next UTC day, so compare on the ET date.
+    et_date = f"{2000 + int(yy)}-{months[mon]:02d}-{int(day):02d}"
+    if side in _FV_CACHE:
+        return _FV_CACHE[side]
+    key = os.environ.get("ODDS_API_KEY", "")
+    if not key:
+        return None
+    try:
+        from odds.monitor_gate import gated_fetch_json
+        data = gated_fetch_json("https://api.the-odds-api.com/v4/sports/baseball_mlb/odds", {
+            "apiKey": key, "regions": "us", "markets": "h2h", "oddsFormat": "american",
+        })
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    side_full = MLB_TEAM_FULL[side]
+    book_probs = []
+    for event in data:
+        if side_full not in (event.get("home_team", ""), event.get("away_team", "")):
+            continue
+        ct = event.get("commence_time", "")
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            start = datetime.fromisoformat(ct.replace("Z", "+00:00")).astimezone(ZoneInfo("America/New_York"))
+            if start.strftime("%Y-%m-%d") != et_date:
+                continue
+        except Exception:
+            continue
+        for bm in event.get("bookmakers", []):
+            if bm.get("key") not in _FV_SHARP_BOOKS:
+                continue
+            for mk in bm.get("markets", []):
+                if mk.get("key") != "h2h":
+                    continue
+                valid = [o for o in mk.get("outcomes", []) if o.get("price")]
+                if len(valid) < 2:
+                    continue
+                raw = {o["name"]: _fv_imp(o["price"]) for o in valid}
+                tot = sum(raw.values())
+                if not (0.95 <= tot <= 1.50) or side_full not in raw:
+                    continue
+                book_probs.append(raw[side_full] / tot)
+    if not book_probs:
+        return None
+    fair = sum(book_probs) / len(book_probs)
+    _FV_CACHE[side] = fair
+    return fair
 
 
 DASHBOARD_URL = "https://virtuosocrypto.com/polyclawd/whale-flow.html"
@@ -444,15 +563,21 @@ def _human_reasons(reasons: str) -> str:
 
 
 def _close_time_str(close_iso: str) -> str:
-    """Format close time to local time (America/New_York)."""
+    """Format close time to local time (America/New_York).
+    Time-only when it closes today; includes the date otherwise
+    (2026-09-01 fix: date-less close times misled on multi-day markets —
+    a Sept-4 deadline rendered as bare '6:45 PM ET' on a Sept-1 game)."""
     if not close_iso:
         return ""
     try:
-        from datetime import datetime
+        from datetime import datetime, date
         from zoneinfo import ZoneInfo
         dt = datetime.fromisoformat(close_iso.replace("Z", "+00:00"))
         local = dt.astimezone(ZoneInfo("America/New_York"))
-        return local.strftime("%I:%M %p ET").lstrip("0")
+        t = local.strftime("%I:%M %p ET").lstrip("0")
+        if local.date() == date.today():
+            return t
+        return f"{local.strftime('%b')} {local.day}, {t}"
     except:
         return ""
 
@@ -464,11 +589,12 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
     - Tier 2 (power user): compact data line with market metrics
     """
     mkt = alert.get("market", "")
+    platform = alert.get("platform", "kalshi")
     title = alert.get("title") or _clean_market_name(mkt)
     short = _short_title(title)
 
     # ── If title is generic (no team names), extract from ticker ────
-    matchup = _extract_matchup_from_ticker(mkt)
+    matchup, game_time = _extract_matchup_from_ticker(mkt)
     if matchup and (short.lower().startswith("over ") or short.lower().startswith("under ") or short.lower().startswith("total ") or short.lower().startswith("o/u ")):
         short = f"{matchup}: {short}"
 
@@ -531,10 +657,16 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
     # ── Verdict label ────────────────────────────────────────────────
     is_whale = "whale_flow_pierce" in reasons
     is_aggressive = "aggressive_taker" in reasons
-    if score >= 9 and is_whale and is_aggressive:
-        verdict = "🟩 ENTRY"
-    elif score >= 9 and is_whale:
-        verdict = "🟩 ENTRY"
+    # Smart-wallet ENTRY is outcome-validated (65.8% hit); anonymous whale
+    # flow is not (54.3%) — size alone is not an entry signal (2026-08-31 audit).
+    smart_name = None
+    for _r in reasons.split(","):
+        _r = _r.strip()
+        if _r.startswith("smart_wallet_"):
+            smart_name = _r.replace("smart_wallet_", "").replace("_", " ")
+            break
+    if score >= 9 and (is_whale or smart_name):
+        verdict = "🟩 ENTRY" if smart_name else "🟩 WHALE FLOW"
     elif score >= 9:
         verdict = "🟡 WATCH"
     elif score >= 7 and is_whale:
@@ -547,11 +679,20 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
     lines = []
 
     # ── Header ───────────────────────────────────────────────────────
-    lines.append(f"{tag_str}{cat_emoji} <b>#{rank}</b> · {_esc(sev)} · {score:.0f}/10 {verdict}")
+    raw = alert.get("raw_score")
+    hdr_score = f"{score:.0f}/10" + (f" (raw {raw:.1f})" if raw is not None and raw > score else "")
+    lines.append(f"{tag_str}{cat_emoji} <b>#{rank}</b> · {_esc(sev)} · {hdr_score} {verdict}")
     lines.append("")
 
     # ── Market name ──────────────────────────────────────────────────
     lines.append(_esc(short))
+    # ── Matchup + first pitch (sports context from ticker) ──────────
+    if matchup and matchup.lower() not in short.lower():
+        sport_emoji = "⚾" if mkt.upper().startswith("KXMLB") else "⚽"
+        ctx_line = f"{sport_emoji} {_esc(matchup)}"
+        if game_time:
+            ctx_line += f" · first pitch {_esc(game_time)}"
+        lines.append(ctx_line)
     sub = alert.get("sub_title") or ""
     sub_clean = ""
     if sub and sub != short and sub != title:
@@ -577,25 +718,39 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
     if px_line:
         lines.append(" ".join(px_line))
 
-    # ── Smart wallet identity ────────────────────────────────────────
-    smart_name = None
-    for r in reasons.split(","):
-        r = r.strip()
-        if r.startswith("smart_wallet_"):
-            smart_name = r.replace("smart_wallet_", "").replace("_", " ")
-            break
-
-    # ── Whale action (explained) ─────────────────────────────────────
+    # ── Whale action (explained, with avg entry price) ─────────────
+    dom_shares = max(fy, fn)
+    avg_c = int(round(flow / dom_shares * 100)) if (flow and dom_shares > 0) else None
+    avg_str = f" · avg ~{avg_c}¢" if avg_c and 1 <= avg_c <= 99 else ""
     whale_line = []
     if flow:
         if smart_name:
-            whale_line.append(f"🐋 <b>{_esc(smart_name)}</b> · ${flow:,.0f} · {flow_dir_str}" if flow_dir_str else f"🐋 <b>{_esc(smart_name)}</b> · ${flow:,.0f}")
+            base = f"🐋 <b>{_esc(smart_name)}</b> · ${flow:,.0f}{avg_str}"
+            whale_line.append(f"{base} · {flow_dir_str}" if flow_dir_str else base)
         elif flow_dir_str:
-            whale_line.append(f"🐋 Whale bought ${flow:,.0f} · {_esc(flow_dir_str)} of flow")
+            whale_line.append(f"🐋 Whale bought ${flow:,.0f}{avg_str} · {_esc(flow_dir_str)} of flow")
         else:
-            whale_line.append(f"🐋 ${flow:,.0f} flow")
+            whale_line.append(f"🐋 ${flow:,.0f}{avg_str} flow")
     if whale_line:
         lines.append(" ".join(whale_line))
+
+    # ── Fair value vs whale entry (sharp-book devig) ─────────────────
+    if platform == "kalshi" and mkt.startswith("KXMLBGAME") and avg_c:
+        fair = _mlb_fair_value(mkt)
+        if fair is not None:
+            fair_c = fair * 100
+            edge_c = avg_c - fair_c
+            sign = "+" if edge_c >= 0 else "−"
+            side_code = mkt.rsplit("-", 1)[-1]
+            lines.append(
+                f"📚 Books: {side_code} {fair_c:.0f}¢ fair · whale paid {avg_c}¢ "
+                f"({sign}{abs(edge_c):.0f}¢ vs fair)"
+            )
+
+    # ── Concentration warning ────────────────────────────────────────
+    m_int = re.search(r'intensity_(\d+)%', reasons)
+    if m_int and int(m_int.group(1)) >= 80:
+        lines.append(f"⚠️ Whale is {m_int.group(1)}% of all volume — price is whale-set, no independent confirmation")
 
     # ── Close time ───────────────────────────────────────────────────
     ct = _close_time_str(close_iso)
@@ -607,10 +762,15 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
 
     # ── Power user line: market size + triggers ─────────────────────
     data = []
+    mid_px = alert.get("mid")
+    # Kalshi OI/volume are CONTRACT counts, not dollars — flow_yes 147K
+    # shares = $80.6K at 54.8¢ avg proves the units (2026-09-01 fix).
+    # Show contracts + mid-price dollar estimate. PM values are already USD.
+    kalshi_ct = platform == "kalshi" and mid_px
     if oi:
-        data.append(f"Open interest ${oi/1000:.0f}K")
+        data.append(f"OI {oi/1000:.0f}K ct ≈ ${oi*mid_px/1000:.0f}K" if kalshi_ct else f"Open interest ${oi/1000:.0f}K")
     if vol:
-        data.append(f"Volume ${vol/1000:.0f}K")
+        data.append(f"Vol {vol/1000:.0f}K ct ≈ ${vol*mid_px/1000:.0f}K" if kalshi_ct else f"Volume ${vol/1000:.0f}K")
     hr = _human_reasons(reasons)
     if hr:
         data.append(_esc(hr))
