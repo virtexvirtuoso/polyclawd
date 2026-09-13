@@ -6,6 +6,7 @@ No API key required, unlimited calls
 from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 
 import json
+import re
 import urllib.request
 
 import requests
@@ -253,7 +254,28 @@ def spread_to_moneyline_prob(spread: float) -> tuple:
     return home_prob, away_prob
 
 
-def find_polymarket_edges(poly_events: List[Dict], min_edge: float = 5.0) -> List[Dict]:
+def _yes_price_from_market(mkt: Dict) -> Optional[float]:
+    """YES price from a Gamma/PM-US market dict.
+
+    Both APIs ship outcomes/outcomePrices as JSON string arrays (e.g.
+    '["Yes","No"]' / '["0.55","0.45"]') and the "Yes" index varies by
+    market. The old code expected a {"Yes": x} dict and never matched, so
+    edges were always empty regardless of game matching (found 2026-09-12).
+    """
+    try:
+        raw_out, raw_px = mkt.get("outcomes"), mkt.get("outcomePrices")
+        outcomes = json.loads(raw_out) if isinstance(raw_out, str) else (raw_out or [])
+        prices = json.loads(raw_px) if isinstance(raw_px, str) else (raw_px or [])
+        if isinstance(outcomes, list) and "Yes" in outcomes:
+            i = outcomes.index("Yes")
+            return float(prices[i])
+    except (ValueError, TypeError, IndexError):
+        pass
+    return None
+
+
+def find_polymarket_edges(poly_events: List[Dict], min_edge: float = 5.0,
+                          skip_sports: Optional[set] = None) -> List[Dict]:
     """
     Compare ESPN/DraftKings odds against Polymarket prices.
     Returns list of edges where ESPN probability differs from Poly by min_edge%.
@@ -267,6 +289,8 @@ def find_polymarket_edges(poly_events: List[Dict], min_edge: float = 5.0) -> Lis
     edges = []
     
     for sport, games in all_odds.items():
+        if skip_sports and sport in skip_sports:
+            continue
         for game in games:
             # Build search terms
             home_short = game.home_team.split()[-1]  # "Patriots"
@@ -287,15 +311,7 @@ def find_polymarket_edges(poly_events: List[Dict], min_edge: float = 5.0) -> Lis
                         
                         # Match team to market
                         if home_short.lower() in question:
-                            poly_price = None
-                            outcome_prices = mkt.get("outcomePrices", {})
-                            if isinstance(outcome_prices, str):
-                                try:
-                                    outcome_prices = json.loads(outcome_prices)
-                                except:
-                                    outcome_prices = {}
-                            
-                            poly_price = outcome_prices.get("Yes") if isinstance(outcome_prices, dict) else None
+                            poly_price = _yes_price_from_market(mkt)
                             if poly_price:
                                 poly_price = float(poly_price)
                                 edge = (home_prob - poly_price) * 100
@@ -315,15 +331,7 @@ def find_polymarket_edges(poly_events: List[Dict], min_edge: float = 5.0) -> Lis
                                     })
                         
                         elif away_short.lower() in question:
-                            poly_price = None
-                            outcome_prices = mkt.get("outcomePrices", {})
-                            if isinstance(outcome_prices, str):
-                                try:
-                                    outcome_prices = json.loads(outcome_prices)
-                                except:
-                                    outcome_prices = {}
-                            
-                            poly_price = outcome_prices.get("Yes") if isinstance(outcome_prices, dict) else None
+                            poly_price = _yes_price_from_market(mkt)
                             if poly_price:
                                 poly_price = float(poly_price)
                                 edge = (away_prob - poly_price) * 100
@@ -347,22 +355,152 @@ def find_polymarket_edges(poly_events: List[Dict], min_edge: float = 5.0) -> Lis
     return edges
 
 
+def _team_prefix_match(a: str, b: str) -> bool:
+    """Prefix-tolerant team-name match: 'New York G' ~ 'New York Giants'."""
+    a, b = (a or "").strip().lower(), (b or "").strip().lower()
+    if not a or not b:
+        return False
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    return len(short) >= 3 and long_.startswith(short)
+
+
+def _fetch_pmus_fgw_for_game(client, home: str, away: str) -> Optional[Dict]:
+    """Targeted PM-US search for ONE game's full-game-winner market.
+
+    The generic 'NFL' search does NOT surface the current week (verified
+    2026-09-12: all 18 of its FGW hits were week-4 games) and FGW markets
+    carry no title field — team identity lives in marketSides[].team, and
+    the market-level bid/ask quote the LONG side. Returns
+    {game_start, long_team, short_team, bid, ask, slug} or None.
+    """
+    try:
+        raw = client.search.query({"query": f"{home} {away}", "status": "upcoming", "limit": 10})
+        events = raw.get("events", []) if isinstance(raw, dict) else raw
+    except Exception as e:
+        logger.debug(f"PM-US targeted search failed ({home} {away}): {e}")
+        return None
+    best = None
+    for ev in events or []:
+        if not ev.get("gameId"):
+            continue
+        for m in (ev.get("markets") or []):
+            if m.get("sportsMarketType") != "football_team_full_game_winner":
+                continue
+            sides = m.get("marketSides") or []
+            long_team = next((s.get("team", {}).get("name") for s in sides
+                              if s.get("long") and s.get("team", {}).get("name")), None)
+            if not long_team:
+                continue
+            short_team = next((s.get("team", {}).get("name") for s in sides
+                               if not s.get("long") and s.get("team", {}).get("name")), None)
+            bid = ask = None
+            try:
+                bid = float((m.get("bestBidQuote") or {}).get("value"))
+                ask = float((m.get("bestAskQuote") or {}).get("value"))
+            except (TypeError, ValueError):
+                pass
+            gs = (m.get("gameStartTime") or "")[:10]
+            cand = {"game_start": gs, "long_team": long_team, "short_team": short_team,
+                    "bid": bid, "ask": ask, "slug": m.get("slug")}
+            if best is None or (gs or "9999") < (best["game_start"] or "9999"):
+                best = cand
+    return best
+
+
+def find_nfl_us_edges(min_edge: float = 5.0) -> List[Dict]:
+    """DK (ESPN) devigged win prob vs PM-US full-game-winner YES price.
+
+    Enumerates the slate from the ESPN scoreboard (free) and runs a targeted
+    PM-US search per game — the generic 'NFL' search misses the current week
+    (verified 2026-09-12). Long-side YES = mid(bid, ask); short-side
+    YES = 1 - mid.
+    """
+    edges: List[Dict] = []
+    try:
+        from polymarket_us import PolymarketUS
+        client = PolymarketUS()
+    except Exception as e:
+        logger.error(f"PM-US client init failed: {e}")
+        return []
+    for g in fetch_odds("nfl"):
+        if g.home_moneyline is not None and g.away_moneyline is not None:
+            hp = american_to_prob(g.home_moneyline)
+            ap = american_to_prob(g.away_moneyline)
+            tot = hp + ap
+            if tot <= 0:
+                continue
+            probs = {g.home_team: hp / tot, g.away_team: ap / tot}
+            prob_src = "ML devig"
+        elif g.spread is not None:
+            hp, ap = spread_to_moneyline_prob(g.spread)
+            probs = {g.home_team: hp, g.away_team: ap}
+            prob_src = "spread approx"
+        else:
+            continue
+        pm = _fetch_pmus_fgw_for_game(client, g.home_team, g.away_team)
+        if not pm:
+            continue
+        espn_date = (g.start_time or "")[:10]
+        if espn_date and pm.get("game_start") and pm["game_start"] != espn_date:
+            continue  # targeted search matched a different week's matchup
+        bid, ask = pm.get("bid"), pm.get("ask")
+        long_mid = (bid + ask) / 2.0 if (bid is not None and ask is not None) else None
+        if long_mid is None:
+            continue
+        for team, prob in probs.items():
+            if pm.get("long_team") and _team_prefix_match(team, pm["long_team"]):
+                yes, side = long_mid, "long"
+            elif pm.get("short_team") and _team_prefix_match(team, pm["short_team"]):
+                yes, side = 1.0 - long_mid, "short"
+            else:
+                continue
+            edge = (prob - yes) * 100
+            if abs(edge) >= min_edge:
+                edges.append({
+                    "sport": "nfl",
+                    "game": f"{g.away_team} @ {g.home_team}",
+                    "team": team,
+                    "espn_prob": round(prob * 100, 1),
+                    "espn_moneyline": g.home_moneyline if team == g.home_team else g.away_moneyline,
+                    "espn_spread": g.spread,
+                    "prob_source": prob_src,
+                    "polymarket_price": round(yes * 100, 1),
+                    "pm_bid": bid,
+                    "pm_ask": ask,
+                    "pm_side": side,
+                    "polymarket_slug": pm["slug"],
+                    "polymarket_id": pm["slug"],
+                    "edge_pct": round(edge, 1),
+                    "direction": "BUY" if edge > 0 else "SELL",
+                    "provider": g.provider,
+                })
+    edges.sort(key=lambda x: abs(x["edge_pct"]), reverse=True)
+    return edges
+
+
 async def get_espn_edges(min_edge: float = 5.0) -> Dict:
     """Main entry point for ESPN edge detection"""
-    import urllib.request
-    
-    # Fetch Polymarket events
+    # NFL game markets live on the PM-US gateway, NOT Gamma (0 NFL events
+    # in Gamma's open events — verified 2026-09-12). Other sports keep the
+    # legacy Gamma path (now with fixed outcomePrices parsing).
+    edges = []
     try:
+        edges.extend(find_nfl_us_edges(min_edge))
+    except Exception as e:
+        logger.error(f"NFL PM-US edge scan failed: {e}")
+
+    poly_events = []
+    try:
+        import urllib.request
         req = urllib.request.Request(
             gamma_url("/events?closed=false&limit=200"),
             headers={"User-Agent": "Polyclawd/1.0"}
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
             poly_events = json.loads(resp.read().decode())
-    except:
-        poly_events = []
-    
-    edges = find_polymarket_edges(poly_events, min_edge)
+    except Exception as e:
+        logger.warning(f"Gamma events fetch failed: {e}")
+    edges.extend(find_polymarket_edges(poly_events, min_edge, skip_sports={"nfl"}))
     
     # Also return raw odds data
     all_odds = fetch_all_odds()

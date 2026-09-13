@@ -264,7 +264,7 @@ TICK_TASKS = {
         "soccer_match_scan": 4,                   # every 2h
         "soccer_resolve": 4,
         "scorer_edge_scan": 4,                    # every 2h (same cadence as match scan)
-        "nfl_edge_scan": 4,                       # every 2h (self-gates in off-season)
+        "nfl_edge_scan": 1,                       # every 30min game-day cadence (self-gates in off-season)
         "betfair_scan": 4,                        # every 2h (futures don't move fast)
         "hf_window_snapshot": 2,                   # every 1h — conditional WR data collection
         "hf_spread_scan": 2,                        # every 1h — cross-asset spread anomaly scan
@@ -1676,10 +1676,27 @@ def task_nfl_edge_scan():
     import asyncio
     from odds.nfl_edge import find_nfl_edges, CFG
     from odds.sports_edge_common import summarize
-    edges = asyncio.run(find_nfl_edges())
+    edges = []
+    source = "odds_api"
+    try:
+        edges = asyncio.run(find_nfl_edges()) or []
+    except Exception as e:
+        # Auth breaker raises while the key is dark — fall through to ESPN.
+        logger.debug(f"NFL edge scan (odds_api) failed: {e}")
+    if not edges:
+        # Odds API dark (key deactivated since Aug 30) → ESPN/DK fallback:
+        # DK devigged win probs vs PM-US full-game-winner books, net of fees.
+        try:
+            from odds.espn_odds import find_nfl_us_edges
+            from scripts.espn_edge_adapter import espn_edges_to_alerts
+            edges = espn_edges_to_alerts(find_nfl_us_edges(0.0))
+            source = "espn_dk"
+        except Exception as e:
+            logger.debug(f"NFL edge scan ESPN fallback failed: {e}")
     if edges:
-        summarize(edges, CFG)
-        logger.info(f"NFL edge scan: {len(edges)} edges")
+        if source == "odds_api":
+            summarize(edges, CFG)
+        logger.info(f"NFL edge scan: {len(edges)} edges ({source})")
         # Fire Telegram alerts for tradeable edges above threshold (dedup'd)
         try:
             from signals.sport_edge_alerts import run_sport_edge_alerts
@@ -1689,7 +1706,7 @@ def task_nfl_edge_scan():
         except Exception as e:
             logger.debug(f"NFL edge alert step failed: {e}")
     else:
-        logger.debug("NFL edge scan: no edges (off-season or no games)")
+        logger.debug("NFL edge scan: no edges (off-season, no games, or both sources empty)")
 
 
 _BETFAIR_DEDUP_FILE = Path("/tmp/betfair_dedup.json")

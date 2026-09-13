@@ -82,7 +82,7 @@ DEFAULT_TIERS = {
 def _connect(db_path: Path) -> sqlite3.Connection:
     con = sqlite3.connect(str(db_path), timeout=5)
     con.row_factory = sqlite3.Row
-    con.execute("PRAGMA busy_timeout=5000")
+    con.execute("PRAGMA busy_timeout=30000")
     return con
 
 
@@ -345,7 +345,14 @@ def _is_noise(row) -> bool:
         return True
     # MLB in-game monitor no-edge score updates (dispatch stopped 2026-08-24,
     # but existing queued rows still need filtering)
-    if row.get("pipeline") == "run_scored" and (
+    # 2026-09-13: rows are sqlite3.Row — no .get(); this line raised
+    # AttributeError on EVERY drain that had queued rows (digest dead since
+    # Sep 5, queue growing). Guarded key access works for Row and dict.
+    try:
+        pipeline = row["pipeline"]
+    except (IndexError, KeyError):
+        pipeline = None
+    if pipeline == "run_scored" and (
         msg.startswith("Run:") or msg.startswith("Pitcher change:")
     ):
         return True

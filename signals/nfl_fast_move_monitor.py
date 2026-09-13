@@ -59,47 +59,105 @@ EDGE_FLOOR_PP = 6.0           # min Vegas-vs-PM gap to emit a trade signal
 
 
 def _fetch_nfl_games() -> List[Dict]:
-    """Fetch upcoming NFL game events with live ML quotes from the US-sports
-    backend. Returns list of {slug, home, away, bid, ask, mid, updated_at}."""
+    """Fetch upcoming NFL game ML quotes from the PM-US gateway.
+
+    Enumerates this week's slate from the ESPN scoreboard (free, no key) and
+    runs a TARGETED PM-US search per game. The generic 'NFL' search misses
+    the current week (verified 2026-09-12: all 18 of its FGW hits were
+    week-4 games) — the monitor was tracking next week's matchups. Returns
+    [{slug, home, away, bid, ask, mid, updated_at}].
+    """
+    games: List[Dict] = []
     try:
         from polymarket_us import PolymarketUS
         client = PolymarketUS()
-        raw = client.search.query({"query": "NFL", "status": "upcoming", "limit": 50})
-        events = raw.get("events", []) if isinstance(raw, dict) else raw
     except Exception as e:
-        logger.debug(f"NFL fast-move fetch failed: {e}")
-        return []
+        logger.debug(f"NFL fast-move PM-US client failed: {e}")
+        return games
 
-    games = []
-    if not isinstance(events, list):
-        logger.debug("NFL fast-move: events not a list, skipping")
-        return []
-    for ev in events:
-        if not ev.get("gameId"):
+    pairs: List[tuple] = []
+    try:
+        from odds.espn_odds import fetch_odds
+        pairs = [(g.home_team, g.away_team, (g.start_time or "")[:10])
+                 for g in fetch_odds("nfl")]
+    except Exception as e:
+        logger.debug(f"NFL fast-move ESPN enumeration failed: {e}")
+
+    if not pairs:
+        # Fallback: legacy generic search (may surface next week's games only)
+        try:
+            raw = client.search.query({"query": "NFL", "status": "upcoming", "limit": 50})
+            events = raw.get("events", []) if isinstance(raw, dict) else raw
+        except Exception as e:
+            logger.debug(f"NFL fast-move fetch failed: {e}")
+            return games
+        for ev in events or []:
+            if not ev.get("gameId"):
+                continue
+            for m in (ev.get("markets") or []):
+                if m.get("sportsMarketType") != "football_team_full_game_winner":
+                    continue
+                bid = (m.get("bestBidQuote") or {}).get("value")
+                ask = (m.get("bestAskQuote") or {}).get("value")
+                if bid is None or ask is None:
+                    continue
+                try:
+                    bid, ask = float(bid), float(ask)
+                except (TypeError, ValueError):
+                    continue
+                parts = ev.get("title", "").split(" vs. ")
+                games.append({
+                    "slug": m.get("slug"),
+                    "home": parts[0] if parts else "",
+                    "away": parts[-1] if len(parts) > 1 else "",
+                    "bid": bid, "ask": ask,
+                    "mid": (bid + ask) / 2.0,
+                    "updated_at": m.get("updatedAt", ""),
+                })
+        return games
+
+    seen_slugs: set = set()
+    for home, away, espn_date in pairs:
+        if not home or not away:
             continue
-        for m in (ev.get("markets") or []):
-            if m.get("sportsMarketType") != "football_team_full_game_winner":
+        try:
+            raw = client.search.query({"query": f"{away} {home}", "status": "upcoming", "limit": 10})
+            events = raw.get("events", []) if isinstance(raw, dict) else raw
+        except Exception as e:
+            logger.debug(f"NFL fast-move targeted search failed ({away} {home}): {e}")
+            continue
+        found = False
+        for ev in events or []:
+            if not ev.get("gameId") or found:
                 continue
-            bid = (m.get("bestBidQuote") or {}).get("value")
-            ask = (m.get("bestAskQuote") or {}).get("value")
-            if bid is None or ask is None:
-                continue
-            try:
-                bid = float(bid)
-                ask = float(ask)
-            except (TypeError, ValueError):
-                continue
-            parts = ev.get("title", "").split(" vs. ")
-            games.append({
-                "slug": m.get("slug"),
-                "home": parts[0] if parts else "",
-                "away": parts[-1] if len(parts) > 1 else "",
-                "bid": bid,
-                "ask": ask,
-                "mid": (bid + ask) / 2.0,
-                "updated_at": m.get("updatedAt", ""),
-            })
-            break  # only the ML market per game
+            for m in (ev.get("markets") or []):
+                if m.get("sportsMarketType") != "football_team_full_game_winner":
+                    continue
+                gs = (m.get("gameStartTime") or "")[:10]
+                if espn_date and gs and gs != espn_date:
+                    continue  # different week's matchup between these teams
+                bid = (m.get("bestBidQuote") or {}).get("value")
+                ask = (m.get("bestAskQuote") or {}).get("value")
+                if bid is None or ask is None:
+                    continue
+                try:
+                    bid, ask = float(bid), float(ask)
+                except (TypeError, ValueError):
+                    continue
+                slug = m.get("slug")
+                if slug and slug in seen_slugs:
+                    continue
+                if slug:
+                    seen_slugs.add(slug)
+                games.append({
+                    "slug": slug,
+                    "home": home, "away": away,
+                    "bid": bid, "ask": ask,
+                    "mid": (bid + ask) / 2.0,
+                    "updated_at": m.get("updatedAt", ""),
+                })
+                found = True
+                break
     return games
 
 
@@ -287,6 +345,50 @@ def _executable_for_team(us: Dict, team: str, home: str, away: str) -> Optional[
         return ex
 
 
+def _prefix_match(a: str, b: str) -> bool:
+    """Prefix-tolerant name match: 'New York G' ~ 'New York Giants'.
+
+    PM-US event titles truncate team names; ESPN/Pinnacle use full names.
+    """
+    a, b = (a or "").strip().lower(), (b or "").strip().lower()
+    if not a or not b:
+        return False
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    return len(short) >= 3 and long_.startswith(short)
+
+
+def _espn_fallback_game(home: str, away: str) -> Optional[Dict]:
+    """ESPN/DK Vegas anchor when the Odds API is dark (deactivated key /
+    auth breaker, since Aug 30). Returns {"outcomes": {team: prob},
+    "source": label} or None. DK moneylines devigged when posted; spread
+    approximation as fallback."""
+    try:
+        from odds.espn_odds import fetch_odds, american_to_prob, spread_to_moneyline_prob
+        games = fetch_odds("nfl")
+    except Exception as e:
+        logger.debug(f"ESPN fallback fetch failed: {e}")
+        return None
+    for g in games:
+        if not (_prefix_match(g.home_team, home) or _prefix_match(g.home_team, away)):
+            continue
+        if not (_prefix_match(g.away_team, home) or _prefix_match(g.away_team, away)):
+            continue
+        if g.home_moneyline is not None and g.away_moneyline is not None:
+            hp = american_to_prob(g.home_moneyline)
+            ap = american_to_prob(g.away_moneyline)
+            tot = hp + ap
+            if tot <= 0:
+                continue
+            return {"outcomes": {g.home_team: hp / tot, g.away_team: ap / tot},
+                    "source": "ESPN/DK ML devig"}
+        if g.spread is not None:
+            hp, ap = spread_to_moneyline_prob(g.spread)
+            return {"outcomes": {g.home_team: hp, g.away_team: ap},
+                    "source": "ESPN/DK spread approx"}
+        return None
+    return None
+
+
 def _fire_alert(move: Dict) -> None:
     """Send a Telegram fast-move alert with an executable Vegas-vs-PM signal.
 
@@ -324,8 +426,8 @@ def _fire_alert(move: Dict) -> None:
                 except Exception:
                     _games = []
                 game = next((g for g in _games
-                             if (g["home"] == move["home"] and g["away"] == move["away"]) or
-                                (g["home"] == move["away"] and g["away"] == move["home"])), None)
+                             if (_prefix_match(g["home"], move["home"]) and _prefix_match(g["away"], move["away"])) or
+                                (_prefix_match(g["home"], move["away"]) and _prefix_match(g["away"], move["home"]))), None)
                 if game:
                     break
             if not game:
@@ -336,20 +438,26 @@ def _fire_alert(move: Dict) -> None:
                     except Exception:
                         _games = []
                     game = next((g for g in _games
-                                 if (g["home"] == move["home"] and g["away"] == move["away"]) or
-                                    (g["home"] == move["away"] and g["away"] == move["home"])), None)
+                                 if (_prefix_match(g["home"], move["home"]) and _prefix_match(g["away"], move["away"])) or
+                                    (_prefix_match(g["home"], move["away"]) and _prefix_match(g["away"], move["home"]))), None)
                     if game:
                         source = "Sharp consensus"
                         break
             if not game:
-                # Suppress the alert entirely when the Odds API has no Vegas
-                # anchor for this game (preseason data-availability gap). A
-                # fast-move alert with no Vegas-vs-PM read is pure noise.
+                # Odds API dark (deactivated key / auth breaker, since Aug 30)
+                # → ESPN/DK moneyline devig as the Vegas anchor (2026-09-12).
+                game = _espn_fallback_game(move["home"], move["away"])
+                if game:
+                    source = game.get("source", "ESPN/DK")
+            if not game:
+                # Suppress the alert entirely when NO Vegas anchor exists
+                # (Odds API dark AND ESPN has no line — e.g. preseason gap).
+                # A fast-move alert with no Vegas-vs-PM read is pure noise.
                 # Log silently so we can verify the monitor is firing and not
                 # silently broken. Approved 2026-08-23.
                 logger.info(
                     f"NFL fast-move: no Vegas line for {move['home']} vs "
-                    f"{move['away']}, suppressed (Odds API data-availability gap)"
+                    f"{move['away']}, suppressed (no Odds API / ESPN anchor)"
                 )
                 return
             else:

@@ -382,7 +382,11 @@ def _infer_category(title: str, ticker: str = "") -> str:
     # ── Ticker-based (most reliable) ─────────────────────────────────
     if tk.startswith("KXMLB"):
         return "⚾"
-    if any(tk.startswith(p) for p in ["KXNBA", "KXWNBA", "KXNCAA"]):
+    if tk.startswith("KXNCAAF"):
+        return "🏈"  # college football (KXNCAAF* was mis-mapped to 🏀)
+    if any(tk.startswith(p) for p in ["KXNCAAB", "KXNCAAW"]):
+        return "🏀"
+    if any(tk.startswith(p) for p in ["KXNBA", "KXWNBA"]):
         return "🏀"
     if tk.startswith("KXNFL"):
         return "🏈"
@@ -680,7 +684,14 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
 
     # ── Header ───────────────────────────────────────────────────────
     raw = alert.get("raw_score")
-    hdr_score = f"{score:.0f}/10" + (f" (raw {raw:.1f})" if raw is not None and raw > score else "")
+    top_pct = alert.get("top_pct")
+    # Display the raw intensity score (unbounded). The severity tag carries the
+    # bounded meaning — "/10" implied a precision the capped score never had.
+    # top_pct (API-computed) anchors raw against the live 7d alert population.
+    if raw is not None:
+        hdr_score = f"{raw:.1f}" + (f" · top {top_pct}" if top_pct else "")
+    else:
+        hdr_score = f"{score:.0f}"
     lines.append(f"{tag_str}{cat_emoji} <b>#{rank}</b> · {_esc(sev)} · {hdr_score} {verdict}")
     lines.append("")
 
@@ -807,6 +818,21 @@ def _refresh_price(alert: dict) -> dict:
     return alert
 
 
+def _enrich_top_pct(alert: dict) -> dict:
+    """Attach live 'top X%' percentile for the raw score (single-alert path;
+    the batch path gets top_pct straight from /whale/top)."""
+    if alert.get("raw_score") is None or alert.get("top_pct"):
+        return alert
+    try:
+        r = requests.get(f"{API}/whale/percentile",
+                         params={"raw": alert["raw_score"]}, timeout=3)
+        if r.ok:
+            alert["top_pct"] = r.json().get("top_pct")
+    except Exception:
+        pass  # percentile is decoration — never block the alert on it
+    return alert
+
+
 def send_single(alert: dict) -> bool:
     """Send a single alert immediately. Returns True if sent."""
     state = load_state()
@@ -823,6 +849,7 @@ def send_single(alert: dict) -> bool:
 
     # Refresh price before sending — catch stale-price alerts
     alert = _refresh_price(alert)
+    alert = _enrich_top_pct(alert)
     # Re-check after price refresh (market may have resolved)
     bid = alert.get("best_bid")
     if bid is not None and (bid > 0.90 or bid < 0.10):

@@ -182,6 +182,7 @@ ALERT_MIN_SCORE  = 3
 # ── Scan budgets ────────────────────────────────────────────────────────────
 TRADES_PAGE_CAP    = 30     # 1000 trades/page since last cycle
 TRADES_MAX_LOOKBACK = 3600  # don't replay more than 1h after downtime
+POSTGAME_GRACE_S     = 900      # 15 min past Kalshi's expected game end → postgame_stale
 PM_SWEEP_PAGES     = 15     # x100 markets, ordered by volume24hr desc
 PM_TRADES_PAGE_CAP = 20     # x500 taker trades from data-api (desc by ts)
 FLAG_BOOK_CAP      = 80     # immediate books for sweep-flagged markets
@@ -986,6 +987,8 @@ def fetch_market_details(tickers: list) -> dict:
                 "title": (m.get("title") or "").replace("**", "")[:90],
                 "sub_title": m.get("yes_sub_title") or "",
                 "close_time": m.get("close_time") or "",
+                "occurrence_datetime": m.get("occurrence_datetime") or "",
+                "expected_expiration_time": m.get("expected_expiration_time") or "",
             }
     return details
 
@@ -1154,6 +1157,48 @@ def build_watchlist(conn) -> list:
         " AND oi BETWEEN ? AND ?", (WATCH_OI_MIN, WATCH_OI_MAX))]
     return sorted(set(get_weather_watchlist(conn)) | set(thin))
 
+def apply_postgame_stale_gate(alert: dict, platform: str, market: str,
+                              meta: Optional[dict], now: Optional[float] = None):
+    """Demote alerts on markets whose game has already ended.
+
+    Kalshi game markets stay open ~2 days past the final (settlement window:
+    close_time 2026-09-14T23:30Z for a Sep-12 game) with status=open
+    throughout, so residual settlement flow fired mid-game detectors hours
+    after the result was known (2026-09-12 OSU-Texas: CRITICAL 25+ min after
+    the final; user-reported). Anchor: Kalshi's own occurrence_datetime /
+    expected_expiration_time = expected game END (verified against MLB +
+    CFB tickers 2026-09-13); fallback = ticker game date + 29h (latest
+    possible kickoff + game length). Demote to LOW: DB keeps forensics,
+    and drain / batch digest / live-fire all skip LOW. Trade-off: a game
+    running >15 min past Kalshi's expected end loses its push for the
+    remainder (dashboard still shows it) — accepted to kill post-final noise.
+    """
+    if alert.get("severity") not in ("CRITICAL", "HIGH"):
+        return
+    if live_game_class(platform, market) is None:
+        return
+    m = meta or {}
+    now = now or time.time()
+    end_iso = m.get("expected_expiration_time") or m.get("occurrence_datetime") or ""
+    end_ts = None
+    if end_iso:
+        try:
+            iso = end_iso.replace("Z", "+00:00") if end_iso.endswith("Z") else end_iso
+            end_ts = datetime.fromisoformat(iso).timestamp()
+        except ValueError:
+            end_ts = None
+    if end_ts is None:
+        gd = _extract_game_date(platform, market)
+        if gd:
+            end_ts = datetime(gd.year, gd.month, gd.day, 5, 0,
+                              tzinfo=timezone.utc).timestamp() + 86400
+    if end_ts is None:
+        return
+    if now > end_ts + POSTGAME_GRACE_S:
+        alert["severity"] = "LOW"
+        alert["reasons"] += ",postgame_stale"
+
+
 def _mk_alert(platform: str, market: str, score: int, reasons: list,
               cur: Optional[dict], meta: Optional[dict]) -> dict:
     # Compute raw_score from sweep + book + market context
@@ -1188,6 +1233,7 @@ def _mk_alert(platform: str, market: str, score: int, reasons: list,
     # Quiet-market rule with pierce conditions (class outlier / smart wallet /
     # pre-game steam) — see apply_livegame_ceiling
     apply_livegame_ceiling(alert, platform, market, meta)
+    apply_postgame_stale_gate(alert, platform, market, meta)
     if cur:
         ratio = _ratio(cur)
         alert.update({
@@ -1202,7 +1248,8 @@ def _mk_alert(platform: str, market: str, score: int, reasons: list,
     if meta:
         alert.setdefault("open_interest", meta.get("oi"))
         alert.setdefault("volume", meta.get("volume"))
-        for k in ("sub_title", "close_time", "flow_yes", "flow_no",
+        for k in ("sub_title", "close_time", "occurrence_datetime",
+                  "expected_expiration_time", "flow_yes", "flow_no",
                   "flow_dollars", "last_yes_price"):
             if meta.get(k) not in (None, ""):
                 alert[k] = meta[k]

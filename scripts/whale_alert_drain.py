@@ -200,8 +200,16 @@ def _implication(score: float, flow: float, fy: float, fn: float, bid, ask, reas
 def _infer_category(title: str, ticker: str = "") -> str:
     tl = title.lower()
     tk = ticker.upper()
-    if any(tk.startswith(p) for p in ["KXWNBA", "KXNBA", "KXNFL", "KXNHL", "KXMLB", "KXNCAA"]):
+    if tk.startswith("KXNCAAF"):
+        return "🏈"  # college football (was mis-mapped to 🏀)
+    if tk.startswith("KXNFL"):
+        return "🏈"
+    if any(tk.startswith(p) for p in ["KXNCAAB", "KXNCAAW", "KXNBA", "KXWNBA"]):
         return "🏀"
+    if tk.startswith("KXNHL"):
+        return "🏒"
+    if tk.startswith("KXMLB"):
+        return "⚾"
     if any(w in tl for w in ["election", "president", "senate", "house ", "governor", "democrat", "republican"]):
         return "🏛️"
     if any(w in tl for w in ["win the", "match?", "round of", "wta", "atp", "grand slam", "qualification"]):
@@ -285,6 +293,43 @@ def _flow_label(fy: float, fn: float) -> str:
         dominant = 'YES' if fy > fn else 'NO'
         return f'{ratio * 100:.0f}% {dominant}'
     return ''
+
+
+POSTGAME_GRACE_S = 900  # 15 min past Kalshi's expected game end
+
+
+def _is_postgame_stale(market: str, payload: dict) -> bool:
+    """True when the market's game has already ended (post-final noise).
+
+    Kalshi keeps game markets open ~2 days for settlement; residual
+    settlement flow on them is worthless as a signal (2026-09-12 OSU-Texas
+    incident). Defense-in-depth: the scanner now demotes these to LOW before
+    they reach the DB; this catches rows logged before that deploy.
+    """
+    import re as _re
+    end_iso = (payload.get("expected_expiration_time")
+               or payload.get("occurrence_datetime") or "")
+    end_ts = None
+    if end_iso:
+        try:
+            iso = end_iso.replace("Z", "+00:00") if end_iso.endswith("Z") else end_iso
+            end_ts = datetime.fromisoformat(iso).timestamp()
+        except ValueError:
+            end_ts = None
+    if end_ts is None:
+        m = _re.search(r"-(\d{2})([A-Z]{3})(\d{2})", (market or "").upper())
+        if m:
+            months = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+                      "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+            try:
+                gd = datetime(2000 + int(m.group(1)), months[m.group(2)], int(m.group(3)),
+                              tzinfo=timezone.utc)
+                end_ts = gd.timestamp() + 86400 + 5 * 3600  # game day + 29h
+            except (ValueError, KeyError):
+                end_ts = None
+    if end_ts is None:
+        return False
+    return datetime.now(timezone.utc).timestamp() > end_ts + POSTGAME_GRACE_S
 
 
 def format_alert_compact(row, p: dict) -> str:
@@ -450,12 +495,32 @@ def main():
     # Score saturates at 10 during game-day churn — tier is the quality signal.
     _TIER_ORDER = {'MEGA FILL': 0, 'WHALE FILL': 1, 'FLOW BURST': 2, 'BOOK SIGNAL': 3}
     parsed = []
+    skipped_stale = 0
+    skipped_pinned = 0
     for r in rows:
         try:
             payload = json.loads(r["payload"] or "{}")
         except json.JSONDecodeError:
             payload = {}
+        if _is_postgame_stale(r["market"], payload):
+            skipped_stale += 1
+            continue
+        # Price-sanity gate (mirrors whale_alert_tg.is_actionable): a market
+        # pinned at ≤10¢ or ≥90¢ is already decided — not actionable. Catches
+        # legacy rows logged before the scanner carried game-end fields.
+        bb = payload.get("best_bid")
+        lyp = payload.get("last_yes_price")
+        if (bb is not None and (bb > 0.90 or bb < 0.10)) or \
+           (lyp is not None and (lyp > 0.90 or lyp < 0.10)):
+            skipped_pinned += 1
+            continue
         parsed.append((r, payload, payload.get("flow_dollars") or 0))
+    if not parsed:
+        if not args.peek and max_id_row["m"]:
+            CURSOR_PATH.write_text(str(max_id_row["m"]))
+        print(f"NO_DELIVERABLE_ALERTS ({skipped_stale} postgame-stale, "
+              f"{skipped_pinned} price-pinned skipped)")
+        return
     parsed.sort(key=lambda x: (_TIER_ORDER.get(_signal_tier(x[0]["reasons"])[1], 9), -x[2]))
 
     total_usd = sum(d for _, _, d in parsed)
