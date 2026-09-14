@@ -35,7 +35,7 @@ DB_PATH = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
 # Sport → emoji for alert headers
 SPORT_EMOJI: Dict[str, str] = {
     "NFL": "🏈", "NBA": "🏀", "MLB": "⚾", "soccer": "⚽",
-    "UFC": "🥊", "NHL": "🏒", "CFB": "🏈", "default": "🎯",
+    "UFC": "🥊", "NHL": "🏒", "CFB": "🎓", "CBB": "🎓", "tennis": "🎾", "default": "🎯",
 }
 
 

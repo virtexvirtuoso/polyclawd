@@ -200,8 +200,8 @@ def _implication(score: float, flow: float, fy: float, fn: float, bid, ask, reas
 def _infer_category(title: str, ticker: str = "") -> str:
     tl = title.lower()
     tk = ticker.upper()
-    if tk.startswith("KXNCAAF"):
-        return "🏈"  # college football (was mis-mapped to 🏀)
+    if any(tk.startswith(p) for p in ["KXNCAAF", "KXCFB"]):
+        return "🎓"  # college football (distinct from pro NFL 🏈)
     if tk.startswith("KXNFL"):
         return "🏈"
     if any(tk.startswith(p) for p in ["KXNCAAB", "KXNCAAW", "KXNBA", "KXWNBA"]):
@@ -210,9 +210,36 @@ def _infer_category(title: str, ticker: str = "") -> str:
         return "🏒"
     if tk.startswith("KXMLB"):
         return "⚾"
+    if any(tk.startswith(p) for p in ["KXWTA", "KXATP", "KXITF"]):
+        return "🎾"
+    if any(tk.startswith(p) for p in ["KXUFC", "KXMMA"]):
+        return "🥊"
+    if any(tk.startswith(p) for p in ["KXLALIGA", "KXEPL", "KXUCL", "KXSERIEA",
+                                      "KXBUNDES", "KXLIGUE1", "KXMLS", "KXLAGA"]):
+        return "⚽"
+    # ── Polymarket slug prefixes (lowercase league codes) ────────────
+    pfx = ticker.lower().split("-")[0] if ticker else ""
+    if pfx == "cfb":
+        return "🎓"
+    if pfx in ("wta", "atp", "itf"):
+        return "🎾"
+    if pfx in ("epl", "ucl", "uel", "lal", "mls", "fifwc", "col", "clf", "bra", "arg", "mex"):
+        return "⚽"
+    if pfx in ("cs2", "lol", "dota2", "val"):
+        return "🎮"
+    if pfx == "mlb":
+        return "⚾"
+    if pfx in ("nba", "wnba"):
+        return "🏀"
+    if pfx == "nfl":
+        return "🏈"
+    if pfx == "nhl":
+        return "🏒"
+    if pfx in ("ufc", "mma"):
+        return "🥊"
     if any(w in tl for w in ["election", "president", "senate", "house ", "governor", "democrat", "republican"]):
         return "🏛️"
-    if any(w in tl for w in ["win the", "match?", "round of", "wta", "atp", "grand slam", "qualification"]):
+    if any(w in tl for w in ["match?", "round of", "wta", "atp", "grand slam", "qualification"]):
         return "🎾"
     if any(w in tl for w in [" vs ", "goal", "draw", "fc ", "united", "city ", "real ", "juventus", "liverpool", "bayern", "psg", "barcelona"]):
         return "⚽"

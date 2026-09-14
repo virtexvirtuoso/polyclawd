@@ -16,6 +16,7 @@ v3 improvements:
 """
 
 import json
+import os
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -1058,7 +1059,28 @@ def get_mispriced_category_signals() -> Dict[str, Any]:
     """Main entry point — returns all mispriced category signals from both platforms.
     
     Cached for 60s to avoid blocking uvicorn on repeated calls.
+
+    2026-09-14 decouple gate: when MISPRICED_SOURCE=snapshot (polyclawd-api
+    systemd drop-in decouple.conf), serve the scanner-service snapshot
+    instead of scanning inline. Import-order-independent: the root-level
+    shim approach did not intercept bare imports in the deployed process.
+    Rollback: remove MISPRICED_SOURCE from the drop-in, daemon-reload,
+    restart polyclawd-api. Design: vault
+    Design-Notes/Polyclawd-Scanner-Decoupling-2026-09-13.md
     """
+    if os.environ.get("MISPRICED_SOURCE") == "snapshot":
+        snap_path = Path(__file__).resolve().parent.parent / "storage" / "mispriced-snapshot.json"
+        data = json.loads(snap_path.read_bytes())
+        written = data.get("snapshot_written_at")
+        if written:
+            try:
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(written)).total_seconds()
+                if age > 900:
+                    logger.warning(f"mispriced snapshot is stale: {age / 60:.0f} min old (scanner down?)")
+            except Exception:
+                pass
+        return data
+
     now = time.time()
     if _cache["data"] and (now - _cache["timestamp"]) < CACHE_TTL:
         return _cache["data"]

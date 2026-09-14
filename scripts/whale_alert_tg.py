@@ -363,14 +363,75 @@ DASHBOARD_URL = "https://virtuosocrypto.com/polyclawd/whale-flow.html"
 
 
 
+_PM_LEAGUE_PREFIX = (
+    ("KXNCAAF", "cfb"), ("KXCFB", "cfb"), ("KXNFL", "nfl"), ("KXMLB", "mlb"),
+    ("KXEPL", "epl"), ("KXLALIGA", "lal"), ("KXNBA", "nba"), ("KXWNBA", "wnba"),
+    ("KXNHL", "nhl"),
+)
+_PM_MONTH = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+             "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+_PM_COUNTERPART_CACHE = {}
+
+
+def _gamma_slug_exists(slug: str) -> bool:
+    """True if gamma knows this slug (market OR event). Never link a guess."""
+    for ep in ("markets", "events"):
+        try:
+            r = requests.get("https://gamma-api.polymarket.com/" + ep,
+                             params={"slug": slug}, timeout=4)
+            if r.json():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _pm_counterpart(mkt: str):
+    """Polymarket game-event slug for a Kalshi game ticker, or None.
+
+    Parses KX{LEAGUE}-YYMMMDD[HHMM]{AWAY}{HOME}-... into
+    {league}-{away}-{home}-YYYY-MM-DD, tries away-code splits (3/2/4 chars)
+    and only returns a slug gamma confirms exists.
+    """
+    if mkt in _PM_COUNTERPART_CACHE:
+        return _PM_COUNTERPART_CACHE[mkt]
+    import re as _re
+    out = None
+    try:
+        parts = (mkt or "").split("-")
+        head = parts[0].upper()
+        league = next((v for k, v in _PM_LEAGUE_PREFIX if head.startswith(k)), None)
+        seg = parts[1] if len(parts) > 1 else ""
+        m = _re.match(r"^(\d{2})([A-Z]{3})(\d{2})", seg.upper())
+        if league and m and m.group(2) in _PM_MONTH:
+            yy = int(m.group(1))
+            mon = _PM_MONTH[m.group(2)]
+            dd = int(m.group(3))
+            teams = _re.sub(r"^\d{4}", "", seg[m.end():]).upper()
+            for L in (3, 2, 4):
+                if len(teams) > L + 1:
+                    cand = "%s-%s-%s-20%02d-%02d-%02d" % (
+                        league, teams[:L].lower(), teams[L:].lower(), yy, mon, dd)
+                    if _gamma_slug_exists(cand):
+                        out = cand
+                        break
+    except Exception:
+        out = None
+    _PM_COUNTERPART_CACHE[mkt] = out
+    return out
+
+
 def _build_market_links(platform: str, mkt: str) -> list:
-    """Build useful links for the alert: direct market + dashboard."""
+    """Build useful links: direct market + cross-venue counterpart + dashboard."""
     links = []
     if platform == "polymarket":
         links.append(f"<a href='https://polymarket.com/market/{mkt}'>Polymarket</a>")
     else:
         series = mkt.split('-')[0]
         links.append(f"<a href='https://kalshi.com/markets/{series}'>Kalshi</a>")
+        pm_slug = _pm_counterpart(mkt)
+        if pm_slug:
+            links.append(f"<a href='https://polymarket.com/event/{pm_slug}'>Polymarket</a>")
     links.append(f"<a href='{DASHBOARD_URL}'>Dashboard</a>")
     return links
 
@@ -383,9 +444,9 @@ def _infer_category(title: str, ticker: str = "") -> str:
     if tk.startswith("KXMLB"):
         return "⚾"
     if tk.startswith("KXNCAAF"):
-        return "🏈"  # college football (KXNCAAF* was mis-mapped to 🏀)
+        return "🎓"  # college football (distinct from pro NFL 🏈)
     if any(tk.startswith(p) for p in ["KXNCAAB", "KXNCAAW"]):
-        return "🏀"
+        return "🎓"
     if any(tk.startswith(p) for p in ["KXNBA", "KXWNBA"]):
         return "🏀"
     if tk.startswith("KXNFL"):
@@ -394,6 +455,15 @@ def _infer_category(title: str, ticker: str = "") -> str:
         return "🏒"
     if any(tk.startswith(p) for p in ["KXUFC", "KXMMA"]):
         return "🥊"
+    if any(tk.startswith(p) for p in ["KXWTA", "KXATP", "KXITF"]):
+        return "🎾"
+    if any(tk.startswith(p) for p in ["KXLALIGA", "KXEPL", "KXUCL", "KXSERIEA",
+                                      "KXBUNDES", "KXLIGUE1", "KXMLS", "KXLAGA"]):
+        return "⚽"
+    # ── Polymarket slug prefixes ─────────────────────────────────────
+    pfx_pm = ticker.lower().split("-")[0] if ticker else ""
+    if pfx_pm in PM_PREFIX_SPORT:
+        return PM_PREFIX_SPORT[pfx_pm][0]
     # ── Title-based (order matters: specific → generic) ──────────────
     # Politics
     if any(w in tl for w in ["election", "president", "senate", "house ", "governor", "democrat", "republican", "congress", "electoral"]):
@@ -429,6 +499,48 @@ def _infer_category(title: str, ticker: str = "") -> str:
     if any(w in tl for w in ["temperature", "climate", "weather", "co2", "emission"]):
         return "🌡️"
     return "📊"
+
+
+SPORT_FROM_TICKER = (
+    ("KXWTAMATCH", "🎾", "Tennis"), ("KXWTA", "🎾", "Tennis"),
+    ("KXATP", "🎾", "Tennis"), ("KXITF", "🎾", "Tennis"),
+    ("KXNFL", "🏈", "NFL"), ("KXNCAAF", "🎓", "CFB"), ("KXCFB", "🎓", "CFB"),
+    ("KXNBA", "🏀", "NBA"), ("KXWNBA", "🏀", "WNBA"),
+    ("KXNCAAB", "🎓", "CBB"), ("KXNCAAW", "🎓", "CBB"),
+    ("KXMLB", "⚾", "MLB"), ("KXNHL", "🏒", "NHL"),
+    ("KXUFC", "🥊", "MMA"), ("KXMMA", "🥊", "MMA"),
+    ("KXLALIGA", "⚽", "Soccer"), ("KXEPL", "⚽", "Soccer"),
+    ("KXUCL", "⚽", "Soccer"), ("KXSERIEA", "⚽", "Soccer"),
+    ("KXBUNDES", "⚽", "Soccer"), ("KXLIGUE1", "⚽", "Soccer"),
+    ("KXMLS", "⚽", "Soccer"), ("KXLAGA", "⚽", "Soccer"),
+)
+
+
+PM_PREFIX_SPORT = {
+    "cfb": ("🎓", "CFB"), "wta": ("🎾", "Tennis"), "atp": ("🎾", "Tennis"),
+    "itf": ("🎾", "Tennis"), "mlb": ("⚾", "MLB"), "wnba": ("🏀", "WNBA"),
+    "nba": ("🏀", "NBA"), "nfl": ("🏈", "NFL"), "nhl": ("🏒", "NHL"),
+    "ufc": ("🥊", "MMA"), "mma": ("🥊", "MMA"),
+    "epl": ("⚽", "Soccer"), "ucl": ("⚽", "Soccer"), "uel": ("⚽", "Soccer"),
+    "lal": ("⚽", "Soccer"), "mls": ("⚽", "Soccer"), "fifwc": ("⚽", "Soccer"),
+    "col": ("⚽", "Soccer"), "clf": ("⚽", "Soccer"), "bra": ("⚽", "Soccer"),
+    "arg": ("⚽", "Soccer"), "mex": ("⚽", "Soccer"),
+    "cs2": ("🎮", "Esports"), "lol": ("🎮", "Esports"), "dota2": ("🎮", "Esports"),
+    "val": ("🎮", "Esports"),
+}
+
+
+def _sport_of(mkt: str, title: str = ""):
+    """(emoji, sport name) from Kalshi/PM slug prefix; falls back to title inference."""
+    pfx_pm = (mkt or "").lower().split("-")[0]
+    if pfx_pm in PM_PREFIX_SPORT:
+        e, name = PM_PREFIX_SPORT[pfx_pm]
+        return e, name
+    tk = (mkt or "").upper()
+    for pfx, e, name in SPORT_FROM_TICKER:
+        if tk.startswith(pfx):
+            return e, name
+    return _infer_category(title, mkt), "Sports"
 
 
 def _short_title(title: str) -> str:
@@ -862,10 +974,11 @@ def send_single(alert: dict) -> bool:
     clob_match = mkt in clob_fired
 
     msg = format_alert(alert, 1, reason, clob_match)
+    se, sn = _sport_of(mkt, alert.get("title", ""))
     if clob_match:
-        header = "🦈 <b>DOUBLE CONFIRMATION</b>\n\n"
+        header = f"{se} 🦈 <b>DOUBLE CONFIRMATION — {sn}</b>\n\n"
     else:
-        header = "🎯 <b>WHALE ALERT</b>\n\n"
+        header = f"{se} <b>WHALE ALERT — {sn}</b>\n\n"
     full = header + msg
 
     ok = send_tg(full)
@@ -914,10 +1027,18 @@ def main():
     n = len(to_send)
     double_conf = [a for a in to_send if a.get("market", "") in clob_fired]
 
-    if double_conf:
-        header = f"🦈 <b>DOUBLE CONFIRMATION — {len(double_conf)} market(s) confirmed by CLOB + scanner</b>"
+    sports = {_sport_of(a.get("market", ""), a.get("title", "")) for a in to_send}
+    if len(sports) == 1:
+        se_hdr, sn_hdr = next(iter(sports))
+        sport_tag = f" — {sn_hdr}"
+    elif len(sports) > 1:
+        se_hdr, sport_tag = "🎯", " — MULTI-SPORT"
     else:
-        header = f"🎯 <b>WHALE ALERT — {n} signal(s)</b>"
+        se_hdr, sport_tag = "🎯", ""
+    if double_conf:
+        header = f"{se_hdr} 🦈 <b>DOUBLE CONFIRMATION{sport_tag} — {len(double_conf)} market(s) confirmed by CLOB + scanner</b>"
+    else:
+        header = f"{se_hdr} <b>WHALE ALERT{sport_tag} — {n} signal(s)</b>"
 
     # Refresh prices and filter out decided markets
     refreshed = []
