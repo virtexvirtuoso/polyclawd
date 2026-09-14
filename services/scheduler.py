@@ -264,7 +264,6 @@ TICK_TASKS = {
         "soccer_match_scan": 4,                   # every 2h
         "soccer_resolve": 4,
         "scorer_edge_scan": 4,                    # every 2h (same cadence as match scan)
-        "nfl_edge_scan": 1,                       # every 30min game-day cadence (self-gates in off-season)
         "betfair_scan": 4,                        # every 2h (futures don't move fast)
         "hf_window_snapshot": 2,                   # every 1h — conditional WR data collection
         "hf_spread_scan": 2,                        # every 1h — cross-asset spread anomaly scan
@@ -2374,6 +2373,23 @@ async def tick_nfl_fast_move():
     await run_fast_move_monitor()
 
 
+async def tick_nfl_edge_scan():
+    """NFL edge scan on its own 60s-poll loop so the persisted 30-min gate is
+    honored exactly. tick_30min runs its task list sequentially then sleeps a
+    fixed 1800s, so its effective period was 58-82 min (measured 2026-09-13
+    from journal tick timestamps) — structurally unable to deliver the
+    approved 30-min game-day cadence. Same gate key + 1800s interval as
+    before (task_state.should_run_safe); only poll granularity changes.
+    Off-season self-gating lives in task_nfl_edge_scan itself."""
+    while True:
+        try:
+            if task_state.should_run_safe("nfl_edge_scan", 1800):
+                await run_in_thread(_run_safe, "nfl_edge_scan", _task_fn("nfl_edge_scan"))
+        except Exception:
+            logger.exception("tick_nfl_edge_scan loop error")
+        await asyncio.sleep(60)
+
+
 async def main():
     logger.info("=" * 60)
     logger.info("Polyclawd Scheduler starting")
@@ -2396,6 +2412,7 @@ async def main():
         asyncio.create_task(_delayed_start(30, tick_scheduled)),
         asyncio.create_task(_delayed_start(8, tick_live_burst)),
         asyncio.create_task(_delayed_start(12, tick_nfl_fast_move)),
+        asyncio.create_task(_delayed_start(18, tick_nfl_edge_scan)),
     ]
 
     await asyncio.gather(*tasks)
