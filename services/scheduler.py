@@ -2374,16 +2374,19 @@ async def tick_nfl_fast_move():
 
 
 async def tick_nfl_edge_scan():
-    """NFL edge scan on its own 60s-poll loop so the persisted 30-min gate is
+    """NFL edge scan on its own 60s-poll loop so the persisted gate is
     honored exactly. tick_30min runs its task list sequentially then sleeps a
     fixed 1800s, so its effective period was 58-82 min (measured 2026-09-13
     from journal tick timestamps) — structurally unable to deliver the
-    approved 30-min game-day cadence. Same gate key + 1800s interval as
-    before (task_state.should_run_safe); only poll granularity changes.
-    Off-season self-gating lives in task_nfl_edge_scan itself."""
+    approved game-day cadence. Same gate key as before
+    (task_state.should_run_safe); interval 600s (10-min game-day cadence,
+    Mr. V approved 2026-09-13: 21% of live gap minutes moved >=3pp, 30-min
+    snapshots miss transient windows; 6 fires/hour keeps PM-US book-walk
+    pressure at the adapter's 429-softening level). Off-season self-gating
+    lives in task_nfl_edge_scan itself."""
     while True:
         try:
-            if task_state.should_run_safe("nfl_edge_scan", 1800):
+            if task_state.should_run_safe("nfl_edge_scan", 600):
                 await run_in_thread(_run_safe, "nfl_edge_scan", _task_fn("nfl_edge_scan"))
         except Exception:
             logger.exception("tick_nfl_edge_scan loop error")
