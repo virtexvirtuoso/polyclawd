@@ -254,7 +254,11 @@ TICK_TASKS = {
         "ufc_prop_scan", "edge_alerts", "mlb_props_alert",
         "stop_silence_alarm",
         "mlb_props_resolve", "baseball_resolve", "ufc_resolve", "nfl_resolve",
-        "scorer_clv_snapshot", "kalshi_fade_scan",
+        # scorer_clv_snapshot DISABLED 2026-09-13 (Mr. V approved): Odds API key
+        # returns DEACTIVATED_KEY (billing lapse 2026-08-30) — task failed 27x/48h.
+        # Re-enable on billing restore, or rewire to a free anchor (see
+        # QA-Session-2026-09-13 follow-up #5). Task def retained at :1558.
+        "kalshi_fade_scan",
         "pm_maker_shadow", "ensemble_recorder", "arb_scan",
         "resolution_edge_scan",
         "hf_backfill_outcomes",
