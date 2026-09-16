@@ -73,3 +73,7 @@ _archive/
 !.claude/settings.json
 *.db-shm
 *.db-wal
+
+# generated at runtime by scripts/kalshi_fade_report.py and signals/weather_mm_shadow.py
+static/kalshi_fade_sheet.json
+static/weather_mm_shadow.json
