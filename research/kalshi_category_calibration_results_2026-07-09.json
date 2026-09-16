@@ -1,0 +1,441 @@
+{
+  "generated": "2026-07-10T02:06:14Z",
+  "config": {
+    "lookback_days": 90,
+    "categories": "Economics,Financials,Crypto,Politics,Sports",
+    "series_per_cat": 100,
+    "candle_budget_cat": 250,
+    "ref_offset_h": 18,
+    "convergence_guard_h": 6,
+    "search_back_h": 30,
+    "max_spread": 0.2,
+    "min_cat_n": 100,
+    "min_bin_n": 20,
+    "min_flag_events": 6,
+    "min_flag_series": 3,
+    "flag_gap": 0.04,
+    "n_boot": 2000,
+    "seed": 17,
+    "sleep": 0.25,
+    "scratch": "/private/tmp/claude-501/-Users-ffv-macmini/102cdff1-0486-4668-a5b2-4e1ca518bbb6/scratchpad"
+  },
+  "n_settled_pulled": 18714,
+  "n_calibratable": 693,
+  "settlement_date_range": [
+    "2026-04-30",
+    "2026-07-10"
+  ],
+  "categories": {
+    "Economics": {
+      "n": 226,
+      "reported": true,
+      "table": [
+        {
+          "bin": "[0.00,0.05)",
+          "n": 58,
+          "n_events": 22,
+          "n_series": 15,
+          "implied": 0.0192,
+          "realized": 0.0172,
+          "gap": -0.002,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        },
+        {
+          "bin": "[0.05,0.15)",
+          "n": 31,
+          "n_events": 18,
+          "n_series": 13,
+          "implied": 0.0892,
+          "realized": 0.0968,
+          "gap": 0.0076,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        },
+        {
+          "bin": "[0.15,0.30)",
+          "n": 20,
+          "n_events": 18,
+          "n_series": 10,
+          "implied": 0.2,
+          "realized": 0.05,
+          "gap": -0.15,
+          "ci_event": [
+            -0.2076,
+            -0.0475
+          ],
+          "ci_series": [
+            -0.2086,
+            -0.035
+          ],
+          "survives": true
+        },
+        {
+          "bin": "[0.30,0.50)",
+          "n": 13,
+          "n_events": 12,
+          "n_series": 7,
+          "implied": 0.4073,
+          "realized": 0.5385,
+          "gap": 0.1312,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        },
+        {
+          "bin": "[0.50,0.70)",
+          "n": 10,
+          "n_events": 7,
+          "n_series": 6,
+          "implied": 0.591,
+          "realized": 0.8,
+          "gap": 0.209,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        },
+        {
+          "bin": "[0.70,0.85)",
+          "n": 11,
+          "n_events": 9,
+          "n_series": 6,
+          "implied": 0.7736,
+          "realized": 0.9091,
+          "gap": 0.1355,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        },
+        {
+          "bin": "[0.85,0.95)",
+          "n": 22,
+          "n_events": 15,
+          "n_series": 10,
+          "implied": 0.9127,
+          "realized": 1.0,
+          "gap": 0.0873,
+          "ci_event": [
+            0.0807,
+            0.0952
+          ],
+          "ci_series": [
+            0.0807,
+            0.0941
+          ],
+          "survives": true
+        },
+        {
+          "bin": "[0.95,1.00)",
+          "n": 61,
+          "n_events": 20,
+          "n_series": 14,
+          "implied": 0.9828,
+          "realized": 1.0,
+          "gap": 0.0172,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        }
+      ]
+    },
+    "Financials": {
+      "n": 207,
+      "reported": true,
+      "table": [
+        {
+          "bin": "[0.00,0.05)",
+          "n": 58,
+          "n_events": 24,
+          "n_series": 16,
+          "implied": 0.0138,
+          "realized": 0.0,
+          "gap": -0.0138,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        },
+        {
+          "bin": "[0.05,0.15)",
+          "n": 8,
+          "n_events": 8,
+          "n_series": 8,
+          "implied": 0.0894,
+          "realized": 0.0,
+          "gap": -0.0894,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        },
+        {
+          "bin": "[0.15,0.30)",
+          "n": 2,
+          "n_events": 2,
+          "n_series": 1,
+          "implied": 0.2,
+          "realized": 0.0,
+          "gap": -0.2,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        },
+        {
+          "bin": "[0.30,0.50)",
+          "n": 6,
+          "n_events": 5,
+          "n_series": 4,
+          "implied": 0.4183,
+          "realized": 0.3333,
+          "gap": -0.085,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        },
+        {
+          "bin": "[0.50,0.70)",
+          "n": 8,
+          "n_events": 7,
+          "n_series": 6,
+          "implied": 0.5587,
+          "realized": 0.5,
+          "gap": -0.0587,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        },
+        {
+          "bin": "[0.70,0.85)",
+          "n": 7,
+          "n_events": 6,
+          "n_series": 6,
+          "implied": 0.78,
+          "realized": 1.0,
+          "gap": 0.22,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        },
+        {
+          "bin": "[0.85,0.95)",
+          "n": 16,
+          "n_events": 8,
+          "n_series": 8,
+          "implied": 0.91,
+          "realized": 1.0,
+          "gap": 0.09,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        },
+        {
+          "bin": "[0.95,1.00)",
+          "n": 102,
+          "n_events": 17,
+          "n_series": 14,
+          "implied": 0.982,
+          "realized": 1.0,
+          "gap": 0.018,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        }
+      ]
+    },
+    "Crypto": {
+      "n": 3,
+      "reported": false,
+      "table": []
+    },
+    "Politics": {
+      "n": 12,
+      "reported": false,
+      "table": []
+    },
+    "Sports": {
+      "n": 245,
+      "reported": true,
+      "table": [
+        {
+          "bin": "[0.00,0.05)",
+          "n": 43,
+          "n_events": 7,
+          "n_series": 6,
+          "implied": 0.0109,
+          "realized": 0.0233,
+          "gap": 0.0124,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        },
+        {
+          "bin": "[0.05,0.15)",
+          "n": 52,
+          "n_events": 33,
+          "n_series": 7,
+          "implied": 0.0892,
+          "realized": 0.1731,
+          "gap": 0.0838,
+          "ci_event": [
+            0.0018,
+            0.1658
+          ],
+          "ci_series": [
+            0.0062,
+            0.1383
+          ],
+          "survives": true
+        },
+        {
+          "bin": "[0.15,0.30)",
+          "n": 30,
+          "n_events": 26,
+          "n_series": 4,
+          "implied": 0.2228,
+          "realized": 0.3667,
+          "gap": 0.1438,
+          "ci_event": [
+            -0.0132,
+            0.3207
+          ],
+          "ci_series": [
+            -0.1167,
+            0.3205
+          ],
+          "survives": false
+        },
+        {
+          "bin": "[0.30,0.50)",
+          "n": 41,
+          "n_events": 36,
+          "n_series": 6,
+          "implied": 0.4156,
+          "realized": 0.3902,
+          "gap": -0.0254,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        },
+        {
+          "bin": "[0.50,0.70)",
+          "n": 54,
+          "n_events": 52,
+          "n_series": 4,
+          "implied": 0.5856,
+          "realized": 0.5185,
+          "gap": -0.0671,
+          "ci_event": [
+            -0.1973,
+            0.0575
+          ],
+          "ci_series": [
+            -0.2587,
+            0.0369
+          ],
+          "survives": false
+        },
+        {
+          "bin": "[0.70,0.85)",
+          "n": 20,
+          "n_events": 19,
+          "n_series": 4,
+          "implied": 0.776,
+          "realized": 0.65,
+          "gap": -0.126,
+          "ci_event": [
+            -0.3255,
+            0.0708
+          ],
+          "ci_series": [
+            -0.2987,
+            -0.0503
+          ],
+          "survives": false
+        },
+        {
+          "bin": "[0.85,0.95)",
+          "n": 4,
+          "n_events": 4,
+          "n_series": 3,
+          "implied": 0.87,
+          "realized": 1.0,
+          "gap": 0.13,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        },
+        {
+          "bin": "[0.95,1.00)",
+          "n": 1,
+          "n_events": 1,
+          "n_series": 1,
+          "implied": 0.95,
+          "realized": 0.0,
+          "gap": -0.95,
+          "ci_event": null,
+          "ci_series": null,
+          "survives": false
+        }
+      ]
+    }
+  },
+  "flags": [
+    {
+      "category": "Economics",
+      "bin": "[0.15,0.30)",
+      "n": 20,
+      "n_events": 18,
+      "n_series": 10,
+      "implied": 0.2,
+      "realized": 0.05,
+      "gap": -0.15,
+      "ci_event": [
+        -0.2076,
+        -0.0475
+      ],
+      "ci_series": [
+        -0.2086,
+        -0.035
+      ],
+      "survives": true
+    },
+    {
+      "category": "Economics",
+      "bin": "[0.85,0.95)",
+      "n": 22,
+      "n_events": 15,
+      "n_series": 10,
+      "implied": 0.9127,
+      "realized": 1.0,
+      "gap": 0.0873,
+      "ci_event": [
+        0.0807,
+        0.0952
+      ],
+      "ci_series": [
+        0.0807,
+        0.0941
+      ],
+      "survives": true
+    },
+    {
+      "category": "Sports",
+      "bin": "[0.05,0.15)",
+      "n": 52,
+      "n_events": 33,
+      "n_series": 7,
+      "implied": 0.0892,
+      "realized": 0.1731,
+      "gap": 0.0838,
+      "ci_event": [
+        0.0018,
+        0.1658
+      ],
+      "ci_series": [
+        0.0062,
+        0.1383
+      ],
+      "survives": true
+    }
+  ]
+}

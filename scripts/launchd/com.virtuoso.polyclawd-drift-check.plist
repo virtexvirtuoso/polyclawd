@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.virtuoso.polyclawd-drift-check</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string><string>-lc</string>
+    <string>/opt/homebrew/bin/python3 /Users/ffv_macmini/Desktop/polyclawd/scripts/drift_check.py</string>
+  </array>
+  <key>StandardOutPath</key><string>/Users/ffv_macmini/Library/Logs/polyclawd-drift-check.launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/ffv_macmini/Library/Logs/polyclawd-drift-check.launchd.log</string>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
+</dict></plist>
