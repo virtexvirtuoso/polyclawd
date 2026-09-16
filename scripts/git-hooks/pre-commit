@@ -17,7 +17,7 @@ EOF
     exit 1
 fi
 
-bad=$(git diff --cached --name-only --diff-filter=A | grep -E '(\.bak$|\.pre-[^/]*$|_old[^/]*$|\.orig$)' || true)
+bad=$(git diff --cached --name-only --diff-filter=A | grep -E '(\.bak(\.|-|$)|\.pre-[^/]*$|_old[^/]*$|\.orig$)' || true)
 if [ -n "$bad" ]; then
     printf 'pre-commit: backup copies are not committed — git is the backup:\n%s\n' "$bad" >&2
     exit 1
