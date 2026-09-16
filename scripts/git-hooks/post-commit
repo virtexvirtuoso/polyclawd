@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# post-commit — the writer clone mirrors every commit to origin immediately.
+# "Unpushed" stops being a state that can outlive a commit by more than seconds.
+# Replicas do nothing here (they only commit on feature branches, pushed by PR flow).
+set -u
+
+role=$(git config --get virtuoso.role || echo replica)
+[ "$role" = writer ] || exit 0
+
+branch=$(git symbolic-ref --short -q HEAD) || exit 0      # detached HEAD: nothing to mirror
+repo=$(basename "$(git rev-parse --show-toplevel)")
+log="$(git rev-parse --git-dir)/hooks-push.log"
+sha=$(git rev-parse --short HEAD)
+
+# Background so the commit returns instantly; stdin closed so nothing can block on a tty.
+(
+    if git push -q origin "$branch" </dev/null 2>>"$log"; then
+        printf '%s pushed %s %s\n' "$(date "+%Y-%m-%dT%H:%M:%S%z")" "$sha" "$branch" >>"$log"
+    else
+        printf '%s PUSH FAILED %s %s\n' "$(date "+%Y-%m-%dT%H:%M:%S%z")" "$sha" "$branch" >>"$log"
+        notify=$(git config --get virtuoso.notify || true)
+        [ -n "$notify" ] && [ -x "$notify" ] &&
+            "$notify" "🔴 ${repo}: git push of ${branch}@${sha} FAILED — commit exists only on $(hostname -s). See ${log}" >/dev/null 2>&1
+    fi
+) &
+disown
+exit 0

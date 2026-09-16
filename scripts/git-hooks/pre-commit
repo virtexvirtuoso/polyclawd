@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# pre-commit — two structural refusals. Both are cheap and both have bitten us.
+#   1. A replica never commits on main. Only the writer host (virtuoso.role=writer) may.
+#      Everyone else: feature branch -> PR. This is what keeps clones from diverging.
+#   2. No backup copies in the tree (*.bak, *.pre-*, *_old*). Git is the backup.
+set -u
+
+role=$(git config --get virtuoso.role || echo replica)
+branch=$(git symbolic-ref --short -q HEAD || echo detached)
+
+if [ "$role" != writer ] && { [ "$branch" = main ] || [ "$branch" = master ]; }; then
+    cat >&2 <<EOF
+pre-commit: this clone is a replica (virtuoso.role=$role) — it does not commit on $branch.
+  git checkout -b feat/<slug>     # then commit, push, open a PR
+  (only the host that runs the code carries: git config virtuoso.role writer)
+EOF
+    exit 1
+fi
+
+bad=$(git diff --cached --name-only --diff-filter=A | grep -E '(\.bak$|\.pre-[^/]*$|_old[^/]*$|\.orig$)' || true)
+if [ -n "$bad" ]; then
+    printf 'pre-commit: backup copies are not committed — git is the backup:\n%s\n' "$bad" >&2
+    exit 1
+fi
+exit 0
