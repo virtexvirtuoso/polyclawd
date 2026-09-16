@@ -8,78 +8,170 @@ This is the brain that the $134→$200K bot never had.
 """
 
 import json
-import subprocess
+import threading
+import time
 from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
+
+import httpx
 from loguru import logger
 
 
-# Timeout for mcporter calls (seconds)
-MCP_TIMEOUT = 20
+# ============================================================================
+# REST Transport (Phase B 2026-09-16) — replaces the mcporter subprocess bridge
+# ============================================================================
+#
+# The old path spawned `node /usr/bin/mcporter call virtuoso.<tool>` per call:
+# a fresh node process + full MCP session (initialize -> initialized ->
+# GET/405 -> tools/call) roughly every 24 s per snapshot round, 24/7
+# (~17.6k MCP sessions/day, 100% of virtuoso-mcp-stream traffic; the same
+# session-per-call pattern behind the 2026-06-01 MCP memory leak). Every tool
+# used here is a thin proxy over a Virtuoso REST endpoint, so we call the
+# endpoints directly and share a TTL cache. Tool names and the _mcp_call()
+# contract are kept — callers (hf_collector, hf_risk_gate,
+# api/routes/markets.py) need no edits.
+#
+# Endpoint map verified live on the VPS 2026-09-16 (Virtuoso src/mcp/tools/*):
+#   get_perps_fusion_signal -> GET :8888 /signals/fusion/{symbol}
+#   get_market_regime       -> GET :8002 /api/regime/
+#   get_kill_switch_status  -> GET :8002 /api/risk/kill-switch/status
+#   get_manipulation_alerts -> GET :8002 /api/manipulation/alerts
+#
+# TTLs are per endpoint (worst case ~216 calls/h across 2 uvicorn workers,
+# target <=300/h and fusion <=60/h): fusion 300 s (signal horizon 1h-24h —
+# 5-min staleness immaterial; upstream rewrites ~15 s), regime 300 s (slow
+# classification), kill switch 75 s (safety gate — tightest), manipulation
+# 150 s. Failures negative-cache 10 s so upstream restart windows
+# (:8002 ~06:00/14:00 UTC) are not hammered.
+
+_VIRTUOSO_API = "http://127.0.0.1:8002"    # kill switch / manipulation / regime
+_VIRTUOSO_PERPS = "http://127.0.0.1:8888"  # fusion signals (perps tracker)
+
+REST_TIMEOUT = 8.0         # s — upstream calls measured 25-207 ms on 2026-09-16
+REST_CACHE_TTL_ERR = 10.0  # s — negative cache for failures
+_REST_TTL_OK = (           # (url substring, success TTL s)
+    ("/signals/fusion/", 300.0),
+    ("/api/regime/", 300.0),
+    ("/api/risk/kill-switch/", 75.0),
+    ("/api/manipulation/", 150.0),
+)
+_REST_TTL_DEFAULT = 90.0
+
+_rest_cache: Dict[str, tuple] = {}
+_rest_lock = threading.Lock()
+_http_client_ref = None
+_http_lock = threading.Lock()
 
 
-# ============================================================================
-# MCP Call Wrapper
-# ============================================================================
+def _ttl_for(url: str) -> float:
+    for key, ttl in _REST_TTL_OK:
+        if key in url:
+            return ttl
+    return _REST_TTL_DEFAULT
+
+
+def _shared_http_client():
+    global _http_client_ref
+    if _http_client_ref is None:
+        with _http_lock:
+            if _http_client_ref is None:
+                _http_client_ref = httpx.Client(timeout=REST_TIMEOUT)
+    return _http_client_ref
+
+
+def _rest_get(url: str):
+    """GET a Virtuoso REST endpoint with a shared TTL cache.
+
+    Returns the parsed JSON (dict or list) or None on failure — the same
+    contract the old mcporter wrapper had, so every caller keeps its existing
+    None handling (risk gates fail open, signal fields fall back to defaults).
+    Success caches per endpoint TTL, failures for REST_CACHE_TTL_ERR. Never
+    raises.
+    """
+    now = time.monotonic()
+    with _rest_lock:
+        hit = _rest_cache.get(url)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+    data = None
+    try:
+        resp = _shared_http_client().get(url)
+        resp.raise_for_status()
+        payload = resp.json()
+        if isinstance(payload, (dict, list)):
+            data = payload
+    except Exception as e:  # noqa: BLE001 — transport must never raise
+        logger.warning(f"Virtuoso REST {url} failed: {str(e)[:160]}")
+    ttl = _ttl_for(url) if data is not None else REST_CACHE_TTL_ERR
+    with _rest_lock:
+        _rest_cache[url] = (now + ttl, data)
+    return data
+
+
+_TOOL_ENDPOINTS = {
+    "get_perps_fusion_signal": _VIRTUOSO_PERPS + "/signals/fusion/{symbol}",
+    "get_market_regime": _VIRTUOSO_API + "/api/regime/",
+    "get_kill_switch_status": _VIRTUOSO_API + "/api/risk/kill-switch/status",
+    "get_manipulation_alerts": _VIRTUOSO_API + "/api/manipulation/alerts",
+}
+
 
 def _mcp_call(tool: str, args: dict = None) -> Optional[Dict]:
-    """Call a Virtuoso MCP tool via mcporter CLI.
-    
-    Returns parsed dict or None on error.
-    The response is markdown-formatted text, so we parse what we can.
+    """Fetch a Virtuoso data endpoint (name/contract kept from the mcporter era).
+
+    Returns {"raw": <json str>, "tool": tool, "timestamp": ...} or None —
+    identical to the old wrapper, so _parse_* and every caller keep working
+    unchanged. raw is now the REST endpoint's JSON instead of the MCP tool's
+    markdown rendering of that same JSON. Never raises.
     """
+    pattern = _TOOL_ENDPOINTS.get(tool)
+    if pattern is None:
+        logger.warning(f"REST bridge: no endpoint mapping for tool {tool}")
+        return None
     try:
-        import shutil
-        mcporter_bin = shutil.which("mcporter") or "/usr/bin/mcporter"
-        cmd = [mcporter_bin, "call", f"virtuoso.{tool}"]
-        if args:
-            cmd += ["--args", json.dumps(args)]
-        
-        import os
-        env = os.environ.copy()
-        # Ensure system paths + node available (uvicorn service has restricted PATH)
-        for p in ["/usr/bin", "/usr/local/bin", "/usr/lib/node_modules/.bin"]:
-            if p not in env.get("PATH", ""):
-                env["PATH"] = p + ":" + env.get("PATH", "")
-        # mcporter needs HOME to find its config
-        if "HOME" not in env:
-            env["HOME"] = "/home/linuxuser"
-        
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=MCP_TIMEOUT,
-            env=env,
-            cwd=env.get("HOME", "/home/linuxuser"),
-        )
-        
-        if result.returncode != 0:
-            logger.warning(f"MCP call {tool} failed: {result.stderr[:200]}")
-            return None
-        
-        output = result.stdout.strip()
-        if "❌ **Error:**" in output:
-            logger.warning(f"MCP {tool} returned error: {output[:200]}")
-            return None
-        
-        return {"raw": output, "tool": tool, "timestamp": datetime.utcnow().isoformat()}
-    
-    except subprocess.TimeoutExpired:
-        logger.warning(f"MCP call {tool} timed out")
+        if "{symbol}" in pattern:
+            symbol = "BTC"
+            if args and args.get("symbol"):
+                symbol = str(args["symbol"]).upper()
+            if symbol == "BITCOIN":
+                symbol = "BTC"
+            elif symbol == "ETHEREUM":
+                symbol = "ETH"
+            url = pattern.format(symbol=symbol)
+        else:
+            url = pattern
+        data = _rest_get(url)
+    except Exception as e:  # noqa: BLE001 — transport must never raise
+        logger.warning(f"REST bridge {tool} exception: {e}")
         return None
-    except Exception as e:
-        logger.warning(f"MCP call {tool} exception: {e}")
+    if data is None:
         return None
+    return {"raw": json.dumps(data), "tool": tool, "timestamp": datetime.utcnow().isoformat()}
 
 
 # ============================================================================
-# Signal Parsers — extract structured data from markdown responses
+# Signal Parsers — map Virtuoso REST payloads to bridge dicts (Phase B 2026-09-16)
 # ============================================================================
+
+def _load_json(raw):
+    """Parse a _mcp_call raw payload (REST JSON) into a dict, else None."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            return None
+        return d if isinstance(d, dict) else None
+    return None
+
 
 def _parse_fusion_signal(raw: str) -> Dict:
-    """Parse fusion signal markdown into structured data."""
+    """Map the fusion REST payload (:8888 /signals/fusion/{coin}) to the
+    bridge dict — Phase B 2026-09-16. raw is the endpoint's JSON (the old
+    mcporter markdown path is gone — the MCP tool rendered its markdown from
+    this same JSON). Output shape identical to the old parser's."""
     result = {
         "direction": "NEUTRAL",
         "score": 0.0,
@@ -88,141 +180,127 @@ def _parse_fusion_signal(raw: str) -> Dict:
         "win_rate": 50,
         "components": {},
     }
-    
-    for line in raw.split("\n"):
-        line = line.strip()
-        if "**Direction:**" in line:
-            if "LONG" in line.upper():
-                result["direction"] = "LONG"
-            elif "SHORT" in line.upper():
-                result["direction"] = "SHORT"
-            elif "NEUTRAL" in line.upper():
-                result["direction"] = "NEUTRAL"
-            # Extract strength hint
-            if "strong" in line.lower():
-                result["strength"] = "strong"
-            elif "weak" in line.lower():
-                result["strength"] = "weak"
-            else:
-                result["strength"] = "moderate"
-        
-        elif "**Score:**" in line:
-            try:
-                score_str = line.split("**Score:**")[1].strip()
-                result["score"] = float(score_str.split()[0])
-            except (ValueError, IndexError):
-                pass
-        
-        elif "**Confidence:**" in line:
-            try:
-                conf_str = line.split("**Confidence:**")[1].strip()
-                result["confidence"] = int(conf_str.replace("%", "").split()[0])
-            except (ValueError, IndexError):
-                pass
-        
-        elif "**Entry:**" in line:
-            if "LONG" in line.upper():
-                result["entry"] = "LONG"
-            elif "SHORT" in line.upper():
-                result["entry"] = "SHORT"
-            else:
-                result["entry"] = "WAIT"
-        
-        elif "**Est. Win Rate:**" in line:
-            try:
-                wr_str = line.split("**Est. Win Rate:**")[1].strip()
-                result["win_rate"] = int(wr_str.replace("%", "").split()[0])
-            except (ValueError, IndexError):
-                pass
-        
-        elif "FR:" in line and "OI:" in line:
-            # Component line like "FR: 0.0 | OI: 0.0 | LSR: 0.0 | CVD: 0.0"
-            for part in line.split("|"):
-                part = part.strip()
-                if ":" in part:
-                    key, val = part.split(":", 1)
-                    try:
-                        result["components"][key.strip()] = float(val.strip())
-                    except ValueError:
-                        pass
-    
+    d = _load_json(raw)
+    if d is None:
+        return result
+    sig = d.get("signal")
+    if not isinstance(sig, dict):
+        sig = d
+
+    def _num(value, default):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    direction = str(sig.get("direction") or "neutral").upper()
+    result["direction"] = direction if direction in ("LONG", "SHORT") else "NEUTRAL"
+    result["score"] = _num(sig.get("score"), 0.0)
+    result["confidence"] = int(round(_num(sig.get("confidence"), 50)))
+    entry = str(sig.get("entry_recommendation") or "WAIT").upper()
+    result["entry"] = entry if entry in ("LONG", "SHORT") else "WAIT"
+    result["win_rate"] = int(round(_num(sig.get("win_rate_estimate"), 50)))
+    result["strength"] = str(sig.get("strength") or "weak")
+    result["components"] = {
+        "FR": _num(sig.get("funding_contribution"), 0.0),
+        "OI": _num(sig.get("oi_contribution"), 0.0),
+        "LSR": _num(sig.get("lsr_contribution"), 0.0),
+        "CVD": _num(sig.get("cvd_contribution"), 0.0),
+    }
     return result
 
 
 def _parse_regime(raw: str) -> Dict:
-    """Parse market regime markdown."""
+    """Map the regime REST payload to the bridge dict — Phase B JSON path.
+
+    KNOWN GAP (deliberately not "fixed" here — it would change trading-gate
+    behaviour; flagged in the Phase B report): the live :8002 /api/regime/
+    response is a per-symbol dict, and the MCP tool we replaced read
+    top-level current_regime/trading_bias keys that don't exist in it — so
+    its output, and therefore this parser's output, has been UNKNOWN/0/0
+    since the data_connectors tool version went live. This mapper reproduces
+    that exactly and will pick up real values if the endpoint grows the
+    top-level shape."""
     result = {
         "bias": "UNKNOWN",
         "confidence": 50,
         "high_volatility_count": 0,
         "recommendation": "",
     }
-    
-    for line in raw.split("\n"):
-        line = line.strip()
-        if "**Overall Bias:**" in line:
-            bias_part = line.split("**Overall Bias:**")[1].strip()
-            result["bias"] = bias_part.split("(")[0].strip().upper()
-            if "confidence:" in bias_part:
-                try:
-                    result["confidence"] = float(bias_part.split("confidence:")[1].replace("%)", "").strip())
-                except ValueError:
-                    pass
-        
-        elif "**Recommendation:**" in line:
-            result["recommendation"] = line.split("**Recommendation:**")[1].strip()
-        
-        elif "high_volatility:" in line.lower():
-            try:
-                result["high_volatility_count"] = int(line.split(":")[-1].strip())
-            except ValueError:
-                pass
-    
+    d = _load_json(raw)
+    if d is None:
+        return result
+    bias = d.get("regime") or d.get("overall_bias") or d.get("current_regime")
+    if bias:
+        result["bias"] = str(bias).upper()
+    try:
+        conf = float(d.get("confidence"))
+        if 0 < conf <= 1.0:  # 0-1 fraction (old tool rendered it as a %) → scale
+            conf *= 100.0
+        if 0 < conf <= 100:
+            result["confidence"] = int(round(conf))
+    except (TypeError, ValueError):
+        pass
+    try:
+        result["high_volatility_count"] = int(d.get("high_volatility_count") or 0)
+    except (TypeError, ValueError):
+        pass
+    rec = d.get("recommendation") or d.get("trading_bias")
+    if rec:
+        result["recommendation"] = str(rec)
     return result
 
 
 def _parse_kill_switch(raw: str) -> Dict:
-    """Parse kill switch status."""
+    """Map the kill-switch REST payload to the bridge dict — Phase B JSON path.
+
+    Keyed off is_active, exactly like the MCP tool's markdown rendering was.
+    (Display note: the old parser left state="MONITORING" even when halted —
+    the tool rendered "HALTED", a word its TRIGGERED/KILLED matcher never
+    matched; gates still worked via trading_allowed. This mapper reports the
+    truer state; gate outcomes are unchanged.)"""
     result = {
         "active": False,
         "trading_allowed": True,
         "state": "MONITORING",
     }
-    
-    for line in raw.split("\n"):
-        line = line.strip()
-        if "**State:**" in line:
-            if "TRIGGERED" in line.upper() or "KILLED" in line.upper():
-                result["active"] = True
-                result["trading_allowed"] = False
-                result["state"] = "TRIGGERED"
-            else:
-                result["state"] = "MONITORING"
-        
-        elif "**Trading Active:**" in line:
-            result["trading_allowed"] = "YES" in line.upper() or "✅" in line
-    
+    d = _load_json(raw)
+    if d is None:
+        return result
+    is_active = bool(d.get("is_active", False))
+    result["active"] = is_active
+    result["trading_allowed"] = not is_active
+    result["state"] = "TRIGGERED" if is_active else "MONITORING"
     return result
 
 
 def _parse_manipulation(raw: str) -> Dict:
-    """Parse manipulation alerts."""
+    """Map the manipulation REST payload to the bridge dict — Phase B JSON path.
+
+    :8002 /api/manipulation/alerts returns a JSON list of active alerts
+    (live 2026-09-16: []). Some shapes may wrap the list in {"data": [...]}."""
     result = {
         "alerts_active": False,
         "alert_count": 0,
         "details": [],
     }
-    
-    if "No Manipulation Alerts" in raw or "No suspicious" in raw:
+    if isinstance(raw, dict):
+        data = raw
+    elif isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return result
+    else:
         return result
-    
-    result["alerts_active"] = True
-    # Count alert entries
-    for line in raw.split("\n"):
-        if "⚠️" in line or "🚨" in line:
-            result["alert_count"] += 1
-            result["details"].append(line.strip())
-    
+    if isinstance(data, dict) and "data" in data:
+        data = data.get("data")
+    if not isinstance(data, list):
+        return result
+    details = [str(a) for a in data]
+    result["alerts_active"] = bool(details)
+    result["alert_count"] = len(details)
+    result["details"] = details
     return result
 
 
