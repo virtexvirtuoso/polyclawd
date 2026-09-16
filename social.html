@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Polyclawd — Social Count Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
+<style>
+  :root {
+    --bg: #0a0e17; --card: #111827; --border: #1e293b;
+    --text: #e2e8f0; --dim: #94a3b8; --accent: #8b5cf6;
+    --green: #10b981; --red: #ef4444; --amber: #f59e0b;
+    --cyan: #06b6d4; --purple: #8b5cf6; --pink: #ec4899;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; } html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+  body { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); padding: 20px; max-width: 1400px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { color: var(--dim); font-size: 0.85rem; margin-bottom: 20px; }
+  .grid { display: grid; gap: 16px; margin-bottom: 16px; }
+  .grid-4 { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  .grid-3 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .grid-2 { grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .stat-value { font-size: 1.8rem; font-weight: 700; line-height: 1.2; }
+  .stat-label { font-size: 0.75rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
+  .positive { color: var(--green); }
+  .negative { color: var(--red); }
+  .neutral { color: var(--amber); }
+  .blocked { color: var(--red); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  th { text-align: left; color: var(--dim); font-weight: 500; padding: 8px 6px; border-bottom: 1px solid var(--border); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  td { padding: 7px 6px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover { background: rgba(139, 92, 246, 0.05); }
+  .badge { display: inline-block; padding: 3px 8px; border-radius: 10px; font-size: 0.7rem; font-weight: 600; white-space: nowrap; }
+  .badge-musk { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
+  .badge-trump { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+  .badge-won { background: rgba(16, 185, 129, 0.15); color: var(--green); }
+  .badge-lost { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+  .badge-stopped { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
+  .badge-open { background: rgba(139, 92, 246, 0.15); color: var(--purple); }
+  .badge-blocked { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+  .chart-wrap { position: relative; height: 250px; }
+  .chart-wrap-tall { position: relative; height: 350px; }
+  .nav-links { display: flex; gap: 12px; margin-bottom: 16px; }
+  .nav-links a { color: var(--accent); font-size: 0.8rem; text-decoration: none; }
+  .nav-links a:hover { text-decoration: underline; }
+  .section-title { font-size: 0.95rem; font-weight: 600; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .empty-state { color: var(--dim); font-style: italic; padding: 30px; text-align: center; font-size: 0.85rem; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .status-live { background: var(--green); animation: pulse 2s infinite; }
+  .status-blocked { background: var(--red); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .progress-bar { background: var(--border); border-radius: 6px; height: 8px; overflow: hidden; margin-top: 8px; }
+  .progress-fill { height: 100%; border-radius: 6px; transition: width 0.5s; }
+  .refresh-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .refresh-timer { font-size: 0.75rem; color: var(--dim); }
+  .tag { font-size: 0.7rem; padding: 2px 8px; border-radius: 10px; }
+  .header-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .last-updated { font-size: 0.7rem; color: var(--dim); margin-top: 8px; }
+  .rate-big { font-size: 2.5rem; font-weight: 700; }
+  .person-card { display: flex; align-items: center; gap: 16px; }
+  .person-avatar { width: 48px; height: 48px; border-radius: 50%; background: var(--border); display: flex; align-items: center; justify-content: center; font-size: 1.5rem; }
+  .config-row { display: flex; flex-wrap: wrap; gap: 10px 16px; font-size: 0.82rem; }
+  .config-row span { color: var(--dim); }
+  @media (max-width: 768px) {
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    .grid-4 { grid-template-columns: repeat(2, 1fr); }
+    h1 { font-size: 1.2rem; }
+    .subtitle { font-size: 0.75rem; }
+    .header-row { gap: 4px; }
+    .tag { font-size: 0.6rem; padding: 2px 6px; }
+    .stat-value { font-size: 1.4rem; }
+    .person-card { flex-direction: column; align-items: flex-start; gap: 8px; }
+    .person-avatar { width: 36px; height: 36px; font-size: 1.2rem; }
+    .config-row { flex-direction: column; gap: 6px; }
+    .refresh-bar { flex-direction: column; gap: 8px; align-items: flex-start; }
+    .chart-wrap-tall { height: 220px; }
+    .nav-links { gap: 8px; flex-wrap: wrap; }
+    /* Trade table: inline card layout on mobile */
+    .mobile-cards td { display: inline-block; padding: 2px 4px; border: none; }
+    .mobile-cards tr { display: block; padding: 10px 0; border-bottom: 1px solid var(--border); }
+    .mobile-cards thead { display: none; }
+    .mobile-cards td:first-child { display: block; font-weight: 600; font-size: 0.85rem; margin-bottom: 4px; color: var(--text); }
+    .mobile-cards td:before { content: attr(data-label); color: var(--dim); font-size: 0.6rem; }
+  }
+  @media (max-width: 480px) {
+    body { padding: 12px; }
+    .stat-value { font-size: 1.2rem; }
+    .card { padding: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="refresh-bar">
+  <div>
+    <div class="header-row">
+      <h1>📊 Social Count Monitor</h1>
+      <span class="tag" style="background:rgba(16,185,129,0.15);color:var(--green)">🟢 LIVE — Golden Source Active</span>
+      <span class="tag" style="background:rgba(139,92,246,0.15);color:var(--purple)">Alpha Generation Phase</span>
+    </div>
+    <div class="subtitle">Polling every 30m — Polymarket Gamma Metadata (Golden Source). High-conviction Final Sprint detection.</div>
+  </div>
+  <div style="text-align:right">
+    <div class="refresh-timer" id="timer">Loading...</div>
+    <div id="api-status" class="last-updated"></div>
+  </div>
+</div>
+
+<div class="nav-links">
+  <a href="/polyclawd/portfolio.html">← Portfolio</a>
+  <a href="/polyclawd/weather.html">Weather</a>
+  <a href="/polyclawd/analysis.html">Analysis</a>
+</div>
+
+<!-- Config Panel -->
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">⚙️ Status</div>
+  <div class="config-row">
+    <div><span>Trading:</span> <span class="positive">ACTIVE</span></div>
+    <div><span>Strategy:</span> Final Sprint (Social Volume)</div>
+    <div><span>Monitor:</span> <span class="positive">Active (30m poll)</span></div>
+    <div><span>Golden Source:</span> Polymarket Gamma Metadata (tweetCount)</div>
+    <div><span>Current Edge:</span> <span class="positive">Elon Musk "Impossible Sprint" (NO)</span></div>
+  </div>
+</div>
+
+<!-- Person Cards -->
+<div class="grid grid-2" id="person-cards">
+  <div class="card">
+    <div class="person-card">
+      <div class="person-avatar">🐦</div>
+      <div>
+        <div style="font-weight:600">Elon Musk <span class="badge badge-musk">@elonmusk</span></div>
+        <div style="color:var(--dim);font-size:0.8rem">Twitter/X • Golden Source</div>
+      </div>
+    </div>
+    <div style="margin-top:16px;display:flex;gap:16px;flex-wrap:wrap">
+      <div>
+        <div class="stat-value" id="musk-total" style="color:var(--cyan)">—</div>
+        <div class="stat-label">Total Tweets</div>
+      </div>
+      <div>
+        <div class="stat-value" id="musk-rate" style="color:var(--accent)">—</div>
+        <div class="stat-label">Tweets/Day (est)</div>
+      </div>
+      <div>
+        <div class="stat-value" id="musk-points" style="color:var(--dim)">—</div>
+        <div class="stat-label">Data Points</div>
+      </div>
+    </div>
+    <div class="progress-bar" style="margin-top:12px">
+      <div class="progress-fill" id="musk-progress" style="width:100%;background:var(--cyan)"></div>
+    </div>
+    <div style="font-size:0.7rem;color:var(--dim);margin-top:4px" id="musk-progress-label">Golden Source Active ✅</div>
+  </div>
+  
+  <div class="card">
+    <div class="person-card">
+      <div class="person-avatar">📢</div>
+      <div>
+        <div style="font-weight:600">Donald Trump <span class="badge badge-trump">@realDonaldTrump</span></div>
+        <div style="color:var(--dim);font-size:0.8rem">Truth Social • Golden Source</div>
+      </div>
+    </div>
+    <div style="margin-top:16px;display:flex;gap:16px;flex-wrap:wrap">
+      <div>
+        <div class="stat-value" id="trump-total" style="color:var(--red)">—</div>
+        <div class="stat-label">Total Posts</div>
+      </div>
+      <div>
+        <div class="stat-value" id="trump-rate" style="color:var(--accent)">—</div>
+        <div class="stat-label">Posts/Day (est)</div>
+      </div>
+      <div>
+        <div class="stat-value" id="trump-points" style="color:var(--dim)">—</div>
+        <div class="stat-label">Data Points</div>
+      </div>
+    </div>
+    <div class="progress-bar" style="margin-top:12px">
+      <div class="progress-fill" id="trump-progress" style="width:100%;background:var(--red)"></div>
+    </div>
+    <div style="font-size:0.7rem;color:var(--dim);margin-top:4px" id="trump-progress-label">Golden Source Active ✅</div>
+  </div>
+</div>
+
+<!-- Charts -->
+<div class="grid grid-2">
+  <div class="card">
+    <div class="section-title">📈 Cumulative Count Over Time</div>
+    <div class="chart-wrap-tall"><canvas id="cumulativeChart"></canvas></div>
+  </div>
+  <div class="card">
+    <div class="section-title">📊 Daily Posting Rate</div>
+    <div class="chart-wrap-tall"><canvas id="rateChart"></canvas></div>
+  </div>
+</div>
+
+<!-- Paper Trading History -->
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">📋 Paper Trade History</div>
+  <div id="trades-table" style="overflow-x:auto"><div class="empty-state">Loading...</div></div>
+</div>
+
+<!-- Raw Data -->
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">🗄️ Raw Data Points</div>
+  <div id="raw-data" style="max-height:400px;overflow-y:auto;overflow-x:auto;-webkit-overflow-scrolling:touch"><div class="empty-state">Loading...</div></div>
+</div>
+
+<script>
+const API_BASE = '/polyclawd/api';
+let charts = {};
+let refreshInterval = 300; // 5 min
+let countdown = refreshInterval;
+
+function pnlClass(v) { return v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral'; }
+function pnlSign(v) { return v > 0 ? '+' : ''; }
+
+async function fetchJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function loadSocialData() {
+  try {
+    // Fetch social count history from API
+    const data = await fetchJSON(`${API_BASE}/social-count/dashboard`);
+    renderDashboard(data);
+    document.getElementById('api-status').innerHTML = 
+      `<span class="status-dot status-live"></span>Live — ${new Date().toLocaleTimeString()}`;
+  } catch(e) {
+    console.log('API not available, trying direct DB endpoint...');
+    // Fallback: try the raw data endpoint
+    try {
+      const data = await fetchJSON(`${API_BASE}/social-count/history`);
+      renderFromRaw(data);
+    } catch(e2) {
+      console.log('Both endpoints failed, showing static data');
+      renderStatic();
+    }
+  }
+}
+
+function renderStatic() {
+  // Show what we know from the initial scrape
+  document.getElementById('musk-total').textContent = '161';
+  document.getElementById('trump-total').textContent = '79';
+  document.getElementById('musk-rate').textContent = '~1.5';
+  document.getElementById('trump-rate').textContent = '~10';
+  document.getElementById('musk-points').textContent = '1';
+  document.getElementById('trump-points').textContent = '1';
+  
+  document.getElementById('api-status').innerHTML = 
+    `<span class="status-dot status-blocked"></span>API endpoint not yet built — showing initial data`;
+  
+  renderTradesTable();
+}
+
+function renderDashboard(d) {
+  // Full dashboard render when API is available
+  for (const person of ['musk', 'trump']) {
+    const p = d[person] || {};
+    document.getElementById(`${person}-total`).textContent = p.total ? p.total.toLocaleString() : '—';
+    document.getElementById(`${person}-rate`).textContent = p.daily_rate ? p.daily_rate.toFixed(1) : '—';
+    document.getElementById(`${person}-points`).textContent = p.data_points || 0;
+  }
+  
+  if (d.history) renderCharts(d.history);
+  renderTradesTable(d.trades);
+}
+
+function renderFromRaw(data) {
+  // Render from raw history data
+  const history = data.history || data || [];
+  
+  const byPerson = {};
+  for (const row of history) {
+    const p = row.person;
+    if (!byPerson[p]) byPerson[p] = [];
+    byPerson[p].push(row);
+  }
+  
+  for (const person of ['musk', 'trump']) {
+    const rows = byPerson[person] || [];
+    if (rows.length > 0) {
+      const latest = rows[rows.length - 1];
+      document.getElementById(`${person}-total`).textContent = 
+        latest.cumulative_count ? latest.cumulative_count.toLocaleString() : '—';
+      document.getElementById(`${person}-points`).textContent = rows.length;
+      
+      // Compute rate from diffs
+      if (rows.length >= 2) {
+        const first = rows[0];
+        const last = rows[rows.length - 1];
+        const days = (new Date(last.date) - new Date(first.date)) / 86400000;
+        if (days > 0) {
+          const rate = (last.cumulative_count - first.cumulative_count) / days;
+          document.getElementById(`${person}-rate`).textContent = rate.toFixed(1);
+        }
+      }
+    }
+  }
+  
+  renderCharts(history);
+  renderTradesTable();
+  renderRawData(history);
+}
+
+function renderCharts(history) {
+  const muskData = history.filter(r => r.person === 'musk').sort((a,b) => a.date.localeCompare(b.date));
+  const trumpData = history.filter(r => r.person === 'trump').sort((a,b) => a.date.localeCompare(b.date));
+  
+  // Cumulative chart
+  const ctx1 = document.getElementById('cumulativeChart').getContext('2d');
+  if (charts.cumulative) charts.cumulative.destroy();
+  
+  const datasets = [];
+  if (muskData.length) {
+    datasets.push({
+      label: 'Musk Tweets',
+      data: muskData.map(r => ({x: r.date, y: r.cumulative_count})),
+      borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)',
+      fill: false, tension: 0.3, pointRadius: 3, borderWidth: 2,
+    });
+  }
+  if (trumpData.length) {
+    datasets.push({
+      label: 'Trump Posts',
+      data: trumpData.map(r => ({x: r.date, y: r.cumulative_count})),
+      borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)',
+      fill: false, tension: 0.3, pointRadius: 3, borderWidth: 2,
+    });
+  }
+  
+  if (datasets.length) {
+    charts.cumulative = new Chart(ctx1, {
+      type: 'line',
+      data: { datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#94a3b8', font: { size: 11 } } } },
+        scales: {
+          x: { type: 'category', labels: [...new Set([...muskData, ...trumpData].map(r => r.date))].sort(),
+               ticks: { color: '#64748b', maxRotation: 45 }, grid: { color: '#1e293b' } },
+          y: { ticks: { color: '#64748b', callback: v => v.toLocaleString() }, grid: { color: '#1e293b' } }
+        }
+      }
+    });
+  }
+  
+  // Daily rate chart
+  const ctx2 = document.getElementById('rateChart').getContext('2d');
+  if (charts.rate) charts.rate.destroy();
+  
+  function computeRates(data) {
+    const rates = [];
+    for (let i = 1; i < data.length; i++) {
+      const days = (new Date(data[i].date) - new Date(data[i-1].date)) / 86400000;
+      if (days > 0) {
+        rates.push({
+          date: data[i].date,
+          rate: (data[i].cumulative_count - data[i-1].cumulative_count) / days
+        });
+      }
+    }
+    return rates;
+  }
+  
+  const muskRates = computeRates(muskData);
+  const trumpRates = computeRates(trumpData);
+  
+  const rateDatasets = [];
+  if (muskRates.length) {
+    rateDatasets.push({
+      label: 'Musk tweets/day',
+      data: muskRates.map(r => ({x: r.date, y: r.rate})),
+      borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.3)',
+      fill: true, tension: 0.3, pointRadius: 3, borderWidth: 2,
+    });
+  }
+  if (trumpRates.length) {
+    rateDatasets.push({
+      label: 'Trump posts/day',
+      data: trumpRates.map(r => ({x: r.date, y: r.rate})),
+      borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.3)',
+      fill: true, tension: 0.3, pointRadius: 3, borderWidth: 2,
+    });
+  }
+  
+  if (rateDatasets.length) {
+    const allDates = [...new Set([...muskRates, ...trumpRates].map(r => r.date))].sort();
+    charts.rate = new Chart(ctx2, {
+      type: 'line',
+      data: { datasets: rateDatasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#94a3b8', font: { size: 11 } } } },
+        scales: {
+          x: { type: 'category', labels: allDates,
+               ticks: { color: '#64748b', maxRotation: 45 }, grid: { color: '#1e293b' } },
+          y: { ticks: { color: '#64748b', callback: v => v.toFixed(0) + '/d' }, grid: { color: '#1e293b' },
+               title: { display: true, text: 'Posts per day', color: '#64748b' } }
+        }
+      }
+    });
+  }
+}
+
+async function renderTradesTable(apiTrades) {
+  // Use API trades if available, otherwise fallback to hard-coded
+  const trades = apiTrades || [
+    {market_title: 'Elon Musk 280-299 Tweets (Mar 31 - Apr 7)', side: 'NO', entry_price: 0.465, bet_size: 1000, status: 'OPEN', pnl: 0, person: 'musk'},
+    {market_title: 'Musk 380-399 tweets Mar 6-13', side: 'NO', entry_price: 0.606, bet_size: 177, status: 'won', pnl: 271.52, person: 'musk'},
+    {market_title: 'Musk 90-114 tweets Mar 12-14', side: 'NO', entry_price: 0.520, bet_size: 174, status: 'lost', pnl: -174.17, person: 'musk'},
+    {market_title: 'Trump 100-119 posts Mar 10-17', side: 'NO', entry_price: 0.550, bet_size: 100, status: 'lost', pnl: -100.00, person: 'trump'},
+    {market_title: 'Musk 40-64 tweets Mar 14-16', side: 'NO', entry_price: 0.555, bet_size: 100, status: 'lost', pnl: -100.00, person: 'musk'},
+    {market_title: 'Trump 120-139 posts Mar 10-17', side: 'NO', entry_price: 0.170, bet_size: 137, status: 'won', pnl: 28.12, person: 'trump'},
+    {market_title: 'Musk 240-259 tweets Mar 10-17', side: 'NO', entry_price: 0.197, bet_size: 120, status: 'won', pnl: 29.42, person: 'musk'},
+    {market_title: 'Musk 280-299 tweets Mar 10-17', side: 'NO', entry_price: 0.245, bet_size: 120, status: 'stopped', pnl: -100.94, person: 'musk'},
+    {market_title: 'Musk 340-359 tweets Mar 13-20', side: 'NO', entry_price: 0.389, bet_size: 100, status: 'stopped', pnl: -55.85, person: 'musk'},
+  ];
+  
+  let html = '<table class="mobile-cards"><tr><th>Market</th><th>Person</th><th>Side</th><th>Entry</th><th>Bet</th><th>P&L</th><th>Result</th></tr>';
+  let totalPnl = 0;
+  for (const t of trades) {
+    const status = (t.status || '').toLowerCase();
+    const statusCls = status === 'won' ? 'badge-won' : status === 'open' ? 'badge-open' : status === 'stopped' ? 'badge-stopped' : 'badge-lost';
+    const person = (t.person || (t.market_title.toLowerCase().includes('elon') ? 'musk' : 'trump'));
+    const personCls = person === 'musk' ? 'badge-musk' : 'badge-trump';
+    const pnl = t.pnl || 0;
+    const pCls = pnl >= 0 ? 'positive' : 'negative';
+    totalPnl += pnl;
+    html += `<tr>
+      <td data-label="">${t.market_title}</td>
+      <td data-label="Person "><span class="badge ${personCls}">${person}</span></td>
+      <td data-label="Side ">${t.side}</td>
+      <td data-label="Entry ">${(t.entry_price * 100).toFixed(1)}¢</td>
+      <td data-label="Bet ">$${t.bet_size}</td>
+      <td data-label="P&L " class="${pCls}">${pnl >= 0 ? '+' : ''}$${Math.abs(pnl).toFixed(0)}</td>
+      <td data-label=""><span class="badge ${statusCls}">${status.toUpperCase()}</span></td>
+    </tr>`;
+  }
+  document.getElementById('trades-table').innerHTML = html + '</table>';
+}
+
+function renderRawData(history) {
+  if (!history || !history.length) {
+    document.getElementById('raw-data').innerHTML = '<div class="empty-state">No data points yet</div>';
+    return;
+  }
+  let html = '<table><tr><th>Date</th><th>Person</th><th>Count</th><th>Source</th><th>Scraped</th></tr>';
+  const sorted = [...history].sort((a,b) => b.date.localeCompare(a.date));
+  for (const r of sorted) {
+    const personCls = r.person === 'musk' ? 'badge-musk' : 'badge-trump';
+    html += `<tr>
+      <td>${r.date}</td>
+      <td><span class="badge ${personCls}">${r.person}</span></td>
+      <td>${r.cumulative_count ? r.cumulative_count.toLocaleString() : '—'}</td>
+      <td style="color:var(--dim)">${r.source || '—'}</td>
+      <td style="color:var(--dim);font-size:0.75rem">${r.scraped_at || '—'}</td>
+    </tr>`;
+  }
+  document.getElementById('raw-data').innerHTML = html + '</table>';
+}
+
+function tick() {
+  countdown--;
+  if (countdown <= 0) { loadSocialData(); countdown = refreshInterval; }
+  document.getElementById('timer').textContent = `Refresh in ${countdown}s`;
+}
+
+// Initial load
+loadSocialData();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

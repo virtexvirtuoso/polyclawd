@@ -40,6 +40,8 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from config.polymarket_urls import POLYMARKET_DATA_API as DATA_API  # polyproxy: central URL config
+from config.polymarket_urls import GAMMA_API as GAMMA  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +49,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 QUOTES_PATH = PROJECT_ROOT / "data" / "pm_maker_shadow_quotes.jsonl"
 OUT_PATH = PROJECT_ROOT / "data" / "pm_maker_shadow.jsonl"
 
-GAMMA = "https://gamma-api.polymarket.com"
-DATA_API = "https://data-api.polymarket.com"
 UA = {"User-Agent": "polyclawd-pm-maker-shadow/1.0"}
 
 SYNOPTIC_BLACKOUT_MIN = 10  # blindspots 2026-06-10: named sniper bots (DSM Bot,
@@ -57,13 +57,11 @@ SYNOPTIC_BLACKOUT_MIN = 10  # blindspots 2026-06-10: named sniper bots (DSM Bot,
 # for some timezones. Model the order as CANCELED +/-10min around each release
 # (conservative both ways: no sniper losses counted, no lucky fills either).
 
-
 def in_release_blackout(ts: float) -> bool:
     """True if a unix timestamp falls within +/-SYNOPTIC_BLACKOUT_MIN minutes
     of a 6-hourly synoptic time (00/06/12/18 UTC)."""
     minutes_into_6h = (ts % 21600) / 60.0
     return minutes_into_6h <= SYNOPTIC_BLACKOUT_MIN or minutes_into_6h >= 360 - SYNOPTIC_BLACKOUT_MIN
-
 
 LONGSHOT_MAX_YES = 0.15
 FAVORITE_MIN, FAVORITE_MAX = 0.50, 0.70
@@ -90,7 +88,6 @@ PM_CITIES = {
     "buenos-aires": "America/Argentina/Buenos_Aires",
 }
 
-
 def _jget(url, timeout=20, retries=3):
     for a in range(retries):
         try:
@@ -102,13 +99,11 @@ def _jget(url, timeout=20, retries=3):
             time.sleep(0.8 * (a + 1))
     return None
 
-
 def _f(v):
     try:
         return float(v)
     except (TypeError, ValueError):
         return None
-
 
 def cities_in_window(now_utc: datetime, force: bool = False) -> list:
     out = []
@@ -119,10 +114,8 @@ def cities_in_window(now_utc: datetime, force: bool = False) -> list:
             out.append((city, tz_name, local.date() + timedelta(days=1)))
     return out
 
-
 def event_slug(city: str, d) -> str:
     return f"highest-temperature-in-{city}-on-{MON_NAME[d.month]}-{d.day}-{d.year}"
-
 
 def classify(mid: float):
     if mid is not None and 0 < mid < LONGSHOT_MAX_YES:
@@ -130,7 +123,6 @@ def classify(mid: float):
     if mid is not None and FAVORITE_MIN <= mid <= FAVORITE_MAX:
         return "pm_fade_favorite_yes", "YES", BET_YES
     return None, None, None
-
 
 def record_evening(now: datetime = None, force_window: bool = False) -> dict:
     """Snapshot tomorrow's PM brackets for in-window cities; record resting
@@ -184,7 +176,6 @@ def record_evening(now: datetime = None, force_window: bool = False) -> dict:
                     len(recorded), len(targets))
     return {"cities_in_window": len(targets), "orders_recorded": len(recorded)}
 
-
 def fetch_trades(condition_id: str) -> list:
     """Public trade tape for one market (most recent first; weather brackets
     are low-volume so one page generally covers an evening)."""
@@ -199,7 +190,6 @@ def fetch_trades(condition_id: str) -> list:
         offset += 500
         time.sleep(0.1)
     return out
-
 
 def judge_fill(order: dict, trades: list) -> dict:
     """Fill from tape, honoring PM complementary matching.
@@ -237,7 +227,6 @@ def judge_fill(order: dict, trades: list) -> dict:
                 fill_rate=round(filled / order["contracts"], 3),
                 tape_qty=qty, trades_in_window=n_window)
 
-
 def market_outcome(condition_id: str):
     """Settled YES/NO from Gamma by conditionId. None if unresolved."""
     d = _jget(f"{GAMMA}/markets?condition_ids={condition_id}")
@@ -256,7 +245,6 @@ def market_outcome(condition_id: str):
     if op == ["0", "1"]:
         return "NO"
     return None
-
 
 def evaluate(target_date: str = None, since_hours: int = 24) -> dict:
     if not QUOTES_PATH.exists():
@@ -317,7 +305,6 @@ def evaluate(target_date: str = None, since_hours: int = 24) -> dict:
             ev_per_dollar=round(pnl / staked, 4) if staked else None)
     print(json.dumps(summary, indent=2))
     return summary
-
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

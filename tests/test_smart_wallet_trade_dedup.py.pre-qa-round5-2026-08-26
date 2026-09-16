@@ -1,0 +1,163 @@
+"""Cross-poll trade dedup for the smart-wallet fast poll.
+
+Context: `_LOOKBACK_SECS` was widened 180s -> 600s because the PM trades feed's
+head lags ~3.5 min, so the old window fetched 0 trades on every poll and the
+scanner was structurally blind. A wider window overlaps successive polls, and the
+downstream `_accumulate` has no per-trade dedup (trade identity is lost before it
+gets there), so the same fill would inflate `total_usd` against the $1000
+cumulative THRESHOLD. Measured pre-fix: 7.8% of accumulator entries were repeats,
+dominant gap 90s == the poll interval.
+
+No network, no real DB — an in-memory sqlite connection stands in for the ledger.
+"""
+
+import sqlite3
+
+import pytest
+
+import scripts.smart_wallet_fast_poll as sw
+
+
+def _trade(tx="0xaa", asset="tok1", wallet="0xw1", side="BUY", size=10, price=0.5):
+    return {"transactionHash": tx, "asset": asset, "proxyWallet": wallet,
+            "side": side, "size": size, "price": price}
+
+
+@pytest.fixture
+def conn():
+    c = sqlite3.connect(":memory:")
+    yield c
+    c.close()
+
+
+def test_first_poll_passes_everything(conn):
+    trades = [_trade(tx=f"0x{i}") for i in range(5)]
+    assert len(sw._dedupe_unseen_trades(conn, trades, 1000)) == 5
+
+
+def test_second_poll_filters_repeats(conn):
+    trades = [_trade(tx=f"0x{i}") for i in range(5)]
+    sw._dedupe_unseen_trades(conn, trades, 1000)
+    assert sw._dedupe_unseen_trades(conn, trades, 1090) == []
+
+
+def test_only_new_trades_survive_an_overlapping_poll(conn):
+    first = [_trade(tx=f"0x{i}") for i in range(5)]
+    sw._dedupe_unseen_trades(conn, first, 1000)
+    overlap = first[3:] + [_trade(tx="0x99"), _trade(tx="0x98")]
+    out = sw._dedupe_unseen_trades(conn, overlap, 1090)
+    assert {t["transactionHash"] for t in out} == {"0x99", "0x98"}
+
+
+def test_same_tx_hash_different_fills_are_distinct(conn):
+    """One transaction can carry several fills — 7500 trades / 4856 hashes measured."""
+    a = _trade(tx="0xsame", asset="tokA", size=10)
+    b = _trade(tx="0xsame", asset="tokB", size=10)
+    c = _trade(tx="0xsame", asset="tokA", size=25)
+    out = sw._dedupe_unseen_trades(conn, [a, b, c], 1000)
+    assert len(out) == 3, "distinct fills sharing a tx hash were wrongly collapsed"
+
+
+def test_repeat_of_one_fill_within_a_shared_tx_is_caught(conn):
+    a = _trade(tx="0xsame", asset="tokA", size=10)
+    b = _trade(tx="0xsame", asset="tokB", size=10)
+    sw._dedupe_unseen_trades(conn, [a, b], 1000)
+    assert sw._dedupe_unseen_trades(conn, [a], 1090) == []
+
+
+def test_old_keys_are_pruned_so_the_table_cannot_grow_unbounded(conn):
+    sw._dedupe_unseen_trades(conn, [_trade(tx="0xold")], 1000)
+    # far beyond the 4x-window retention
+    sw._dedupe_unseen_trades(conn, [_trade(tx="0xnew")], 1000 + 10 * sw._LOOKBACK_SECS)
+    rows = conn.execute(f"SELECT key FROM {sw._SEEN_TABLE}").fetchall()
+    assert len(rows) == 1 and "0xnew" in rows[0][0]
+
+
+def test_pruned_trade_may_reappear_but_only_after_the_retention_window(conn):
+    t = _trade(tx="0xold")
+    sw._dedupe_unseen_trades(conn, [t], 1000)
+    assert sw._dedupe_unseen_trades(conn, [t], 1000 + 10 * sw._LOOKBACK_SECS) == [t]
+
+
+def test_empty_input_is_a_noop(conn):
+    assert sw._dedupe_unseen_trades(conn, [], 1000) == []
+
+
+def test_dedup_failure_never_drops_trades(monkeypatch):
+    """A broken ledger must degrade to passing everything, not to silence."""
+    class Broken:
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+    sw._mem_seen.clear()  # shares module state with the in-process LRU fallback
+    trades = [_trade(tx="0x1"), _trade(tx="0x2")]
+    assert sw._dedupe_unseen_trades(Broken(), trades, 1000) == trades
+
+
+def test_lookback_exceeds_the_measured_feed_lag():
+    """The feed head lagged ~3.5 min (210s); 180s sat inside it and saw nothing."""
+    assert sw._LOOKBACK_SECS > 210, "lookback is back inside the feed lag — scanner goes blind"
+
+
+# --------------------------------------------------------------------------- #
+# /qa round 2 — regressions for two defects a fresh critic falsified
+# --------------------------------------------------------------------------- #
+
+def test_json_type_drift_does_not_fork_the_key():
+    """DEFECT 1: str() made 100, 100.0 and "100" three keys for ONE fill.
+
+    The PM feed is JSON, so a numeric can arrive as int, float or string across
+    polls — which defeated dedup on exactly the repeats it exists to catch.
+    """
+    base = dict(transactionHash="0xa", asset="t1", proxyWallet="0xw", side="BUY")
+    k_int = sw._trade_key({**base, "size": 100, "price": 0.5})
+    k_flt = sw._trade_key({**base, "size": 100.0, "price": 0.50})
+    k_str = sw._trade_key({**base, "size": "100", "price": "0.5"})
+    assert k_int == k_flt == k_str
+
+
+def test_genuinely_different_sizes_stay_distinct():
+    base = dict(transactionHash="0xa", asset="t1", proxyWallet="0xw", side="BUY", price=0.5)
+    assert sw._trade_key({**base, "size": 100}) != sw._trade_key({**base, "size": 101})
+    assert sw._trade_key({**base, "size": 100}) != sw._trade_key({**base, "size": 100.5})
+
+
+def test_type_drift_repeat_is_actually_suppressed_end_to_end(conn):
+    """The key fix is worthless if the filter still lets the repeat through."""
+    t1 = _trade(tx="0xdrift", size=100, price=0.5)
+    t2 = _trade(tx="0xdrift", size=100.0, price=0.50)
+    assert len(sw._dedupe_unseen_trades(conn, [t1], 1000)) == 1
+    assert sw._dedupe_unseen_trades(conn, [t2], 1090) == []
+
+
+def test_db_failure_still_dedups_in_process():
+    """DEFECT 2: the except path returned ALL trades, double-counting into the
+    $1000 cumulative threshold. It now falls back to a bounded in-process LRU."""
+    class Broken:
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+    sw._mem_seen.clear()
+    trades = [_trade(tx="0xf1"), _trade(tx="0xf2")]
+    first = sw._dedupe_unseen_trades(Broken(), trades, 1000)
+    assert first == trades, "first sighting must pass — failing closed would drop signals"
+    second = sw._dedupe_unseen_trades(Broken(), trades, 1090)
+    assert second == [], "repeat during DB failure must NOT be passed through again"
+
+
+def test_db_failure_still_admits_genuinely_new_trades():
+    class Broken:
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+    sw._mem_seen.clear()
+    sw._dedupe_unseen_trades(Broken(), [_trade(tx="0xg1")], 1000)
+    out = sw._dedupe_unseen_trades(Broken(), [_trade(tx="0xg1"), _trade(tx="0xg2")], 1090)
+    assert [t["transactionHash"] for t in out] == ["0xg2"]
+
+
+def test_in_process_lru_is_bounded():
+    sw._mem_seen.clear()
+    sw._mem_filter(*(lambda ts: ([sw._trade_key(t) for t in ts], ts))(
+        [_trade(tx=f"0x{i}") for i in range(sw._MEM_SEEN_MAX + 500)]))
+    assert len(sw._mem_seen) == sw._MEM_SEEN_MAX

@@ -4,10 +4,12 @@ Pre-trade gate + KILL/HALT state machine.  No money, no network.
 All state is persisted to live_portfolio_state so a restart reloads it.
 
 Rule order enforced by check() — first failing rule wins:
+  0. strategy_allowlist: intent["category"] not in live_strategy_allowlist()
+                      (fail-closed: missing/empty category is rejected)
   1. KILL      : bankroll < kill_floor()
   2. DAILY_HALT: daily_loss + unrealized_loss >= daily_loss_halt()
                  (realised + unrealised, as the docstring promises)
-  3. per_trade_cap  : intent["size_usd"] > per_trade_cap()
+  3. per_trade_cap  : intent["size_usd"] > min(per_trade_cap(), bankroll * per_trade_frac())
   4. max_deployed   : deployed + size > max_deployed_frac() * bankroll
                       (and absolute max_deployed_usd() if set)
   5. max_open_markets: open distinct markets >= max_open_markets() (if set)
@@ -53,6 +55,19 @@ def _alert(msg: str) -> None:
         _send(embeds, alert_type="risk_governor", alert_meta={"msg": msg})
     except Exception as exc:
         logger.warning("risk_governor alert failed (non-fatal): %s", exc)
+
+    # Telegram mirror (added 2026-08-21 after /qa audit found this path was
+    # Discord-ONLY). State transitions here include ACTIVE->KILL and
+    # ACTIVE->DAILY_HALT, i.e. the kill switch firing on live capital and
+    # cancel_all() running. If the Discord webhook 4xx'd, that fired silently.
+    # Mirrors the pattern already used by alert_position_opened/closed.
+    # Deliberately a SEPARATE try: a Discord failure must not skip the mirror.
+    try:
+        from scripts.alert_formatter import send_telegram
+
+        send_telegram(f"🛑 <b>RISK GOVERNOR</b>\n\n{msg}")
+    except Exception as exc:  # noqa: BLE001 — never let alerting break risk control
+        logger.warning("risk_governor telegram mirror failed (non-fatal): %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +147,8 @@ class RiskGovernor:
         # Open market IDs — in-memory only (not persisted; rebuilt on restart
         # by the executor which will call record_fill() for each open position).
         self._open_market_ids: set[str] = set()
+        # event_id → market_id map for correlation guard (in-memory, not persisted)
+        self._event_id_by_market: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -161,6 +178,20 @@ class RiskGovernor:
             # Defense-in-depth: a raising/replaced _alert must NEVER break a
             # trade Decision. _alert is also internally guarded, but guard the
             # call site too so a monkeypatched/buggy _alert can't propagate.
+            # ORDER MATTERS: cancel FIRST, notify second. _alert() does up to
+            # ~35s of blocking network I/O (Discord 10s + Telegram 15s+5s+15s);
+            # delaying order cancellation on live capital to send a message is
+            # the wrong trade-off. (/qa critic, 2026-08-21.)
+            # On KILL: cancel all open CLOB orders to prevent further exposure
+            if new_state == "KILL":
+                try:
+                    from execution.clob_client import _get_client
+                    result = _get_client().cancel_all()
+                    cancelled = getattr(result, "canceled", None) or getattr(result, "cancelled", None) or []
+                    logger.info("risk_governor: KILL → cancel_all() cancelled %d orders", len(cancelled) if isinstance(cancelled, (list, tuple)) else 0)
+                except Exception as cancel_exc:
+                    logger.warning("risk_governor: KILL cancel_all failed (non-fatal): %s", cancel_exc)
+
             try:
                 _alert(
                     f"Risk Governor transition: {old} → {new_state} | "
@@ -193,19 +224,81 @@ class RiskGovernor:
         self._persist()
 
     def record_fill(self, market_id: str, usd: float, **kw) -> None:
-        """Record a confirmed fill: bumps deployed_usd and tracks the open
-        market ID.  Additional keyword args are accepted but ignored (Phase F
-        will pass more context)."""
+        """Record a confirmed fill: bumps deployed_usd, tracks the open
+        market ID, and registers event_id for the correlation guard."""
         self._deployed_usd += float(usd)
         self._open_market_ids.add(market_id)
+        event_id = str(kw.get("event_id", "") or "")
+        if event_id:
+            self._event_id_by_market[market_id] = event_id
         self._persist()
 
     def record_close(self, market_id: str, usd: float) -> None:
-        """Symmetric counterpart to record_fill — called by Phase F/G when a
-        position closes.  Decrements deployed_usd (floored at 0.0 — never
-        goes negative) and removes the market from the open set."""
+        """Symmetric counterpart to record_fill — decrements deployed_usd,
+        removes market from open set, and clears event_id correlation entry."""
         self._deployed_usd = max(0.0, self._deployed_usd - float(usd))
         self._open_market_ids.discard(market_id)
+        self._event_id_by_market.pop(market_id, None)
+        self._persist()
+
+    def set_realized_pnl(self, value: float) -> None:
+        """Set cumulative realised P&L (signed; negative = net loss).
+
+        Observability only — no rule in check() reads this field. It exists so
+        the persisted state and the /api/live/governor view agree with
+        live_position_tracker.recompute_equity(), which is the authority.
+        Before this setter existed the field was loaded once at init and echoed
+        back by _persist() forever, freezing it at whatever the DB last held.
+        """
+        self._realized_pnl = float(value)
+        self._persist()
+
+    def set_daily_loss(self, amount: float) -> None:
+        """Set today's cumulative realised loss (positive = loss magnitude).
+
+        Idempotent counterpart to record_realized_loss(): callers that derive
+        the day's loss from the ledger must NOT accumulate, or every sync cycle
+        would double-count. Transitions to DAILY_HALT on the same combined
+        realised+unrealised threshold record_realized_loss() uses.
+        """
+        self._daily_loss = max(0.0, float(amount))
+        if self._daily_loss + self._unrealized_loss >= live_config.daily_loss_halt():
+            self._transition("DAILY_HALT")
+        self._persist()
+
+    def apply_sync(self, *, bankroll: float | None = None,
+                   deployed_usd: float | None = None,
+                   realized_pnl: float | None = None,
+                   daily_loss: float | None = None,
+                   unrealized_loss: float | None = None) -> None:
+        """Apply a full ledger sync in ONE persisted transaction.
+
+        Every individual setter calls _persist(), so a cron syncing four fields
+        opened four write transactions and appended four rows to
+        live_portfolio_state every cycle. shadow_trades.db has demonstrated
+        lock contention between concurrent sport monitors (mlb_live_monitor and
+        cross_sport_drift both hit "database is locked"), so a caller that can
+        batch its writes should.
+
+        The DAILY_HALT decision is evaluated ONCE, after every field is
+        applied, so it always sees a consistent snapshot. Calling the setters
+        individually makes the outcome depend on their order — set_daily_loss()
+        evaluates against whatever _unrealized_loss happened to hold at the
+        time.
+        """
+        if bankroll is not None:
+            self._bankroll = float(bankroll)
+        if deployed_usd is not None:
+            self._deployed_usd = float(deployed_usd)
+        if realized_pnl is not None:
+            self._realized_pnl = float(realized_pnl)
+        if unrealized_loss is not None:
+            self._unrealized_loss = max(0.0, float(unrealized_loss))
+        if daily_loss is not None:
+            self._daily_loss = max(0.0, float(daily_loss))
+
+        if self._daily_loss + self._unrealized_loss >= live_config.daily_loss_halt():
+            self._transition("DAILY_HALT")
         self._persist()
 
     def set_unrealized_loss(self, amount: float) -> None:
@@ -254,6 +347,17 @@ class RiskGovernor:
         size_usd: float = float(intent.get("size_usd", 0))
         market_id: str = str(intent.get("market_id", ""))
 
+        # ── Rule 0: strategy allowlist (fail-closed) ────────────────────
+        # The live account traded a K2-killed archetype in July because no
+        # strategy gate existed on the live path. Missing category = reject.
+        category = str(intent.get("category", "") or "")
+        allowed_strategies = live_config.live_strategy_allowlist()
+        if category not in allowed_strategies:
+            return Decision(
+                False,
+                f"strategy_allowlist: category {category or '(missing)'} not in {sorted(allowed_strategies)}",
+            )
+
         # ── Rule 1: KILL floor ──────────────────────────────────────────
         # Check KILL state OR newly crossed threshold.
         if self._governor_state == "KILL" or self._bankroll < live_config.kill_floor():
@@ -282,12 +386,23 @@ class RiskGovernor:
             )
 
         # ── Rule 3: per-trade cap ───────────────────────────────────────
-        # Strict > so that exactly-at-cap (100.0) is ALLOWED.
-        cap = live_config.per_trade_cap()
+        # Tiered sizing (L2, 2026-07-24) may size up to POLYCLAWD_TIER_SIZE_CAP,
+        # so honor whichever flat ceiling is higher — then bound by a fraction
+        # of current bankroll (the June Mariners trade was 46% of bankroll; a
+        # flat cap alone doesn't scale down as bankroll shrinks).
+        try:
+            tier_cap = live_config._parse_float("POLYCLAWD_TIER_SIZE_CAP", "25.0")
+            flat_cap = max(tier_cap, live_config.per_trade_cap())
+        except Exception:
+            flat_cap = live_config.per_trade_cap()
+        cap = min(flat_cap, self._bankroll * live_config.per_trade_frac())
+        # Strict > so that exactly-at-cap is ALLOWED.
         if size_usd > cap:
             return Decision(
                 False,
-                f"per_trade_cap: {size_usd:.2f} > {cap:.2f}",
+                f"per_trade_cap: {size_usd:.2f} > {cap:.2f} "
+                f"(min of flat {live_config.per_trade_cap():.2f}, "
+                f"{live_config.per_trade_frac():.0%} of bankroll {self._bankroll:.2f})",
             )
 
         # ── Rule 4: deployed cap ────────────────────────────────────────
@@ -316,6 +431,18 @@ class RiskGovernor:
                     False,
                     f"max_open_markets: {open_count} open >= limit {max_markets}",
                 )
+
+        # ── Rule 5.5: correlation guard ─────────────────────────────────────
+        # Block a second position on the same event_id (different market).
+        # Bypassed when event_id is absent — safe default.
+        event_id = str(intent.get("event_id", "") or "")
+        if event_id:
+            for open_mid, open_eid in self._event_id_by_market.items():
+                if open_eid == event_id and open_mid != market_id:
+                    return Decision(
+                        False,
+                        f"correlation_guard: event {event_id[:24]} already open in {open_mid[:16]}",
+                    )
 
         # ── All rules passed ────────────────────────────────────────────
         return Decision(True, "ok")

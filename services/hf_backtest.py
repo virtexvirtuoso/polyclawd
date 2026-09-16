@@ -31,7 +31,7 @@ DB_PATH = os.getenv("HF_DB_PATH",
 # ============================================================================
 
 def _get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -292,11 +292,13 @@ def run_monte_carlo(
             
             # Random outcome based on win rate
             if random.random() < wr:
-                # Win: earn edge-proportional profit
-                # In binary markets at ~50c, profit ≈ stake * (payout_ratio)
-                profit = stake * (edge / kelly_fraction) if kelly_fraction > 0 else 0
-                # Cap at 2x stake (binary payout)
-                profit = min(profit, stake * 1.0)
+                # Win: correct binary market payoff.
+                # edge = p_true - price; if wr ≈ p_true then price = wr - edge.
+                # Win pays (1/price - 1) per dollar staked (the odds multiplier).
+                # Fixed 2026-08-23: old formula stake*(edge/kelly_fraction) was
+                # dimensionally wrong and produced negative EV by construction.
+                entry_price = max(0.01, min(0.99, wr - edge))
+                profit = stake * ((1.0 / entry_price) - 1.0)
                 balance += profit
                 wins += 1
             else:

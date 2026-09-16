@@ -31,6 +31,8 @@ from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from db import connect as db_connect  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent
@@ -57,7 +59,7 @@ WALLET_MIN_TRADES_30D = 5      # Fewer than 5 trades in 30 days → demote
 def get_meta_db(path: Optional[Path] = None) -> sqlite3.Connection:
     db_path = Path(path) if path else META_DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=30)
+    conn = db_connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
@@ -78,6 +80,7 @@ def get_meta_db(path: Optional[Path] = None) -> sqlite3.Connection:
         ("source_category", "TEXT"), ("rank_at_seed", "INTEGER"),
         ("rank_last_seen", "INTEGER"), ("rank_scraped_at", "INTEGER"),
         ("is_bot", "INTEGER DEFAULT 0"),
+        ("skill_n", "INTEGER"), ("skill_ret", "REAL"), ("skill_p", "REAL"),
     ):
         try:
             conn.execute(f"ALTER TABLE pm_wallets ADD COLUMN {col} {typ}")
@@ -216,11 +219,17 @@ def fetch_wallet_stats(wallet: str) -> Optional[dict]:
     for page in range(POSITIONS_PAGE_CAP):
         d = _fetch_json(f"{PM_DATA_API}/positions?user={wallet}&limit=500&offset={page * 500}")
         if d is None:
-            return None if page == 0 else compute_stats(rows)
+            return None if page == 0 else _stats_with_skill(rows)
         rows.extend(d)
         if len(d) < 500:
             break
-    return compute_stats(rows)
+    return _stats_with_skill(rows)
+
+
+def _stats_with_skill(rows: list) -> dict:
+    st = compute_stats(rows)
+    st.update(skill_score(skill_returns(rows)))
+    return st
 
 
 def demote_stale_wallets(conn) -> dict:
@@ -245,6 +254,7 @@ def demote_stale_wallets(conn) -> dict:
         last_check = max(row["last_seen"] or 0, refreshed)
         if now - last_check > WALLET_STALE_HOURS * 3600:
             conn.execute("UPDATE pm_wallets SET smart=0 WHERE wallet=?", (wallet,))
+            conn.commit()  # per-row: network fetches interleave this loop
             demoted += 1
             reasons.append(f"{name}: stale ({int((now - last_check)/3600)}h no activity)")
             continue
@@ -254,11 +264,14 @@ def demote_stale_wallets(conn) -> dict:
         if stats is None:
             continue
 
-        # Check sliding WR
-        if stats["closed"] >= 20:
+        # Check sliding WR — but never WR-demote a wallet passing the
+        # sign-randomization skill gate: longshot specialists run low WR with
+        # strongly positive per-$ returns; WR is the wrong metric for them.
+        if stats["closed"] >= 20 and not skill_gate_ok(stats):
             wr = stats["wins"] / stats["closed"]
             if wr < WALLET_SLIDING_WR:
                 conn.execute("UPDATE pm_wallets SET smart=0 WHERE wallet=?", (wallet,))
+                conn.commit()  # per-row: network fetches interleave this loop
                 demoted += 1
                 reasons.append(f"{name}: WR {wr:.1%} below {WALLET_SLIDING_WR:.0%} (last {stats['closed']} trades)")
                 continue
@@ -276,6 +289,7 @@ def demote_stale_wallets(conn) -> dict:
         ).fetchone()
         if seen and seen[0] and (now - seen[0]) > 30 * 86400:
             conn.execute("UPDATE pm_wallets SET smart=0 WHERE wallet=?", (wallet,))
+            conn.commit()  # per-row: network fetches interleave this loop
             demoted += 1
             reasons.append(f"{name}: no flow activity in 30d+")
 
@@ -373,11 +387,179 @@ def _alert_graduation(name: str, stats: dict, wr: float) -> None:
         pass  # Don't crash refresh on alert failure
 
 
+# ── Sign-randomization skill scoring (Gomez-Cram et al. 2026, SSRN 6617059) ──
+# Raw win-rate/PnL graduation is luck-confounded (longshot sprayers, hot streaks).
+# The randomization test scores a wallet's actual total probability-point return
+# against a null where every bet's side is a coin flip — a wallet's own variance
+# widens its own null instead of inflating its score.
+SKILL_MIN_N = 30     # resolved positions needed before the skill gate can pass
+SKILL_P_MAX = 0.05   # sign-randomization p-value threshold
+SKILL_SIMS = 10_000
+
+# Hard floor the skill path may NOT bypass (2026-08-21). The canary's first
+# live trade followed a wallet at -$95,496 net / 5.8% WR that passed the skill
+# gate on an UNWEIGHTED mean per-position return. Skill is now size-weighted
+# (see skill_returns/skill_score), but a wallet that has destroyed capital in
+# aggregate must not be followable on any path, however good its statistics
+# look per-position.
+SKILL_GATE_MIN_NET = 0.0
+
+# Per-archetype follow gate. Below this many resolved follows in an archetype
+# there is no track record to judge, so the gate abstains rather than blocking
+# every new market type (a gate that rejects everything is indistinguishable
+# from no signal -- fleet ledger, 2026-08-19).
+ARCHETYPE_GATE_MIN_TRADES = 10
+
+
+def skill_returns(rows: list) -> list:
+    """Per-position (probability-point return, size weight) pairs for RESOLVED
+    positions, using the same outcome-honest complete-rule as compute_stats.
+    realizedPnl>0 counts as a directional win even when sold early — consistent
+    with compute_stats. Open/ambiguous positions and rows without a usable
+    avgPrice are skipped.
+
+    Returns (ret, weight) tuples where weight is the position's cost basis in
+    dollars. Weighting is NOT cosmetic: the unweighted mean certified a wallet
+    at -$95,496 net as skilled (+0.0128/position) because its losses were
+    concentrated in its LARGEST positions — precisely the size class we copy
+    when we follow it. An unweighted metric is blind on the only dimension
+    that determines whether following the wallet makes or loses money.
+    """
+    rets = []
+    for p in rows:
+        try:
+            px = float(p.get("avgPrice"))
+        except (TypeError, ValueError):
+            continue
+        if not (0.0 < px < 1.0):
+            continue
+        rp = p.get("realizedPnl") or 0
+        cur = p.get("currentValue") or 0
+        init = p.get("initialValue") or 0
+        if abs(rp) > 0.01:
+            # Realized (sold or redeemed): ACTUAL per-share return in probability
+            # points = realizedPnl x avgPrice / cost. Counting any realized win as
+            # a full s=1.0 booked a +3c scalp as +0.60 and inflated every
+            # high-volume wallet ~+0.4/bet (QA probe 2026-07-06) — that rule would
+            # have graduated scalpers wholesale. Redemption still books 1-avgPrice
+            # exactly; the sign-flip null stays valid (mirror side = -ret).
+            if init <= 0:
+                continue
+            rets.append((max(-1.0, min(1.0, rp * px / init)), float(init)))
+            continue
+        if init > 1 and cur < 0.01 * init:
+            rets.append((0.0 - px, float(init)))   # zombie: held to worthless
+        elif init > 1 and cur >= 0.5 * init and p.get("redeemable"):
+            rets.append((1.0 - px, float(init)))   # unredeemed winner
+        # else: still open / ambiguous — skip
+    return rets
+
+
+def skill_score(rets: list, sims: int = SKILL_SIMS) -> dict:
+    """p = P(null total ≥ actual total) under random sign flips. Deterministic
+    (fixed seed). Falls back to the normal approximation if numpy is missing.
+
+    *rets* is a list of (return, weight) pairs from skill_returns(). The test
+    statistic is the DOLLAR-WEIGHTED total sum(w*r), so a wallet cannot earn a
+    skill certificate on many small good bets while losing far more on a few
+    large ones. skill_ret is reported as the weighted mean sum(w*r)/sum(w).
+
+    Plain floats are still accepted (weight 1.0 each) so callers and fixtures
+    that predate weighting keep working.
+    """
+    n = len(rets)
+    if n == 0:
+        return {"skill_n": 0, "skill_ret": None, "skill_p": None}
+
+    pairs = [(x, 1.0) if isinstance(x, (int, float)) else (x[0], x[1]) for x in rets]
+    # A non-positive cost basis carries no capital and must not vote.
+    pairs = [(r, w) for (r, w) in pairs if w > 0]
+    n = len(pairs)
+    if n == 0:
+        return {"skill_n": 0, "skill_ret": None, "skill_p": None}
+
+    weighted = [r * w for (r, w) in pairs]
+    total_w = sum(w for (_, w) in pairs)
+    actual = float(sum(weighted))
+    mean = actual / total_w
+    try:
+        import numpy as np
+
+        r = np.asarray(weighted, dtype=np.float64)
+        # Deterministic per wallet but DECORRELATED across wallets — a single
+        # shared seed reuses one null sample fleet-wide, so its Monte-Carlo
+        # error biases every wallet's p the same direction (QA 2026-07-06
+        # measured 12% empirical FP at nominal 5% with 2k shared sims).
+        seed = (n * 1_000_003 + int(abs(actual) * 1e9)) % (2**63 - 1)
+        rng = np.random.default_rng(seed)
+        ge = done = 0
+        block = max(1, min(sims, 20_000_000 // max(n, 1)))
+        while done < sims:
+            b = min(block, sims - done)
+            signs = rng.integers(0, 2, size=(b, n)) * 2 - 1
+            ge += int((signs @ r >= actual).sum())
+            done += b
+        p = (ge + 1) / (sims + 1)
+    except Exception:
+        import math
+
+        sd = math.sqrt(sum(x * x for x in weighted)) or 1e-9
+        p = 0.5 * math.erfc((actual / sd) / math.sqrt(2))
+    return {"skill_n": n, "skill_ret": mean, "skill_p": p}
+
+
+def skill_gate_ok(stats: dict) -> bool:
+    """True when the wallet passes the luck-controlled skill gate."""
+    return ((stats.get("skill_n") or 0) >= SKILL_MIN_N
+            and stats.get("skill_p") is not None
+            and stats["skill_p"] <= SKILL_P_MAX
+            and (stats.get("skill_ret") or 0) > 0)
+
+
 def is_smart(stats: dict) -> bool:
+    if skill_gate_ok(stats):
+        # Sign-randomization path — the WIN-RATE threshold legitimately does
+        # not apply (a longshot buyer at 0.05 SHOULD have a low win rate), but
+        # the capital floor does. Before 2026-08-21 this returned True outright
+        # and certified a wallet at -$95,496 net as smart.
+        return (stats.get("net", stats.get("realized", 0.0)) or 0.0) >= SKILL_GATE_MIN_NET
     if stats["closed"] < SMART_MIN_CLOSED:
         return False
     wr = stats["wins"] / stats["closed"]
     return wr >= SMART_MIN_WIN_RATE and stats.get("net", stats["realized"]) >= SMART_MIN_NET
+
+
+def archetype_gate_ok(conn, wallet: str, archetype: str) -> tuple[bool, str]:
+    """False when *wallet* has a LOSING resolved record in *archetype*.
+
+    Returns (ok, reason). We already compute wallet_archetype_pnl and then
+    never consulted it: the canary's first live trade followed a wallet into
+    sports while our own table showed it at -$1,807.97 over 127 sports trades.
+
+    Abstains (returns True) when there is no row or too few resolved follows —
+    absence of evidence must not block every new market type.
+    """
+    if not wallet or not archetype:
+        return True, "abstain: missing wallet/archetype"
+    try:
+        row = conn.execute(
+            "SELECT trades, wins, pnl FROM wallet_archetype_pnl"
+            " WHERE wallet = ? AND archetype = ?",
+            (wallet, archetype),
+        ).fetchone()
+    except Exception as exc:  # noqa: BLE001 — a gate must not raise into execution
+        return True, "abstain: lookup failed (%s)" % exc
+    if row is None:
+        return True, "abstain: no %s record" % archetype
+    trades = int(row["trades"] or 0)
+    pnl = float(row["pnl"] or 0.0)
+    if trades < ARCHETYPE_GATE_MIN_TRADES:
+        return True, "abstain: only %d %s trades (< %d)" % (
+            trades, archetype, ARCHETYPE_GATE_MIN_TRADES)
+    if pnl < 0:
+        return False, "archetype_gate: wallet is $%.2f over %d %s trades" % (
+            pnl, trades, archetype)
+    return True, "ok: +$%.2f over %d %s trades" % (pnl, trades, archetype)
 
 
 def refresh_wallets(conn, cap: int = 60) -> dict:
@@ -415,19 +597,26 @@ def refresh_wallets(conn, cap: int = 60) -> dict:
         conn.execute(
             "INSERT INTO pm_wallets (wallet, name, first_seen, last_seen,"
             " closed_positions, wins, win_rate, realized_pnl, net_pnl, zombies,"
-            " concentration, smart, refreshed)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            " concentration, smart, refreshed, skill_n, skill_ret, skill_p)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(wallet) DO UPDATE SET"
             "  name=excluded.name, last_seen=excluded.last_seen,"
             "  closed_positions=excluded.closed_positions, wins=excluded.wins,"
             "  win_rate=excluded.win_rate, realized_pnl=excluded.realized_pnl,"
             "  net_pnl=excluded.net_pnl, zombies=excluded.zombies,"
             "  concentration=excluded.concentration,"
-            "  smart=excluded.smart, refreshed=excluded.refreshed",
+            "  smart=excluded.smart, refreshed=excluded.refreshed,"
+            "  skill_n=excluded.skill_n, skill_ret=excluded.skill_ret,"
+            "  skill_p=excluded.skill_p",
             (row["wallet"], row["name"] or "", now, now,
              stats["closed"], stats["wins"], wr, stats["realized"],
              stats.get("net"), stats.get("zombies"),
-             stats.get("concentration", 0.0), smart, now))
+             stats.get("concentration", 0.0), smart, now,
+             stats.get("skill_n"), stats.get("skill_ret"), stats.get("skill_p")))
+        # Commit per wallet: the next iteration does a NETWORK fetch — holding the
+        # write txn across the whole loop locked whale_meta.db for minutes and
+        # starved follower_kv/queue_wallet_seen (246 SQLITE_BUSY per 48h, 2026-07-10).
+        conn.commit()
         refreshed += 1
 
     conn.execute("DELETE FROM pm_wallet_seen WHERE wallet IN"

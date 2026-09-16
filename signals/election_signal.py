@@ -21,6 +21,7 @@ Confluence scoring stacks confirming signals on the same market+side:
 """
 
 import logging
+from db import connect as db_connect
 import time
 
 logger = logging.getLogger(__name__)
@@ -222,7 +223,7 @@ def _arb_signals(report: dict) -> list[dict]:
     try:
         import sqlite3, pathlib
         db_path = pathlib.Path(__file__).parent.parent / "storage" / "election_trends.db"
-        conn = sqlite3.connect(str(db_path))
+        conn = db_connect(str(db_path))
         row = conn.execute("SELECT MAX(date) FROM race_prices WHERE platform=?", ("kalshi",)).fetchone()
         conn.close()
         if row and row[0]:

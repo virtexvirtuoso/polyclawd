@@ -125,6 +125,76 @@ def _maker_slice_depth(token_id: str) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Vendor minimum order size — MOCKABLE (tests monkeypatch _min_order_shares)
+# ---------------------------------------------------------------------------
+
+# Share-count comparisons are done with this tolerance so an order that lands
+# EXACTLY on the vendor minimum is allowed through (5.0 shares is legal; only
+# strictly-below is rejected).
+_MIN_SHARES_EPS = 1e-9
+
+
+def _min_order_shares(token_id: str) -> float:
+    """Vendor minimum order size for *token_id*, in SHARES. Never raises.
+
+    Thin, monkeypatchable seam over clob_client.get_min_order_size so tests can
+    substitute a fixed minimum without any network.
+    """
+    try:
+        return float(clob_client.get_min_order_size(token_id))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("_min_order_shares({}): {} — using {}", token_id[:16], exc,
+                       clob_client.DEFAULT_MIN_ORDER_SHARES)
+        return float(clob_client.DEFAULT_MIN_ORDER_SHARES)
+
+
+def _ladder_slices(
+    size_usd: float, slice_depth: float, price: float, min_shares: float
+) -> list[float]:
+    """Split *size_usd* into maker-ladder chunks that each clear *min_shares*.
+
+    Laddering across top-of-book depth used to emit chunks sized purely by book
+    depth, so a thin book split a valid order into sub-minimum slices and the
+    vendor rejected EACH ONE independently even though the aggregate order was
+    fine. Two rules fix that:
+
+      1. every rung is widened to at least ``min_shares * price`` USD, and
+      2. a leftover tail below the minimum is MERGED into its predecessor
+         rather than emitted as a doomed slice.
+
+    Returns USD chunk sizes. Every chunk c satisfies ``c / price >= min_shares``
+    except in the degenerate case where the whole order is already below the
+    minimum — execute_intent's pre-flight guard rejects that before we get here.
+    """
+    if size_usd <= 0:
+        return []
+    if price <= 0:
+        return [size_usd]
+    if slice_depth is None or slice_depth <= 0:
+        slice_depth = size_usd
+
+    min_chunk_usd = max(0.0, min_shares) * price
+    step = max(slice_depth, min_chunk_usd)
+
+    chunks: list[float] = []
+    remaining = size_usd
+    while remaining > 1e-9:
+        chunk = min(step, remaining)
+        chunks.append(chunk)
+        remaining -= chunk
+    if not chunks:
+        return [size_usd]
+
+    # Fold an undersized tail back into the previous rung. (Written as an
+    # explicit pop-then-add: `chunks[-2] += chunks.pop()` resolves the -2 index
+    # BEFORE the pop and silently merges into the wrong rung.)
+    while len(chunks) > 1 and chunks[-1] < min_chunk_usd - 1e-9:
+        tail = chunks.pop()
+        chunks[-1] += tail
+    return chunks
+
+
+# ---------------------------------------------------------------------------
 # Maker fill polling — MOCKABLE (tests override to avoid real sleeping)
 # ---------------------------------------------------------------------------
 
@@ -240,7 +310,10 @@ def execute_intent(
     neg_risk: bool,
     net_edge_taker: float,
     client_order_ref: str,
-    category: str = "weather",
+    category: str = "",  # fail-closed: unspecified must be rejected, not aliased
+    market_title: str = "",
+    event_id: str = "",  # correlation guard; "" safely bypasses (see Rule 5.5)
+    reasoning: dict | None = None,  # entry-trigger audit trail, forwarded as-is
 ) -> dict:
     """Route a single trade intent through the hybrid maker→taker executor.
 
@@ -276,18 +349,58 @@ def execute_intent(
         logger.info("execute_intent: skipping duplicate ref={}", client_order_ref)
         return result
 
+    # ── Step 0b: governor entry gate (BEFORE any vendor post) ───────────────
+    # Covers the maker path too — previously governor.check() was only called
+    # on the taker leg (line ~493), so maker legs bypassed ALL risk caps.
+    entry_decision = governor.check(
+        {"size_usd": size_usd, "market_id": token_id, "token_id": token_id,
+         "category": category, "event_id": event_id}
+    )
+    if not entry_decision.allowed:
+        result["action"] = "dropped"
+        result["reason"] = f"governor: {entry_decision.reason}"
+        logger.info("execute_intent: governor blocked ref={}: {}",
+                    client_order_ref, entry_decision.reason)
+        return result
+
+    # ── Step 0c: vendor MINIMUM ORDER SIZE gate (BEFORE any vendor post) ────
+    # Polymarket rejects orders below the market's min_order_size (in SHARES).
+    # At small bankrolls this binds hard: a $3.45 order at price 0.70 is only
+    # 4.93 shares and is rejected outright. Nothing downstream checked this, so
+    # the rejection was invisible. Log at WARNING (never DEBUG) and return a
+    # distinct action so callers can alert on it.
+    min_shares = _min_order_shares(token_id)
+    intended_shares = _shares_for(side, fair_price, size_usd)
+    if intended_shares < min_shares - _MIN_SHARES_EPS:
+        result["action"] = "skipped_min_size"
+        result["reason"] = (
+            f"below vendor minimum: {intended_shares:.4f} sh < {min_shares:g} sh "
+            f"(${size_usd:.2f} @ {fair_price:.4f}); need >= ${min_shares * fair_price:.2f}"
+        )
+        result["min_shares"] = min_shares
+        result["intended_shares"] = intended_shares
+        logger.warning(
+            "MIN_SIZE_SKIP execute_intent: ref={} token={} SKIPPED — {:.4f} shares "
+            "< vendor minimum {:g} (size ${:.2f} @ price {:.4f}; tradeable only at "
+            "price <= {:.4f} for this size)",
+            client_order_ref,
+            token_id[:16],
+            intended_shares,
+            min_shares,
+            size_usd,
+            fair_price,
+            (size_usd / min_shares) if min_shares > 0 else 0.0,
+        )
+        return result
+
     # ── Step 1: maker-first, laddered across slices ─────────────────────────
     slice_depth = _maker_slice_depth(token_id)
     if slice_depth is None or slice_depth <= 0:
         slice_depth = size_usd  # one slice
 
-    # Build per-slice USD chunks.
-    slices: list[float] = []
-    remaining = size_usd
-    while remaining > 1e-9:
-        chunk = min(slice_depth, remaining)
-        slices.append(chunk)
-        remaining -= chunk
+    # Build per-slice USD chunks. Each rung must independently clear the vendor
+    # minimum — the exchange validates every slice on its own.
+    slices = _ladder_slices(size_usd, slice_depth, fair_price, min_shares)
     if not slices:
         slices = [size_usd]
 
@@ -351,7 +464,8 @@ def execute_intent(
     for oid in maker_order_ids:
         if not oid:
             continue
-        status = _safe_get_order(oid)
+        # Use retry poll: CLOB may return size_matched=0 briefly after fill.
+        status = _poll_until_settled(oid, label="C1-post-wait")
         matched = _matched_shares_of(status)
         if matched > 0:
             maker_filled_shares += matched
@@ -374,9 +488,13 @@ def execute_intent(
             fee_paid=0.0,
             fair_price=fair_price,
             token_id=token_id,
+            market_title=market_title,
+            category=category,
+            reasoning=reasoning,
         )
         # Tell the governor the ACTUAL usd deployed, not the full size_usd.
-        governor.record_fill(market_id=token_id, usd=maker_usd, liquidity="maker")
+        governor.record_fill(market_id=token_id, usd=maker_usd,
+                             liquidity="maker", event_id=event_id)
         logger.info(
             "execute_intent: MAKER filled ref={} {:.4f} sh ${:.2f}",
             client_order_ref,
@@ -410,13 +528,15 @@ def execute_intent(
     for oid in maker_order_ids:
         if not oid:
             continue
-        already_matched = _matched_shares_of(_safe_get_order(oid))
+        # Snapshot matched count BEFORE cancel (use retry poll for same reason).
+        already_matched = _matched_shares_of(_poll_until_settled(oid, label="C2-pre-cancel"))
         try:
             clob_client.cancel(oid)
         except Exception as exc:
             logger.warning("execute_intent: cancel({}) raised; re-polling to confirm: {}", oid, exc)
-        # Re-poll ONCE to learn the post-cancel truth.
-        status = _safe_get_order(oid)
+        # Re-poll with retry: cancel and fill can race; CLOB may transiently
+        # report size_matched=0 even when the fill landed before the cancel.
+        status = _poll_until_settled(oid, label="C2-post-cancel")
         post_cancel_matched = _matched_shares_of(status)
         late_fill = post_cancel_matched - already_matched
         if late_fill > 1e-9:
@@ -434,8 +554,12 @@ def execute_intent(
                 fee_paid=0.0,
                 fair_price=fair_price,
                 token_id=token_id,
+                market_title=market_title,
+                category=category,
+                reasoning=reasoning,
             )
-            governor.record_fill(market_id=token_id, usd=late_usd, liquidity="maker")
+            governor.record_fill(market_id=token_id, usd=late_usd,
+                                 liquidity="maker", event_id=event_id)
             maker_filled_shares += late_fill
             remainder_shares = max(0.0, remainder_shares - late_fill)
             logger.info(
@@ -462,6 +586,28 @@ def execute_intent(
     # The taker candidate is the unfilled remainder, valued at fair_price.
     remainder_usd = remainder_shares * fair_price
 
+    # A partial maker fill can leave a remainder below the vendor minimum. The
+    # FAK would be rejected; drop instead of posting a doomed order.
+    if remainder_shares < min_shares - _MIN_SHARES_EPS:
+        logger.warning(
+            "MIN_SIZE_SKIP taker leg: ref={} remainder {:.4f} sh < vendor minimum {:g} "
+            "— dropping instead of posting a rejectable FAK",
+            client_order_ref,
+            remainder_shares,
+            min_shares,
+        )
+        return _finish_dropped_or_partial(
+            result,
+            maker_filled_shares,
+            maker_price,
+            primary_oid,
+            reason=(
+                f"taker remainder {remainder_shares:.4f} sh below vendor minimum "
+                f"{min_shares:g} sh"
+            ),
+            client_order_ref=client_order_ref,
+        )
+
     # ── Taker gating: edge, then depth, then governor ───────────────────────
     min_edge = live_config.min_taker_edge()
     if net_edge_taker < min_edge:
@@ -485,7 +631,13 @@ def execute_intent(
         )
 
     decision = governor.check(
-        {"size_usd": remainder_usd, "market_id": token_id, "token_id": token_id}
+        {
+            "size_usd": remainder_usd,
+            "market_id": token_id,
+            "token_id": token_id,
+            "category": category,
+            "event_id": event_id,
+        }
     )
     if not decision.allowed:
         return _finish_dropped_or_partial(
@@ -552,8 +704,12 @@ def execute_intent(
         fee_paid=fee_paid,
         fair_price=fair_price,
         token_id=token_id,
+        market_title=market_title,
+        category=category,
+        reasoning=reasoning,
     )
-    governor.record_fill(market_id=token_id, usd=taker_usd, liquidity="taker")
+    governor.record_fill(market_id=token_id, usd=taker_usd,
+                         liquidity="taker", event_id=event_id)
 
     result.update(
         action="taker_filled",
@@ -584,6 +740,48 @@ def _safe_get_order(order_id: str) -> dict | None:
     except Exception as exc:
         logger.warning("execute_intent: get_order({}) failed: {}", order_id, exc)
         return None
+
+
+# Retry constants for fill-confirmation polls.
+# The CLOB can report status=MATCHED before size_matched is non-zero —
+# we retry briefly to avoid treating a confirmed fill as zero.
+_FILL_CONFIRM_RETRIES = 3
+_FILL_CONFIRM_SLEEP = 1.5  # seconds between retries
+
+
+def _poll_until_settled(order_id: str, *, label: str = "") -> dict | None:
+    """Poll get_order until size_matched > 0 or a terminal state is reached.
+
+    Addresses the CLOB race where status=MATCHED is returned before
+    size_matched is updated.  Retries up to _FILL_CONFIRM_RETRIES times
+    with _FILL_CONFIRM_SLEEP between each attempt.
+
+    Terminal early-exit conditions (no further retries):
+      - size_matched > 0  (fill confirmed)
+      - status in {CANCELED, CANCELLED, EXPIRED}  (no fill possible)
+
+    Falls through and returns the last status dict (or None) when retries
+    are exhausted without confirmation.
+    """
+    status = _safe_get_order(order_id)
+    for attempt in range(_FILL_CONFIRM_RETRIES):
+        if status is None:
+            break
+        matched = _matched_shares_of(status)
+        label_str = f"[{label}] " if label else ""
+        raw = str(status.get("status", "")).strip().upper()
+        if matched > 0:
+            break  # fill confirmed
+        if raw in ("CANCELED", "CANCELLED", "EXPIRED"):
+            break  # definitely not filled
+        # Status may be MATCHED/LIVE with size_matched still 0 — retry
+        logger.debug(
+            "{}poll_until_settled: oid={} attempt={}/{} status={} matched=0 — retrying",
+            label_str, order_id, attempt + 1, _FILL_CONFIRM_RETRIES, raw,
+        )
+        time.sleep(_FILL_CONFIRM_SLEEP)
+        status = _safe_get_order(order_id)
+    return status
 
 
 def _parse_taker_fill(
@@ -746,6 +944,38 @@ def execute_exit(
             "reason": reason,
         }
 
+    # ── Guard: position below the vendor minimum is UNSELLABLE ───────────────
+    # Polymarket rejects orders under a per-market minimum (5 shares on open
+    # markets). Posting anyway just burns a rejectable call and then looks like
+    # a zero fill. Critically, if this exit is a hard stop, the stop CANNOT
+    # execute — the position rides to resolution regardless. Say so loudly.
+    _exit_min_shares = _min_order_shares(token_id)
+    if pos_shares < _exit_min_shares - _MIN_SHARES_EPS:
+        _loss_frac = 0.0
+        if cost_usd > 0:
+            _adverse = entry_price - mark_price
+            _loss_frac = (_adverse * pos_shares / cost_usd) if _adverse > 0 else 0.0
+        _is_hard = _loss_frac >= hard_cap_frac
+        logger.warning(
+            "MIN_SIZE_UNSELLABLE execute_exit: position {} holds {:.4f} sh < vendor "
+            "minimum {:g} — cannot sell, holding to resolution. loss_frac={:.2%} "
+            "hard_cap={:.2%}{} reason={}",
+            position_id, pos_shares, _exit_min_shares, _loss_frac, hard_cap_frac,
+            "  *** HARD STOP CANNOT EXECUTE ***" if _is_hard else "",
+            reason,
+        )
+        return {
+            "action": "held_remainder",
+            "shares_sold": 0.0,
+            "exit_price": mark_price,
+            "fee_paid": 0.0,
+            "pnl": 0.0,
+            "reason": f"below vendor minimum: {pos_shares:.4f} sh < {_exit_min_shares:g} sh",
+            "min_size_blocked": True,
+            "min_shares": _exit_min_shares,
+            "hard_stop_blocked": _is_hard,
+        }
+
     # ── Step 1: post maker SELL at mark_price ────────────────────────────────
     resp = clob_client.post_maker(
         token_id=token_id,
@@ -761,7 +991,7 @@ def execute_exit(
     timeout = float(live_config.maker_wait_secs())
     _wait_for_maker_fill(maker_oid, timeout)
 
-    status_after_wait = _safe_get_order(maker_oid)
+    status_after_wait = _poll_until_settled(maker_oid, label="exit-C1-post-wait")
     maker_filled_shares = _matched_shares_of(status_after_wait)
 
     maker_pnl = 0.0
@@ -807,13 +1037,13 @@ def execute_exit(
         }
 
     # ── Step 3: cancel resting maker, re-poll to confirm (C2) ────────────────
-    already_matched_pre_cancel = _matched_shares_of(_safe_get_order(maker_oid))
+    already_matched_pre_cancel = _matched_shares_of(_poll_until_settled(maker_oid, label="exit-C2-pre-cancel"))
     try:
         clob_client.cancel(maker_oid)
     except Exception as exc:
         logger.warning("execute_exit: cancel({}) raised; re-polling: {}", maker_oid, exc)
 
-    status_post_cancel = _safe_get_order(maker_oid)
+    status_post_cancel = _poll_until_settled(maker_oid, label="exit-C2-post-cancel")
     post_cancel_matched = _matched_shares_of(status_post_cancel)
     cancel_window_fill = post_cancel_matched - already_matched_pre_cancel
 
@@ -876,6 +1106,28 @@ def execute_exit(
             "fee_paid": 0.0,
             "pnl": total_maker_pnl,
             "reason": reason,
+        }
+
+    # ── Guard: remainder below the vendor minimum cannot cross taker ────────
+    # A partial maker fill can leave a sub-minimum remainder. The FAK would be
+    # rejected, so hold it instead — but this IS a hard stop, so warn.
+    if remainder_shares < _exit_min_shares - _MIN_SHARES_EPS:
+        logger.warning(
+            "MIN_SIZE_UNSELLABLE execute_exit taker leg: remainder {:.4f} sh < vendor "
+            "minimum {:g} — *** HARD STOP CANNOT EXECUTE ***, holding {:.4f} sh to "
+            "resolution. loss_frac={:.2%} reason={}",
+            remainder_shares, _exit_min_shares, remainder_shares, current_loss_frac, reason,
+        )
+        return {
+            "action": "held_remainder",
+            "shares_sold": total_maker_shares,
+            "exit_price": mark_price,
+            "fee_paid": 0.0,
+            "pnl": total_maker_pnl,
+            "reason": f"taker remainder below vendor minimum: {remainder_shares:.4f} sh",
+            "min_size_blocked": True,
+            "min_shares": _exit_min_shares,
+            "hard_stop_blocked": True,
         }
 
     # ── Step 3d: cross taker (FAK SELL) for the remainder ───────────────────

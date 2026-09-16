@@ -10,6 +10,7 @@ from slowapi.util import get_remote_address
 from api.deps import get_storage_service
 from api.models import HealthResponse, ReadyResponse, MetricsResponse
 from api.activity_feed import get_events
+from config.polymarket_urls import clob_url, gamma_url  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +24,14 @@ _startup_time = datetime.now()
 
 
 @router.get("/health", response_model=HealthResponse)
+@router.get("/api/health", response_model=HealthResponse, include_in_schema=False)
 @limiter.limit("60/minute")
 async def health(request: Request) -> HealthResponse:
     """Health check endpoint.
 
     Returns basic health status for load balancers and monitoring.
+    Served at both /health and /api/health so monitors can't false-alarm on a
+    path mismatch (root cause of the 2026-06-20 'unreachable' incident).
     """
     return HealthResponse(
         status="healthy",
@@ -111,7 +115,8 @@ async def opportunities(request: Request):
     from pathlib import Path
     
     db_path = Path(__file__).parent.parent.parent / "storage" / "shadow_trades.db"
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=15)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     
     # Resolving soon: open paper positions, sorted by soonest close
@@ -174,12 +179,12 @@ async def opportunities(request: Request):
             pass
         # Cache miss — resolve via CLOB + gamma
         try:
-            r = httpx.get(f"https://clob.polymarket.com/markets/{mid}", timeout=5)
+            r = httpx.get(clob_url(f"/markets/{mid}"), timeout=5)
             if r.status_code == 200:
                 mslug = r.json().get("market_slug", "")
                 if mslug:
                     m["market_slug"] = mslug
-                    r2 = httpx.get(f"https://gamma-api.polymarket.com/markets?slug={mslug}", timeout=5)
+                    r2 = httpx.get(gamma_url(f"/markets?slug={mslug}"), timeout=5)
                     if r2.status_code == 200:
                         data = r2.json()
                         if data and data[0].get("events"):
@@ -270,7 +275,8 @@ async def strategy_breakdown(request: Request):
     
     db_path = Path(__file__).parent.parent.parent / "storage" / "shadow_trades.db"
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = sqlite3.connect(str(db_path), timeout=15)
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.row_factory = sqlite3.Row
         
         rows = conn.execute("""
@@ -310,7 +316,8 @@ async def daily_pnl(request: Request):
     
     db_path = Path(__file__).parent.parent.parent / "storage" / "shadow_trades.db"
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = sqlite3.connect(str(db_path), timeout=15)
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.row_factory = sqlite3.Row
         
         rows = conn.execute("""
@@ -349,7 +356,8 @@ async def meta_model_stats(request: Request):
     db_path = Path(__file__).parent.parent.parent / "storage" / "shadow_trades.db"
     recent_scores = []
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = sqlite3.connect(str(db_path), timeout=15)
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.row_factory = sqlite3.Row
         # Show meta scores on open positions
         rows = conn.execute("""
@@ -381,7 +389,8 @@ async def crypto_signals(request: Request):
     from signals.crypto_price_signal import evaluate_crypto_price_market
     
     db_path = Path(__file__).parent.parent.parent / "storage" / "shadow_trades.db"
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=15)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     
     rows = conn.execute("""
@@ -427,7 +436,8 @@ async def clv_analysis():
     import sqlite3
     from pathlib import Path
     db_path = Path(__file__).parent.parent.parent / "storage" / "shadow_trades.db"
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=15)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
 
     rows = conn.execute("""
@@ -498,7 +508,8 @@ async def shadow_performance():
     import sqlite3
     import os
     db_path = os.path.join(os.path.dirname(__file__), "..", "..", "storage", "shadow_trades.db")
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(str(db_path), timeout=15)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
 
     rows = conn.execute("""

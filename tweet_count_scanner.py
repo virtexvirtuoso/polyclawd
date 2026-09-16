@@ -1,0 +1,877 @@
+#!/usr/bin/env python3
+"""
+Tweet Count Scanner for Polyclawd
+
+Scans Polymarket Elon Musk (and other) tweet count bracket markets.
+Uses xtracker.polymarket.com API for historical post data.
+Runs Monte Carlo simulation to find mispriced brackets.
+
+Edge source: market systematically underestimates posting rate.
+Same structural pattern as weather_scanner.py.
+"""
+
+import json
+import random
+import statistics
+import urllib.request
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+from loguru import logger
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
+from config.polymarket_urls import xtracker_url  # polyproxy: central URL config
+
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+XTRACKER_API = xtracker_url("/api")
+# Cache for xtracker data (avoid hammering their API)
+CACHE_FILE = Path(__file__).parent.parent / "storage" / "tweet_count_cache.json"
+CACHE_TTL_SECONDS = 3600  # 1 hour
+
+# Monte Carlo settings
+MC_SIMULATIONS = 50_000
+MC_SEED = None  # None = random seed each run for true randomness
+
+# Minimum edge to surface a signal
+MIN_EDGE_PCT = 3.0
+
+# Tracked accounts (handle → slug pattern)
+TRACKED_ACCOUNTS = {
+    "elonmusk": {
+        "name": "Elon Musk",
+        "slug_pattern": "elon-musk-of-tweets-{slug_dates}",
+        "slug_search": "elon-musk-of-tweets-",
+        "rolling_days": 28,  # Use last N days for distribution
+    },
+    "Cobratate": {
+        "name": "Andrew Tate",
+        "slug_pattern": "andrew-tate-of-tweets-{slug_dates}",
+        "slug_search": "andrew-tate-of-tweets-",
+        "rolling_days": 28,
+    },
+    "realDonaldTrump": {
+        "name": "Donald Trump",
+        "slug_pattern": "donald-trump-of-truth-social-posts-{slug_dates}",
+        "slug_search": "donald-trump-of-truth-social-posts-",
+        "rolling_days": 28,
+    },
+}
+
+# Bracket width (Polymarket uses 20-tweet increments)
+BRACKET_WIDTH = 20
+
+
+# ============================================================================
+# HTTP helpers
+# ============================================================================
+
+def _fetch_json(url: str, timeout: int = 15) -> Optional[dict]:
+    """Fetch JSON from URL, return None on failure."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        logger.warning("Fetch failed {}: {}", url[:80], e)
+        return None
+
+
+# ============================================================================
+# XTracker API
+# ============================================================================
+
+def fetch_post_history(handle: str) -> Optional[List[dict]]:
+    """Fetch all historical posts for an account from xtracker API.
+    
+    Returns list of posts with 'createdAt' timestamps.
+    Uses file cache to avoid excessive API calls.
+    """
+    # Check cache
+    cache = _load_cache()
+    cache_key = f"posts_{handle}"
+    if cache_key in cache:
+        entry = cache[cache_key]
+        age = datetime.now(timezone.utc).timestamp() - entry.get("fetched_at", 0)
+        if age < CACHE_TTL_SECONDS:
+            logger.debug("Cache hit for {} ({} posts, {}s old)", handle, len(entry["posts"]), age)
+            return entry["posts"]
+
+    data = _fetch_json(f"{XTRACKER_API}/users/{handle}/posts")
+    if not data or not data.get("success"):
+        logger.warning("Failed to fetch posts for {}", handle)
+        return None
+
+    posts = data.get("data", [])
+    logger.info("Fetched {} posts for @{} from xtracker", len(posts), handle)
+
+    # Cache
+    cache[cache_key] = {
+        "posts": posts,
+        "fetched_at": datetime.now(timezone.utc).timestamp(),
+    }
+    _save_cache(cache)
+    return posts
+
+
+def fetch_account_info(handle: str) -> Optional[dict]:
+    """Fetch account info including active tracking windows."""
+    data = _fetch_json(f"{XTRACKER_API}/users/{handle}")
+    if not data or not data.get("success"):
+        return None
+    return data.get("data", {})
+
+
+def get_daily_counts(posts: List[dict], rolling_days: int = 28) -> List[int]:
+    """Convert raw posts into daily counts for the last N days.
+    
+    Returns list of daily post counts (one per day).
+    Excludes today (partial day).
+    """
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    cutoff = today - timedelta(days=rolling_days)
+
+    daily = {}
+    for p in posts:
+        created = p.get("createdAt", "")
+        if not created:
+            continue
+        try:
+            dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            d = dt.date()
+            if cutoff <= d < today:  # Exclude today (partial)
+                daily[d] = daily.get(d, 0) + 1
+        except (ValueError, TypeError):
+            continue
+
+    # Fill gaps with 0 (days with no posts)
+    counts = []
+    current = cutoff
+    while current < today:
+        counts.append(daily.get(current, 0))
+        current += timedelta(days=1)
+
+    return counts
+
+
+def get_daily_counts_by_dow(posts: List[dict], rolling_days: int = 28) -> Dict[int, List[int]]:
+    """Like get_daily_counts but bucketed by day-of-week (0=Mon, 6=Sun).
+    
+    Returns {dow: [count, count, ...]} for sampling by matching DOW.
+    """
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    cutoff = today - timedelta(days=rolling_days)
+
+    daily = {}
+    for p in posts:
+        created = p.get("createdAt", "")
+        if not created:
+            continue
+        try:
+            dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            d = dt.date()
+            if cutoff <= d < today:
+                daily[d] = daily.get(d, 0) + 1
+        except (ValueError, TypeError):
+            continue
+
+    by_dow: Dict[int, List[int]] = {i: [] for i in range(7)}
+    current = cutoff
+    while current < today:
+        by_dow[current.weekday()].append(daily.get(current, 0))
+        current += timedelta(days=1)
+
+    return by_dow
+
+
+def count_posts_in_window(posts: List[dict], start: datetime, end: datetime) -> int:
+    """Count posts within a specific time window."""
+    count = 0
+    for p in posts:
+        created = p.get("createdAt", "")
+        if not created:
+            continue
+        try:
+            dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            if start <= dt <= end:
+                count += 1
+        except (ValueError, TypeError):
+            continue
+    return count
+
+
+# ============================================================================
+# Monte Carlo Engine
+# ============================================================================
+
+def simulate_totals(daily_counts: List[int], window_days: float,
+                    posts_so_far: int = 0, days_elapsed: float = 0,
+                    simulations: int = MC_SIMULATIONS,
+                    counts_by_dow: Optional[Dict[int, List[int]]] = None,
+                    window_start: Optional[datetime] = None) -> List[int]:
+    """Run Monte Carlo and return raw simulated final post-count totals.
+
+    Bracket-AGNOSTIC: one total per run so callers bin into each market's
+    ACTUAL bracket scheme via bracket_probability(). The old code binned here
+    against a hardcoded BRACKET_WIDTH, silently mis-keying 25-wide markets.
+    
+    Args:
+        daily_counts: Historical daily post counts (fallback pool)
+        window_days: Total window length in days
+        posts_so_far: Posts already counted in current window
+        days_elapsed: Days already elapsed in current window
+        simulations: Number of MC runs
+        counts_by_dow: {dow: [counts]} for DOW-aware sampling (0=Mon, 6=Sun)
+        window_start: Window start datetime (needed for DOW-aware sampling)
+    
+    Returns:
+        Dict of bracket_key → probability (e.g. {"280-299": 0.144})
+    """
+    if not daily_counts:
+        return []
+
+    remaining_days = max(0, window_days - days_elapsed)
+    remaining_whole = int(remaining_days)
+    remaining_frac = remaining_days - remaining_whole
+
+    # Build per-day sampling pools (DOW-aware if available)
+    # Figure out what DOW each remaining day falls on
+    day_pools = []
+    if counts_by_dow and window_start:
+        first_remaining = window_start + timedelta(days=int(days_elapsed) + (1 if days_elapsed % 1 > 0.5 else 0))
+        for i in range(remaining_whole + (1 if remaining_frac > 0.1 else 0)):
+            d = (first_remaining + timedelta(days=i)).date()
+            dow = d.weekday()
+            pool = counts_by_dow.get(dow, [])
+            # Fall back to full pool if DOW bucket too small (<4 samples)
+            day_pools.append(pool if len(pool) >= 4 else daily_counts)
+    else:
+        day_pools = [daily_counts] * (remaining_whole + (1 if remaining_frac > 0.1 else 0))
+
+    # Pace blending: if mid-week pace differs from historical mean by >1σ,
+    # shift sampling toward current pace via weighted resampling
+    pace_weights = None
+    if days_elapsed >= 1.5 and len(daily_counts) > 3:
+        current_pace = posts_so_far / days_elapsed
+        hist_mean = sum(daily_counts) / len(daily_counts)
+        hist_stdev = (sum((x - hist_mean) ** 2 for x in daily_counts) / len(daily_counts)) ** 0.5
+        if hist_stdev > 0:
+            z = (current_pace - hist_mean) / hist_stdev
+            if abs(z) > 1.0:
+                # Blend: weight samples closer to current pace higher
+                # Soft blend — doesn't replace distribution, just tilts it
+                pace_weights = {}
+                for pool_idx, pool in enumerate(day_pools):
+                    weights = []
+                    for c in pool:
+                        dist = abs(c - current_pace)
+                        w = 1.0 / (1.0 + dist / (hist_stdev + 1))  # Closer to pace = higher weight
+                        weights.append(w)
+                    total_w = sum(weights)
+                    pace_weights[pool_idx] = [w / total_w for w in weights] if total_w > 0 else None
+
+    rng = random.Random(MC_SEED)
+    totals: List[int] = []
+
+    for _ in range(simulations):
+        total = posts_so_far
+        for day_i in range(remaining_whole):
+            pool = day_pools[day_i] if day_i < len(day_pools) else daily_counts
+            if pace_weights and day_i in pace_weights and pace_weights[day_i]:
+                # Weighted random choice
+                r = rng.random()
+                cumulative = 0.0
+                chosen = pool[-1]
+                for idx, w in enumerate(pace_weights[day_i]):
+                    cumulative += w
+                    if r <= cumulative:
+                        chosen = pool[idx]
+                        break
+                total += chosen
+            else:
+                total += rng.choice(pool)
+
+        # Partial day: sample and scale
+        if remaining_frac > 0.1:
+            frac_pool = day_pools[remaining_whole] if remaining_whole < len(day_pools) else daily_counts
+            total += int(rng.choice(frac_pool) * remaining_frac)
+
+        totals.append(total)
+
+    return totals
+
+
+def _parse_bracket_bounds(bracket: str) -> Tuple[int, Optional[int]]:
+    """Parse a market bracket string into (low, high); high is None for "N+"."""
+    bracket = bracket.strip()
+    if bracket.endswith("+"):
+        return int(bracket[:-1]), None
+    lo, hi = bracket.split("-")
+    return int(lo), int(hi)
+
+
+def bracket_probability(totals: List[int], bracket: str) -> Optional[float]:
+    """P(final count in `bracket`) from simulated `totals`, binned into the
+    bracket's ACTUAL bounds (Fix 1 - width-agnostic, works for 20- or 25-wide).
+
+    Returns None when the bracket lies ENTIRELY OUTSIDE the simulated support
+    (Fix 2): zero simulations is "no opinion", which the caller must NOT invert
+    into mc_no = 1.0 / certainty. 0.0 is returned only for an in-support gap,
+    where a genuine ~0 probability is actionable.
+    """
+    if not totals:
+        return None
+    lo, hi = _parse_bracket_bounds(bracket)
+    tmin, tmax = min(totals), max(totals)
+    if lo > tmax:                      # entirely above the envelope
+        return None
+    if hi is not None and hi < tmin:   # entirely below the envelope
+        return None
+    hits = sum(1 for t in totals if t >= lo and (hi is None or t <= hi))
+    return hits / len(totals)
+
+
+def decide_signal(mc_yes: Optional[float], yes_price: float,
+                  min_edge_pct: float = MIN_EDGE_PCT) -> Optional[dict]:
+    """Choose the better side (YES/NO) given the model's YES probability.
+
+    Returns None when there is no tradeable signal. mc_yes=None (bracket outside
+    MC support) yields None -- never a certainty-driven NO with edge == the
+    market price (Fix 2). Confidence is tied to the chosen side's probability,
+    never a blind default (Fix 3).
+    """
+    if mc_yes is None:
+        return None
+    mc_no = 1 - mc_yes
+    market_no = 1 - yes_price
+    edge_no = (mc_no - market_no) * 100      # positive => NO underpriced
+    edge_yes = (mc_yes - yes_price) * 100    # positive => YES underpriced
+
+    if edge_no > edge_yes and edge_no > min_edge_pct:
+        side, edge, our_prob, eff_price = "NO", edge_no, mc_no, 1 - yes_price
+    elif edge_yes > min_edge_pct:
+        side, edge, our_prob, eff_price = "YES", edge_yes, mc_yes, yes_price
+    else:
+        return None
+
+    if eff_price < 0.01 or eff_price > 0.98:
+        return None
+
+    return {
+        "side": side,
+        "edge_pct": round(edge, 1),
+        "confidence": round(min(0.95, our_prob), 3),
+        "our_prob": our_prob,
+        "effective_price": eff_price,
+    }
+
+
+def run_monte_carlo(daily_counts: List[int], window_days: float,
+                    posts_so_far: int = 0, days_elapsed: float = 0,
+                    simulations: int = MC_SIMULATIONS,
+                    counts_by_dow: Optional[Dict[int, List[int]]] = None,
+                    window_start: Optional[datetime] = None) -> Dict[str, float]:
+    """DEPRECATED back-compat shim: fixed-width bracket->prob dict.
+
+    Bins simulated totals into hardcoded BRACKET_WIDTH brackets. Kept only for
+    external callers; the scanner now uses simulate_totals()+bracket_probability()
+    to bin into each market's real bracket scheme. Do not use for new code.
+    """
+    totals = simulate_totals(daily_counts, window_days, posts_so_far, days_elapsed,
+                             simulations, counts_by_dow, window_start)
+    if not totals:
+        return {}
+    hits: Dict[str, int] = {}
+    for total in totals:
+        bracket_start = (total // BRACKET_WIDTH) * BRACKET_WIDTH
+        key = "580+" if bracket_start >= 580 else f"{bracket_start}-{bracket_start + BRACKET_WIDTH - 1}"
+        hits[key] = hits.get(key, 0) + 1
+    n = len(totals)
+    return {k: v / n for k, v in hits.items()}
+
+
+# ============================================================================
+# Market Discovery
+# ============================================================================
+
+def discover_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optional[list] = None) -> List[dict]:
+    """Find active tweet count bracket markets on Polymarket.
+    
+    Two-pass discovery:
+    1. Slug-based: look up known tracking windows from xtracker
+    2. Volume-based: scan top events for any we missed
+    
+    Returns list of market dicts with condition_id, question, prices.
+    """
+    config = TRACKED_ACCOUNTS.get(handle, {})
+    slug_search = config.get("slug_search", f"{handle}-tweets-")
+    seen_slugs = set()
+    markets = []
+
+    def _extract_event_markets(event: dict) -> List[dict]:
+        """Extract bracket markets from a Gamma event."""
+        result = []
+        slug = event.get("slug", "")
+        title = event.get("title", "")
+        end_date = event.get("endDate", "")
+        event_vol = event.get("volume", 0)
+
+        for m in event.get("markets", []):
+            condition_id = m.get("conditionId", "")
+            question = m.get("question", "")
+            prices_raw = m.get("outcomePrices", "")
+
+            try:
+                prices = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
+                yes_price = float(prices[0]) if prices else 0
+            except (json.JSONDecodeError, IndexError, TypeError):
+                yes_price = 0
+
+            # Skip resolved markets (prices are 0/1 or market is closed)
+            if m.get("closed", False) or yes_price <= 0.001 or yes_price >= 0.999:
+                continue
+
+            volume = m.get("volumeNum", 0)
+            bracket = _extract_bracket(question)
+            if not bracket:
+                continue
+
+            result.append({
+                "condition_id": condition_id,
+                "question": question,
+                "bracket": bracket,
+                "yes_price": yes_price,
+                "volume": volume,
+                "event_title": title,
+                "event_slug": slug,
+                "event_end_date": end_date,
+                "event_volume": event_vol,
+                "handle": handle,
+            })
+        return result
+
+    # Pass 1: Slug-based discovery from xtracker tracking windows
+    account_info = fetch_account_info(handle)
+    if account_info:
+        trackings = account_info.get("trackings", [])
+        for t in trackings:
+            if not t.get("isActive"):
+                continue
+            # Build slug from tracking title
+            title = t.get("title", "").lower()
+            # Try known slug patterns by searching Gamma
+            # Parse dates from title: "Elon Musk # tweets February 27 - March 6, 2026?"
+            import re
+            date_match = re.findall(r'(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d+)', title)
+            if len(date_match) >= 2:
+                slug_candidate = f"{slug_search}{date_match[0][0]}-{date_match[0][1]}-{date_match[1][0]}-{date_match[1][1]}"
+                data = _fetch_json(f"{GAMMA_API}/events?slug={slug_candidate}")
+                if data and len(data) > 0:
+                    event = data[0]
+                    slug = event.get("slug", slug_candidate)
+                    if slug not in seen_slugs:
+                        seen_slugs.add(slug)
+                        event_mkts = _extract_event_markets(event)
+                        markets.extend(event_mkts)
+                        logger.debug("Slug discovery: {} → {} markets", slug[:40], len(event_mkts))
+
+            # Also try monthly pattern: "Elon Musk musk # tweets in March 2026?"
+            month_match = re.search(r'in\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{4})', title)
+            if month_match:
+                slug_candidate = f"{slug_search}{month_match.group(1)}-{month_match.group(2)}"
+                data = _fetch_json(f"{GAMMA_API}/events?slug={slug_candidate}")
+                if data and len(data) > 0:
+                    event = data[0]
+                    slug = event.get("slug", slug_candidate)
+                    if slug not in seen_slugs:
+                        seen_slugs.add(slug)
+                        markets.extend(_extract_event_markets(event))
+
+    # Pass 2: Volume-based scan (catch any events slug discovery missed)
+    # Use pre-fetched cache if available (avoids 1 HTTP call per account)
+    data = gamma_volume_cache if gamma_volume_cache is not None else _fetch_json(
+        f"{GAMMA_API}/events?active=true&closed=false&limit=50"
+        f"&order=volume24hr&ascending=false"
+    )
+    if data:
+        for event in data:
+            slug = event.get("slug", "")
+            if slug_search in slug and slug not in seen_slugs:
+                seen_slugs.add(slug)
+                markets.extend(_extract_event_markets(event))
+
+    logger.info("Discovered {} bracket markets for @{} across {} events",
+                len(markets), handle, len(seen_slugs))
+    return markets
+
+
+def _extract_bracket(question: str) -> Optional[str]:
+    """Extract bracket range from market question.
+    
+    Examples:
+        "Will Elon Musk post 200-219 tweets..." → "200-219"
+        "Will Elon Musk post 580+ tweets..." → "580+"
+        "Will Elon Musk post 0-19 tweets..." → "0-19"
+    """
+    import re
+    # Match "N-M" or "N+" pattern
+    match = re.search(r'(\d+)-(\d+)', question)
+    if match:
+        low, high = int(match.group(1)), int(match.group(2))
+        return f"{low}-{high}"
+
+    match = re.search(r'(\d+)\+', question)
+    if match:
+        return f"{match.group(1)}+"
+
+    # Also match "0-19" style
+    match = re.search(r'(\d+)\s*[-–]\s*(\d+)', question)
+    if match:
+        return f"{match.group(1)}-{match.group(2)}"
+
+    return None
+
+
+def _parse_window_from_event(event_slug: str, event_end_date: str) -> Tuple[Optional[datetime], Optional[datetime]]:
+    """Parse the tracking window from event metadata.
+    
+    Returns (start_datetime, end_datetime) in UTC.
+    """
+    import re
+
+    # Try to get from account's tracking windows (more reliable)
+    # Fallback: parse from slug
+    # Slug format: elon-musk-of-tweets-february-27-march-6
+    months = {
+        'january': 1, 'february': 2, 'march': 3, 'april': 4,
+        'may': 5, 'june': 6, 'july': 7, 'august': 8,
+        'september': 9, 'october': 10, 'november': 11, 'december': 12
+    }
+
+    # Extract month-day pairs from slug
+    slug_lower = event_slug.lower()
+    matches = re.findall(r'(january|february|march|april|may|june|july|august|september|october|november|december)-(\d+)', slug_lower)
+
+    if len(matches) >= 2:
+        now = datetime.now(timezone.utc)
+        year = now.year
+
+        start_month = months[matches[0][0]]
+        start_day = int(matches[0][1])
+        end_month = months[matches[1][0]]
+        end_day = int(matches[1][1])
+
+        # Markets use noon ET (17:00 UTC)
+        try:
+            start = datetime(year, start_month, start_day, 17, 0, 0, tzinfo=timezone.utc)
+            end = datetime(year, end_month, end_day, 17, 0, 0, tzinfo=timezone.utc)
+            return start, end
+        except ValueError:
+            pass
+
+    # Fallback: use event end date
+    if event_end_date:
+        try:
+            end = datetime.fromisoformat(event_end_date.replace("Z", "+00:00"))
+            start = end - timedelta(days=7)  # Assume 7-day window
+            return start, end
+        except ValueError:
+            pass
+
+    return None, None
+
+
+# ============================================================================
+# Signal Generation
+# ============================================================================
+
+def scan_tweet_markets(handle: str = "elonmusk", gamma_volume_cache: Optional[list] = None) -> List[dict]:
+    """Full scan pipeline for a single account.
+    
+    1. Fetch post history from xtracker
+    2. Discover active bracket markets
+    3. Run Monte Carlo for each event window
+    4. Compare MC probabilities to market prices
+    5. Return signals with edge
+    """
+    config = TRACKED_ACCOUNTS.get(handle, {})
+    name = config.get("name", handle)
+    rolling_days = config.get("rolling_days", 28)
+
+    # 1. Fetch post history
+    posts = fetch_post_history(handle)
+    if not posts:
+        logger.warning("No post history for @{} — skipping", handle)
+        return []
+
+    daily_counts = get_daily_counts(posts, rolling_days=rolling_days)
+    counts_by_dow = get_daily_counts_by_dow(posts, rolling_days=rolling_days)
+    if len(daily_counts) < 7:
+        logger.warning("Only {} days of data for @{} — need 7+", len(daily_counts), handle)
+        return []
+
+    mean_daily = statistics.mean(daily_counts)
+    stdev_daily = statistics.stdev(daily_counts) if len(daily_counts) > 1 else 0
+    # Log DOW breakdown
+    dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    dow_means = {dow_names[d]: round(statistics.mean(c), 1) if c else 0 for d, c in counts_by_dow.items()}
+    logger.info("@{}: {} days, mean={}/day, stdev={}, median={} | DOW: {}",
+                handle, len(daily_counts), mean_daily, stdev_daily, statistics.median(daily_counts),
+                " ".join(f"{k}={v}" for k, v in dow_means.items()))
+
+    # 2. Discover markets
+    markets = discover_tweet_markets(handle, gamma_volume_cache=gamma_volume_cache)
+    if not markets:
+        logger.info("No active markets for @{}", handle)
+        return []
+
+    # 3. Group markets by event
+    events: Dict[str, List[dict]] = {}
+    for m in markets:
+        slug = m["event_slug"]
+        if slug not in events:
+            events[slug] = []
+        events[slug].append(m)
+
+    # 4. Run MC per event, compare to market prices
+    signals = []
+    now = datetime.now(timezone.utc)
+
+    for slug, event_markets in events.items():
+        # Parse window
+        sample = event_markets[0]
+        start, end = _parse_window_from_event(slug, sample.get("event_end_date", ""))
+        if not start or not end:
+            logger.warning("Cannot parse window for {}", slug)
+            continue
+
+        window_days = (end - start).total_seconds() / 86400
+        if window_days <= 0:
+            continue
+
+        # Calculate days elapsed and posts so far
+        days_elapsed = max(0, (now - start).total_seconds() / 86400)
+        if days_elapsed >= window_days:
+            logger.debug("Window {} already closed", slug)
+            continue
+
+        posts_so_far = count_posts_in_window(posts, start, min(now, end))
+
+        logger.info("Event {}: {}/{} days elapsed, {} posts so far",
+                     slug[:40], days_elapsed, window_days, posts_so_far)
+
+        # Run Monte Carlo -> raw simulated totals (bracket-agnostic)
+        totals = simulate_totals(
+            daily_counts, window_days,
+            posts_so_far=posts_so_far,
+            days_elapsed=days_elapsed,
+            counts_by_dow=counts_by_dow,
+            window_start=start,
+        )
+
+        if not totals:
+            continue
+
+        # 5. Compare MC to market prices
+        for m in event_markets:
+            bracket = m["bracket"]
+            yes_price = m["yes_price"]
+
+            # Bin into the market's ACTUAL bracket bounds (Fix 1). Outside the
+            # simulated support -> None -> no opinion, never certainty (Fix 2/3).
+            mc_yes = bracket_probability(totals, bracket)
+            decision = decide_signal(mc_yes, yes_price)
+            if decision is None:
+                continue  # no edge, or bracket outside MC support
+
+            mc_no = 1 - mc_yes
+            side = decision["side"]
+            edge = decision["edge_pct"]
+            confidence = decision["confidence"]
+
+            signals.append({
+                "market_id": m["condition_id"],
+                "market": m["question"][:120],
+                "market_title": m["question"][:120],
+                "side": side,
+                "entry_price": yes_price,
+                "market_price": yes_price,
+                "confidence": round(confidence, 3),
+                "edge_pct": round(edge, 1),
+                "strategy": "tweet_count_mc",
+                "archetype": "social_count",
+                "platform": "polymarket",
+                "source": "tweet_count_scanner",
+                "bracket": bracket,
+                "handle": handle,
+                "account_name": name,
+                "event_slug": slug,
+                "event_title": sample.get("event_title", ""),
+                "event_volume": sample.get("event_volume", 0),
+                "volume": m.get("volume", 0),
+                "mc_yes_prob": round(mc_yes, 4),
+                "mc_no_prob": round(mc_no, 4),
+                "posts_so_far": posts_so_far,
+                "days_elapsed": round(days_elapsed, 1),
+                "window_days": round(window_days, 1),
+                "projected_total": round(posts_so_far / days_elapsed * window_days) if days_elapsed > 0.5 else round(mean_daily * window_days),
+                "daily_mean": round(mean_daily, 1),
+                "daily_stdev": round(stdev_daily, 1),
+                "days_to_close": round(max(0.1, window_days - days_elapsed), 1),
+            })
+
+    signals.sort(key=lambda x: x["edge_pct"], reverse=True)
+    logger.info("Tweet count scan: {} signals with >{}%% edge for @{}",
+                len(signals), MIN_EDGE_PCT, handle)
+    return signals
+
+
+def scan_all_tweet_markets() -> Dict[str, any]:
+    """Scan all tracked accounts and return combined results."""
+    all_signals = []
+    account_stats = {}
+
+    # Pre-fetch Gamma volume scan once (shared across all accounts)
+    _gamma_volume_cache = _fetch_json(
+        f"{GAMMA_API}/events?active=true&closed=false&limit=50"
+        f"&order=volume24hr&ascending=false"
+    )
+
+    for handle in TRACKED_ACCOUNTS:
+        try:
+            signals = scan_tweet_markets(handle, gamma_volume_cache=_gamma_volume_cache)
+            all_signals.extend(signals)
+            account_stats[handle] = {
+                "signals": len(signals),
+                "top_edge": signals[0]["edge_pct"] if signals else 0,
+            }
+        except Exception as e:
+            logger.error("Error scanning @{}: {}", handle, e)
+            account_stats[handle] = {"signals": 0, "error": str(e)}
+
+    return {
+        "signals": all_signals,
+        "accounts": account_stats,
+        "total_signals": len(all_signals),
+        "scanned_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ============================================================================
+# Portfolio Integration
+# ============================================================================
+
+def get_tweet_portfolio_signals(min_edge: float = 5.0, max_signals: int = 5) -> List[dict]:
+    """Get tweet count signals formatted for paper_portfolio.process_signals().
+    
+    Deduplicates: best bracket per event (don't overload one event).
+    """
+    result = scan_all_tweet_markets()
+    all_signals = result.get("signals", [])
+    if not all_signals:
+        return []
+
+    # Filter by minimum edge
+    filtered = [s for s in all_signals if s["edge_pct"] >= min_edge]
+
+    # Deduplicate: best signal per event
+    best_per_event = {}
+    for s in filtered:
+        key = s["event_slug"]
+        if key not in best_per_event or s["edge_pct"] > best_per_event[key]["edge_pct"]:
+            best_per_event[key] = s
+
+    # Sort by edge, take top N
+    top = sorted(best_per_event.values(), key=lambda x: x["edge_pct"], reverse=True)[:max_signals]
+
+    # Already in portfolio signal format
+    logger.info("Tweet portfolio signals: {}/{} pass min_edge={}%%",
+                len(top), len(all_signals), min_edge)
+    return top
+
+
+# ============================================================================
+# Cache helpers
+# ============================================================================
+
+def _load_cache() -> Dict:
+    """Load file-based cache."""
+    try:
+        if CACHE_FILE.exists():
+            with open(CACHE_FILE, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def _save_cache(cache: Dict):
+    """Save file-based cache."""
+    try:
+        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(CACHE_FILE, "w") as f:
+            json.dump(cache, f)
+    except Exception as e:
+        logger.warning("Failed to save cache: {}", e)
+
+
+# ============================================================================
+# CLI
+# ============================================================================
+
+if __name__ == "__main__":
+    import sys
+    logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s %(message)s")
+
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "scan"
+
+    if cmd == "scan":
+        result = scan_all_tweet_markets()
+        signals = result["signals"]
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Tweet Count Scanner — {result['total_signals']} signals found")
+        logger.info(f"{'='*80}\n")
+
+        for handle, stats in result["accounts"].items():
+            name = TRACKED_ACCOUNTS[handle]["name"]
+            logger.info(f"@{handle} ({name}): {stats['signals']} signals, top edge={stats.get('top_edge',0):.1f}%")
+
+        if signals:
+            logger.info(f"\n{'Bracket':>12s}  {'Side':>4s}  {'Mkt YES':>8s}  {'MC YES':>8s}  {'Edge':>6s}  {'Market'}")
+            logger.info("-" * 90)
+            for s in signals[:20]:
+                logger.info(f"{s['bracket']:>12s}  {s['side']:>4s}  {s['entry_price']:>7.1%}  "
+                      f"{s['mc_yes_prob']:>7.1%}  {s['edge_pct']:>+5.1f}%  {s['market'][:45]}")
+
+            logger.info(f"\nProjections:")
+            seen = set()
+            for s in signals:
+                slug = s["event_slug"]
+                if slug not in seen:
+                    seen.add(slug)
+                    logger.info(f"  {s['event_title'][:50]}: {s['posts_so_far']} posts in {s['days_elapsed']:.1f}d → projected {s['projected_total']}")
+        else:
+            logger.info("\nNo signals with sufficient edge found.")
+
+    elif cmd == "portfolio":
+        signals = get_tweet_portfolio_signals()
+        logger.info(json.dumps(signals, indent=2))
+
+    elif cmd == "history":
+        handle = sys.argv[2] if len(sys.argv) > 2 else "elonmusk"
+        posts = fetch_post_history(handle)
+        if posts:
+            counts = get_daily_counts(posts, rolling_days=28)
+            logger.info(f"@{handle}: {len(counts)} days, mean={statistics.mean(counts):.1f}, "
+                  f"stdev={statistics.stdev(counts):.1f}, median={statistics.median(counts):.0f}")
+            logger.info(f"7-day projection: {statistics.mean(counts)*7:.0f} ± {statistics.stdev(counts)*7**0.5:.0f}")
+            logger.info("\nDaily counts (last 14 days):")
+            for i, c in enumerate(counts[-14:]):
+                d = (datetime.now(timezone.utc).date() - timedelta(days=14-i))
+                logger.info(f"  {d}: {c} posts")
+    else:
+        logger.info("Usage: tweet_count_scanner.py [scan|portfolio|history [handle]]")

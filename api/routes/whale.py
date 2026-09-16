@@ -6,6 +6,7 @@ in the threadpool; an `async def` doing sqlite would block the event loop
 (see the 2026-06 polyclawd-api hang postmortem).
 """
 
+import bisect
 import json
 import logging
 import sqlite3
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Query
 from typing import Optional
+from config.polymarket_urls import clob_url, data_url, gamma_url  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +29,44 @@ META_DB = BASE_DIR / "storage" / "whale_meta.db"
 def _ro(path: Path):
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
+
+
+# ── 7d raw_score population for "top X%" ranking (10-min TTL cache) ──
+_PCT_CACHE: dict = {"ts": 0.0, "scores": None}
+_PCT_TTL = 600
+
+
+def _raw_population():
+    """Sorted raw_score population (last 7d) for percentile ranking."""
+    now = time.time()
+    if _PCT_CACHE["scores"] is not None and now - _PCT_CACHE["ts"] < _PCT_TTL:
+        return _PCT_CACHE["scores"]
+    conn = _ro(ALERTS_DB)
+    try:
+        rows = [r[0] for r in conn.execute(
+            "SELECT raw_score FROM whale_alerts WHERE ts > ? AND raw_score IS NOT NULL",
+            (now - 7 * 86400,))]
+    finally:
+        conn.close()
+    rows.sort()
+    _PCT_CACHE["ts"] = now
+    _PCT_CACHE["scores"] = rows
+    return rows
+
+
+def _top_pct(pop, raw):
+    """'top X%' rank of a raw score vs the 7d alert population; None if unknown."""
+    if raw is None or not pop:
+        return None
+    rank = bisect.bisect_right(pop, raw)
+    pct = max(0.0, 100.0 * (1.0 - rank / len(pop)))
+    if pct >= 10:
+        return f"{pct:.0f}%"
+    if pct >= 1:
+        return f"{pct:.1f}%"
+    return f"{pct:.2f}%"
 
 
 @router.get("/whale/alerts")
@@ -55,6 +93,7 @@ def whale_alerts(
     args.append(limit)
 
     alerts = []
+    pop = _raw_population()
     for r in conn.execute(q, args):
         try:
             p = json.loads(r["payload"] or "{}")
@@ -68,6 +107,8 @@ def whale_alerts(
                 "market": r["market"],
                 "severity": r["severity"],
                 "score": r["score"],
+                "raw_score": r["raw_score"],
+                "top_pct": _top_pct(pop, r["raw_score"]),
                 "reasons": r["reasons"] or "",
                 "title": p.get("title") or "",
                 "sub_title": p.get("sub_title") or "",
@@ -95,6 +136,12 @@ def whale_alerts(
     }
     conn.close()
     return {"alerts": alerts, "counts": counts}
+
+
+@router.get("/whale/percentile")
+def whale_percentile(raw: float = Query(..., description="Raw score to rank")):
+    """Rank one raw score against the live 7d alert population."""
+    return {"raw": raw, "top_pct": _top_pct(_raw_population(), raw)}
 
 
 @router.get("/whale/stats")
@@ -260,18 +307,21 @@ def whale_follows(limit: int = Query(40, le=200)):
 
 
 @router.get("/whale/wallets")
-def whale_wallets(limit: int = Query(20, le=100)):
-    """Wallet ledger: smart wallets first, by realized PnL."""
+def whale_wallets(limit: int = Query(20, le=100), sort: str = Query("net_pnl")):
+    """Wallet ledger: smart wallets first, sorted by net_pnl or win_rate."""
     try:
         meta = _ro(META_DB)
     except sqlite3.OperationalError:
         return {"wallets": [], "smart_count": 0, "tracked": 0, "queued": 0}
+    sort_col = "net_pnl" if sort in ("net_pnl", "pnl") else (
+        "win_rate" if sort == "win_rate" else (
+        "closed_positions" if sort == "closed" else "net_pnl"))
     wallets = [
         dict(r)
         for r in meta.execute(
-            "SELECT wallet, name, closed_positions, wins, win_rate, realized_pnl,"
-            " smart, last_seen FROM pm_wallets"
-            " ORDER BY smart DESC, realized_pnl DESC LIMIT ?",
+            f"SELECT wallet, name, closed_positions, wins, win_rate, realized_pnl,"
+            f" net_pnl, concentration, smart, last_seen, refreshed FROM pm_wallets"
+            f" ORDER BY smart DESC, {sort_col} DESC LIMIT ?",
             (limit,),
         )
     ]
@@ -280,6 +330,48 @@ def whale_wallets(limit: int = Query(20, le=100)):
     queued = meta.execute("SELECT COUNT(*) FROM pm_wallet_seen").fetchone()[0]
     meta.close()
     return {"wallets": wallets, "smart_count": smart, "tracked": tracked, "queued": queued}
+
+
+@router.get("/whale/wallet/{wallet_addr}")
+def whale_wallet_detail(wallet_addr: str):
+    """Detail view for a single wallet: stats + recent PM trades."""
+    import urllib.request as _ur
+    try:
+        meta = _ro(META_DB)
+    except sqlite3.OperationalError:
+        return {"error": "db unavailable"}
+
+    row = meta.execute(
+        "SELECT * FROM pm_wallets WHERE wallet=?", (wallet_addr.lower(),)
+    ).fetchone()
+    meta.close()
+
+    wallet_data = dict(row) if row else {"wallet": wallet_addr, "name": "unknown"}
+
+    # Fetch recent trades from PM data-api
+    trades = []
+    try:
+        url = data_url(f"/trades?user={wallet_addr.lower()}&limit=50")
+        req = _ur.Request(url, headers={"User-Agent": "polyclawd/1.0"})
+        with _ur.urlopen(req, timeout=12) as r:
+            raw = json.loads(r.read().decode())
+        for t in raw:
+            size = float(t.get("size", 0) or 0)
+            price = float(t.get("price", 0) or 0)
+            trades.append({
+                "side": t.get("side", ""),
+                "size": size,
+                "price": price,
+                "volume_usdc": size * price,
+                "outcome": t.get("outcome", ""),
+                "title": t.get("title", ""),
+                "timestamp": t.get("timestamp", 0),
+                "slug": t.get("eventSlug", ""),
+            })
+    except Exception:
+        pass
+
+    return {"wallet": wallet_data, "trades": trades}
 
 
 # ── Live order book (for the dashboard's per-alert depth visualization) ─────
@@ -316,7 +408,7 @@ def whale_book(platform: str = Query(...), market: str = Query(...)):
             b, a = parse_kalshi_book(d["orderbook_fp"])
             bids, asks = b[:12], a[:12]
     elif platform == "polymarket":
-        g = _fetch_json(f"https://gamma-api.polymarket.com/markets?slug={market}&limit=1")
+        g = _fetch_json(gamma_url(f"/markets?slug={market}&limit=1"))
         token = None
         if g:
             try:
@@ -324,7 +416,7 @@ def whale_book(platform: str = Query(...), market: str = Query(...)):
             except (ValueError, IndexError, TypeError):
                 token = None
         if token:
-            d = _fetch_json(f"https://clob.polymarket.com/book?token_id={token}")
+            d = _fetch_json(clob_url(f"/book?token_id={token}"))
             if d:
                 bids = sorted(
                     ((float(x["price"]), float(x["size"])) for x in d.get("bids") or []), key=lambda v: -v[0]
@@ -404,7 +496,7 @@ def whale_top(limit: int = Query(10, ge=1, le=50),
     """Top-ranked whale alerts by composite score. Auto-learns from resolutions."""
     conn = sqlite3.connect(str(META_DB), timeout=10)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute(f"ATTACH DATABASE '{ALERTS_DB}' AS scanner")
 
     title_map: dict[str, str] = {}
@@ -427,6 +519,20 @@ def whale_top(limit: int = Query(10, ge=1, le=50),
         params.append(platform.lower())
     query = "SELECT * FROM whale_outcomes WHERE " + base_where + extra + " ORDER BY alert_id DESC LIMIT 500"
     rows = conn.execute(query, params).fetchall()
+    # raw_score lives in scanner.whale_alerts, not whale_outcomes — batch-fetch
+    # for this page instead of joining 1.5M open rows.
+    raw_map: dict = {}
+    if rows:
+        ids = [r["alert_id"] for r in rows]
+        ph = ",".join("?" * len(ids))
+        try:
+            for rr in conn.execute(
+                f"SELECT id, raw_score FROM scanner.whale_alerts WHERE id IN ({ph})", ids
+            ):
+                raw_map[rr["id"]] = rr["raw_score"]
+        except sqlite3.Error:
+            raw_map = {}
+    pop = _raw_population()
 
     seen = {}
     for r in rows:
@@ -458,9 +564,17 @@ def whale_top(limit: int = Query(10, ge=1, le=50),
             "platform": r["platform"],
             "severity": r["severity"],
             "score": s,
+            "raw_score": raw_map.get(r["alert_id"]),
+            "top_pct": _top_pct(pop, raw_map.get(r["alert_id"])),
+            "reasons": r["reasons"] or "",
             "direction": r["direction"],  # +1=YES, -1=NO, None=ambiguous
             "price": r["price_at_alert"],
+            "best_bid": r["price_at_alert"],  # alias for TG filter
             "flow_dollars": r["flow_dollars"],
+            "flow_yes": r["flow_yes"] or 0,
+            "flow_no": r["flow_no"] or 0,
+            "open_interest": r["total_volume"] or 0,
+            "volume": r["total_volume"] or 0,
             "wallet": wallet_short,
             "wallet_win_rate": r["wallet_win_rate"],
             "wallet_n": r["wallet_n"],
@@ -486,7 +600,7 @@ def whale_precision():
     """Precision by severity, platform, archetype, and flow size."""
     conn = sqlite3.connect(str(META_DB), timeout=10)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA busy_timeout=30000")
     results = {}
 
     valid_cols = {"severity", "platform", "market_archetype"}

@@ -5,6 +5,8 @@ Sends trading signals and alerts via OpenClaw gateway.
 """
 
 import json
+import re
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -15,40 +17,192 @@ OPENCLAW_GATEWAY = "http://localhost:18789"
 
 DEFAULT_CHAT_ID = "468298295"  # Mr. V
 
+# Safe-tag pattern for the send-layer 400 self-heal (2026-09-14). Keep the
+# pattern in sync with the local copy inside scripts/alert_formatter.py
+# (_send_telegram_inner) — that path keeps its own retry for historical reasons.
+_SAFE_TAG = r"</?(?:b|i|u|s|a|em|strong|code|pre|blockquote)(?=[\s/>])[^>]*>"
 
-def _telegram_http_send(message: str, silent: bool = False, parse_mode: str = "Markdown") -> bool:
+
+def _escape_stray_entities(msg: str) -> str:
+    """Escape bare & and < > that are NOT part of known-safe HTML tags.
+    Send-layer self-heal for Telegram 400 'can't parse entities': direct
+    alert_openclaw(parse_mode='HTML') callers (drain, prop alerts, dispatch
+    registry) have no formatter-level escape-retry, so ~1 send/day degraded
+    to plain text. Idempotent: already-escaped entities are left alone."""
+    msg = re.sub(r"&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)", "&amp;", msg)
+    parts = re.split(f"({_SAFE_TAG})", msg)
+    out = []
+    for part in parts:
+        if re.fullmatch(_SAFE_TAG, part):
+            out.append(part)
+        else:
+            out.append(part.replace("<", "&lt;").replace(">", "&gt;"))
+    return "".join(out)
+
+
+def _telegram_http_send(message: str, silent: bool = False, parse_mode: Optional[str] = None) -> tuple:
     """Direct Telegram Bot API send — the delivery path on hosts without the
     openclaw CLI (the VPS). Token comes from the service EnvironmentFile
-    (TELEGRAM_BOT_TOKEN in /etc/default/polyclawd); never hardcoded."""
+    (TELEGRAM_BOT_TOKEN in /etc/default/polyclawd); never hardcoded.
+
+    Returns (ok, err): err is "" on success, else a short machine-parseable
+    failure class ("no_token", "http_<code>:...", "net:...", "tg_api:...")
+    recorded in the send ledger for failure diagnosis."""
     import os
     import urllib.parse
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     if not token:
         print("[OpenClaw] no openclaw CLI and TELEGRAM_BOT_TOKEN unset — telegram alert dropped")
-        return False
+        return False, "no_token"
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", DEFAULT_CHAT_ID)
-    fields = {
-        "chat_id": chat_id,
-        "text": message,
-        "disable_notification": "true" if silent else "false",
-    }
-    if parse_mode:  # omit entirely for plain text (avoids 400 on stray _ / * in data)
-        fields["parse_mode"] = parse_mode
-    payload = urllib.parse.urlencode(fields).encode()
-    try:
-        req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=payload)
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            ok = json.loads(resp.read().decode()).get("ok", False)
+    def _payload(text: str, with_parse: bool) -> bytes:
+        f = {
+            "chat_id": chat_id,
+            "text": text,
+            "disable_notification": "true" if silent else "false",
+        }
+        if with_parse and parse_mode:  # omit entirely for plain text (avoids 400 on stray _ / * in data)
+            f["parse_mode"] = parse_mode
+        return urllib.parse.urlencode(f).encode()
+
+    def _attempt(payload: bytes) -> tuple:
+        try:
+            req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=payload)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                body = resp.read().decode()
+            if not json.loads(body).get("ok", False):
+                print("[OpenClaw] telegram HTTP send returned ok=false")
+                return False, f"tg_api:{body[:120]}"
+            return True, ""
+        except urllib.error.HTTPError as e:
+            try:
+                detail = e.read()[:120].decode("utf-8", "replace")
+            except Exception:
+                detail = ""
+            print(f"[OpenClaw] telegram HTTP send failed: {e}")
+            return False, f"http_{e.code}:{detail}"
+        except (urllib.error.URLError, TimeoutError) as e:
+            print(f"[OpenClaw] telegram HTTP send failed: {e}")
+            return False, f"net:{e}"
+        except Exception as e:
+            print(f"[OpenClaw] telegram HTTP send failed: {e}")
+            return False, f"err:{e}"
+
+    def _send(payload: bytes) -> tuple:
+        ok, err = _attempt(payload)
+        if not ok and _is_transient(err):
+            # ONE inline retry only (decision D2): durable retries belong to the
+            # dispatch queue, not sleeps — this runs in an executor thread, and
+            # long backoffs would starve the finite thread pool.
+            time.sleep(5)
+            ok, err = _attempt(payload)
+        return ok, err
+
+    ok, err = _send(_payload(message, True))
+    if not ok and parse_mode and err.startswith("http_400") and "can't parse entities" in err:
+        # Deterministic formatting 400 (unescaped < / & in dynamic content).
+        # 2026-09-14: retry ONCE with stray entities escaped before degrading
+        # to plain — direct parse_mode='HTML' callers bypass alert_formatter's
+        # escape-retry, so ~1 send/day degraded (ledger degraded:entity_400_*).
+        cause = err[:160]
+        escaped = _escape_stray_entities(message)
+        if escaped != message:
+            ok, err = _send(_payload(escaped, True))
+            if ok:
+                err = "recovered:entity_400_escape_retry"
         if not ok:
-            print("[OpenClaw] telegram HTTP send returned ok=false")
-        return bool(ok)
-    except Exception as e:
-        print(f"[OpenClaw] telegram HTTP send failed: {e}")
-        return False
+            # deliver plain rather than drop (plan §6 step 10 — was ~5% of sends).
+            # The degraded marker keeps the caller's formatting bug visible in
+            # the ledger without counting as a delivery failure; cause= carries
+            # Telegram's offending-tag detail so the producer can be named.
+            ok, err = _send(_payload(message, False))
+            if ok:
+                err = f"degraded:entity_400_plain_fallback cause={cause}"
+    return ok, err
 
 
-def alert_openclaw(message: str, channel: str = "telegram", silent: bool = False, parse_mode: str = "Markdown") -> bool:
+def _is_transient(err: str) -> bool:
+    """Retryable failure classes: rate limit, server-side 5xx, network.
+    NEVER 4xx (≠429) — a 400 is deterministic (bad parse_mode/entities) and
+    retrying it just doubles the failure count. no_token is permanent too."""
+    return err.startswith("net:") or err.startswith("http_429") or err.startswith("http_5")
+
+
+def _ledger_log(ok: bool, channel: str, parse_mode, msg_len: int, err: str = "") -> None:
+    """Append one JSON line per delivery attempt — the fleet send ledger
+    (logs/telegram_sent.jsonl; consumed by scripts/send_ledger_watchdog.py).
+    NEVER raises: ledger I/O must not break delivery (audit 2026-07-10)."""
+    try:
+        import os as _os
+        import sys as _sys
+        from datetime import datetime as _dt, timezone as _tz
+
+        path = _os.environ.get("POLYCLAWD_LEDGER_PATH") or _os.path.join(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "logs", "telegram_sent.jsonl"
+        )
+        line = {
+            "ts": _dt.now(_tz.utc).isoformat(timespec="seconds"),
+            "caller": _os.path.basename(_sys.argv[0] or "") or "unknown",
+            "channel": channel,
+            "ok": bool(ok),
+            "parse_mode": parse_mode,
+            "len": msg_len,
+        }
+        if err:
+            line["err"] = str(err)[:200]
+        with open(path, "a") as f:
+            f.write(json.dumps(line) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def alert_openclaw(
+    message: str, channel: str = "telegram", silent: bool = False, parse_mode: Optional[str] = None
+) -> bool:
+    """Ledger-wrapped sender: records every delivery attempt (with failure
+    reason), then returns only the boolean result — the public signature is
+    frozen (9 pipelines call it). Messages over the Telegram limit are split
+    on line boundaries and sent sequentially (AND of results). See
+    _alert_openclaw_inner for delivery."""
+    ok_all = True
+    for chunk in _split_message(message or ""):
+        ok, err = _alert_openclaw_inner(chunk, channel=channel, silent=silent, parse_mode=parse_mode)
+        _ledger_log(ok, channel, parse_mode, len(chunk), err=err)
+        ok_all = ok_all and ok
+    return ok_all
+
+
+TELEGRAM_MAX_LEN = 4000  # headroom under Telegram's hard 4096-char sendMessage limit
+
+
+def _split_message(message: str, limit: int = TELEGRAM_MAX_LEN) -> list:
+    """Split a message into ≤limit-char chunks on line boundaries.
+    Single lines longer than the limit are hard-wrapped."""
+    if len(message) <= limit:
+        return [message]
+    chunks, current = [], ""
+    for line in message.split("\n"):
+        while len(line) > limit:  # pathological single line: hard-wrap
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _alert_openclaw_inner(
+    message: str, channel: str = "telegram", silent: bool = False, parse_mode: Optional[str] = None
+) -> tuple:
     """
     Send an alert via OpenClaw CLI.
 
@@ -58,7 +212,7 @@ def alert_openclaw(message: str, channel: str = "telegram", silent: bool = False
         silent: If True, send without notification sound
 
     Returns:
-        True if successful, False otherwise
+        (ok, err) — err is "" on success, else a short failure class.
     """
     import subprocess
 
@@ -67,29 +221,41 @@ def alert_openclaw(message: str, channel: str = "telegram", silent: bool = False
         # Default to Mr. V's Telegram ID
         target = "468298295" if channel == "telegram" else channel
 
-        cmd = ["openclaw", "message", "send", "--channel", channel, "--target", target, "--message", message]
+        cmd = [
+            "openclaw",
+            "message",
+            "send",
+            "--channel",
+            channel,
+            "--account",
+            "polyclawd",
+            "--target",
+            target,
+            "--message",
+            message,
+        ]
         if silent:
             cmd.append("--silent")
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
         if result.returncode == 0:
-            return True
+            return True, ""
         else:
             print(f"[OpenClaw] CLI error: {result.stderr}")
-            return False
+            return False, f"cli:{(result.stderr or '')[:120]}"
 
     except FileNotFoundError:
         if channel == "telegram":
             return _telegram_http_send(message, silent=silent, parse_mode=parse_mode)
         print("[OpenClaw] CLI not found - openclaw not in PATH")
-        return False
+        return False, "cli_not_found"
     except subprocess.TimeoutExpired:
         print("[OpenClaw] CLI timeout")
-        return False
+        return False, "cli_timeout"
     except Exception as e:
         print(f"[OpenClaw] Alert failed: {e}")
-        return False
+        return False, f"err:{e}"
 
 
 def format_signal_alert(

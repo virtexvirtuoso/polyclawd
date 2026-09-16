@@ -11,13 +11,11 @@ Based on: [[Polymarket 134 to 200K Story]] and [[HF_MODULE_PLAN]]
 
 import json
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 from loguru import logger
-
-GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API = "https://clob.polymarket.com"
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 # Resilient fetch wrapper
 try:
@@ -26,6 +24,46 @@ try:
 except ImportError:
     HAS_RESILIENT = False
 
+
+
+# Cache token IDs that return 404 to avoid re-hitting dead CLOB endpoints.
+# TTL must exceed the scan cadence (~30 min) or the cache expires between runs and
+# every scan re-404s the same dead tokens — that cost ~2.4k wasted 404s/day.
+_CLOB_404_CACHE: dict[str, float] = {}  # token_id -> timestamp
+_CLOB_404_TTL = 7200  # 2 hours
+
+
+def _is_market_expired(market) -> bool:
+    """True if the market's endDate has already passed.
+
+    Polymarket leaves short-duration markets flagged active=true&closed=false until
+    they resolve on-chain, but tears the CLOB orderbook down at endDate. Fetching
+    /book for those tokens is a guaranteed 404 — measured 43/43 of the failing book
+    fetches were markets with a past endDate, 0/43 had a future one.
+    """
+    end = getattr(market, "end_date", None)
+    if not end:
+        return False
+    try:
+        return datetime.fromisoformat(str(end).replace("Z", "+00:00")) < datetime.now(timezone.utc)
+    except (ValueError, TypeError):
+        return False
+
+def _is_token_dead(token_id: str) -> bool:
+    """Check if a CLOB token_id recently returned 404."""
+    ts = _CLOB_404_CACHE.get(token_id)
+    if ts is None:
+        return False
+    import time
+    if time.time() - ts > _CLOB_404_TTL:
+        del _CLOB_404_CACHE[token_id]
+        return False
+    return True
+
+def _mark_token_dead(token_id: str):
+    """Mark a CLOB token_id as dead (404)."""
+    import time
+    _CLOB_404_CACHE[token_id] = time.time()
 
 def _fetch_json(source: str, url: str, timeout: int = 15):
     """Fetch JSON with optional resilient wrapper."""
@@ -368,14 +406,31 @@ def scan_neg_vig(markets: List[HFMarket] = None, threshold: float = 0.99) -> Lis
         if len(market.clob_token_ids) < 2:
             continue
         
+        # Expired markets keep their CLOB books torn down while Gamma still
+        # reports active=true&closed=false — their /book is a guaranteed 404.
+        if _is_market_expired(market):
+            continue
+
         try:
+            # Skip tokens that recently returned 404
+            yes_token = market.clob_token_ids[0]
+            no_token = market.clob_token_ids[1]
+            if _is_token_dead(yes_token) or _is_token_dead(no_token):
+                continue
+
             # Fetch Yes orderbook (token 0)
-            yes_url = f"{CLOB_API}/book?token_id={market.clob_token_ids[0]}"
+            yes_url = f"{CLOB_API}/book?token_id={yes_token}"
             yes_book = _fetch_json("clob_yes", yes_url, timeout=8)
+            if yes_book is None:
+                _mark_token_dead(yes_token)
+                continue
             
             # Fetch No orderbook (token 1)
-            no_url = f"{CLOB_API}/book?token_id={market.clob_token_ids[1]}"
+            no_url = f"{CLOB_API}/book?token_id={no_token}"
             no_book = _fetch_json("clob_no", no_url, timeout=8)
+            if no_book is None:
+                _mark_token_dead(no_token)
+                continue
             
             # Get best asks (cheapest price to buy)
             yes_asks = yes_book.get("asks", [])

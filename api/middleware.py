@@ -61,7 +61,7 @@ async def global_exception_handler(request: Request, exc: Exception):
                 str(exc)[:200]
             )
         except Exception:
-            pass
+            logger.warning("activity-feed emit failed for %s", request.url.path, exc_info=True)
     
     return JSONResponse(
         status_code=500,

@@ -15,6 +15,7 @@ State: storage/shadow_trades.db (auto-migrated tables)
 """
 
 from __future__ import annotations
+from config.polymarket_urls import clob_url, gamma_url  # polyproxy: central URL config
 
 import json
 import os
@@ -22,8 +23,9 @@ import socket
 import sqlite3
 import sys
 import time
-import urllib.request
 import urllib.parse
+
+import requests
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,14 +33,15 @@ from typing import Dict, List, Optional, Tuple
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
+from odds.monitor_gate import gated_fetch_json, LIVE_BOOKS
 
 from scripts.alert_formatter import send_telegram
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ESPN_MMA       = "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard"
-POLY_EVENTS    = "https://gamma-api.polymarket.com/events"
+POLY_EVENTS    = gamma_url("/events")
 ODDS_API_BASE  = "https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds/"
-CLOB_BOOK      = "https://clob.polymarket.com/book"
+CLOB_BOOK      = clob_url("/book")
 
 ODDS_API_KEY   = os.environ.get("ODDS_API_KEY", "")
 LINE_DRIFT_PP  = 10.0    # pp shift to fire drift alert (UFC swings hard between rounds)
@@ -68,7 +71,7 @@ def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=8000")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
@@ -108,9 +111,11 @@ def _get(url: str, params: Optional[dict] = None, timeout: int = 12) -> Optional
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "polyclawd/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode())
+        # requests, not urllib: ESPN's edge 403s Python's urllib TLS fingerprint
+        # (silent outage Aug 4-16 2026; urllib3's handshake passes)
+        r = requests.get(url, headers={"User-Agent": "polyclawd/1.0"}, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
     except Exception as e:
         print(f"[ufc_monitor] GET {url[:70]} → {e}", flush=True)
         return None
@@ -238,9 +243,9 @@ def fetch_pinnacle(fighter_a: str, fighter_b: str) -> Optional[Dict[str, float]]
     if not ODDS_API_KEY:
         return None
 
-    data = _get(ODDS_API_BASE, {
+    data = gated_fetch_json(ODDS_API_BASE, {
         "apiKey": ODDS_API_KEY,
-        "regions": "us,uk",
+        "bookmakers": LIVE_BOOKS,
         "markets": "h2h",
         "oddsFormat": "decimal",
     })
@@ -598,7 +603,7 @@ def check_line_drift(conn: sqlite3.Connection, fight: Dict,
 
     prev_a = prev["pin_a"]
     drift_a = (pin["a"] - prev_a) * 100 if prev_a else 0
-    drift_b = (pin["b"] - (prev["pin_b"] or 0)) * 100 if prev.get("pin_b") else 0
+    drift_b = (pin["b"] - (prev["pin_b"] or 0)) * 100 if prev["pin_b"] else 0
 
     if abs(drift_a) < LINE_DRIFT_PP and abs(drift_b) < LINE_DRIFT_PP:
         return
@@ -640,11 +645,11 @@ def check_edge_inversion(conn: sqlite3.Connection, fight: Dict,
 
     # Look for open shadow trades matching this fight
     rows = conn.execute("""
-        SELECT id, market_title, side, entry_price, confidence
+        SELECT id, market, side, entry_price, confidence
         FROM shadow_trades
         WHERE resolved = 0
           AND category = 'ufc'
-          AND (market_title LIKE ? OR market_title LIKE ?)
+          AND (market LIKE ? OR market LIKE ?)
     """, (f"%{fa}%", f"%{fb}%")).fetchall()
 
     for row in rows:
@@ -652,9 +657,9 @@ def check_edge_inversion(conn: sqlite3.Connection, fight: Dict,
         entry = row["entry_price"] / 100.0 if row["entry_price"] else 0
 
         # Determine current fair value
-        if _nmatch(fa, row["market_title"]):
+        if _nmatch(fa, row["market"]):
             fair = pin.get("a", 0.5)
-        elif _nmatch(fb, row["market_title"]):
+        elif _nmatch(fb, row["market"]):
             fair = pin.get("b", 0.5)
         else:
             continue
@@ -711,8 +716,21 @@ def main() -> None:
             ev = None
 
         tokens = extract_tokens(ev, fa, fb) if ev else {}
+        sdk_source = False
 
-        if tokens:
+        # SDK fallback: aec-ufc-{f1_abbr}-{f2_abbr}-{date} (binary, YES=f1 wins)
+        if not tokens:
+            try:
+                from scripts.pm_sdk_utils import fetch_pm_sdk_ufc
+                tokens = fetch_pm_sdk_ufc(fa, fb, pin=pin)
+                sdk_source = bool(tokens)
+                if sdk_source:
+                    print(f"[ufc_monitor] SDK fallback: {fa} vs {fb}", flush=True)
+            except Exception as _sdk_e:
+                print(f"[ufc_monitor] SDK fallback error: {_sdk_e}", flush=True)
+
+        if tokens and not sdk_source:
+            # SDK tokens use slugs, not CLOB token IDs — skip CLOB refresh for them
             mc_register_tokens([tokens[lbl][0] for lbl in tokens])
             tokens = refresh_clob_prices(tokens)
 

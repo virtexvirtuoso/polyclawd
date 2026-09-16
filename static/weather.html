@@ -3,15 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
 <title>Polyclawd — Kalshi Weather Fade (Paper)</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
 <style>
   :root {
-    --bg: #0a0e17; --card: #111827; --border: #1e293b;
-    --text: #e2e8f0; --dim: #94a3b8; --accent: #3b82f6;
-    --green: #10b981; --red: #ef4444; --amber: #f59e0b;
-    --cyan: #06b6d4; --purple: #8b5cf6;
+    --bg: var(--pc-bg); --card: var(--pc-panel); --border: var(--pc-line);
+    --text: var(--pc-ink); --dim: var(--pc-dim); --accent: var(--pc-accent);
+    --green: var(--pc-up); --red: var(--pc-down); --amber: var(--pc-warn);
+    --cyan: var(--pc-chart-4); --purple: var(--pc-chart-5);
   }
   * { margin: 0; padding: 0; box-sizing: border-box; } html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
   body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); padding: 20px; padding-left: max(20px, env(safe-area-inset-left)); padding-right: max(20px, env(safe-area-inset-right)); max-width: 1400px; margin: 0 auto; }
@@ -118,9 +118,16 @@
     table { font-size: 0.7rem; }
     .badge { font-size: 0.6rem; padding: 1px 5px; }
   }
+
+  /* ── Probability Bureau adoption (css/polyclawd.css) ── */
+  body{font-family:var(--pc-mono);background:var(--pc-bg);color:var(--pc-ink)}
+  body > *{position:relative;z-index:1}
+  *{border-radius:0!important;box-shadow:none!important;text-shadow:none!important}
+  h1,h2,h3,h4,.stat-value,.card-value,.page-title,.kpi-value,.big-num{font-family:var(--pc-disp);font-weight:400;letter-spacing:.03em}
+  .tab.active,.btn-primary{color:#0d0d0b}
 </style>
 </head>
-<body>
+<body data-pc-section="Weather">
 
 <div class="refresh-bar">
   <div>
@@ -147,18 +154,13 @@
   gates: depth census → realized shadow → live.
 </div>
 
-<div class="nav-links">
-  <a href="/polyclawd/portfolio.html">← Portfolio</a>
-  <a href="/polyclawd/baseball.html">⚾ Baseball</a>
-  <a href="/polyclawd/options.html">📈 Options</a>
-  <a href="/polyclawd/analysis.html">Analysis</a>
-</div>
 
 <!-- Tab Navigation -->
 <div class="tab-bar">
   <div class="tab active" onclick="switchTab('fade')">📉 Fade Overview</div>
   <div class="tab" onclick="switchTab('sheet')">📋 Edge Sheet</div>
   <div class="tab" onclick="switchTab('ensemble')">🔬 Ensemble Health</div>
+  <div class="tab" onclick="switchTab('resolution')">🎯 Resolution Edge</div>
 </div>
 
 <!-- ===================== FADE OVERVIEW TAB ===================== -->
@@ -250,9 +252,45 @@
 
 </div>
 
+<!-- ===================== RESOLUTION EDGE TAB ===================== -->
+<div class="section" id="tab-resolution">
+
+<!-- Summary Stats -->
+<div class="grid grid-4" id="res-summary">
+  <div class="card"><div class="stat-value" id="res-total">—</div><div class="stat-label">Active Signals</div></div>
+  <div class="card"><div class="stat-value" id="res-high">—</div><div class="stat-label">HIGH Conviction</div></div>
+  <div class="card"><div class="stat-value" id="res-log-count">—</div><div class="stat-label">Forecast Log Rows</div></div>
+  <div class="card"><div class="stat-value" id="res-log-cities">—</div><div class="stat-label">Cities Tracked</div></div>
+</div>
+
+<!-- Edge Signals Table -->
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">🎯 Resolution-Source Edge Signals</div>
+  <div class="subtitle" style="margin-bottom:10px">NWS edge for Kalshi (resolution source) · TWC edge for Polymarket (resolution source)</div>
+  <div class="table-wrap" id="res-signals-table"><div class="empty-state">Loading resolution edge signals...</div></div>
+</div>
+
+<!-- Forecast Log Sample -->
+<div class="card" style="margin-bottom:16px">
+  <div class="section-title">📊 Forecast Log (NWS vs TWC vs Market)</div>
+  <div class="subtitle" style="margin-bottom:10px">Accumulating data for validation · Phase 5 backtest after 2-3 weeks</div>
+  <div class="table-wrap" id="res-forecast-log"><div class="empty-state">Loading forecast log...</div></div>
+</div>
+
+<!-- NWS vs TWC Disagreements -->
+<div class="card">
+  <div class="section-title">⚡ Biggest NWS ↔ TWC Disagreements</div>
+  <div class="subtitle" style="margin-bottom:10px">When NWS and TWC disagree by &gt;3°F — high-signal cities</div>
+  <div class="table-wrap" id="res-disagreements"><div class="empty-state">Loading...</div></div>
+</div>
+
+</div>
+
 <script>
 const FADE_API = '/polyclawd/api/weather/kalshi-fade/dashboard';
 const ENSEMBLE_API = '/polyclawd/api/signals/weather/ensemble-status';
+const RESOLUTION_API = '/polyclawd/api/signals/weather-resolution-edge';
+const FORECAST_LOG_API = '/polyclawd/api/weather/forecast-log';
 const SHEET_URL = 'kalshi_fade_sheet.json';
 let charts = {};
 let refreshInterval = 60;
@@ -545,16 +583,114 @@ function renderCityCoverage(coverage, sources) {
   el.innerHTML = html + '</table>';
 }
 
+// ---------------- Resolution Edge ----------------
+async function loadResolution() {
+  try {
+    // Load edge signals
+    const res = await fetch(RESOLUTION_API);
+    const data = await res.json();
+    document.getElementById('res-total').textContent = data.total || 0;
+    document.getElementById('res-high').textContent = data.high_conviction || 0;
+
+    const sigEl = document.getElementById('res-signals-table');
+    if (!data.signals || data.signals.length === 0) {
+      sigEl.innerHTML = '<div class="empty-state">No edge signals above 5pp threshold right now.<br>Edges appear when forecasts shift and markets haven\'t caught up.</div>';
+    } else {
+      let html = '<table><thead><tr><th>City</th><th>Platform</th><th>Source</th><th>Forecast</th><th>Threshold</th><th>Market</th><th>Implied</th><th>Edge</th><th>Dir</th><th>Conv</th><th>Δ</th></tr></thead><tbody>';
+      for (const s of data.signals) {
+        const fc = s.nws_raw_max_f || s.twc_forecast_f || '—';
+        const convClass = s.conviction_tier === 'HIGH' ? 'positive' : s.conviction_tier === 'MEDIUM' ? 'neutral' : 'dim';
+        const edgeClass = Math.abs(s.edge_pp) >= 10 ? 'positive' : '';
+        const delta = s.forecast_delta != null ? (s.forecast_delta > 0 ? '+' : '') + s.forecast_delta + '°F' : '—';
+        html += `<tr>
+          <td>${s.city}</td>
+          <td>${s.platform}</td>
+          <td>${s.resolution_source.toUpperCase()}</td>
+          <td>${fc}°F</td>
+          <td>${s.threshold_f}°F</td>
+          <td>${(s.market_price * 100).toFixed(1)}¢</td>
+          <td>${((s.twc_implied_prob || s.nws_implied_prob) * 100).toFixed(1)}¢</td>
+          <td class="${edgeClass}" style="font-weight:600">${s.edge_pp > 0 ? '+' : ''}${s.edge_pp.toFixed(1)}pp</td>
+          <td>${s.direction === 'buy_yes' ? '🟢 YES' : '🔴 NO'}</td>
+          <td class="${convClass}">${s.conviction_tier}</td>
+          <td>${delta}</td>
+        </tr>`;
+      }
+      html += '</tbody></table>';
+      sigEl.innerHTML = html;
+    }
+
+    // Load forecast log stats
+    try {
+      const logRes = await fetch(FORECAST_LOG_API);
+      const logData = await logRes.json();
+      document.getElementById('res-log-count').textContent = logData.total_rows || '—';
+      document.getElementById('res-log-cities').textContent = logData.cities || '—';
+
+      // Forecast log table
+      const logEl = document.getElementById('res-forecast-log');
+      if (logData.recent && logData.recent.length > 0) {
+        let html = '<table><thead><tr><th>City</th><th>Date</th><th>NWS</th><th>TWC</th><th>Ensemble</th><th>Std</th><th>Actual</th><th>NWS Err</th><th>TWC Err</th></tr></thead><tbody>';
+        for (const r of logData.recent) {
+          const nwsErr = r.nws_error_f != null ? (r.nws_error_f > 0 ? '+' : '') + r.nws_error_f.toFixed(1) + '°F' : '—';
+          const twcErr = r.twc_error_f != null ? (r.twc_error_f > 0 ? '+' : '') + r.twc_error_f.toFixed(1) + '°F' : '—';
+          html += `<tr>
+            <td>${r.city}</td><td>${r.target_date}</td>
+            <td>${r.nws_forecast_high_f != null ? r.nws_forecast_high_f.toFixed(0) + '°F' : '—'}</td>
+            <td>${r.twc_forecast_high_f != null ? r.twc_forecast_high_f.toFixed(0) + '°F' : '—'}</td>
+            <td>${r.ensemble_forecast_f != null ? r.ensemble_forecast_f.toFixed(1) + '°F' : '—'}</td>
+            <td>${r.ensemble_std_f != null ? '±' + r.ensemble_std_f.toFixed(1) : '—'}</td>
+            <td>${r.actual_high_f != null ? r.actual_high_f.toFixed(0) + '°F' : '⏳'}</td>
+            <td>${nwsErr}</td><td>${twcErr}</td>
+          </tr>`;
+        }
+        html += '</tbody></table>';
+        logEl.innerHTML = html;
+      } else {
+        logEl.innerHTML = '<div class="empty-state">Forecast log accumulating — data populates on each weather tick</div>';
+      }
+
+      // Disagreements table
+      const disEl = document.getElementById('res-disagreements');
+      if (logData.disagreements && logData.disagreements.length > 0) {
+        let html = '<table><thead><tr><th>City</th><th>Date</th><th>NWS</th><th>TWC</th><th>Diff</th><th>Who was right?</th></tr></thead><tbody>';
+        for (const d of logData.disagreements) {
+          const diff = Math.abs(d.nws_forecast_high_f - d.twc_forecast_high_f).toFixed(0);
+          let verdict = '⏳';
+          if (d.actual_high_f != null) {
+            const nwsErr = Math.abs(d.nws_forecast_high_f - d.actual_high_f);
+            const twcErr = Math.abs(d.twc_forecast_high_f - d.actual_high_f);
+            verdict = nwsErr < twcErr ? '🏛️ NWS' : twcErr < nwsErr ? '🌤️ TWC' : '🤝 Tie';
+          }
+          html += `<tr>
+            <td>${d.city}</td><td>${d.target_date}</td>
+            <td>${d.nws_forecast_high_f.toFixed(0)}°F</td>
+            <td>${d.twc_forecast_high_f.toFixed(0)}°F</td>
+            <td style="font-weight:600">${diff}°F</td>
+            <td>${verdict}</td>
+          </tr>`;
+        }
+        html += '</tbody></table>';
+        disEl.innerHTML = html;
+      }
+    } catch (e) { console.warn('Forecast log load failed:', e); }
+  } catch (e) {
+    console.error('Resolution edge load failed:', e);
+  }
+}
+
 function tick() {
   countdown--;
-  if (countdown <= 0) { loadFade(); loadSheet(); loadEnsemble(); countdown = refreshInterval; }
+  if (countdown <= 0) { loadFade(); loadSheet(); loadEnsemble(); loadResolution(); countdown = refreshInterval; }
   document.getElementById('timer').textContent = `Refresh in ${countdown}s`;
 }
 
 loadFade();
 loadSheet();
 loadEnsemble();
+loadResolution();
 setInterval(tick, 1000);
 </script>
+<script src="polyclawd-shell.js" defer></script>
 </body>
 </html>

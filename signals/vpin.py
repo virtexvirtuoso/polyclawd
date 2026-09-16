@@ -19,6 +19,7 @@ Architecture:
 """
 
 import json
+from collections import Counter
 import logging
 import math
 import os
@@ -33,6 +34,8 @@ from typing import Dict, List, Optional
 # Ensure project root is importable
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from db import connect as db_connect  # noqa: E402
 
 logger = logging.getLogger("vpin")
 
@@ -51,7 +54,7 @@ BACKTEST_MIN_ACCURACY = 55.0  # % — Andersen-Bondarenko gate
 
 def _ensure_db():
     """Create vpin_snapshots.db schema if not present."""
-    conn = sqlite3.connect(str(VPIN_DB_PATH))
+    conn = db_connect(str(VPIN_DB_PATH))
     try:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS vpin_snapshots (
@@ -90,7 +93,7 @@ def _save_vpin_snapshot(
 ):
     """Store a VPIN snapshot for later backtesting."""
     _ensure_db()
-    conn = sqlite3.connect(str(VPIN_DB_PATH))
+    conn = db_connect(str(VPIN_DB_PATH))
     try:
         now = time.time()
         conn.execute(
@@ -107,7 +110,7 @@ def _save_vpin_snapshot(
 def _load_vpin_snapshots(limit: int = 500) -> list:
     """Load stored VPIN snapshots for backtesting."""
     _ensure_db()
-    conn = sqlite3.connect(str(VPIN_DB_PATH))
+    conn = db_connect(str(VPIN_DB_PATH))
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
@@ -119,40 +122,55 @@ def _load_vpin_snapshots(limit: int = 500) -> list:
         conn.close()
 
 
-def _update_price_1h_later(slug: str, ts: float, price_1h: float):
-    """Backfill price_1h_later and direction_match for a snapshot."""
+def _backfill_1h_outcomes(
+    min_age_s: int = 3300, max_age_s: int = 5400, max_slugs: int = 40
+) -> int:
+    """Fill price_1h_later for snapshots aged ~55-90 min.
+
+    Called from run_scan() every cycle, so in steady state rows are filled
+    on the first cycle after they turn 55 min old (i.e. at 55-65 min — an
+    honest "1h later" price). Rows that age past max_age_s unfilled (e.g.
+    scheduler downtime) stay NULL and are excluded by backtest_vpin_accuracy.
+    direction_match is left NULL — the backtest derives direction from
+    buy_pct + the two prices itself.
+
+    Returns the number of snapshots filled.
+    """
     _ensure_db()
-    conn = sqlite3.connect(str(VPIN_DB_PATH))
+    now = time.time()
+    conn = db_connect(str(VPIN_DB_PATH))
     try:
-        # Find the snapshot closest to ts+1h for this slug
-        target_ts = ts + 3600
-        row = conn.execute(
-            """SELECT id, price_at_snap FROM vpin_snapshots
-               WHERE slug = ? AND ts >= ? AND price_1h_later IS NULL
-               ORDER BY ts ASC LIMIT 1""",
-            (slug, target_ts),
-        ).fetchone()
-        if row:
-            price_old = row[1] or 0.5
-            direction_match = 1 if (price_1h > price_old) == (price_1h > price_old) else -1  # corrected below
-            # Correct direction_match: does the move direction match VPIN flow?
-            # We'll compute this in backtest_vpin_accuracy instead.
-            conn.execute(
-                "UPDATE vpin_snapshots SET price_1h_later = ? WHERE id = ?",
-                (price_1h, row[0]),
+        slugs = conn.execute(
+            """SELECT DISTINCT slug FROM vpin_snapshots
+               WHERE price_1h_later IS NULL AND ts <= ? AND ts >= ?
+               LIMIT ?""",
+            (now - min_age_s, now - max_age_s, max_slugs),
+        ).fetchall()
+        filled = 0
+        for (slug,) in slugs:
+            price = _fetch_market_price(slug)
+            if price is None:
+                continue
+            cur = conn.execute(
+                """UPDATE vpin_snapshots SET price_1h_later = ?
+                   WHERE slug = ? AND price_1h_later IS NULL
+                     AND ts <= ? AND ts >= ?""",
+                (price, slug, now - min_age_s, now - max_age_s),
             )
-            conn.commit()
+            filled += cur.rowcount
+        conn.commit()
+        return filled
     finally:
         conn.close()
 
 
 # ─── Trade Fetching ─────────────────────────────────────────────────────
 
-def _get_recent_trades(token_id: str, limit: int = 500) -> list:
+def _get_recent_trades(token_id: str, limit: int = 500, condition_id: str = "") -> list:
     """Fetch recent trades using the CLOB client.
     Falls back to our direct /trades implementation if available."""
     from odds.polymarket_clob import get_recent_trades as _clob_trades
-    return _clob_trades(token_id, limit=limit)
+    return _clob_trades(token_id, limit=limit, condition_id=condition_id)
 
 
 def _fetch_market_price(slug: str) -> Optional[float]:
@@ -189,7 +207,7 @@ def _fetch_liquid_markets(limit: int = 30) -> list:
 
 # ─── VPIN Core Computation ──────────────────────────────────────────────
 
-def compute_vpin(token_id: str, n_bars: int = DEFAULT_N_BARS) -> dict:
+def compute_vpin(token_id: str, n_bars: int = DEFAULT_N_BARS, condition_id: str = "") -> dict:
     """
     Compute VPIN for a single Polymarket CLOB token.
 
@@ -210,7 +228,7 @@ def compute_vpin(token_id: str, n_bars: int = DEFAULT_N_BARS) -> dict:
         vpin_class, buy_volume, sell_volume, total_volume
         Returns error dict on failure.
     """
-    trades = _get_recent_trades(token_id, limit=2000)
+    trades = _get_recent_trades(token_id, limit=2000, condition_id=condition_id)
     if not trades or len(trades) < DEFAULT_MIN_TRADES:
         return {
             "error": f"Insufficient trades: got {len(trades) if trades else 0}, need {DEFAULT_MIN_TRADES}",
@@ -371,6 +389,7 @@ def scan_top_markets_vpin(top_n: int = 20) -> list:
         return []
 
     results = []
+    snapshot_rows = []
     for m in markets:
         slug = m.get("slug", "")
         question = m.get("question", "")[:80]
@@ -382,7 +401,7 @@ def scan_top_markets_vpin(top_n: int = 20) -> list:
             logger.debug("Skipping %s: no token ID", slug)
             continue
 
-        result = compute_vpin(token_id)
+        result = compute_vpin(token_id, condition_id=m.get("conditionId", ""))
         if result.get("error"):
             logger.debug("VPIN skip %s: %s", slug, result["error"])
             continue
@@ -406,15 +425,32 @@ def scan_top_markets_vpin(top_n: int = 20) -> list:
         }
         results.append(entry)
 
-        # Store snapshot for backtesting
-        _save_vpin_snapshot(
+        # Snapshot deferred until after the sanity gate below
+        snapshot_rows.append(dict(
             slug=slug,
             token_id=token_id,
             vpin=result["vpin"],
             buy_pct=result["buy_pct"],
             n_trades=result["n_trades"],
             price_at_snap=price or 0.5,
-        )
+        ))
+
+    # Sanity gate: identical VPIN across most markets = dead input filter
+    # (2026-07-08: token_id passed as data-api `market` param was silently
+    # ignored, stamping one global-tape VPIN on all 30 markets)
+    if len(results) >= 5:
+        vpin_counts = Counter(r["vpin"] for r in results)
+        top_vpin, top_count = vpin_counts.most_common(1)[0]
+        if top_count > len(results) / 2:
+            logger.error(
+                "VPIN sanity gate: %d/%d markets share identical VPIN=%.4f — "
+                "input filter likely dead; skipping snapshot writes",
+                top_count, len(results), top_vpin,
+            )
+            snapshot_rows = []
+
+    for row in snapshot_rows:
+        _save_vpin_snapshot(**row)
 
     # Rank by VPIN descending
     results.sort(key=lambda x: x["vpin"], reverse=True)
@@ -461,7 +497,7 @@ def vpin_for_slug(slug: str) -> dict:
     if not token_id:
         return {"error": f"No token ID for {slug}", "slug": slug}
 
-    result = compute_vpin(token_id)
+    result = compute_vpin(token_id, condition_id=m.get("conditionId", ""))
     price = _fetch_market_price(slug)
 
     result["slug"] = slug
@@ -620,6 +656,12 @@ def backtest_vpin_accuracy(vpin_snapshots: Optional[list] = None) -> dict:
 def run_scan(verbose: bool = False) -> dict:
     """Run a full VPIN scan and return results."""
     results = scan_top_markets_vpin(top_n=20)
+    try:
+        filled = _backfill_1h_outcomes()
+        if filled:
+            logger.info("VPIN backfill: price_1h_later filled for %d snapshots", filled)
+    except Exception:
+        logger.exception("VPIN 1h-outcome backfill failed")
     accuracy = backtest_vpin_accuracy()
     return {
         "scan_results": results,

@@ -13,6 +13,7 @@ State: storage/shadow_trades.db (3 new tables auto-migrated)
 """
 
 from __future__ import annotations
+from config.polymarket_urls import clob_url, gamma_url  # polyproxy: central URL config
 
 import json
 import os
@@ -20,21 +21,34 @@ import socket
 import sqlite3
 import sys
 import time
-import urllib.request
 import urllib.parse
+
+import requests
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
+from odds.monitor_gate import gated_fetch_json, LIVE_BOOKS
 
-from scripts.alert_formatter import send_telegram
+from scripts.alert_formatter import format_grid, send_telegram
+from signals.alert_dispatch import TIER_DIGEST, dispatch
+from signals.alert_governor import Leg, govern
+
+# Leagues whose live-match alerts are RECORDED but never paged (2026-08-22).
+# MLS carries the largest lifetime Polymarket soccer volume ($21.9M / 24 events)
+# but that is cumulative across a long season: measured 24h volume is $3,322 and
+# resting liquidity $989K (~$41K/event) vs EPL $7.18M and UCL $6.43M. It is not
+# tradeable depth, so it should not interrupt. Alerts still land in the tier-3
+# digest, so the coverage is kept and can be re-promoted on evidence.
+SHADOW_LEAGUES = {"MLS"}
 
 # ── Config ──────────────────────────────────────────────────────────────────
-POLY_EVENTS    = "https://gamma-api.polymarket.com/events"
-CLOB_BOOK      = "https://clob.polymarket.com/book"
+POLY_EVENTS    = gamma_url("/events")
+CLOB_BOOK      = clob_url("/book")
+CLOB_MIDPOINT  = clob_url("/midpoint")
 ESPN_BASE      = "https://site.api.espn.com/apis/site/v2/sports"
 ODDS_API_BASE  = "https://api.the-odds-api.com/v4/sports"
 
@@ -50,6 +64,7 @@ LEAGUE_CONFIGS: List[Dict] = [
         "espn_path": "soccer/fifa.world/scoreboard",
         "odds_key": "soccer_fifa_world_cup",
         "pm_tag": "fifa-world-cup",
+        "pm_sdk_comp": "fwc",   # SDK event prefix: fwc-{team1}-{team2}-{date}
         "kalshi_series": "KXWCGAME",
         "active_months": [6, 7],
     },
@@ -58,6 +73,7 @@ LEAGUE_CONFIGS: List[Dict] = [
         "espn_path": "soccer/usa.1/scoreboard",
         "odds_key": "soccer_usa_mls",
         "pm_tag": "mls",
+        "pm_sdk_comp": None,    # SDK prefix unknown — skip SDK fallback
         "kalshi_series": None,
         "active_months": [3, 4, 5, 6, 7, 8, 9, 10, 11],
     },
@@ -66,6 +82,7 @@ LEAGUE_CONFIGS: List[Dict] = [
         "espn_path": "soccer/eng.1/scoreboard",
         "odds_key": "soccer_epl",
         "pm_tag": "soccer",
+        "pm_sdk_comp": None,
         "kalshi_series": None,
         "active_months": [8, 9, 10, 11, 12, 1, 2, 3, 4, 5],
     },
@@ -74,6 +91,7 @@ LEAGUE_CONFIGS: List[Dict] = [
         "espn_path": "soccer/uefa.champions/scoreboard",
         "odds_key": "soccer_uefa_champs_league",
         "pm_tag": "soccer",
+        "pm_sdk_comp": None,
         "kalshi_series": None,
         "active_months": [9, 10, 11, 12, 1, 2, 3, 4, 5, 6],
     },
@@ -82,6 +100,7 @@ LEAGUE_CONFIGS: List[Dict] = [
         "espn_path": "soccer/esp.1/scoreboard",
         "odds_key": "soccer_spain_la_liga",
         "pm_tag": "soccer",
+        "pm_sdk_comp": None,
         "kalshi_series": None,
         "active_months": [8, 9, 10, 11, 12, 1, 2, 3, 4, 5],
     },
@@ -89,6 +108,7 @@ LEAGUE_CONFIGS: List[Dict] = [
 
 ODDS_API_KEY   = os.environ.get("ODDS_API_KEY", "")
 LINE_DRIFT_PP  = 5.0    # pp shift to trigger drift alert
+BLOWOUT_GOAL_DIFF = 3   # if lead >= this, suppress drift alert (game effectively over)
 WHALE_SIZE     = 50000  # single order size threshold (Polymarket CLOB units)
 WHALE_DEDUP_S  = 1800   # suppress re-alert for same wall within 30 min
 EDGE_FLOOR     = 0.02   # close shadow trade if edge drops below 2pp
@@ -118,7 +138,7 @@ def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=8000")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
@@ -211,9 +231,10 @@ def _get(url: str, params: dict | None = None, timeout: int = 12) -> Optional[di
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "polyclawd/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode())
+        # requests, not urllib: ESPN's edge 403s Python's urllib TLS fingerprint
+        r = requests.get(url, headers={"User-Agent": "polyclawd/1.0"}, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
     except Exception as e:
         print(f"[monitor] GET {url[:70]} → {e}", flush=True)
         return None
@@ -285,9 +306,9 @@ def fetch_pinnacle(home: str, away: str, odds_key: str = "soccer_fifa_world_cup"
     """
     if not ODDS_API_KEY:
         return None
-    # Fetch ALL books, not just Pinnacle — 1 credit (bookmakers= costs 1 per book)
-    data = _get(f"{ODDS_API_BASE}/{odds_key}/odds/", {
-        "apiKey": ODDS_API_KEY, "regions": "us,uk,eu",
+    # Multi-book at 1 credit: <=10 bookmakers bill as 1 region (vs regions=us,uk,eu = 3).
+    data = gated_fetch_json(f"{ODDS_API_BASE}/{odds_key}/odds/", {
+        "apiKey": ODDS_API_KEY, "bookmakers": LIVE_BOOKS,
         "markets": "h2h", "oddsFormat": "decimal",
     })
     if not data:
@@ -306,11 +327,19 @@ def fetch_pinnacle(home: str, away: str, odds_key: str = "soccer_fifa_world_cup"
                     continue
                 outcomes = mkt["outcomes"]
                 valid = [o for o in outcomes if o.get("price", 0) and o["price"] > 1.0]
-                if len(valid) < 2:
+                # COMPLETE outcome set required (2026-08-21). `len(valid) < 2`
+                # let a 3-way soccer market be devigged from only 2 outcomes:
+                # the pair then normalises to 1.0, inflating BOTH by the missing
+                # outcome's share (~25pp on soccer) — 4x the 6pp trigger. The
+                # old `total < 0.5` guard does not catch it: 2 of 3 outcomes
+                # sums to ~0.78 with vig and passes.
+                if len(valid) < 2 or len(valid) != len(outcomes):
                     continue
                 raw = {o["name"]: 1.0 / o["price"] for o in valid}
                 total = sum(raw.values())
-                if total < 0.5:
+                # Raw implied probabilities must sum to 1 + vig. Outside a sane
+                # band the book's prices are malformed, stale or incomplete.
+                if not (0.95 <= total <= 1.50):
                     continue
                 devigged = {k: v / total for k, v in raw.items()}
                 upd = mkt.get("last_update", bm.get("last_update", ""))
@@ -365,7 +394,16 @@ def fetch_pinnacle(home: str, away: str, odds_key: str = "soccer_fifa_world_cup"
 
 # ── Polymarket ────────────────────────────────────────────────────────────────
 def fetch_poly_event(home: str, away: str, pm_tag: str = "fifa-world-cup") -> Optional[Dict]:
-    data = _get(POLY_EVENTS, {"tag_slug": pm_tag, "active": "true", "limit": 200})
+    now_utc = datetime.now(timezone.utc)
+    end_min = now_utc.strftime("%Y-%m-%dT00:00:00Z")
+    end_max = (now_utc + timedelta(days=2)).strftime("%Y-%m-%dT00:00:00Z")
+    data = _get(POLY_EVENTS, {
+        "tag_slug": pm_tag,
+        "active": "true",
+        "limit": 200,
+        "end_date_min": end_min,
+        "end_date_max": end_max,
+    })
     if not data:
         return None
     for ev in (data if isinstance(data, list) else []):
@@ -403,7 +441,13 @@ def extract_tokens(ev: Dict, home: str, away: str) -> Dict[str, Tuple[str, float
 # ── CLOB ─────────────────────────────────────────────────────────────────────
 
 def refresh_clob_prices(tokens: Dict) -> Dict:
-    """Replace Gamma-cached prices with live CLOB mid. Adds liquid flag (bid>2%, ask<98%)."""
+    """Replace Gamma-cached prices with live CLOB mid. Adds liquid flag.
+
+    LOB ghost mode (bid≤2% or ask≥98%) occurs during live soccer when human market
+    makers pull resting orders. Polymarket's AMM still provides real pricing via
+    /midpoint even when the LOB is thin. Fall back to /midpoint before marking illiquid.
+    Only mark liquid=False when the midpoint itself indicates a terminal/settling market.
+    """
     updated = {}
     for label, token_data in tokens.items():
         tid = token_data[0]
@@ -417,6 +461,7 @@ def refresh_clob_prices(tokens: Dict) -> Dict:
         best_bid = float(bids[0]["price"]) if bids else 0.0
         best_ask = float(asks[0]["price"]) if asks else 1.0
         if best_bid > 0.02 and best_ask < 0.98 and best_ask > best_bid:
+            # Normal LOB with real spread — use LOB mid
             clob_mid = (best_bid + best_ask) / 2
             liquid = any(
                 abs(float(o["price"]) - clob_mid) <= 0.15
@@ -424,7 +469,16 @@ def refresh_clob_prices(tokens: Dict) -> Dict:
             )
             updated[label] = (tid, clob_mid, liquid)
         else:
-            updated[label] = (tid, gamma_price, False)
+            # LOB in ghost mode (0.001/0.999) — fall back to AMM midpoint
+            mid_data = _get(CLOB_MIDPOINT, {"token_id": tid})
+            if mid_data and "mid" in mid_data:
+                clob_mid = float(mid_data["mid"])
+                # liquid=False only when truly terminal (market settling at extremes)
+                liquid = 0.03 < clob_mid < 0.97
+                updated[label] = (tid, clob_mid, liquid)
+            else:
+                # /midpoint also failed — fall back to Gamma price, mark unknown
+                updated[label] = (tid, gamma_price, False)
     return updated
 
 def fetch_book(token_id: str) -> Optional[Dict]:
@@ -614,7 +668,7 @@ def check_goal_trigger(conn: sqlite3.Connection, game: Dict,
             gap = (pin_p - poly_p) * 100
             plain = "It ends in a draw" if name == "Draw" else f"{name} wins"
             if not liquid:
-                lines.append(f"  🔒 <b>{plain}</b>: Polymarket {poly_p:.0%}  (illiquid — no live orders)")
+                lines.append(f"  🔒 <b>{plain}</b>: Polymarket {poly_p:.0%}  (market settling — price terminal)")
             elif abs(gap) >= PM_GAP_PP:
                 direction = "cheaper" if gap > 0 else "pricier"
                 action = "BUY" if gap > 0 else "SELL"
@@ -654,11 +708,30 @@ def check_goal_trigger(conn: sqlite3.Connection, game: Dict,
             lines.append("Big money spotted post-goal:")
             lines.extend(walls_found)
 
-    # Suppress goal alerts with no actionable edge (no PM gap, no whale wall)
+    # No actionable edge (no PM gap, no whale wall) -> tier-3 digest, not Telegram.
+    # Previously this returned silently; the event is still a fact worth seeing
+    # in the 2x-daily digest, just not an interrupt.
     if not trade_signals and not walls_found:
-        print(f"[goal_trigger] Goal {home} {hs}-{as_} {away} — no edge/wall, suppressed", flush=True)
+        try:
+            # Compact one-liner: the digest is a scannable list of what
+            # happened, not 100 full alert bodies (cf. run_scored).
+            dispatch("soccer_goal",
+                     f"{home} {hs}–{as_} {away} ({detail}) — goal by {scorer}; no PM edge",
+                     TIER_DIGEST)
+        except Exception as ex:  # noqa: BLE001 — digest must never block the monitor
+            print(f"[goal_trigger] digest dispatch failed: {ex}", flush=True)
+        print(f"[goal_trigger] Goal {home} {hs}-{as_} {away} — no edge/wall, digested", flush=True)
         return
 
+    if game.get("_league") in SHADOW_LEAGUES:
+        try:
+            dispatch("soccer_goal",
+                     f"[{game.get('_league')}] {home} {hs}–{as_} {away} ({detail}) — actionable, shadowed",
+                     TIER_DIGEST)
+        except Exception as ex:  # noqa: BLE001
+            print(f"[goal_trigger] digest dispatch failed: {ex}", flush=True)
+        print(f"[goal_trigger] {home} {hs}-{as_} {away} — shadow league, digested", flush=True)
+        return
     send_telegram("\n".join(lines))
     print("[goal_trigger] Alert sent", flush=True)
 
@@ -747,24 +820,25 @@ def check_line_drift(conn: sqlite3.Connection, game: Dict,
         """, (gid, outcome, prob, now_ts))
     conn.commit()
 
+    # Blowout gate: suppress drift alert if game is effectively over
+    # 4-0 in the 80th minute doesn't need an alert
+    goal_diff = abs(hs - as_)
+    if goal_diff >= BLOWOUT_GOAL_DIFF:
+        any_drift = False
+
     if not any_drift:
         return
 
     # ── Build novice-friendly message ─────────────────────────────────────
     score_line = f"{home} <b>{hs}–{as_}</b> {away}  ({detail})  <i>{fired_ts}</i>"
-    lines = [
-        f"⚡ <b>ODDS MOVED</b> — {score_line}",
-        "",
-        "Vegas bookmakers shifted big. Here's where each outcome stands:",
-        "",
-    ]
-
     trade_signals: List[str] = []
+    grid_rows: List[list] = []
+    comparison_lines: List[str] = []
 
     for d in outcome_data:
         sym = "↑" if d["move"] > 0 else "↓"
         moved = abs(d["move"]) >= LINE_DRIFT_PP
-        move_tag = f"  <b>{sym}{abs(d['move']):.0f}pts</b>" if moved else f"  {d['move']:+.0f}pts"
+        move_str = f"{sym}{abs(d['move']):.0f}pts" if moved else f"{d['move']:+.0f}pts"
 
         # Plain-English outcome label — use _nmatch to handle Pinnacle/ESPN name divergence
         # e.g. Pinnacle returns "USA" but ESPN gives home="United States"
@@ -777,20 +851,19 @@ def check_line_drift(conn: sqlite3.Connection, game: Dict,
         else:
             label = f"{d['name']} wins"  # fallback: use Pinnacle's name verbatim
 
-        lines.append(f"{d['flag']} <b>{label}</b>")
-        lines.append(f"   {d['prev']:.0%} → <b>{d['now']:.0%}</b>{move_tag}")
+        grid_rows.append([label, f"{d['prev']:.0%}", f"{d['now']:.0%}", move_str])
 
         if d["poly"] is not None:
             gap = d["gap"]
             if gap is not None and abs(gap) >= PM_GAP_PP:
                 direction = "cheaper" if gap > 0 else "pricier"
                 action = "BUY" if gap > 0 else "SELL"
-                lines.append(f"   Polymarket: {d['poly']:.0%}  ← <b>{abs(gap):.0f}pts {direction} than Vegas</b>")
+                comparison_lines.append(f"<b>{label}</b>: Polymarket {d['poly']:.0%}  ← <b>{abs(gap):.0f}pts {direction} than Vegas</b>")
                 trade_signals.append(
                     f"→ <b>{action} {d['name']} YES</b> on Polymarket at {d['poly']:.0%}  (Vegas says {d['now']:.0%})"
                 )
             else:
-                lines.append(f"   Polymarket: {d['poly']:.0%}  (in line with Vegas)")
+                comparison_lines.append(f"<b>{label}</b>: Polymarket {d['poly']:.0%}  (in line with Vegas)")
 
             # Kalshi 3rd leg
             if kal is not None:
@@ -801,21 +874,82 @@ def check_line_drift(conn: sqlite3.Connection, game: Dict,
                     if abs(kal_gap) >= PM_GAP_PP:
                         direction = "cheaper" if kal_gap > 0 else "pricier"
                         action = "BUY" if kal_gap > 0 else "SELL"
-                        lines.append(f"   Kalshi:      {kal_p:.0%}  ← <b>{abs(kal_gap):.0f}pts {direction} than Vegas</b>")
+                        comparison_lines.append(f"<b>{label}</b>: Kalshi {kal_p:.0%}  ← <b>{abs(kal_gap):.0f}pts {direction} than Vegas</b>")
                         trade_signals.append(
                             f"→ <b>{action} {d['name']} YES</b> on Kalshi at {kal_p:.0%}  (Vegas says {d['now']:.0%})"
                         )
                     else:
-                        lines.append(f"   Kalshi:      {kal_p:.0%}  (in line with Vegas)")
-        lines.append("")
+                        comparison_lines.append(f"<b>{label}</b>: Kalshi {kal_p:.0%}  (in line with Vegas)")
+
+    lines = [
+        f"⚡ <b>ODDS MOVED</b> — {score_line}",
+        "",
+        "Vegas bookmakers shifted big. Here's where each outcome stands:",
+        "",
+        format_grid(["Outcome", "Prev", "Now", "Move"], grid_rows),
+        "",
+    ]
+    lines.extend(comparison_lines)
 
     if trade_signals:
         lines.append("━━━━━━━━━━━━━━━━")
         lines.append("💰 <b>Polymarket hasn't caught up yet:</b>")
         lines.extend(trade_signals)
 
-    send_telegram("\n".join(lines))
-    print(f"[line_drift] Alert sent: {gid}", flush=True)
+    def _digest_line() -> str:
+        _moves = ", ".join(f"{d['name']} {d['prev']:.0%}→{d['now']:.0%}"
+                           for d in outcome_data if abs(d["move"]) >= LINE_DRIFT_PP)
+        _pm = "PM in line" if any(d["poly"] is not None for d in outcome_data) else "PM unavailable"
+        return f"{home} {hs}–{as_} {away} ({detail}) — {_moves or 'line move'}; {_pm}"
+
+    def _to_digest(reason: str) -> None:
+        try:
+            dispatch("soccer_odds_moved", _digest_line(), TIER_DIGEST)
+        except Exception as ex:  # noqa: BLE001 — digest must never block the monitor
+            print(f"[line_drift] digest dispatch failed: {ex}", flush=True)
+        print(f"[line_drift] {gid} — {reason}, digested", flush=True)
+
+    # RELEVANCE GATE FIRST (reordered 2026-08-21 after /qa audit).
+    # Vegas moving is not actionable unless Polymarket lags it. Critically this
+    # must run BEFORE govern(): the governor unconditionally stamps "alerted at
+    # level X at time T" for any non-suppress verdict, so letting a digest-only
+    # event arm it means the NEXT genuinely actionable move fails the escalation
+    # test against a level that was never sent. That inverts alert_governor.py's
+    # own contract ("gates SENDS only; callers must log BEFORE calling govern()").
+    if not trade_signals:
+        _to_digest("no PM gap")
+        return
+
+    # Only actionable alerts reach the governor.
+    # Escalation-aware dedup — soccer had NO cooldown at all before this
+    # (one match produced a dozen pings across 21 minutes, 2026-08-20).
+    # Magnitude is the current devig LEVEL in pp, matching mlb_line_drift.
+    drift_legs = [Leg(d["name"], d["now"] * 100, "up" if d["move"] > 0 else "down")
+                  for d in outcome_data if abs(d["move"]) >= LINE_DRIFT_PP]
+    try:
+        verdict = govern("soccer_line_drift", gid, drift_legs)
+    except Exception as ex:  # noqa: BLE001 — fail open, a dup is cheaper than a miss
+        print(f"[line_drift] governor failed, firing open: {ex}", flush=True)
+        verdict = None
+    # Honour the governor's DECISION even while the pipeline is in shadow mode.
+    # shadow keeps should_send=True (module-level enforcement is off, so the
+    # decision is only recorded) — but soccer runs on a 1-min tick, and without
+    # this a drifting match with a standing PM gap pages every 60 seconds: the
+    # exact "dozen pings across 21 minutes" flood. Testing `action` rather than
+    # `should_send` keeps the pipeline measurable in shadow while still deduping,
+    # and keeps this digest branch reachable. (/qa critic, 2026-08-21.)
+    if verdict is not None and verdict.action == "suppress":
+        # Digest, never silence. Previously this returned outright, so a governed
+        # alert produced neither a Telegram message nor a digest row — one log line.
+        _to_digest(f"governed ({','.join(verdict.reasons) or 'same-state'})")
+        return
+
+    msg = verdict.decorate("\n".join(lines)) if verdict is not None else "\n".join(lines)
+    if game.get("_league") in SHADOW_LEAGUES:
+        _to_digest(f"shadow league {game.get('_league')}")
+        return
+    send_telegram(msg)
+    print(f"[line_drift] Alert sent (actionable): {gid}", flush=True)
 
 
 # ── Alert 3: CLOB Whale Wall ──────────────────────────────────────────────────
@@ -977,6 +1111,7 @@ def main() -> None:
         espn_path  = league["espn_path"]
         odds_key   = league["odds_key"]
         pm_tag     = league["pm_tag"]
+        pm_sdk_comp = league.get("pm_sdk_comp")  # SDK competition prefix (fwc, etc.)
         kalshi_s   = league["kalshi_series"]  # None = skip Kalshi leg
         lname      = league["name"]
 
@@ -991,6 +1126,7 @@ def main() -> None:
         print(f"[soccer_live_monitor] {lname}: {len(active)} active game(s)", flush=True)
 
         for game in active:
+            game["_league"] = lname  # consumed by the SHADOW_LEAGUES routing
             home, away = game["home_team"], game["away_team"]
             print(f"[soccer_live_monitor] → {home} vs {away}  ({game['detail']})", flush=True)
 
@@ -1016,8 +1152,22 @@ def main() -> None:
                 kal = None
 
             tokens = extract_tokens(ev, home, away) if ev else {}
+            sdk_source = False
 
-            if tokens:
+            # SDK fallback: Gamma CLOB may not exist for all games.
+            # For WC, construct slugs directly: atc-fwc-{id}-{team} (3-way)
+            if not tokens and pm_sdk_comp:
+                try:
+                    from scripts.pm_sdk_utils import fetch_pm_sdk_soccer
+                    tokens = fetch_pm_sdk_soccer(home, away, competition=pm_sdk_comp, pin=pin)
+                    sdk_source = bool(tokens)
+                    if sdk_source:
+                        print(f"[soccer_live_monitor] SDK fallback: {home} vs {away}", flush=True)
+                except Exception as _sdk_e:
+                    print(f"[soccer_live_monitor] SDK fallback error: {_sdk_e}", flush=True)
+
+            if tokens and not sdk_source:
+                # SDK tokens use slugs, not CLOB token IDs — skip CLOB refresh for them
                 mc_register_tokens([tokens[lbl][0] for lbl in tokens])
                 tokens = refresh_clob_prices(tokens)
 

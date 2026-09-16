@@ -21,6 +21,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 
 router = APIRouter()
@@ -53,12 +54,13 @@ LLM_PROVIDER = "anthropic" if ANTHROPIC_API_KEY else ("openai" if OPENAI_API_KEY
 
 # LLM Validation Cache
 LLM_VALIDATION_CACHE: dict[str, dict] = {}
+# Bound the cache: TTL is checked on read but entries were never evicted, so a key
+# written once and never re-read persisted for the life of the process (2026-08-25).
+_LLM_CACHE_MAX = 500
 LLM_CACHE_TTL = 300  # 5 minutes
 
 # Defaults
 DEFAULT_BALANCE = 10000.0
-GAMMA_API = "https://gamma-api.polymarket.com"
-
 # Adaptive confidence config
 ADAPTIVE_CONF_INCREMENT = 3
 ADAPTIVE_CONF_MAX = 40
@@ -596,6 +598,23 @@ def check_price_alerts() -> dict:
 # LLM Validation Functions
 # ============================================================================
 
+def _evict_llm_cache() -> None:
+    """Drop expired entries, then bound the cache. Never raises."""
+    try:
+        now = datetime.now()
+        expired = [
+            k for k, v in LLM_VALIDATION_CACHE.items()
+            if (now - v["timestamp"]).total_seconds() >= LLM_CACHE_TTL
+        ]
+        for k in expired:
+            LLM_VALIDATION_CACHE.pop(k, None)
+        # dicts keep insertion order, so the front is the oldest write
+        while len(LLM_VALIDATION_CACHE) > _LLM_CACHE_MAX:
+            LLM_VALIDATION_CACHE.pop(next(iter(LLM_VALIDATION_CACHE)), None)
+    except Exception:
+        pass
+
+
 def llm_validate_signal(signal: dict) -> dict:
     """Send signal to LLM for contextual validation."""
     if not LLM_VALIDATION_ENABLED:
@@ -604,7 +623,8 @@ def llm_validate_signal(signal: dict) -> dict:
     cache_key = f"{signal.get('market_id', '')}:{signal.get('side', '')}"
     if cache_key in LLM_VALIDATION_CACHE:
         cached = LLM_VALIDATION_CACHE[cache_key]
-        if (datetime.now() - cached["timestamp"]).seconds < LLM_CACHE_TTL:
+        # .seconds is the 0..86399 component; anything >=24h old read as fresh.
+        if (datetime.now() - cached["timestamp"]).total_seconds() < LLM_CACHE_TTL:
             return cached["result"]
 
     market = signal.get("market", "")[:200]
@@ -644,6 +664,7 @@ If uncertain, use adjustment=0 and veto=false."""
             "timestamp": datetime.now(),
             "result": result
         }
+        _evict_llm_cache()
 
         return result
     except Exception as e:

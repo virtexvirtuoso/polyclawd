@@ -21,6 +21,7 @@ tick), and writes the live credit headers back on every fetch.
 """
 import json
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Optional
@@ -80,11 +81,31 @@ def gated_fetch_json(base_url: str, params: Optional[dict] = None,
         with urllib.request.urlopen(req, timeout=timeout) as r:
             headers = {k.lower(): v for k, v in r.headers.items()}
             data = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        # A 401/403 means the KEY is bad — retrying cannot fix it. Report it to
+        # the auth breaker so every other fetch path halts too, instead of each
+        # monitor independently hammering a dead key (2026-08-29 DEACTIVATED_KEY).
+        body = ""
+        try:
+            body = e.read()[:400].decode("utf-8", "replace")
+        except Exception:
+            pass
+        if rl is not None:
+            try:
+                rl.note_auth_failure(e.code, body)
+            except Exception:
+                pass
+        print(f"[monitor_gate] GET {url[:70]} -> HTTP {e.code} {body[:120]}", flush=True)
+        return hit[1] if hit else None
     except Exception as e:
         print(f"[monitor_gate] GET {url[:70]} -> {e}", flush=True)
         return hit[1] if hit else None
 
     if rl is not None:
+        try:
+            rl.note_auth_success()  # clears a tripped breaker on a good probe
+        except Exception:
+            pass
         try:
             rem = headers.get("x-requests-remaining")
             used = headers.get("x-requests-used")

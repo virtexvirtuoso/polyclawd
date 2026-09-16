@@ -15,9 +15,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
 
-
-GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 
 # --- Config ---
@@ -34,7 +33,6 @@ MAX_BOOK_LEVELS = 100        # Fetch deeper than default 10
 _scan_cache: Dict = {"data": None, "ts": 0}
 _SCAN_CACHE_TTL = 300  # 5 min
 
-
 def _fetch_json(url: str, timeout: int = 12) -> Optional[dict]:
     """Fetch JSON with error handling."""
     try:
@@ -44,7 +42,6 @@ def _fetch_json(url: str, timeout: int = 12) -> Optional[dict]:
     except Exception as e:
         logger.debug("Fetch failed {}: {}", url[:60], e)
         return None
-
 
 def _get_top_markets(n: int = TOP_MARKETS) -> List[dict]:
     """Get top N Polymarket events by 24h volume."""
@@ -106,7 +103,6 @@ def _get_top_markets(n: int = TOP_MARKETS) -> List[dict]:
     markets.sort(key=lambda x: x["volume_24h"], reverse=True)
     return markets[:n]
 
-
 def _fetch_full_orderbook(token_id: str) -> Optional[dict]:
     """Fetch orderbook with full depth (not just top 10)."""
     url = f"{CLOB_API}/book?token_id={token_id}"
@@ -129,7 +125,6 @@ def _fetch_full_orderbook(token_id: str) -> Optional[dict]:
             continue
 
     return {"bids": bids, "asks": asks}
-
 
 def _analyze_depth(book: dict, yes_price: float) -> dict:
     """Analyze orderbook depth for imbalances and walls."""
@@ -199,7 +194,6 @@ def _analyze_depth(book: dict, yes_price: float) -> dict:
         "total_depth_usd": round(total, 2),
     }
 
-
 def scan_whale_walls(top_n: int = TOP_MARKETS) -> dict:
     """
     Scan top Polymarket markets for orderbook imbalances.
@@ -256,8 +250,6 @@ def scan_whale_walls(top_n: int = TOP_MARKETS) -> dict:
     logger.info("Whale wall scan: {} markets, {} alerts ({}s)",
                 len(markets), len(alerts), result["scan_time"])
     return result
-
-
 
 def _whale_days_to_close(end_date_str: str) -> float:
     """Parse endDate to days_to_close. Returns 999 if unparseable (will be caught by portfolio horizon gate)."""

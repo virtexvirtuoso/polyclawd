@@ -1,0 +1,10 @@
+[Unit]
+Description=Run polyclawd mispriced scanner every 6 minutes
+
+[Timer]
+OnCalendar=*-*-* *:0/6:30
+AccuracySec=15s
+Unit=polyclawd-scanner.service
+
+[Install]
+WantedBy=timers.target

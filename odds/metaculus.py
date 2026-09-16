@@ -2,6 +2,7 @@
 Metaculus Forecasting Platform Integration
 Free API, no key required - quality forecasts for politics, science, economics
 """
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 
 import json
 import urllib.request
@@ -399,7 +400,7 @@ async def get_metaculus_edges(min_edge: float = 5.0, min_forecasters: int = 20) 
     # Fetch Polymarket events
     try:
         req = urllib.request.Request(
-            "https://gamma-api.polymarket.com/events?closed=false&limit=200",
+            gamma_url("/events?closed=false&limit=200"),
             headers={"User-Agent": "Polyclawd/1.0"}
         )
         with urllib.request.urlopen(req, timeout=20) as resp:

@@ -10,23 +10,43 @@ Dedup logic:
   - CLOB×scanner fusion: if whale_clob fired on same market within 15 min,
     header becomes "DOUBLE CONFIRMATION"
 """
-import requests, json, os, time, re
+import requests, json, os, time, re, html
+# Runnable as a script (scheduler/cron launch it as a subprocess, which does
+# NOT inherit the parent sys.path). Make the project root importable so the
+# module-level project imports below resolve either way.
+import sys as _sys
+from pathlib import Path as _Path
+_ROOT = str(_Path(__file__).resolve().parent.parent)
+if _ROOT not in _sys.path:
+    _sys.path.insert(0, _ROOT)
+
 from scripts.alert_formatter import send_telegram as send_tg
+
+# HTML-escape dynamic content — raw & < > in market titles 400 at Telegram
+_esc = lambda s: html.escape(str(s), quote=False)
 
 API = "http://127.0.0.1:8420/api"
 STATE_FILE = "/tmp/whale_alert_tg_state.json"
 CLOB_LAST_FILE = "/tmp/whale_clob_last.json"
 
-MIN_SCORE = 0.48
+MIN_SCORE = 7           # Must reach at least MONITOR verdict (score ≥ 7) to alert
 MIN_HTR = 0.5         # hours — skip only if resolves in < 30 min
 MAX_HTR = 72
 MIN_FLOW = 5000
 MIN_WALLET_WR = 0.45
 MIN_WALLET_N = 5
+# ── Top-accounts filter (2026-06-20) ────────────────────────────────
+# Only alert when a verified smart wallet ($10K+ net, 55%+ WR) is driving
+# the flow. Kalshi has no wallet data, so use high flow+score threshold.
+REQUIRE_SMART_WALLET = True
+KALSHI_FALLBACK_MIN_FLOW = 25_000   # Kalshi alerts without wallet ID need big flow
+KALSHI_FALLBACK_MIN_SCORE = 9       # ... and high score
 DEDUP_WINDOW = 4 * 3600   # 4h standard
 SCORE_ESCALATION_DELTA = 0.15  # re-alert if score jumps this much
 HTR_URGENCY_THRESHOLD = 2.0    # bypass dedup if <2h to resolve
 CLOB_FUSION_WINDOW = 15 * 60   # 15 min — CLOB×scanner fusion window
+PM_ANON_FLOW_FLOOR = 75_000   # PM anon flow above this bypasses smart-wallet gate
+PM_FUTURES_HTR_MAX = 720      # 30 days — WC futures have HTR 336-672h
 
 
 def load_state():
@@ -84,8 +104,15 @@ def is_actionable(alert):
     wr = alert.get("wallet_win_rate")
     if score < MIN_SCORE:
         return False
-    if htr is not None and (htr < MIN_HTR or htr > MAX_HTR):
-        return False
+    if htr is not None:
+        if htr < MIN_HTR:
+            return False
+        # PM futures (WC Advance/Winner) resolve in 14-28 days — use 30-day ceiling
+        htr_ceiling = (PM_FUTURES_HTR_MAX
+                       if (alert.get("platform") == "polymarket" and flow >= PM_ANON_FLOW_FLOOR)
+                       else MAX_HTR)
+        if htr > htr_ceiling:
+            return False
     if flow < MIN_FLOW:
         return False
     wallet_n = alert.get("wallet_n")
@@ -108,8 +135,15 @@ def is_actionable(alert):
     if bid is not None and (bid > 0.90 or bid < 0.10):
         print(f"SKIP decided: {alert.get('title','')[:40]} bid={bid:.2f}")
         return False
-    # ── No price = no edge visibility, skip for CRITICAL/HIGH ────────
-    if bid is None and alert.get("severity") in ("CRITICAL", "HIGH"):
+    # ── PM near-settled fallback: bid is often None for PM (no CLOB snapshot)
+    # Use current_price (last executed trade) as defense-in-depth
+    current_price = alert.get("current_price")
+    if current_price is not None and (current_price >= 0.97 or current_price <= 0.03):
+        print(f"SKIP near-settled PM: {alert.get('title','')[:40]} @ {current_price:.2f}")
+        return False
+    # ── No price = no edge visibility, skip for CRITICAL/HIGH unless large PM flow ─
+    platform = alert.get("platform", "")
+    if bid is None and current_price is None and alert.get("severity") in ("CRITICAL", "HIGH"):
         print(f"SKIP no-price: {alert.get('title','')[:40]}")
         return False
     # ── WNBA: log to shadow only, no Telegram alerts ────────────────
@@ -117,6 +151,20 @@ def is_actionable(alert):
     if mkt.upper().startswith("KXWNBA"):
         print(f"SKIP WNBA (shadow only): {alert.get('title','')[:40]}")
         return False
+    # ── Top-accounts gate: only alert on verified smart wallets ──────
+    if REQUIRE_SMART_WALLET:
+        reasons = alert.get("reasons", "")
+        has_smart = "smart_wallet" in reasons
+        if platform == "polymarket" and not has_smart:
+            # Large anonymous PM flow: aggregate dollar size IS the signal
+            if flow < PM_ANON_FLOW_FLOOR:
+                print(f"SKIP PM anon low-flow (${flow:,.0f}): {alert.get('title','')[:40]}")
+                return False
+        if platform != "polymarket" and not has_smart:
+            # Kalshi/other: no wallet ID available, use high-bar fallback
+            if flow < KALSHI_FALLBACK_MIN_FLOW or score < KALSHI_FALLBACK_MIN_SCORE:
+                print(f"SKIP no-smart-wallet (Kalshi, flow=${flow:,.0f} score={score}): {alert.get('title','')[:40]}")
+                return False
     return True
 
 
@@ -173,37 +221,217 @@ WC_TEAM_CODES = {
 }
 
 
-def _extract_matchup_from_ticker(mkt: str) -> str | None:
-    """Extract team matchup from Kalshi World Cup ticker codes.
-    E.g. KXWCTOTAL-26JUN17GHAPAN-3 → Ghana vs Panama
+# ── Kalshi MLB team codes (3-char, from KXMLBGAME tickers) ──────────
+MLB_TEAM_CODES = {
+    "SEA": "Mariners", "BOS": "Red Sox", "STL": "Cardinals", "LAD": "Dodgers",
+    "NYY": "Yankees", "LAA": "Angels", "MIL": "Brewers", "CHC": "Cubs",
+    "TOR": "Blue Jays", "CLE": "Guardians", "NYM": "Mets", "TB": "Rays",
+    "SD": "Padres", "CIN": "Reds", "PHI": "Phillies", "AZ": "D-backs",
+    "BAL": "Orioles", "COL": "Rockies", "CWS": "White Sox", "HOU": "Astros",
+    "ATH": "Athletics", "TEX": "Rangers", "MIA": "Marlins", "KC": "Royals",
+    "DET": "Tigers", "MIN": "Twins", "SF": "Giants", "PIT": "Pirates",
+    "ATL": "Braves", "WSH": "Nationals",
+}
+
+
+def _extract_matchup_from_ticker(mkt: str):
+    """Extract matchup (+ first-pitch time) from Kalshi ticker codes.
+    World Cup: KXWCTOTAL-26JUN17GHAPAN-3 → ("Ghana vs Panama", None)
+    MLB: KXMLBGAME-26SEP011845SEABOS-BOS → ("Mariners @ Red Sox", "Sep 1, 6:45 PM ET")
+    Returns (matchup, game_time) — either may be None.
     """
+    # MLB game ticker: KXMLBGAME-<YY><MON><DD><HHMM ET><AWAY><HOME>-<SIDE>
+    # Combined segment is 5-6 chars (2-char codes exist: SD, TB, AZ, KC, SF).
+    m = re.search(r'KXMLBGAME-\d{2}([A-Z]{3})(\d{2})(\d{4})([A-Z]{5,6})-', mkt)
+    if m:
+        mon, day, hhmm, seg = m.groups()
+        for split_at in (3, 2):
+            away, home = seg[:split_at], seg[split_at:]
+            if away in MLB_TEAM_CODES and home in MLB_TEAM_CODES:
+                h = int(hhmm[:2])
+                h12 = h % 12 or 12
+                ampm = "AM" if h < 12 else "PM"
+                game_time = f"{mon.title()} {int(day)}, {h12}:{hhmm[2:]} {ampm} ET"
+                return f"{MLB_TEAM_CODES[away]} @ {MLB_TEAM_CODES[home]}", game_time
+    # World Cup tickers (existing behaviour)
     m = re.search(r'KXWC\w+-\d{2}\w+\d{2}([A-Z]{3,8})-', mkt)
     if not m:
-        return None
+        return None, None
     code_str = m.group(1)
     # Try 4-char split first (e.g. GHAPAN = GHA + PAN)
     if len(code_str) == 6:
         c1, c2 = code_str[:3], code_str[3:]
         if c1 in WC_TEAM_CODES and c2 in WC_TEAM_CODES:
-            return f"{WC_TEAM_CODES[c1]} vs {WC_TEAM_CODES[c2]}"
+            return f"{WC_TEAM_CODES[c1]} vs {WC_TEAM_CODES[c2]}", None
     # Try 3-char (e.g. POR = Portugal)
     if len(code_str) == 3 and code_str in WC_TEAM_CODES:
-        return WC_TEAM_CODES[code_str]
-    return None
+        return WC_TEAM_CODES[code_str], None
+    return None, None
+
+
+# ── Fair-value join: sharp-book devig vs whale entry (2026-09-01) ────
+# sport_line_snap only has LIVE-game rows (drift scanner self-gates on live
+# games), but whale alerts fire PRE-game — so fetch the devig on demand,
+# once per process run, through the same credit gate the monitors use.
+# Pattern copied from cross_sport_drift.fetch_pinnacle_sport: per-book 2-way
+# devig across sharp US books, averaged. Fail-closed: any miss → no line.
+MLB_TEAM_FULL = {
+    "SEA": "Seattle Mariners", "BOS": "Boston Red Sox", "STL": "St. Louis Cardinals",
+    "LAD": "Los Angeles Dodgers", "NYY": "New York Yankees", "LAA": "Los Angeles Angels",
+    "MIL": "Milwaukee Brewers", "CHC": "Chicago Cubs", "TOR": "Toronto Blue Jays",
+    "CLE": "Cleveland Guardians", "NYM": "New York Mets", "TB": "Tampa Bay Rays",
+    "SD": "San Diego Padres", "CIN": "Cincinnati Reds", "PHI": "Philadelphia Phillies",
+    "AZ": "Arizona Diamondbacks", "BAL": "Baltimore Orioles", "COL": "Colorado Rockies",
+    "CWS": "Chicago White Sox", "HOU": "Houston Astros", "ATH": "Athletics",
+    "TEX": "Texas Rangers", "MIA": "Miami Marlins", "KC": "Kansas City Royals",
+    "DET": "Detroit Tigers", "MIN": "Minnesota Twins", "SF": "San Francisco Giants",
+    "PIT": "Pittsburgh Pirates", "ATL": "Atlanta Braves", "WSH": "Washington Nationals",
+}
+_FV_SHARP_BOOKS = ("pinnacle", "draftkings", "fanduel", "betmgm", "williamhill_us", "fanatics")
+_FV_CACHE: dict = {}   # side_code -> fair_prob (per process run)
+
+
+def _fv_imp(price) -> float:
+    p = int(price)
+    return (100 / (100 + p)) if p > 0 else (-p / (-p + 100))
+
+
+def _mlb_fair_value(mkt: str):
+    """Devigged sharp-book consensus win prob for the alert's side.
+    Returns None on any miss (no key, gated, no line, date mismatch)."""
+    m = re.search(r'KXMLBGAME-(\d{2})([A-Z]{3})(\d{2})\d{4}[A-Z]{5,6}-([A-Z]{2,3})$', mkt)
+    if not m:
+        return None
+    yy, mon, day, side = m.groups()
+    months = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6, "JUL": 7,
+              "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+    if side not in MLB_TEAM_FULL or mon not in months:
+        return None
+    # Ticker date is the ET game date; commence_time is UTC — evening ET
+    # games roll to the next UTC day, so compare on the ET date.
+    et_date = f"{2000 + int(yy)}-{months[mon]:02d}-{int(day):02d}"
+    if side in _FV_CACHE:
+        return _FV_CACHE[side]
+    key = os.environ.get("ODDS_API_KEY", "")
+    if not key:
+        return None
+    try:
+        from odds.monitor_gate import gated_fetch_json
+        data = gated_fetch_json("https://api.the-odds-api.com/v4/sports/baseball_mlb/odds", {
+            "apiKey": key, "regions": "us", "markets": "h2h", "oddsFormat": "american",
+        })
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    side_full = MLB_TEAM_FULL[side]
+    book_probs = []
+    for event in data:
+        if side_full not in (event.get("home_team", ""), event.get("away_team", "")):
+            continue
+        ct = event.get("commence_time", "")
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            start = datetime.fromisoformat(ct.replace("Z", "+00:00")).astimezone(ZoneInfo("America/New_York"))
+            if start.strftime("%Y-%m-%d") != et_date:
+                continue
+        except Exception:
+            continue
+        for bm in event.get("bookmakers", []):
+            if bm.get("key") not in _FV_SHARP_BOOKS:
+                continue
+            for mk in bm.get("markets", []):
+                if mk.get("key") != "h2h":
+                    continue
+                valid = [o for o in mk.get("outcomes", []) if o.get("price")]
+                if len(valid) < 2:
+                    continue
+                raw = {o["name"]: _fv_imp(o["price"]) for o in valid}
+                tot = sum(raw.values())
+                if not (0.95 <= tot <= 1.50) or side_full not in raw:
+                    continue
+                book_probs.append(raw[side_full] / tot)
+    if not book_probs:
+        return None
+    fair = sum(book_probs) / len(book_probs)
+    _FV_CACHE[side] = fair
+    return fair
 
 
 DASHBOARD_URL = "https://virtuosocrypto.com/polyclawd/whale-flow.html"
 
 
 
+_PM_LEAGUE_PREFIX = (
+    ("KXNCAAF", "cfb"), ("KXCFB", "cfb"), ("KXNFL", "nfl"), ("KXMLB", "mlb"),
+    ("KXEPL", "epl"), ("KXLALIGA", "lal"), ("KXNBA", "nba"), ("KXWNBA", "wnba"),
+    ("KXNHL", "nhl"),
+)
+_PM_MONTH = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+             "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+_PM_COUNTERPART_CACHE = {}
+
+
+def _gamma_slug_exists(slug: str) -> bool:
+    """True if gamma knows this slug (market OR event). Never link a guess."""
+    for ep in ("markets", "events"):
+        try:
+            r = requests.get("https://gamma-api.polymarket.com/" + ep,
+                             params={"slug": slug}, timeout=4)
+            if r.json():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _pm_counterpart(mkt: str):
+    """Polymarket game-event slug for a Kalshi game ticker, or None.
+
+    Parses KX{LEAGUE}-YYMMMDD[HHMM]{AWAY}{HOME}-... into
+    {league}-{away}-{home}-YYYY-MM-DD, tries away-code splits (3/2/4 chars)
+    and only returns a slug gamma confirms exists.
+    """
+    if mkt in _PM_COUNTERPART_CACHE:
+        return _PM_COUNTERPART_CACHE[mkt]
+    import re as _re
+    out = None
+    try:
+        parts = (mkt or "").split("-")
+        head = parts[0].upper()
+        league = next((v for k, v in _PM_LEAGUE_PREFIX if head.startswith(k)), None)
+        seg = parts[1] if len(parts) > 1 else ""
+        m = _re.match(r"^(\d{2})([A-Z]{3})(\d{2})", seg.upper())
+        if league and m and m.group(2) in _PM_MONTH:
+            yy = int(m.group(1))
+            mon = _PM_MONTH[m.group(2)]
+            dd = int(m.group(3))
+            teams = _re.sub(r"^\d{4}", "", seg[m.end():]).upper()
+            for L in (3, 2, 4):
+                if len(teams) > L + 1:
+                    cand = "%s-%s-%s-20%02d-%02d-%02d" % (
+                        league, teams[:L].lower(), teams[L:].lower(), yy, mon, dd)
+                    if _gamma_slug_exists(cand):
+                        out = cand
+                        break
+    except Exception:
+        out = None
+    _PM_COUNTERPART_CACHE[mkt] = out
+    return out
+
+
 def _build_market_links(platform: str, mkt: str) -> list:
-    """Build useful links for the alert: direct market + dashboard."""
+    """Build useful links: direct market + cross-venue counterpart + dashboard."""
     links = []
     if platform == "polymarket":
         links.append(f"<a href='https://polymarket.com/market/{mkt}'>Polymarket</a>")
     else:
         series = mkt.split('-')[0]
         links.append(f"<a href='https://kalshi.com/markets/{series}'>Kalshi</a>")
+        pm_slug = _pm_counterpart(mkt)
+        if pm_slug:
+            links.append(f"<a href='https://polymarket.com/event/{pm_slug}'>Polymarket</a>")
     links.append(f"<a href='{DASHBOARD_URL}'>Dashboard</a>")
     return links
 
@@ -215,7 +443,11 @@ def _infer_category(title: str, ticker: str = "") -> str:
     # ── Ticker-based (most reliable) ─────────────────────────────────
     if tk.startswith("KXMLB"):
         return "⚾"
-    if any(tk.startswith(p) for p in ["KXNBA", "KXWNBA", "KXNCAA"]):
+    if tk.startswith("KXNCAAF"):
+        return "🎓"  # college football (distinct from pro NFL 🏈)
+    if any(tk.startswith(p) for p in ["KXNCAAB", "KXNCAAW"]):
+        return "🎓"
+    if any(tk.startswith(p) for p in ["KXNBA", "KXWNBA"]):
         return "🏀"
     if tk.startswith("KXNFL"):
         return "🏈"
@@ -223,6 +455,15 @@ def _infer_category(title: str, ticker: str = "") -> str:
         return "🏒"
     if any(tk.startswith(p) for p in ["KXUFC", "KXMMA"]):
         return "🥊"
+    if any(tk.startswith(p) for p in ["KXWTA", "KXATP", "KXITF"]):
+        return "🎾"
+    if any(tk.startswith(p) for p in ["KXLALIGA", "KXEPL", "KXUCL", "KXSERIEA",
+                                      "KXBUNDES", "KXLIGUE1", "KXMLS", "KXLAGA"]):
+        return "⚽"
+    # ── Polymarket slug prefixes ─────────────────────────────────────
+    pfx_pm = ticker.lower().split("-")[0] if ticker else ""
+    if pfx_pm in PM_PREFIX_SPORT:
+        return PM_PREFIX_SPORT[pfx_pm][0]
     # ── Title-based (order matters: specific → generic) ──────────────
     # Politics
     if any(w in tl for w in ["election", "president", "senate", "house ", "governor", "democrat", "republican", "congress", "electoral"]):
@@ -258,6 +499,63 @@ def _infer_category(title: str, ticker: str = "") -> str:
     if any(w in tl for w in ["temperature", "climate", "weather", "co2", "emission"]):
         return "🌡️"
     return "📊"
+
+
+SPORT_FROM_TICKER = (
+    ("KXWTAMATCH", "🎾", "Tennis"), ("KXWTA", "🎾", "Tennis"),
+    ("KXATP", "🎾", "Tennis"), ("KXITF", "🎾", "Tennis"),
+    ("KXNFL", "🏈", "NFL"), ("KXNCAAF", "🎓", "CFB"), ("KXCFB", "🎓", "CFB"),
+    ("KXNBA", "🏀", "NBA"), ("KXWNBA", "🏀", "WNBA"),
+    ("KXNCAAB", "🎓", "CBB"), ("KXNCAAW", "🎓", "CBB"),
+    ("KXMLB", "⚾", "MLB"), ("KXNHL", "🏒", "NHL"),
+    ("KXUFC", "🥊", "MMA"), ("KXMMA", "🥊", "MMA"),
+    ("KXLALIGA", "⚽", "Soccer"), ("KXEPL", "⚽", "Soccer"),
+    ("KXUCL", "⚽", "Soccer"), ("KXSERIEA", "⚽", "Soccer"),
+    ("KXBUNDES", "⚽", "Soccer"), ("KXLIGUE1", "⚽", "Soccer"),
+    ("KXMLS", "⚽", "Soccer"), ("KXLAGA", "⚽", "Soccer"),
+)
+
+
+PM_PREFIX_SPORT = {
+    "cfb": ("🎓", "CFB"), "wta": ("🎾", "Tennis"), "atp": ("🎾", "Tennis"),
+    "itf": ("🎾", "Tennis"), "mlb": ("⚾", "MLB"), "wnba": ("🏀", "WNBA"),
+    "nba": ("🏀", "NBA"), "nfl": ("🏈", "NFL"), "nhl": ("🏒", "NHL"),
+    "ufc": ("🥊", "MMA"), "mma": ("🥊", "MMA"),
+    "epl": ("⚽", "Soccer"), "ucl": ("⚽", "Soccer"), "uel": ("⚽", "Soccer"),
+    "lal": ("⚽", "Soccer"), "mls": ("⚽", "Soccer"), "fifwc": ("⚽", "Soccer"),
+    "col": ("⚽", "Soccer"), "clf": ("⚽", "Soccer"), "bra": ("⚽", "Soccer"),
+    "arg": ("⚽", "Soccer"), "mex": ("⚽", "Soccer"),
+    "cs2": ("🎮", "Esports"), "lol": ("🎮", "Esports"), "dota2": ("🎮", "Esports"),
+    "val": ("🎮", "Esports"),
+}
+
+
+_EMOJI_CATEGORY = {
+    "⚾": "Baseball", "🏀": "Basketball", "🏈": "NFL",
+    "🎾": "Tennis", "🥊": "MMA", "⚽": "Soccer",
+    "🎓": "College", "🏛️": "Politics",
+    "₿": "Crypto", "🌡️": "Weather", "📊": "Markets",
+}
+
+def _sport_of(mkt: str, title: str = ""):
+    """(emoji, sport name) from Kalshi/PM slug prefix; falls back to title inference."""
+    pfx_pm = (mkt or "").lower().split("-")[0]
+    if pfx_pm in PM_PREFIX_SPORT:
+        e, name = PM_PREFIX_SPORT[pfx_pm]
+        return e, name
+    tk = (mkt or "").upper()
+    for pfx, e, name in SPORT_FROM_TICKER:
+        if tk.startswith(pfx):
+            return e, name
+    e = _infer_category(title, mkt)
+    if e == "📊":
+        # PM matchup slugs without a league prefix (eagles-cowboys-2026-09-14)
+        ms = (mkt or "").lower()
+        tl = (title or "").lower()
+        import re as _re
+        if "-vs-" in ms or _re.search(r"-\d{4}-\d{2}-\d{2}$", ms) or " vs " in tl:
+            return e, "Sports"
+    return e, _EMOJI_CATEGORY.get(e, "Markets")
 
 
 def _short_title(title: str) -> str:
@@ -395,16 +693,72 @@ def _human_reasons(reasons: str) -> str:
     return " · ".join(parts[:3])
 
 
-def _close_time_str(close_iso: str) -> str:
-    """Format close time to local time (America/New_York)."""
+def _close_time_str(close_iso: str, market: str = "") -> str:
+    """Format close time to local time (America/New_York).
+    Time-only when it closes today; includes the date otherwise
+    (2026-09-01 fix: date-less close times misled on multi-day markets —
+    a Sept-4 deadline rendered as bare '6:45 PM ET' on a Sept-1 game).
+    2026-09-14 fix: two API placeholder classes showed fake precision —
+    midnight-UTC day boundaries (Fed, elections) rendered as '8:00 PM ET'
+    the evening before → 'by <date>' (Kalshi intraday tickers like
+    …26SEP072000- keep their real ET time); PM per-game endDate = slug
+    date +7/8d (settlement window) → show the slug's game day instead."""
     if not close_iso:
         return ""
     try:
-        from datetime import datetime
+        from datetime import datetime, date, timezone
         from zoneinfo import ZoneInfo
         dt = datetime.fromisoformat(close_iso.replace("Z", "+00:00"))
+        off = dt.utcoffset()
+        is_midnight_utc = (
+            off is not None
+            and off.total_seconds() == 0
+            and (dt.hour, dt.minute, dt.second) == (0, 0, 0)
+        )
+        # PM per-game settlement artifact: endDate lands 5-10d after the
+        # slug's event date → API date is a settlement window, not the game.
+        m = re.search(r"-(20\d{2})-(\d{2})-(\d{2})$", market or "")
+        if m:
+            try:
+                ev = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                if 5 <= (dt.date() - ev).days <= 10:
+                    if ev == date.today():
+                        return "today (game day)"
+                    return f"{ev.strftime('%b')} {ev.day} (game day)"
+            except ValueError:
+                pass
         local = dt.astimezone(ZoneInfo("America/New_York"))
-        return local.strftime("%I:%M %p ET").lstrip("0")
+        t = local.strftime("%I:%M %p ET").lstrip("0")
+        if local.date() == date.today():
+            day = "today"
+        else:
+            day = f"{local.strftime('%b')} {local.day}"
+        if is_midnight_utc:
+            # Kalshi intraday tickers encode the real ET close (…26SEP072000-)
+            mt = re.search(
+                r"-(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{2})(\d{2})(\d{2})-",
+                (market or "") + "-",
+            )
+            if mt:
+                try:
+                    mon = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+                           "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}[mt.group(2)]
+                    tdt = datetime(2000 + int(mt.group(1)), mon, int(mt.group(3)),
+                                   int(mt.group(4)), int(mt.group(5)),
+                                   tzinfo=ZoneInfo("America/New_York"))
+                    if tdt.astimezone(timezone.utc) == dt:
+                        tt = tdt.strftime("%I:%M %p ET").lstrip("0")
+                        if tdt.date() == date.today():
+                            return tt
+                        return f"{tdt.strftime('%b')} {tdt.day}, {tt}"
+                except (ValueError, KeyError):
+                    pass
+            if day == "today":
+                return "today"
+            return f"by {dt.strftime('%b')} {dt.day}"
+        if day == "today":
+            return t
+        return f"{day}, {t}"
     except:
         return ""
 
@@ -416,11 +770,12 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
     - Tier 2 (power user): compact data line with market metrics
     """
     mkt = alert.get("market", "")
+    platform = alert.get("platform", "kalshi")
     title = alert.get("title") or _clean_market_name(mkt)
     short = _short_title(title)
 
     # ── If title is generic (no team names), extract from ticker ────
-    matchup = _extract_matchup_from_ticker(mkt)
+    matchup, game_time = _extract_matchup_from_ticker(mkt)
     if matchup and (short.lower().startswith("over ") or short.lower().startswith("under ") or short.lower().startswith("total ") or short.lower().startswith("o/u ")):
         short = f"{matchup}: {short}"
 
@@ -483,10 +838,16 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
     # ── Verdict label ────────────────────────────────────────────────
     is_whale = "whale_flow_pierce" in reasons
     is_aggressive = "aggressive_taker" in reasons
-    if score >= 9 and is_whale and is_aggressive:
-        verdict = "🟩 ENTRY"
-    elif score >= 9 and is_whale:
-        verdict = "🟩 ENTRY"
+    # Smart-wallet ENTRY is outcome-validated (65.8% hit); anonymous whale
+    # flow is not (54.3%) — size alone is not an entry signal (2026-08-31 audit).
+    smart_name = None
+    for _r in reasons.split(","):
+        _r = _r.strip()
+        if _r.startswith("smart_wallet_"):
+            smart_name = _r.replace("smart_wallet_", "").replace("_", " ")
+            break
+    if score >= 9 and (is_whale or smart_name):
+        verdict = "🟩 ENTRY" if smart_name else "🟩 WHALE FLOW"
     elif score >= 9:
         verdict = "🟡 WATCH"
     elif score >= 7 and is_whale:
@@ -499,11 +860,27 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
     lines = []
 
     # ── Header ───────────────────────────────────────────────────────
-    lines.append(f"{tag_str}{cat_emoji} <b>#{rank}</b> · {sev} · {score:.0f}/10 {verdict}")
+    raw = alert.get("raw_score")
+    top_pct = alert.get("top_pct")
+    # Display the raw intensity score (unbounded). The severity tag carries the
+    # bounded meaning — "/10" implied a precision the capped score never had.
+    # top_pct (API-computed) anchors raw against the live 7d alert population.
+    if raw is not None:
+        hdr_score = f"{raw:.1f}" + (f" · top {top_pct}" if top_pct else "")
+    else:
+        hdr_score = f"{score:.0f}"
+    lines.append(f"{tag_str}{cat_emoji} <b>#{rank}</b> · {_esc(sev)} · {hdr_score} {verdict}")
     lines.append("")
 
     # ── Market name ──────────────────────────────────────────────────
-    lines.append(short)
+    lines.append(_esc(short))
+    # ── Matchup + first pitch (sports context from ticker) ──────────
+    if matchup and matchup.lower() not in short.lower():
+        sport_emoji = "⚾" if mkt.upper().startswith("KXMLB") else "⚽"
+        ctx_line = f"{sport_emoji} {_esc(matchup)}"
+        if game_time:
+            ctx_line += f" · first pitch {_esc(game_time)}"
+        lines.append(ctx_line)
     sub = alert.get("sub_title") or ""
     sub_clean = ""
     if sub and sub != short and sub != title:
@@ -521,41 +898,70 @@ def format_alert(alert, rank, send_reason: str, clob_match: bool) -> str:
     # ── Price (with team name if applicable) ────────────────────────
     px_line = []
     if sub_clean:
-        px_line.append(f"<i>{sub_clean}</i>")
+        px_line.append(f"<i>{_esc(sub_clean)}</i>")
     if bid_c is not None:
-        px_line.append(f"{dir_str} @ {bid_c}¢" if dir_str else f"{bid_c}¢")
+        px_line.append(f"{_esc(dir_str)} @ {bid_c}¢" if dir_str else f"{bid_c}¢")
     if ask_c is not None and ask_c != bid_c:
         px_line.append(f"(ask {ask_c}¢)")
     if px_line:
         lines.append(" ".join(px_line))
 
-    # ── Whale action (explained) ─────────────────────────────────────
+    # ── Whale action (explained, with avg entry price) ─────────────
+    dom_shares = max(fy, fn)
+    avg_c = int(round(flow / dom_shares * 100)) if (flow and dom_shares > 0) else None
+    avg_str = f" · avg ~{avg_c}¢" if avg_c and 1 <= avg_c <= 99 else ""
     whale_line = []
     if flow:
-        if flow_dir_str:
-            whale_line.append(f"🐋 Whale bought ${flow:,.0f} · {flow_dir_str} of flow")
+        if smart_name:
+            base = f"🐋 <b>{_esc(smart_name)}</b> · ${flow:,.0f}{avg_str}"
+            whale_line.append(f"{base} · {flow_dir_str}" if flow_dir_str else base)
+        elif flow_dir_str:
+            whale_line.append(f"🐋 Whale bought ${flow:,.0f}{avg_str} · {_esc(flow_dir_str)} of flow")
         else:
-            whale_line.append(f"🐋 ${flow:,.0f} flow")
+            whale_line.append(f"🐋 ${flow:,.0f}{avg_str} flow")
     if whale_line:
         lines.append(" ".join(whale_line))
 
+    # ── Fair value vs whale entry (sharp-book devig) ─────────────────
+    if platform == "kalshi" and mkt.startswith("KXMLBGAME") and avg_c:
+        fair = _mlb_fair_value(mkt)
+        if fair is not None:
+            fair_c = fair * 100
+            edge_c = avg_c - fair_c
+            sign = "+" if edge_c >= 0 else "−"
+            side_code = mkt.rsplit("-", 1)[-1]
+            lines.append(
+                f"📚 Books: {side_code} {fair_c:.0f}¢ fair · whale paid {avg_c}¢ "
+                f"({sign}{abs(edge_c):.0f}¢ vs fair)"
+            )
+
+    # ── Concentration warning ────────────────────────────────────────
+    m_int = re.search(r'intensity_(\d+)%', reasons)
+    if m_int and int(m_int.group(1)) >= 80:
+        lines.append(f"⚠️ Whale is {m_int.group(1)}% of all volume — price is whale-set, no independent confirmation")
+
     # ── Close time ───────────────────────────────────────────────────
-    ct = _close_time_str(close_iso)
+    ct = _close_time_str(close_iso, mkt)
     if ct:
-        lines.append(f"Closes {ct}")
+        lines.append(f"Closes {_esc(ct)}")
     elif htr is not None:
-        lines.append(f"{htr:.0f}h left")
+        lines.append(_esc(f"{htr:.0f}h left"))
     lines.append("")
 
     # ── Power user line: market size + triggers ─────────────────────
     data = []
+    mid_px = alert.get("mid")
+    # Kalshi OI/volume are CONTRACT counts, not dollars — flow_yes 147K
+    # shares = $80.6K at 54.8¢ avg proves the units (2026-09-01 fix).
+    # Show contracts + mid-price dollar estimate. PM values are already USD.
+    kalshi_ct = platform == "kalshi" and mid_px
     if oi:
-        data.append(f"Open interest ${oi/1000:.0f}K")
+        data.append(f"OI {oi/1000:.0f}K ct ≈ ${oi*mid_px/1000:.0f}K" if kalshi_ct else f"Open interest ${oi/1000:.0f}K")
     if vol:
-        data.append(f"Volume ${vol/1000:.0f}K")
+        data.append(f"Vol {vol/1000:.0f}K ct ≈ ${vol*mid_px/1000:.0f}K" if kalshi_ct else f"Volume ${vol/1000:.0f}K")
     hr = _human_reasons(reasons)
     if hr:
-        data.append(hr)
+        data.append(_esc(hr))
     if data:
         lines.append(f"📊 {' · '.join(data)}")
 
@@ -589,6 +995,21 @@ def _refresh_price(alert: dict) -> dict:
     return alert
 
 
+def _enrich_top_pct(alert: dict) -> dict:
+    """Attach live 'top X%' percentile for the raw score (single-alert path;
+    the batch path gets top_pct straight from /whale/top)."""
+    if alert.get("raw_score") is None or alert.get("top_pct"):
+        return alert
+    try:
+        r = requests.get(f"{API}/whale/percentile",
+                         params={"raw": alert["raw_score"]}, timeout=3)
+        if r.ok:
+            alert["top_pct"] = r.json().get("top_pct")
+    except Exception:
+        pass  # percentile is decoration — never block the alert on it
+    return alert
+
+
 def send_single(alert: dict) -> bool:
     """Send a single alert immediately. Returns True if sent."""
     state = load_state()
@@ -605,6 +1026,7 @@ def send_single(alert: dict) -> bool:
 
     # Refresh price before sending — catch stale-price alerts
     alert = _refresh_price(alert)
+    alert = _enrich_top_pct(alert)
     # Re-check after price refresh (market may have resolved)
     bid = alert.get("best_bid")
     if bid is not None and (bid > 0.90 or bid < 0.10):
@@ -617,10 +1039,11 @@ def send_single(alert: dict) -> bool:
     clob_match = mkt in clob_fired
 
     msg = format_alert(alert, 1, reason, clob_match)
+    se, sn = _sport_of(mkt, alert.get("title", ""))
     if clob_match:
-        header = "🦈 <b>DOUBLE CONFIRMATION</b>\n\n"
+        header = f"{se} 🦈 <b>DOUBLE CONFIRMATION — {sn}</b>\n\n"
     else:
-        header = "🎯 <b>WHALE ALERT</b>\n\n"
+        header = f"{se} <b>WHALE ALERT — {sn}</b>\n\n"
     full = header + msg
 
     ok = send_tg(full)
@@ -669,10 +1092,18 @@ def main():
     n = len(to_send)
     double_conf = [a for a in to_send if a.get("market", "") in clob_fired]
 
-    if double_conf:
-        header = f"🦈 <b>DOUBLE CONFIRMATION — {len(double_conf)} market(s) confirmed by CLOB + scanner</b>"
+    sports = {_sport_of(a.get("market", ""), a.get("title", "")) for a in to_send}
+    if len(sports) == 1:
+        se_hdr, sn_hdr = next(iter(sports))
+        sport_tag = f" — {sn_hdr}"
+    elif len(sports) > 1:
+        se_hdr, sport_tag = "🎯", " — MULTI-CATEGORY"
     else:
-        header = f"🎯 <b>WHALE ALERT — {n} signal(s)</b>"
+        se_hdr, sport_tag = "🎯", ""
+    if double_conf:
+        header = f"{se_hdr} 🦈 <b>DOUBLE CONFIRMATION{sport_tag} — {len(double_conf)} market(s) confirmed by CLOB + scanner</b>"
+    else:
+        header = f"{se_hdr} <b>WHALE ALERT{sport_tag} — {n} signal(s)</b>"
 
     # Refresh prices and filter out decided markets
     refreshed = []

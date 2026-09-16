@@ -3,11 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
 <title>WHALE TAPE</title>
 <link id="fav" rel="icon" href="">
-<link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Archivo+Narrow:wght@700&family=Fragment+Mono&display=swap" rel="stylesheet">
 <style>
 :root{
   --bg:#0b0b0c; --surface:#111113; --text:#ececec; --muted:#9a9aa2;
@@ -196,9 +195,20 @@ footer{border-top:1px solid var(--border); color:var(--muted); font-size:11px; p
 @media(prefers-reduced-motion:reduce){
   #cursor,#sweep{transition:none}
 }
+
+  :root{
+    --bg:var(--pc-bg); --surface:var(--pc-panel); --text:var(--pc-ink); --muted:var(--pc-dim);
+    --crit:var(--pc-crit); --high:var(--pc-warn); --low:var(--pc-low); --border:var(--pc-line); --hairline:var(--pc-line);
+    --display:var(--pc-disp); --mono:var(--pc-mono);
+  }
+  /* ── Probability Bureau adoption (css/polyclawd.css) ── */
+  body{font-family:var(--pc-mono);background:var(--pc-bg);color:var(--pc-ink)}
+  body > *{position:relative;z-index:1}
+  *{border-radius:0!important;box-shadow:none!important;text-shadow:none!important;filter:none!important}
+  h1,h2,h3,h4,.stat-value,.card-value,.page-title,.kpi-value,.big-num{font-family:var(--pc-disp);font-weight:400;letter-spacing:.03em}
 </style>
 </head>
-<body>
+<body data-pc-section="Whale tape">
 <a class="skip" href="#inspector">Skip to inspector</a>
 
 <header class="masthead">
@@ -1381,5 +1391,6 @@ new ResizeObserver(()=>{
   try{commit();}catch(_){draw();}
 });
 </script>
+<script src="polyclawd-shell.js" defer></script>
 </body>
 </html>

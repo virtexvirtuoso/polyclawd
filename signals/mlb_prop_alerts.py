@@ -48,8 +48,20 @@ MLB_STATS_API = "https://statsapi.mlb.com/api/v1"
 STATS_API_11 = "https://statsapi.mlb.com/api/v1.1"
 
 # ── Tunables (mirror the plan) ───────────────────────────────────────────────
-EDGE_THRESHOLD_PCT = 15.0       # alert when scout edge >= +15pp
-MIN_GAMES = 7                   # alert floor (plan: min_games >= 7)
+MIN_GAMES = 7                   # SCAN floor — keeps the control sample broad
+ALERT_MIN_GAMES = 15            # ALERT floor (audit 2026-07-07: n=7 hit rates
+#                                 predicted 75% vs 44% realized; at n=7 one 6/7
+#                                 streak inflates the estimate ~14pp vs ~7pp at n=15)
+
+# ── Calibration: Capped Hit Rate (replaces flat discount 2026-07-13) ────────
+# Audit showed scout overconfidence grows nonlinearly: at 80%+ predicted,
+# realized hit rate caps around 60-67%. The capped model trusts predictions
+# up to CALIBRATION_BASELINE fully, then only CALIBRATION_TRUST_PCT of the
+# excess above that. This replaces the old flat 10pp discount + 20pp threshold.
+# See: vault 02-Projects/Polyclawd/Strategy/Sports-Props/MLB-Prop-Calibration-Audit-2026-07-13.md
+CALIBRATION_BASELINE = 0.60     # hit rates ≤60% are well-calibrated (no discount)
+CALIBRATION_TRUST_PCT = 0.30    # above baseline, trust only 30% of the excess
+CALIBRATION_MIN_EDGE_PP = 5.0   # minimum calibrated edge to alert (noise floor)
 ALERT_LAST_N = 20               # fetch up to 20 games so we can compute every
 #                                 candidate lookback (7/10/15/20) from one pull.
 LOOKBACK_WINDOWS = (7, 10, 15, 20)
@@ -68,16 +80,40 @@ MARKET_STAT: Dict[str, Tuple[str, str]] = {
 }
 
 
+# ── Calibration: Capped Hit Rate ────────────────────────────────────────────
+# Replaces the old flat discount + threshold. Trusts predictions up to baseline
+# fully, then only trust_pct of the excess. Fits the observed calibration curve
+# where realized hit rate caps around 60-67% regardless of predicted.
+# See: vault 02-Projects/Polyclawd/Strategy/Sports-Props/MLB-Prop-Calibration-Audit-2026-07-13.md
+
+
+def calibrated_hit_rate(raw_hr: float,
+                         baseline: float = CALIBRATION_BASELINE,
+                         trust_pct: float = CALIBRATION_TRUST_PCT) -> float:
+    """Cap predicted hit rate: anything above baseline, only trust trust_pct of the excess."""
+    if raw_hr <= baseline:
+        return raw_hr
+    excess = raw_hr - baseline
+    return baseline + excess * trust_pct
+
+
+def calibrated_edge_pct(hit_rate_pct: float, book_over_pct: float) -> float:
+    """Return calibrated edge in percentage points."""
+    raw_hr = hit_rate_pct / 100.0
+    adj_hr = calibrated_hit_rate(raw_hr)
+    return round((adj_hr - book_over_pct / 100.0) * 100, 1)
+
+
 # ============================================================================
 # Database — dedicated prop tables in the shared shadow DB
 # ============================================================================
 
 def _db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")
     _init_tables(conn)
     return conn
 
@@ -142,6 +178,18 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_scan_log_player ON mlb_prop_scan_log(player, market);
         CREATE INDEX IF NOT EXISTS idx_prop_shadow_status ON mlb_prop_shadow(status);
+
+        -- Persistent alert dedup. The cooldown state used to live in the
+        -- scheduler's in-memory _state dict, so every scheduler restart reset
+        -- the 4h window and re-fired live alerts (Jun 19-22: 11 duplicate
+        -- Telegram fires, worst 5x in 90min). Audit 2026-07-07, rec 1.
+        CREATE TABLE IF NOT EXISTS prop_alert_dedup (
+            player TEXT NOT NULL,
+            market TEXT NOT NULL,
+            alerted_at REAL NOT NULL,
+            edge_at_alert REAL,
+            PRIMARY KEY (player, market)
+        );
         """
     )
     # Migrate: control-sample outcome columns (idempotent — added 2026-06-10 for
@@ -326,6 +374,41 @@ def capture_clv_close(game_pk: int, player: str, market: str,
         logger.debug(f"capture_clv_close failed: {e}")
 
 
+def _load_dedup_state() -> Dict[str, Dict]:
+    """Alert cooldown state from the shadow DB — survives scheduler restarts
+    (the in-memory _state version reset on restart and re-fired live alerts).
+    Same shape the scan loop always used: {"player|market": {ts, edge}}."""
+    try:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT player, market, alerted_at, edge_at_alert FROM prop_alert_dedup"
+        ).fetchall()
+        conn.close()
+        return {
+            f"{r['player']}|{r['market']}": {"ts": r["alerted_at"], "edge": r["edge_at_alert"] or 0}
+            for r in rows
+        }
+    except Exception as e:  # pragma: no cover
+        logger.debug(f"dedup state load failed: {e}")
+        return {}
+
+
+def _save_dedup_entry(player: str, market: str, ts: float, edge: float) -> None:
+    """Persist one fired alert's cooldown marker. Never raises."""
+    try:
+        conn = _db()
+        conn.execute(
+            "INSERT INTO prop_alert_dedup (player, market, alerted_at, edge_at_alert) "
+            "VALUES (?,?,?,?) ON CONFLICT(player, market) DO UPDATE SET "
+            "alerted_at=excluded.alerted_at, edge_at_alert=excluded.edge_at_alert",
+            (player, market, ts, edge),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:  # pragma: no cover
+        logger.debug(f"dedup state save failed: {e}")
+
+
 # ============================================================================
 # Scan + alert  (Task 4)  — fires only inside a window
 # ============================================================================
@@ -365,12 +448,9 @@ async def run_prop_alert_scan(now: Optional[datetime] = None) -> Dict:
     payload = await get_prop_scout(last_n=ALERT_LAST_N, min_edge=-0.99, min_games=MIN_GAMES)
     results = payload.get("results", [])
 
-    # Import dedup state lazily from the scheduler if present; else local dict.
-    try:
-        from services.scheduler import _state
-        prev_state = _state.setdefault("mlb_props_alert_state", {})
-    except Exception:
-        prev_state = {}
+    # Dedup state lives in the shadow DB so it survives scheduler restarts
+    # (in-memory _state reset on restart -> Jun 19-22 duplicate fires).
+    prev_state = _load_dedup_state()
 
     scanned = 0
     to_alert: List[Dict] = []
@@ -397,7 +477,18 @@ async def run_prop_alert_scan(now: Optional[datetime] = None) -> Dict:
             confirmed = False
 
         edge = row.get("edge_pct", 0) or 0
-        qualifies = edge >= EDGE_THRESHOLD_PCT and confirmed and (row.get("games_sampled", 0) >= MIN_GAMES)
+        # Calibrated edge: cap the scout's hit rate at baseline, trust only
+        # trust_pct of the excess. Replaces old flat discount + threshold.
+        # See: calibrated_hit_rate() above.
+        hr = row.get("hit_rate_pct", 0) or 0
+        book = row.get("book_over_pct", 0) or 0
+        calibrated_edge = calibrated_edge_pct(hr, book)
+        # Hard block: batter_home_runs (11.3% baseline hit rate, rare-event noise)
+        market = row.get("market", "")
+        if market == "batter_home_runs":
+            qualifies = False
+        else:
+            qualifies = calibrated_edge >= CALIBRATION_MIN_EDGE_PP and confirmed and (row.get("games_sampled", 0) >= ALERT_MIN_GAMES)
 
         # Dedup / cooldown (mirror task_edge_alerts).
         will_alert = False
@@ -409,6 +500,7 @@ async def run_prop_alert_scan(now: Optional[datetime] = None) -> Dict:
             if hours_since >= COOLDOWN_HOURS or edge_moved or not prev:
                 will_alert = True
                 prev_state[key] = {"ts": ts, "edge": edge}
+                _save_dedup_entry(player, row.get("market") or "", ts, edge)
 
         # CONTROL SAMPLE: log EVERY scanned prop (calibration integrity).
         log_scan_row(row, lineup_confirmed=confirmed, alerted=will_alert,
@@ -416,8 +508,42 @@ async def run_prop_alert_scan(now: Optional[datetime] = None) -> Dict:
         scanned += 1
 
         if will_alert:
+            # Park/platoon/lineup enrichment
+            try:
+                from odds.mlb_enrichment import enrich_row
+                row = enrich_row(row, row.get("home_team", ""), row.get("away_team", ""))
+            except Exception:
+                pass
+            # Statcast xStats enrichment
+            try:
+                from odds.statcast import enrich_with_statcast
+                row = enrich_with_statcast(row)
+            except Exception:
+                pass
             log_prop_shadow(row, game_pk=game_pk, window_kind=wk)
             to_alert.append(row)
+            # Phase 2: stats enrichment — compute stats_score from hit rates
+            try:
+                from odds.sports_edge_common import log_enrichment
+                hr = row.get("hit_rate_pct", 0) or 0
+                book = row.get("book_over_pct", 0) or 0
+                games = row.get("games_sampled", 0) or 0
+                # stats_score: 0-1 composite (hit rate consistency + sample size)
+                hr_frac = min(hr / 100.0, 1.0) if hr > 0 else 0
+                size_bonus = min(games / 20.0, 1.0) * 0.2  # 0-0.2 for sample size
+                score = hr_frac * 0.8 + size_bonus
+                confirms = hr > book and games >= ALERT_MIN_GAMES
+                tier = "strong" if confirms and calibrated_edge >= 15 else "speculative" if confirms else "fade"
+                log_enrichment(
+                    shadow_trade_id=None,  # prop shadows use mlb_prop_shadow, not shadow_trades
+                    sport="mlb_props",
+                    stats_score=score,
+                    stats_confirmation=confirms,
+                    alert_tier=tier,
+                    stats_detail=f"hr={hr}% book={book}% games={games} edge={edge}pp",
+                )
+            except Exception:
+                pass
 
     if to_alert:
         to_alert.sort(key=lambda r: r.get("edge_pct", 0), reverse=True)
@@ -481,14 +607,67 @@ def _push_alerts(rows: List[Dict]) -> None:
     # Telegram via OpenClaw gateway.
     try:
         from scripts.openclaw_alerts import alert_openclaw
-        lines = ["⚾ *MLB Prop Edges* (lineup-confirmed)"]
+        lines = ["⚾ <b>MLB Prop Edges</b> (lineup-confirmed)"]
+        lines.append("")
         for r in rows[:8]:
+            player = r.get('player', '?')
+            stat = r.get('stat_label', '?')
+            line = r.get('prop_line', '?')
+            hr = r.get('hit_rate_pct', 0) or 0
+            book = r.get('book_over_pct', 0) or 0
+            edge = r.get('edge_pct', 0) or 0
+            cal_edge = r.get('adj_edge_pct', edge)
+            games = r.get('games_sampled', 0) or 0
+            away = r.get('away_team', '')
+            home = r.get('home_team', '')
+            matchup = f"{away} @ {home}" if away and home else (home or away or '')
+            # Enrichment fields (from mlb_enrichment + statcast)
+            opp_p = r.get('opp_pitcher', '')
+            p_hand = r.get('pitcher_hand', '')
+            pf = r.get('park_factor')
+            platoon = r.get('platoon_mult')
+            adj_hr = r.get('adj_hit_rate_pct')
+            xstats = r.get('xstats', {})
+            sc_adj = r.get('statcast_adj')
+            # Confidence tier
+            if cal_edge >= 15 and games >= 20:
+                tier = "🔥"
+            elif cal_edge >= 10 and games >= 15:
+                tier = "✅"
+            else:
+                tier = "⚠️"
+            # Build context line
+            ctx_parts = []
+            if opp_p:
+                hand_tag = f" ({p_hand}HP)" if p_hand and p_hand != "?" else ""
+                ctx_parts.append(f"vs {opp_p}{hand_tag}")
+            if pf and abs(pf - 1.0) > 0.03:
+                pf_tag = "Coors" if pf > 1.15 else (f"park {pf:.2f}x" if pf < 0.95 else "")
+                if pf_tag:
+                    ctx_parts.append(pf_tag)
+            if platoon and abs(platoon - 1.0) > 0.03:
+                ctx_parts.append(f"platoon {platoon:.2f}x")
+            if sc_adj and abs(sc_adj - 1.0) > 0.03:
+                ctx_parts.append(f"Statcast {sc_adj:.2f}x")
+            ctx = "  |  ".join(ctx_parts) if ctx_parts else ""
+            # Build the alert block
+            lines.append(f"{tier} <b>{player}</b> {stat} o{line}")
+            lines.append(f"   {matchup}")
+            if ctx:
+                lines.append(f"   {ctx}")
             lines.append(
-                f"• {r.get('player')} {r.get('stat_label')} o{r.get('prop_line')} — "
-                f"hit {r.get('hit_rate_pct')}% vs book {r.get('book_over_pct')}% "
-                f"(+{r.get('edge_pct')}pp)"
+                f"   Hit {hr:.0f}% (L{games}) vs book {book:.0f}% → "
+                f"<b>+{cal_edge:.1f}pp</b> edge"
             )
-        alert_openclaw("\n".join(lines))
+            if adj_hr is not None and abs(adj_hr - hr) > 1:
+                lines.append(
+                    f"   Adj: {adj_hr:.0f}% (park+platoon+statcast)"
+                )
+            lines.append("")
+        lines.append("━" * 20)
+        lines.append("💡 <b>How to act:</b> Buy OVER on Polymarket/Kalshi at the book's implied price. Edge = hit rate minus book implied prob.")
+        lines.append("Calibrated edge accounts for park, platoon, and Statcast adjustments.")
+        alert_openclaw("\n".join(lines), parse_mode="HTML")
     except Exception as e:  # pragma: no cover
         logger.debug(f"telegram prop alert skipped: {e}")
 
@@ -548,7 +727,8 @@ def _mlb_get(url: str, timeout: int = 12) -> Optional[dict]:
 
 
 def _resolve_mlb_prop_from_statsapi(
-    game_pk: int, player_id: Optional[int], market: str, prop_line: float
+    game_pk: int, player_id: Optional[int], market: str, prop_line: float,
+    game_date: Optional[str] = None,
 ) -> Tuple[str, Optional[float], str]:
     """Grade ONE prop from the live feed/box score. Returns (status, result_stat, note).
 
@@ -574,6 +754,13 @@ def _resolve_mlb_prop_from_statsapi(
 
     if detailed in ("Postponed", "Cancelled", "Canceled"):
         return ("void", None, f"game {detailed.lower()}")
+    # Postponed games keep their gamePk but get RE-DATED to the makeup date with
+    # status 'Scheduled', so the branch above never fires for them. If the feed's
+    # official date is after the date we alerted for, the original game didn't
+    # happen -> void (props for the postponed date settle void, not carry over).
+    official = gd.get("datetime", {}).get("officialDate", "")
+    if game_date and official and official > game_date:
+        return ("void", None, f"postponed \u2014 rescheduled to {official}")
     if "Suspended" in detailed:
         return ("open", None, "suspended — awaiting completion")
     if abstract != "Final":
@@ -605,12 +792,13 @@ def resolve_open_prop_shadows() -> Dict:
     try:
         conn = _db()
         rows = conn.execute(
-            "SELECT id, game_pk, player_id, market, prop_line FROM mlb_prop_shadow "
+            "SELECT id, game_pk, game_date, player_id, market, prop_line FROM mlb_prop_shadow "
             "WHERE status='open' AND game_pk IS NOT NULL"
         ).fetchall()
         for r in rows:
             status, result_stat, note = _resolve_mlb_prop_from_statsapi(
-                r["game_pk"], r["player_id"], r["market"], r["prop_line"] or 0.5
+                r["game_pk"], r["player_id"], r["market"], r["prop_line"] or 0.5,
+                game_date=r["game_date"],
             )
             if status == "open":
                 counts["still_open"] += 1

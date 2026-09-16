@@ -19,7 +19,7 @@ from collections import defaultdict
 from difflib import get_close_matches
 
 MLB_API  = "https://statsapi.mlb.com/api/v1"
-ODDS_KEY = os.environ.get("ODDS_API_KEY", "51efafc2aaa8df23e01020214bb7e594")
+ODDS_KEY = os.environ.get("ODDS_API_KEY", "")
 
 # Map CLI --prop aliases to Odds API market keys and stat keys
 PROP_MAP = {
@@ -423,6 +423,34 @@ def main():
         print("  ✓ No IL stints found (2024-present)")
     for t in other[-3:]:
         print(f"  {t.get('date','?')}: {t.get('typeDesc','?')}")
+
+    # ── 7b. Statcast xStats ──────────────────────────────────────────────────
+    try:
+        from odds.statcast import get_batter_xstats, get_pitcher_xstats
+        xstats = get_pitcher_xstats(pid) if is_pitcher else get_batter_xstats(pid)
+        if xstats:
+            print(f"\n{'─'*55}")
+            print(f"  STATCAST xSTATS (Baseball Savant)")
+            print(f"{'─'*55}")
+            if is_pitcher:
+                era = xstats.get("era", "?")
+                xera = xstats.get("xera", "?")
+                print(f"  ERA: {era}  |  xERA: {xera}")
+                print(f"  wOBA-against: {xstats.get('woba', 0):.3f}  |  xwOBA: {xstats.get('xwoba', 0):.3f}")
+                diff = xstats.get("xwoba", 0) - xstats.get("woba", 0)
+                tag = "unlucky (xwOBA > wOBA — due for regression)" if diff > 0.010 else \
+                      "lucky (wOBA > xwOBA — overperforming)" if diff < -0.010 else "neutral"
+                print(f"  Luck: {tag} (diff: {diff:+.3f})")
+            else:
+                print(f"  BA: {xstats.get('ba', 0):.3f}  |  xBA: {xstats.get('xba', 0):.3f}")
+                print(f"  SLG: {xstats.get('slg', 0):.3f}  |  xSLG: {xstats.get('xslg', 0):.3f}")
+                print(f"  wOBA: {xstats.get('woba', 0):.3f}  |  xwOBA: {xstats.get('xwoba', 0):.3f}")
+                diff = xstats.get("xslg", 0) - xstats.get("slg", 0)
+                tag = "unlucky (xSLG > SLG — power regression up)" if diff > 0.020 else \
+                      "lucky (SLG > xSLG — overperforming)" if diff < -0.020 else "neutral"
+                print(f"  Luck: {tag} (xSLG diff: {diff:+.3f})")
+    except Exception:
+        pass
 
     # ── 8. Tonight's game context ───────────────────────────────────────────────
     if game:

@@ -15,12 +15,11 @@ import sqlite3, json, urllib.request, time, sys
 from collections import defaultdict
 from pathlib import Path
 from datetime import datetime, timezone
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 SRC_DB = Path("/var/www/virtuosocrypto.com/polyclawd/storage/whale_scanner.db")
 PRED_DB = Path("/var/www/virtuosocrypto.com/polyclawd/storage/whale_predictions.db")
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
-GAMMA_API = "https://gamma-api.polymarket.com"
-
 PRED_TABLE = """
 CREATE TABLE IF NOT EXISTS whale_predictions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,6 +123,15 @@ def extract_alerts():
         if rs is not None:
             g["raw_score"] = max(g.get("raw_score", 0), rs)
         g["titles"].add((p.get("title", "") or "")[:200])
+        # First alert's book snapshot = the price a follower could act on.
+        # Without it whale_won is unpriced (60% WR at 65c is a LOSS) — QA 2026-07-08.
+        if "alert_price" not in g:
+            _mid = p.get("mid") or (
+                (p.get("best_bid") and p.get("best_ask"))
+                and (float(p["best_bid"]) + float(p["best_ask"])) / 2
+            ) or p.get("current_price")
+            if _mid and 0.0 < float(_mid) < 1.0:
+                g["alert_price"] = float(_mid)
         g["close_time"] = p.get("close_time", "") or ""
         g["base_ticker"] = base
         reasons = r["reasons"] or ""
@@ -164,12 +172,17 @@ def extract_alerts():
                 "dominant_amount": dom_amt,
                 "total_flow": g["flow_dollars"],
                 "taker_pct": taker_pct,
+                "alert_price": g.get("alert_price"),
             }
         )
     return results
 
 
 def backfill_predictions(pred):
+    try:
+        pred.execute("ALTER TABLE whale_predictions ADD COLUMN alert_price REAL")
+    except Exception:
+        pass
     existing = {r[0] for r in pred.execute("SELECT market FROM whale_predictions")}
     alerts = extract_alerts()
     print(f"  Extracted {len(alerts)} alert groups from source")
@@ -181,8 +194,9 @@ def backfill_predictions(pred):
             """
             INSERT INTO whale_predictions
             (market, base_ticker, platform, title, close_time, severity, max_score,
-             dominant_direction, dominant_amount, total_flow, taker_pct, resolved, last_checked)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,0,datetime('now'))
+             dominant_direction, dominant_amount, total_flow, taker_pct, alert_price,
+             resolved, last_checked)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,datetime('now'))
         """,
             (
                 a["market"],
@@ -196,6 +210,7 @@ def backfill_predictions(pred):
                 a["dominant_amount"],
                 a["total_flow"],
                 a["taker_pct"],
+                a.get("alert_price"),
             ),
         )
         inserted += 1
@@ -311,6 +326,24 @@ def check_resolutions(pred, limit=500):
             print(f"    Progress: {checked}/{total}")
     pred.commit()
     return checked, resolved, still_open, errors
+
+
+def _priced_edge_line(pred) -> str:
+    """Mean (whale_won − entry) per contract — the WITH/AGAINST number."""
+    rows = pred.execute("""
+        SELECT whale_won, dominant_direction dd, alert_price, taker_pct
+        FROM whale_predictions
+        WHERE resolved=2 AND whale_won IN (0,1) AND alert_price IS NOT NULL
+          AND dominant_direction IN ('YES','NO')
+    """).fetchall()
+    if not rows:
+        return "Priced edge: n/a (no alert_price yet)"
+    entry = lambda r: r["alert_price"] if r["dd"] == "YES" else 1.0 - r["alert_price"]
+    ret = sum(r["whale_won"] - entry(r) for r in rows) / len(rows)
+    agg = [r for r in rows if (r["taker_pct"] or 50) >= 70]
+    agg_ret = (sum(r["whale_won"] - entry(r) for r in agg) / len(agg)) if agg else 0.0
+    return (f"Priced edge: {ret*100:+.1f}c/contract (n={len(rows)}) | "
+            f"aggressive-taker: {agg_ret*100:+.1f}c (n={len(agg)})")
 
 
 def summary(pred, verbose=False):
@@ -455,10 +488,36 @@ def telegram_summary(pred, new_resolved=0):
         )
     if kw + kl:
         lines.append(f"Kalshi: {kw}W/{kl}L ({kw / (kw + kl) * 100:.0f}%)")
+    lines.append(_priced_edge_line(pred))
     if pw + pl:
         lines.append(f"PM: {pw}W/{pl}L ({pw / (pw + pl) * 100:.0f}%)")
     lines.append(f"Tracked: {total} | resolved {resolved} | pending {pending}")
     return "\n".join(lines)
+
+
+def _send_summary(text: str) -> None:
+    """Push the resolution summary to Telegram (direct send stays
+    authoritative) and mirror it into the dispatch queue in shadow mode
+    (Task 5.3 Step 1). dedup_key = digest of the summary body (entity+state:
+    same resolved-set state never enqueues twice within a batch window)."""
+    print(text)
+    try:
+        sys.path.insert(0, str(PRED_DB.parent.parent))
+        from scripts.openclaw_alerts import alert_openclaw
+
+        # LIVE since 2026-08-21: routed through the tier-2 batch queue instead
+        # of a direct push. The former direct alert_openclaw() send was removed
+        # at the same time — keeping both would double-deliver every resolution.
+        import hashlib
+
+        from signals.alert_dispatch import dispatch
+
+        ok = dispatch(
+            "whale_resolutions", text, tier=2,
+            dedup_key="resolutions:" + hashlib.sha1(text.encode()).hexdigest()[:16])
+        print(f"[send] whale_resolutions queued ok={ok}")
+    except Exception as e:
+        print(f"[send] failed: {e}")
 
 
 if __name__ == "__main__":
@@ -490,15 +549,5 @@ if __name__ == "__main__":
     ):
         summary(pred, verbose=args.verbose)
     if args.send:
-        text = telegram_summary(pred, new_resolved)
-        print(text)
-        try:
-            import sys
-
-            sys.path.insert(0, str(PRED_DB.parent.parent))
-            from scripts.openclaw_alerts import alert_openclaw
-
-            print(f"[send] telegram ok={alert_openclaw(text, parse_mode=None)}")
-        except Exception as e:
-            print(f"[send] failed: {e}")
+        _send_summary(telegram_summary(pred, new_resolved))
     pred.close()

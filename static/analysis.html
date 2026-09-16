@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
 <title>Polyclawd — Full Analysis Suite</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
   :root {
-    --bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a26;--border:#2a2a3a;
-    --accent:#6c5ce7;--accent2:#a29bfe;--green:#00e676;--red:#ff5252;
-    --orange:#ffab40;--cyan:#18ffff;--text:#e8e8f0;--text2:#8888a0;--gold:#ffd700;
+    --bg:var(--pc-bg);--surface:var(--pc-panel);--surface2:var(--pc-raised);--border:var(--pc-line);
+    --accent:var(--pc-accent);--accent2:var(--pc-accent-ink);--green:var(--pc-up);--red:var(--pc-down);
+    --orange:var(--pc-warn);--cyan:var(--pc-chart-4);--text:var(--pc-ink);--text2:var(--pc-dim);--gold:var(--pc-gold);
   }
   *{margin:0;padding:0;box-sizing:border-box}
   body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,sans-serif;min-height:100vh}
@@ -57,12 +57,18 @@
   footer{text-align:center;padding:40px 0 20px;border-top:1px solid var(--border);margin-top:20px}
   footer p{font-size:12px;color:var(--text2);font-family:'JetBrains Mono',monospace}
   footer .brand{color:var(--accent2)}
+
+  /* ── Probability Bureau adoption (css/polyclawd.css) ── */
+  body{font-family:var(--pc-mono);background:var(--pc-bg);color:var(--pc-ink)}
+  body > *{position:relative;z-index:1}
+  *{border-radius:0!important;box-shadow:none!important;text-shadow:none!important}
+  h1,h2,h3,h4,.stat-value,.card-value,.page-title,.kpi-value,.big-num{font-family:var(--pc-disp);font-weight:400;letter-spacing:.03em}
+  .tab.active,.btn-primary{color:#0d0d0b}
 </style>
 </head>
-<body>
+<body data-pc-section="Analysis">
 <div class="noise"></div>
 <div class="container">
-<nav style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px"><a href="portfolio.html" style="display:inline-block;font-size:12px;color:#8888a0;text-decoration:none;padding:8px 16px;border:1px solid #2a2a3a;border-radius:8px">← Portfolio</a><a href="how-it-works.html" style="display:inline-block;font-size:12px;color:#8888a0;text-decoration:none;padding:8px 16px;border:1px solid #2a2a3a;border-radius:8px">How It Works</a></nav>
 
 <header>
   <div class="logo">Virtuoso Crypto — <span>Polyclawd</span></div>
@@ -297,5 +303,6 @@
 </footer>
 
 </div>
+<script src="polyclawd-shell.js" defer></script>
 </body>
 </html>

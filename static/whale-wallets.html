@@ -3,10 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
 <title>WHALE SHARK — PREDATOR ATLAS</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,600;1,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 :root{
   --bg:#0a0c14; --surface:#10131e; --text:#e9e4d8; --muted:#8d8775;
@@ -332,9 +331,20 @@ footer b{color:var(--text); font-weight:500}
 @media (prefers-reduced-motion: reduce){
   *{animation:none !important; transition:none !important}
 }
+
+  :root{
+    --bg:var(--pc-bg); --surface:var(--pc-panel); --text:var(--pc-ink); --muted:var(--pc-dim);
+    --gold:var(--pc-gold); --crit:var(--pc-crit); --high:var(--pc-warn); --low:var(--pc-chart-4);
+    --border:var(--pc-line); --dim:var(--pc-faint); --ringbg:var(--pc-raised); --serif:var(--pc-disp); --mono:var(--pc-mono);
+  }
+  /* ── Probability Bureau adoption (css/polyclawd.css) ── */
+  body{font-family:var(--pc-mono);background:var(--pc-bg);color:var(--pc-ink)}
+  body > *{position:relative;z-index:1}
+  *{border-radius:0!important;box-shadow:none!important;text-shadow:none!important;filter:none!important}
+  h1,h2,h3,h4,.stat-value,.card-value,.page-title,.kpi-value,.big-num{font-family:var(--pc-disp);font-weight:400;letter-spacing:.03em}
 </style>
 </head>
-<body>
+<body data-pc-section="Whale wallets">
 <a class="skip" href="#rosterH">Skip to roster</a>
 
 <header class="mast">
@@ -930,5 +940,6 @@ setInterval(pollWallets, POLL_MS);
 setInterval(pollAlerts, POLL_MS);
 setInterval(pollStats, POLL_MS);
 </script>
+<script src="polyclawd-shell.js" defer></script>
 </body>
 </html>

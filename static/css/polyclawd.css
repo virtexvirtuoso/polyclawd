@@ -66,8 +66,9 @@
   --pc-chart-1: #ff5c1f; --pc-chart-2: #2fbf71; --pc-chart-3: #d8b13c;
   --pc-chart-4: #7d9bb8; --pc-chart-5: #b07aa8; --pc-chart-6: #9a968a;
 
-  /* z-stack (documented, fixed) */
-  --pc-z-chrome: 30; --pc-z-overlay: 50; --pc-z-dock: 60;
+  /* z-stack (documented, fixed) — chrome sits ABOVE arbitrary page sticky bars
+     so nav dropdowns are never obscured by a page's own header/stat bar. */
+  --pc-z-chrome: 900; --pc-z-overlay: 950; --pc-z-dock: 980;
 }
 
 /* ── base ──────────────────────────────────────────────────────────────── */
@@ -127,6 +128,28 @@ main, .pc-main{position:relative;z-index:1}
 .pc-nav a:hover{color:var(--pc-ink)}
 .pc-nav a.on{color:var(--pc-ink);border-bottom-color:var(--pc-accent)}
 .pc-chrome .pc-right{margin-left:auto;display:flex;align-items:center;gap:10px;padding:10px 0}
+
+/* ── nav dropdowns (multi-page sections: Markets / Sports / Whales / Portfolio) ── */
+.pc-nav .pc-navitem{position:relative;display:flex;align-items:stretch}
+.pc-nav .pc-navitem>a{gap:5px}
+.pc-caret{font-style:normal;font-size:8px;opacity:.55}
+.pc-dropdown{
+  position:absolute;top:100%;left:0;min-width:172px;
+  display:none;flex-direction:column;
+  background:var(--pc-panel);border:1px solid var(--pc-line);
+  z-index:var(--pc-z-dock);
+}
+.pc-navitem:hover .pc-dropdown,
+.pc-navitem:focus-within .pc-dropdown{display:flex}
+.pc-dropdown a{
+  display:block;padding:9px 14px;
+  font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--pc-dim);border-bottom:1px solid var(--pc-line);
+  white-space:nowrap;
+}
+.pc-dropdown a:last-child{border-bottom:none}
+.pc-dropdown a:hover{color:var(--pc-ink);background:var(--pc-raised)}
+.pc-dropdown a.on{color:var(--pc-accent)}
 
 /* ── stamps (state chips: LIVE / PAPER / CRITICAL / …) ─────────────────── */
 .pc-stamp{
@@ -239,6 +262,11 @@ main, .pc-main{position:relative;z-index:1}
   .pc-brand{border-right:none}
   .pc-nav a{padding:10px 10px}
   .pc-stat .v{font-size:24px}
+  /* dropdowns can't hover on touch: show the active section's sub-views inline */
+  .pc-nav .pc-navitem{display:block}
+  .pc-dropdown{position:static;border:none;min-width:0;display:none}
+  .pc-navitem.on .pc-dropdown{display:flex;flex-direction:row;flex-wrap:wrap;padding:0 0 6px 12px}
+  .pc-dropdown a{border-bottom:none;padding:6px 10px}
 }
 
 /* ════════════════════════════════════════════════════════════════════════

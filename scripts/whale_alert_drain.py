@@ -12,8 +12,9 @@ Usage:
 
 import argparse
 import json
+import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
@@ -42,7 +43,11 @@ def usd_bar(flow_d: float, width: int = 10) -> str:
     return "▰" * filled + "▱" * (width - filled)
 
 
-def closes_in(close_iso: str) -> str:
+def closes_in(close_iso: str, market: str = "") -> str:
+    """Relative close string. 2026-09-14: midnight-UTC day boundaries show
+    'closes by <date>' (no fake hour precision; Kalshi intraday tickers
+    …26SEP072000- keep their real ET time); PM per-game endDate (slug date
+    +7/8d settlement window) shows the slug's game day."""
     try:
         close = datetime.fromisoformat(close_iso.replace("Z", "+00:00"))
         hours = (close - datetime.now(timezone.utc)).total_seconds() / 3600
@@ -50,6 +55,35 @@ def closes_in(close_iso: str) -> str:
         return ""
     if hours < 0:
         return "closed"
+    m = re.search(r"-(20\d{2})-(\d{2})-(\d{2})$", market or "")
+    if m:
+        try:
+            ev = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            if 5 <= (close.date() - ev).days <= 10:
+                return ("game day today" if ev == datetime.now(timezone.utc).date()
+                        else f"game day {ev.strftime('%b')} {ev.day}")
+        except ValueError:
+            pass
+    off = close.utcoffset()
+    if off is not None and off.total_seconds() == 0 and (close.hour, close.minute, close.second) == (0, 0, 0):
+        mt = re.search(
+            r"-(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{2})(\d{2})(\d{2})-",
+            (market or "") + "-",
+        )
+        if mt:
+            try:
+                from zoneinfo import ZoneInfo
+                mon = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+                       "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}[mt.group(2)]
+                tdt = datetime(2000 + int(mt.group(1)), mon, int(mt.group(3)),
+                               int(mt.group(4)), int(mt.group(5)),
+                               tzinfo=ZoneInfo("America/New_York"))
+                if tdt.astimezone(timezone.utc) == close:
+                    et = tdt.astimezone(ZoneInfo("America/New_York"))
+                    return f"closes {et.strftime('%b')} {et.day}, {et.strftime('%I:%M %p ET').lstrip('0')}"
+            except (ValueError, KeyError):
+                pass
+        return f"closes by {close.strftime('%b')} {close.day}"
     if hours < 2:
         return f"closes in {hours * 60:.0f}min"
     if hours < 48:
@@ -200,11 +234,46 @@ def _implication(score: float, flow: float, fy: float, fn: float, bid, ask, reas
 def _infer_category(title: str, ticker: str = "") -> str:
     tl = title.lower()
     tk = ticker.upper()
-    if any(tk.startswith(p) for p in ["KXWNBA", "KXNBA", "KXNFL", "KXNHL", "KXMLB", "KXNCAA"]):
+    if any(tk.startswith(p) for p in ["KXNCAAF", "KXCFB"]):
+        return "🎓"  # college football (distinct from pro NFL 🏈)
+    if tk.startswith("KXNFL"):
+        return "🏈"
+    if any(tk.startswith(p) for p in ["KXNCAAB", "KXNCAAW", "KXNBA", "KXWNBA"]):
         return "🏀"
+    if tk.startswith("KXNHL"):
+        return "🏒"
+    if tk.startswith("KXMLB"):
+        return "⚾"
+    if any(tk.startswith(p) for p in ["KXWTA", "KXATP", "KXITF"]):
+        return "🎾"
+    if any(tk.startswith(p) for p in ["KXUFC", "KXMMA"]):
+        return "🥊"
+    if any(tk.startswith(p) for p in ["KXLALIGA", "KXEPL", "KXUCL", "KXSERIEA",
+                                      "KXBUNDES", "KXLIGUE1", "KXMLS", "KXLAGA"]):
+        return "⚽"
+    # ── Polymarket slug prefixes (lowercase league codes) ────────────
+    pfx = ticker.lower().split("-")[0] if ticker else ""
+    if pfx == "cfb":
+        return "🎓"
+    if pfx in ("wta", "atp", "itf"):
+        return "🎾"
+    if pfx in ("epl", "ucl", "uel", "lal", "mls", "fifwc", "col", "clf", "bra", "arg", "mex"):
+        return "⚽"
+    if pfx in ("cs2", "lol", "dota2", "val"):
+        return "🎮"
+    if pfx == "mlb":
+        return "⚾"
+    if pfx in ("nba", "wnba"):
+        return "🏀"
+    if pfx == "nfl":
+        return "🏈"
+    if pfx == "nhl":
+        return "🏒"
+    if pfx in ("ufc", "mma"):
+        return "🥊"
     if any(w in tl for w in ["election", "president", "senate", "house ", "governor", "democrat", "republican"]):
         return "🏛️"
-    if any(w in tl for w in ["win the", "match?", "round of", "wta", "atp", "grand slam", "qualification"]):
+    if any(w in tl for w in ["match?", "round of", "wta", "atp", "grand slam", "qualification"]):
         return "🎾"
     if any(w in tl for w in [" vs ", "goal", "draw", "fc ", "united", "city ", "real ", "juventus", "liverpool", "bayern", "psg", "barcelona"]):
         return "⚽"
@@ -257,92 +326,190 @@ def _short_title(title: str) -> str:
     return title
 
 
-def format_alert(row, p: dict) -> str:
-    sev = row["severity"]
-    when = datetime.fromtimestamp(row["ts"], tz=timezone.utc).strftime("%H:%M UTC")
 
-    name = p.get("title", "") or row["market"]
+def _signal_tier(reasons: str) -> tuple:
+    """Return (emoji, label) for signal quality tier.
+    MEGA FILL > WHALE FILL > FLOW BURST > BOOK SIGNAL."""
+    if 'mega_single_trade' in reasons:
+        return ('⚡', 'MEGA FILL')
+    if 'whale_single_trade' in reasons:
+        return ('🐋', 'WHALE FILL')
+    if ('flow_mag' in reasons or 'vol_spike' in reasons) and (
+            'taker_YES' in reasons or 'taker_NO' in reasons or 'taker_BUY' in reasons):
+        return ('📈', 'FLOW BURST')
+    return ('📖', 'BOOK SIGNAL')
+
+
+def _flow_label(fy: float, fn: float) -> str:
+    """'one-sided', '85% YES', or '' for at-a-glance flow direction summary."""
+    total = (fy or 0) + (fn or 0)
+    if total < 500:
+        return ''
+    if not fn or fn <= 0:
+        return 'one-sided'
+    if not fy or fy <= 0:
+        return 'one-sided'
+    ratio = max(fy, fn) / total
+    if ratio >= 0.85:
+        dominant = 'YES' if fy > fn else 'NO'
+        return f'{ratio * 100:.0f}% {dominant}'
+    return ''
+
+
+POSTGAME_GRACE_S = 900  # 15 min past Kalshi's expected game end
+
+
+def _is_postgame_stale(market: str, payload: dict) -> bool:
+    """True when the market's game has already ended (post-final noise).
+
+    Kalshi keeps game markets open ~2 days for settlement; residual
+    settlement flow on them is worthless as a signal (2026-09-12 OSU-Texas
+    incident). Defense-in-depth: the scanner now demotes these to LOW before
+    they reach the DB; this catches rows logged before that deploy.
+    """
+    import re as _re
+    end_iso = (payload.get("expected_expiration_time")
+               or payload.get("occurrence_datetime") or "")
+    end_ts = None
+    if end_iso:
+        try:
+            iso = end_iso.replace("Z", "+00:00") if end_iso.endswith("Z") else end_iso
+            end_ts = datetime.fromisoformat(iso).timestamp()
+        except ValueError:
+            end_ts = None
+    if end_ts is None:
+        m = _re.search(r"-(\d{2})([A-Z]{3})(\d{2})", (market or "").upper())
+        if m:
+            months = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+                      "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+            try:
+                gd = datetime(2000 + int(m.group(1)), months[m.group(2)], int(m.group(3)),
+                              tzinfo=timezone.utc)
+                end_ts = gd.timestamp() + 86400 + 5 * 3600  # game day + 29h
+            except (ValueError, KeyError):
+                end_ts = None
+    if end_ts is None:
+        return False
+    return datetime.now(timezone.utc).timestamp() > end_ts + POSTGAME_GRACE_S
+
+
+def format_alert_compact(row, p: dict) -> str:
+    """One-line summary for secondary alerts in a batch."""
+    reasons = row["reasons"]
+    tier_emoji, _ = _signal_tier(reasons)
+    cat_emoji = _infer_category(p.get("title", "") or row["market"], row["market"])
+    short = _short_title(p.get("title", "") or row["market"])
+    dir_emoji, dir_text, flow_d = _alert_direction(p, reasons)
+    bid = p.get("best_bid")
+    bid_c = int(bid * 100) if bid is not None else None
+    signal = _human_reasons(reasons)
+    parts = [short]
+    price_str = f"{bid_c}¢" if bid_c is not None else ""
+    if dir_emoji and dir_text != "NO SIGNAL":
+        parts.append(f"{dir_emoji} {price_str}")
+    if flow_d:
+        parts.append(f"${flow_d:,.0f}")
+    if signal:
+        parts.append(signal)
+    return f"{tier_emoji} {cat_emoji} {' · '.join(parts)}"
+
+
+def format_alert(row, p: dict) -> str:
+    """Action-first alert. Tier on line 1, decision on line 3, signal on line 4."""
+    reasons = row["reasons"]
+    tier_emoji, tier_label = _signal_tier(reasons)
+    cat_emoji = _infer_category(p.get("title", "") or row["market"], row["market"])
+    platform_name = row["platform"].capitalize()
+    short = _short_title(p.get("title", "") or row["market"])
     ticker = row["market"]
 
-    dir_emoji, dir_text, flow_d = _alert_direction(p, row["reasons"])
-    action_px = _action_price(p)
-    ci = closes_in(p.get("close_time", ""))
-
+    dir_emoji, dir_text, flow_d = _alert_direction(p, reasons)
     bid = p.get("best_bid")
     ask = p.get("best_ask")
     mid = p.get("mid", 0) or ((bid or 0) + (ask or 0)) / 2
-    bid_d = p.get("bid_depth", 0)
-    ask_d = p.get("ask_depth", 0)
-    oi = p.get("open_interest", 0)
-    vol = p.get("volume", 0)
-    score = row["score"]
-    reasons = row["reasons"]
-    fy = p.get("flow_yes", 0)
-    fn = p.get("flow_no", 0)
-
-    cat_emoji = _infer_category(name, ticker)
-    short = _short_title(name)
     bid_c = int(bid * 100) if bid is not None else None
     ask_c = int(ask * 100) if ask is not None else None
     spread_pct = (ask - bid) / mid * 100 if (bid is not None and ask is not None and mid) else None
-    oiv_ratio = oi / vol if (oi and vol) else 0
 
-    # Line 1: Header
-    lines = [f"{cat_emoji} <b>#{sev}</b>"]
+    fy = p.get("flow_yes", 0) or 0
+    fn = p.get("flow_no", 0) or 0
+    score = row["score"]
+    ci = closes_in(p.get("close_time", ""), p.get("market", ""))
+    signal = _human_reasons(reasons)
+    flow_lbl = _flow_label(fy, fn)
 
-    # Line 2: Short title
-    lines.append(short)
-    lines.append("")  # spacer
-
-    # Line 3: Direction + Price + Flow + Score
-    action_bits = []
-    if dir_emoji and dir_text:
-        action_bits.append(f"{dir_emoji} {dir_text}")
-    if bid_c is not None and ask_c is not None:
-        action_bits.append(f"{bid_c}¢/{ask_c}¢")
-        if spread_pct is not None and spread_pct < 5:
-            action_bits.append(f"spread {spread_pct:.1f}%")
-    if flow_d:
-        action_bits.append(f"${flow_d:,.0f}")
-    action_bits.append(f"{score}/10")
-    lines.append(" · ".join(action_bits))
-
-    # Line 4: Flow breakdown + Depth
-    flow_bits = []
-    if fy or fn:
-        flow_bits.append(f"Y ${fy:,.0f} / N ${fn:,.0f}")
-    if bid_d or ask_d:
-        flow_bits.append(f"D ${bid_d/1000:.0f}K/${ask_d/1000:.0f}K")
-    if flow_bits:
-        lines.append(" · ".join(flow_bits))
-
-    # Line 5: OI + Close
-    health_bits = []
-    if oi:
-        health_bits.append(f"OI ${oi/1000:.0f}K")
-    if oiv_ratio > 0:
-        health_bits.append(f"OIV {oiv_ratio:.2f}")
-    if ci:
-        health_bits.append(f"→ {ci}")
-    if health_bits:
-        lines.append(" · ".join(health_bits))
-    lines.append("")  # spacer
-
-    # Line 6: Implication
     imp = _implication(score, flow_d, fy, fn, bid, ask, reasons, dir_text)
     if imp:
-        lines.append(imp)
+        # "💡 🟢 STRONG ENTRY · whale · tight" → "🟢 STRONG ENTRY"
+        action_label = imp.replace("💡 ", "").split(" · ")[0].strip()
+    else:
+        action_label = f"{dir_emoji} {dir_text}" if (dir_emoji and dir_text != "NO SIGNAL") else ""
 
-    # Line 6: Trigger
-    signal = _human_reasons(reasons)
+    lines = []
+
+    # L1: Signal tier · category · platform
+    lines.append(f"{tier_emoji} <b>{tier_label}</b> · {cat_emoji} {platform_name}")
+
+    # L2: Market name
+    lines.append(short)
+    lines.append("")
+
+    # L3: THE decision line — action + price + flow (most important, read first)
+    decision_parts = []
+    if action_label:
+        decision_parts.append(action_label)
+    if bid_c is not None and ask_c is not None:
+        decision_parts.append(f"{bid_c}¢/{ask_c}¢")
+        if spread_pct is not None and spread_pct < 5:
+            decision_parts.append(f"spread {spread_pct:.1f}%")
+    elif bid_c is not None:
+        decision_parts.append(f"{bid_c}¢")
+    if flow_d:
+        decision_parts.append(f"${flow_d:,.0f}")
+    lines.append(" · ".join(decision_parts))
+
+    # L4: Signal evidence + flow direction label
+    sig_parts = []
     if signal:
-        lines.append(signal)
-    lines.append("")  # spacer
+        sig_parts.append(signal)
+    if flow_lbl and "taker" not in signal:
+        sig_parts.append(flow_lbl)
+    if sig_parts:
+        lines.append(" · ".join(sig_parts))
 
-    # Line 7: Links
+    # L5: Flow split + close time
+    ctx_parts = []
+    if fy or fn:
+        ctx_parts.append(f"Y ${fy:,.0f} / N ${fn:,.0f}")
+    if ci:
+        ctx_parts.append(ci)
+    if ctx_parts:
+        lines.append(" · ".join(ctx_parts))
+
+    lines.append("")
+
+    # L6: Link only — dashboard available on tap
     lines.append(market_link(row["platform"], ticker))
-    lines.append(f"<a href='{DASHBOARD_URL}'>Dashboard</a>")
     return "\n".join(lines)
+
+
+
+def _send_telegram_message(text: str) -> bool:
+    """Deliver via the fleet helper. HTML first (format uses <b>/<a> tags), then a
+    tag-stripped plain-text retry so an unescaped & or < in a market title can't
+    400 the whole batch. Telegram hard-caps messages at 4096 chars."""
+    import re
+    import sys as _s
+
+    if str(BASE) not in _s.path:
+        _s.path.insert(0, str(BASE))
+    from scripts.openclaw_alerts import alert_openclaw
+
+    if len(text) > 3900:
+        text = text[:3890] + "\n…truncated"
+    if alert_openclaw(text, parse_mode="HTML"):
+        return True
+    return alert_openclaw(re.sub(r"<[^>]+>", "", text), parse_mode=None)
 
 
 def main():
@@ -351,6 +518,11 @@ def main():
         "--peek",
         action="store_true",
         help="show pending alerts without advancing the cursor",
+    )
+    parser.add_argument(
+        "--send",
+        action="store_true",
+        help="deliver to Telegram; cursor only advances if delivery succeeds",
     )
     args = parser.parse_args()
 
@@ -365,7 +537,7 @@ def main():
         except ValueError:
             cursor = 0
 
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT * FROM whale_alerts WHERE id > ? AND severity = 'CRITICAL' ORDER BY id",
@@ -380,32 +552,72 @@ def main():
         print("NO_NEW_WHALE_ALERTS")
         return
 
-    MAX_FULL = 8
-    # Parse payloads once; rank by REAL dollars, not score — score saturates
-    # at 10 on game-day churn (2026-06-11: 1,732 CRITICALs in 24h, all 10/10).
+    # Parse payloads; sort by signal tier first, then flow dollars.
+    # Score saturates at 10 during game-day churn — tier is the quality signal.
+    _TIER_ORDER = {'MEGA FILL': 0, 'WHALE FILL': 1, 'FLOW BURST': 2, 'BOOK SIGNAL': 3}
     parsed = []
+    skipped_stale = 0
+    skipped_pinned = 0
     for r in rows:
         try:
             payload = json.loads(r["payload"] or "{}")
         except json.JSONDecodeError:
             payload = {}
+        if _is_postgame_stale(r["market"], payload):
+            skipped_stale += 1
+            continue
+        # Price-sanity gate (mirrors whale_alert_tg.is_actionable): a market
+        # pinned at ≤10¢ or ≥90¢ is already decided — not actionable. Catches
+        # legacy rows logged before the scanner carried game-end fields.
+        bb = payload.get("best_bid")
+        lyp = payload.get("last_yes_price")
+        if (bb is not None and (bb > 0.90 or bb < 0.10)) or \
+           (lyp is not None and (lyp > 0.90 or lyp < 0.10)):
+            skipped_pinned += 1
+            continue
         parsed.append((r, payload, payload.get("flow_dollars") or 0))
-    parsed.sort(key=lambda x: -x[2])
+    if not parsed:
+        if not args.peek and max_id_row["m"]:
+            CURSOR_PATH.write_text(str(max_id_row["m"]))
+        print(f"NO_DELIVERABLE_ALERTS ({skipped_stale} postgame-stale, "
+              f"{skipped_pinned} price-pinned skipped)")
+        return
+    parsed.sort(key=lambda x: (_TIER_ORDER.get(_signal_tier(x[0]["reasons"])[1], 9), -x[2]))
 
     total_usd = sum(d for _, _, d in parsed)
-    print(f"🦈 WHALE SHARK — {len(rows)} alert(s) | ≈${total_usd:,.0f} total flow\n")
-    for r, payload, _ in parsed[:MAX_FULL]:
-        print(format_alert(r, payload))
-        print()
-    if len(rows) > MAX_FULL:
-        hidden_usd = sum(d for _, _, d in parsed[MAX_FULL:])
-        print(
-            f"(+{len(rows) - MAX_FULL} more ≈${hidden_usd:,.0f} — full tape: {DASHBOARD_URL})"
-        )
-    else:
-        print(f"live tape: {DASHBOARD_URL}")
+    count = len(parsed)
+    label = "alert" if count == 1 else "alerts"
+    out = [f"🦈 {count} whale {label} · ≈${total_usd:,.0f} flow\n"]
 
-    if not args.peek:
+    # Top pick — full detail
+    top_row, top_payload, _ = parsed[0]
+    out.append(format_alert(top_row, top_payload))
+
+    # Secondary alerts — compact one-liners
+    MAX_COMPACT = 5
+    secondary = parsed[1:MAX_COMPACT + 1]
+    if secondary:
+        out.append("")
+        out.append("─" * 16)
+        for r, pl, _ in secondary:
+            out.append(format_alert_compact(r, pl))
+        if count > MAX_COMPACT + 1:
+            hidden_n = count - MAX_COMPACT - 1
+            hidden_usd = sum(d for _, _, d in parsed[MAX_COMPACT + 1:])
+            out.append(f"  +{hidden_n} more ≈${hidden_usd:,.0f}")
+
+    out.append(f"\n<a href='{DASHBOARD_URL}'>Full tape</a>")
+    text = "\n".join(out)
+    print(text)
+
+    delivered = True
+    if args.send:
+        delivered = _send_telegram_message(text)
+        print(f"[send] telegram ok={delivered}")
+
+    # A failed --send must NOT advance the cursor — that silently drops the
+    # batch forever (the pre-2026-07-06 consumer-gone failure mode).
+    if not args.peek and delivered:
         CURSOR_PATH.write_text(str(max_id_row["m"]))
 
 

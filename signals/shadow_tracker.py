@@ -21,6 +21,16 @@ import urllib.request
 from datetime import datetime, timedelta, timezone, date
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+# Runnable as a script (scheduler/cron launch it as a subprocess, which does
+# NOT inherit the parent sys.path). Make the project root importable so the
+# module-level project imports below resolve either way.
+import sys as _sys
+from pathlib import Path as _Path
+_ROOT = str(_Path(__file__).resolve().parent.parent)
+if _ROOT not in _sys.path:
+    _sys.path.insert(0, _ROOT)
+
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +44,6 @@ LEGACY_JSON = STORAGE_DIR / "shadow_trades.json"
 
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 POLYMARKET_CLOB = "https://clob.polymarket.com"
-GAMMA_API = "https://gamma-api.polymarket.com"
-
 
 # ============================================================================
 # Database
@@ -44,13 +52,12 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 def get_db() -> sqlite3.Connection:
     """Get SQLite connection with WAL mode for concurrent reads."""
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")
     _init_tables(conn)
     return conn
-
 
 def _init_tables(conn: sqlite3.Connection):
     conn.executescript("""
@@ -138,6 +145,18 @@ def _init_tables(conn: sqlite3.Connection):
     except sqlite3.OperationalError:
         pass
 
+    # Migration: last_resolve_attempt enables FAIR ROTATION in resolve_trades.
+    # Without it the resolver took `ORDER BY timestamp ASC LIMIT 15` — the same
+    # 15 oldest rows every run. When those are permanently unresolvable (empty
+    # market_id, a closed market with no winner recorded, or a long-dated market
+    # still open months later) the window never advances and every newer row is
+    # starved. On prod 2026-08-28 that starved 42 resolvable rows behind a head
+    # of 15 that could never clear.
+    try:
+        conn.execute("ALTER TABLE shadow_trades ADD COLUMN last_resolve_attempt TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
 
 def _migrate_legacy_json(conn: sqlite3.Connection):
     """Import trades from legacy JSON file into SQLite."""
@@ -185,7 +204,6 @@ def _migrate_legacy_json(conn: sqlite3.Connection):
     LEGACY_JSON.rename(LEGACY_JSON.with_suffix(".json.migrated"))
     logger.info(f"Migrated {imported} trades from legacy JSON to SQLite")
     return imported
-
 
 # ============================================================================
 # Signal Snapshot
@@ -265,7 +283,6 @@ def save_signal_snapshot(signals: List[Dict], source: str = "all"):
     conn.close()
     return len(signals)
 
-
 # ============================================================================
 # Trade Logging
 # ============================================================================
@@ -281,6 +298,20 @@ def log_shadow_trade(signal: Dict) -> bool:
     today = date.today().isoformat()
     market_id = signal.get("market_id", "")
     side = signal.get("side", "")
+    # entry_price = cost per share of the token actually HELD. Writers whose
+    # display `price` is the YES price of a market they fade (MCW, weather
+    # resolution) pass an explicit entry_price; poly_delta + PnL depend on it.
+    entry_price = signal.get("entry_price")
+    if entry_price is None:
+        entry_price = signal.get("price")
+    # Units guard: entry_price is DOLLARS per share (0..1). Cents slip through
+    # when a writer forgets /100 (itunes_rss_edge 51.0 -> -50.0 "per-share" PnL).
+    if entry_price is not None and not (0.0 <= float(entry_price) <= 1.0):
+        logger.warning(
+            f"Shadow trade rejected: entry_price {entry_price} outside [0,1] "
+            f"(cents instead of dollars?) — {market_id} {signal.get('strategy')}"
+        )
+        return False
 
     try:
         # Check for existing open trade on same market (ANY side, ANY platform)
@@ -322,12 +353,11 @@ def log_shadow_trade(signal: Dict) -> bool:
             # Update existing trade with latest data (price, confidence, volume)
             conn.execute("""
                 UPDATE shadow_trades
-                SET entry_price = ?, confidence = ?, confirmations = ?,
+                SET confidence = ?, confirmations = ?,
                     days_to_close = ?, volume = ?, reasoning = ?,
                     snapshot_date = ?
                 WHERE id = ?
             """, (
-                signal.get("price"),
                 signal.get("confidence"),
                 signal.get("confirmations"),
                 signal.get("days_to_close"),
@@ -355,7 +385,7 @@ def log_shadow_trade(signal: Dict) -> bool:
             signal.get("category_tier", ""),
             signal.get("platform", "kalshi"),
             side,
-            signal.get("price"),
+            entry_price,
             signal.get("confidence"),
             signal.get("confirmations"),
             signal.get("days_to_close"),
@@ -373,23 +403,26 @@ def log_shadow_trade(signal: Dict) -> bool:
         conn.close()
         return False
 
-
 # ============================================================================
 # Resolution
 # ============================================================================
 
 def _fetch_json(url: str, timeout: int = 8) -> Any:
-    """Fetch JSON with timeout."""
+    """Fetch JSON with timeout.
+
+    UA must NOT be browser-shaped: clob.polymarket.com returns 403 for
+    Mozilla/* (verified 2026-08-28: Mozilla/5.0 -> 403, Polyclawd/2.0 -> 200,
+    curl/8.5.0 -> 200). gamma-api does not block it, which is why this hid for
+    months. This fetcher backs _check_polymarket_resolution, so the 403 made
+    every Polymarket trade look "still open" and the resolver never advanced.
+    """
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
         logger.debug(f"Fetch failed: {e}")
         return None
-
-
-
 
 def _normalize_market_title(title: str) -> str:
     """Normalize market title for cross-platform dedup matching.
@@ -420,7 +453,6 @@ def _normalize_market_title(title: str) -> str:
     t = re.sub(r'\breach\b', 'above', t)
     return t
 
-
 def _markets_match(title_a: str, title_b: str) -> bool:
     """Structured cross-platform market matching.
 
@@ -433,7 +465,7 @@ def _markets_match(title_a: str, title_b: str) -> bool:
 
     # Structured matching via browser_bridge parser
     try:
-        from browser_bridge import _parse_market_title
+        from signals.browser_bridge import _parse_market_title
         a = _parse_market_title(title_a)
         b = _parse_market_title(title_b)
 
@@ -455,7 +487,6 @@ def _markets_match(title_a: str, title_b: str) -> bool:
         return True
     except ImportError:
         return False
-
 
 def _check_polymarket_resolution(condition_id: str) -> str:
     """Check if a Polymarket condition has resolved.
@@ -483,7 +514,6 @@ def _check_polymarket_resolution(condition_id: str) -> str:
 
     return None
 
-
 def resolve_trades(batch_size: int = 15, delay: float = 0.3) -> Dict[str, Any]:
     """Resolve unresolved shadow trades against Kalshi + Polymarket APIs.
 
@@ -494,13 +524,27 @@ def resolve_trades(batch_size: int = 15, delay: float = 0.3) -> Dict[str, Any]:
     conn = get_db()
     _migrate_legacy_json(conn)
 
+    # Least-recently-attempted first (NULL = never tried), then oldest. This is
+    # a FAIR queue: a row that cannot resolve is stamped and moves to the back,
+    # so it can no longer block every row behind it. See the migration note on
+    # last_resolve_attempt.
     rows = conn.execute("""
         SELECT id, market_id, side, entry_price, market, platform
         FROM shadow_trades
         WHERE resolved = 0
-        ORDER BY timestamp ASC
+        ORDER BY COALESCE(last_resolve_attempt, '') ASC, timestamp ASC
         LIMIT ?
     """, (batch_size,)).fetchall()
+
+    # Stamp the whole batch up front: every row in it has now had its turn,
+    # whether or not the API gives us an outcome. Stamping only on success
+    # would reproduce the head-of-line block exactly.
+    _attempt_ts = datetime.now(timezone.utc).isoformat()
+    conn.executemany(
+        "UPDATE shadow_trades SET last_resolve_attempt = ? WHERE id = ?",
+        [(_attempt_ts, r["id"]) for r in rows],
+    )
+    conn.commit()
 
     if not rows:
         conn.close()
@@ -546,7 +590,7 @@ def resolve_trades(batch_size: int = 15, delay: float = 0.3) -> Dict[str, Any]:
             pnl = (1.0 - entry_price) if side == "YES" else -entry_price
             exit_price = 1.0
         elif result == "NO":
-            pnl = -entry_price if side == "YES" else entry_price
+            pnl = -entry_price if side == "YES" else (1.0 - entry_price)
             exit_price = 0.0
         else:
             continue
@@ -600,7 +644,6 @@ def resolve_trades(batch_size: int = 15, delay: float = 0.3) -> Dict[str, Any]:
         "cumulative_pnl": round(stats["cumulative_pnl"] or 0, 4),
         "avg_pnl_per_trade": round(stats["avg_pnl"] or 0, 4),
     }
-
 
 # ============================================================================
 # Daily Summary
@@ -676,8 +719,15 @@ def generate_daily_summary(target_date: Optional[str] = None) -> Dict[str, Any]:
 
     # Track actual sources from today's trades
     source_counts = {}
+    # sqlite3.Row has no .get(): it raises AttributeError, and indexing an
+    # absent column raises IndexError. Probe keys() once instead. This crashed
+    # every `summary` run, but was invisible behind the ModuleNotFoundError
+    # that killed the script at import time (fixed 2026-08-28).
+    _cols = day_trades[0].keys() if day_trades else ()
     for t in day_trades:
-        src = t.get("strategy") or t.get("source") or "unknown"
+        src = (t["strategy"] if "strategy" in _cols else None) \
+            or (t["source"] if "source" in _cols else None) \
+            or "unknown"
         source_counts[src] = source_counts.get(src, 0) + 1
 
     # Poly delta: avg adverse selection by signal source (last 7 days)
@@ -760,7 +810,6 @@ def generate_daily_summary(target_date: Optional[str] = None) -> Dict[str, Any]:
     conn.close()
     return summary
 
-
 # ============================================================================
 # Query Helpers
 # ============================================================================
@@ -779,7 +828,6 @@ def get_performance_history(days: int = 30) -> List[Dict]:
     conn.close()
     return [dict(r) for r in rows]
 
-
 def get_open_trades() -> List[Dict]:
     """Get all unresolved shadow trades."""
     conn = get_db()
@@ -790,7 +838,6 @@ def get_open_trades() -> List[Dict]:
     """).fetchall()
     conn.close()
     return [dict(r) for r in rows]
-
 
 def get_trade_stats(exclude_categories: Optional[List[str]] = None) -> Dict[str, Any]:
     """Get overall shadow trading statistics.
@@ -867,7 +914,6 @@ def get_trade_stats(exclude_categories: Optional[List[str]] = None) -> Dict[str,
         ],
     }
 
-
 def export_trades(format: str = "json") -> str:
     """Export all trades to JSON file. Returns path."""
     conn = get_db()
@@ -880,7 +926,6 @@ def export_trades(format: str = "json") -> str:
         json.dump(trades, f, indent=2, default=str)
 
     return str(out_path)
-
 
 # ============================================================================
 # CLI

@@ -1,0 +1,37 @@
+**Paper Portfolio Daily P&L — 2026-05-07**
+
+**TL;DR:** 205W/624 (32.9%) · Net 24h: **+$1,956.75** · Bankroll: **$15,457.78**
+
+**Portfolio:**
+├─ Bankroll: $15,457.78
+├─ Today: 1W/0L (+$598.90)
+└─ Cumulative: 205 / 624 (32.9% WR)
+
+**Position Status:**
+├─ won: 187
+├─ stopped: 383
+├─ lost: 24
+├─ closed_manual: 3
+├─ displaced: 27
+└─ open: 4
+
+**Recent Activity (24h):**
+├─ 🟢 Won: 7 positions (+$3,504.30)
+│     ├─ 811: Will the highest temperature in Denver be between  → +$598.90
+│     ├─ 795: Will the highest temperature in San Francisco be b → +$461.54
+│     ├─ 803: Will the highest temperature in Buenos Aires be 24 → +$470.87
+│     ├─ 807: Will the highest temperature in Paris be 15°C on M → +$510.10
+│     └─ 809: Will the highest temperature in London be 12°C on  → +$520.41
+├─ 🔴 Stopped: 5 positions ($-1,547.55)
+│     ├─ 802: Will the highest temperature in Wellington be 18°C → $-257.14
+│     ├─ 805: Will the highest temperature in Miami be between 8 → $-428.57
+│     ├─ 808: Will the highest temperature in Seattle be 61°F or → $-264.06
+│     ├─ 801: Will the highest temperature in Los Angeles be bet → $-316.83
+│     └─ 804: Will the highest temperature in New York City be b → $-280.95
+└─ 🟡 Open: 4 positions
+      ├─ 813: Will the highest temperature in New York City @ 0.52 | Edge: 0.2%
+      ├─ 812: Will the highest temperature in London be 15° @ 0.49 | Edge: 0.2%
+      ├─ 810: Will the highest temperature in Miami be betw @ 0.47 | Edge: 0.2%
+      └─ 806: Will the highest temperature in Paris be 17°C @ 0.47 | Edge: 0.2%
+
+**Net (24h): +$1,956.75**

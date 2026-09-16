@@ -21,6 +21,8 @@ from typing import Optional
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_DIR)
 
+from db import connect as db_connect  # noqa: E402
+
 ODDS_API = "https://api.the-odds-api.com/v4"
 DB_PATH = os.path.join(PROJECT_DIR, "storage", "shadow_trades.db")
 
@@ -42,7 +44,7 @@ DRY_RUN = "--dry" in sys.argv
 
 SOFT_BOOKS = ["draftkings", "fanduel", "betmgm", "caesars", "betrivers"]
 MIN_EDGE_PP = 4.0
-COOLDOWN_MINUTES = 15
+COOLDOWN_MINUTES = 120  # must exceed the 30-min tick cadence or it never gates (15 was a no-op: persistent lines re-alerted every scan)
 EDGE_CHANGE_PP = 3.0  # re-alert inside cooldown if edge moves >= this
 MAX_ALERTS_PER_SCAN = 5
 NEAR_WINDOW_HOURS = 12  # only spend credits on events kicking off within this window
@@ -79,8 +81,7 @@ def _send_alert(message: str) -> bool:
 
 
 def _cooldown_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn = db_connect(DB_PATH, timeout=10)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS stale_line_alert_log (

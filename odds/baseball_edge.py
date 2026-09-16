@@ -32,6 +32,8 @@ from typing import Dict, List, Optional, Tuple
 import requests
 from loguru import logger
 
+from config.polymarket_urls import GAMMA_API as POLYMARKET_GAMMA  # polyproxy: central URL config
+
 try:  # shared order-book executable-edge enrichment
     from . import poly_executable_edge as pee
     from . import sports_edge_common as sec
@@ -54,33 +56,8 @@ except ImportError:
     )
     from client import devig_multiway
 
-# Shadow tracker (soft import — degrade gracefully)
-try:
-    from signals.shadow_tracker import log_shadow_trade
-    HAS_SHADOW = True
-except ImportError:
-    try:
-        import sys
-        sys.path.insert(0, str(__import__('pathlib').Path(__file__).parent.parent / 'signals'))
-        from shadow_tracker import log_shadow_trade
-        HAS_SHADOW = True
-    except ImportError:
-        HAS_SHADOW = False
-        log_shadow_trade = None
-
-# Empirical confidence (soft import — degrade gracefully)
-try:
-    from signals.empirical_confidence import calculate_empirical_confidence
-    HAS_EMPIRICAL = True
-except ImportError:
-    try:
-        import sys
-        sys.path.insert(0, str(__import__('pathlib').Path(__file__).parent.parent / 'signals'))
-        from empirical_confidence import calculate_empirical_confidence
-        HAS_EMPIRICAL = True
-    except ImportError:
-        HAS_EMPIRICAL = False
-        calculate_empirical_confidence = None
+# Shadow logging now uses sec.log_shadow (post-enrichment, fee-adjusted).
+# See end of find_baseball_edges().
 
 # ─── Line movement store ─────────────────────────────────────────────
 # In-memory dict tracking last seen best odds per (game_id, team)
@@ -88,7 +65,6 @@ except ImportError:
 # Cross-request state (uvicorn process lives long enough)
 _LINE_MOVEMENT: Dict[str, Dict] = {}
 _LINE_MOVEMENT_WINDOW = 10800  # 3 hours for movement tracking
-
 
 def _is_stale_game(commence_time: str) -> bool:
     """Check if a game starts in <30min or has already started.
@@ -102,7 +78,6 @@ def _is_stale_game(commence_time: str) -> bool:
         return mins_to_start < 30
     except (ValueError, TypeError):
         return True
-
 
 def _update_line_movement(game_id: str, team: str, best_odds: int, market_type: str = "moneyline") -> Dict:
     """Record a line movement observation and return delta info.
@@ -143,64 +118,6 @@ def _update_line_movement(game_id: str, team: str, best_odds: int, market_type: 
         }
         return {"delta_3h": None, "delta_ticks": 0, "direction": "first_observation"}
 
-
-async def _log_baseball_shadow(edge: "MLBEdge", edge_pct: float, game_id: str):
-    """Log a baseball edge to the shadow tracker for empirical validation."""
-    if not HAS_SHADOW or not log_shadow_trade:
-        return
-    try:
-        # P1: edge floor/cap gate (2026-06-06)
-        try:
-            from odds.sports_edge_common import p1_edge_ok, p1_confidence
-            ok, reason = p1_edge_ok(edge_pct)
-            if not ok:
-                logger.debug(f"baseball shadow skip — {reason}")
-                return
-            use_p1_conf = True
-        except ImportError:
-            use_p1_conf = False
-
-        # Build confidence from empirical confidence system if available
-        conf = p1_confidence(abs(edge_pct)) if use_p1_conf else min(75, abs(edge_pct) * 15)
-        if HAS_EMPIRICAL and calculate_empirical_confidence:
-            try:
-                ec = calculate_empirical_confidence(
-                    edge.game_title,
-                    "YES" if edge.direction == "BUY" else "NO",
-                    edge.polymarket_price,
-                    days_to_close=7.0,
-                )
-                if not ec.get("killed"):
-                    conf = min(85, ec["confidence"] * 100)
-            except Exception:
-                pass
-
-        platform = "polymarket"
-        signal = {
-            "market_id": edge.poly_market_id or f"mlb_{game_id}_{edge.bet_team.replace(' ', '')}",
-            "market": f"{edge.game_title[:180]} — {edge.bet_team} {edge.market_type.capitalize()}",
-            "platform": platform,
-            "side": "YES" if edge.direction == "BUY" else "NO",
-            "price": edge.polymarket_price,
-            "confidence": conf,
-            "days_to_close": 7.0,
-            "volume": 0,
-            "confirmations": 1,
-            "reasoning": (
-                f"MLB baseball edge: Odds API {edge.odds_api_prob*100:.0f}% "
-                f"vs Poly {edge.polymarket_price*100:.1f}¢ "
-                f"({edge.edge_pct*100:+.1f}% edge)"
-            ),
-            "archetype": "sports_single_game",
-            "strategy": f"baseball_{edge.market_type}",
-            "category": "baseball",
-            "category_tier": "sports",
-        }
-        log_shadow_trade(signal)
-    except Exception as e:
-        logger.debug(f"baseball shadow log failed: {e}")
-
-POLYMARKET_GAMMA = "https://gamma-api.polymarket.com"
 DEFAULT_MIN_EDGE = 0.05  # 5%
 
 # Canonical Odds API team name → Polymarket title variants
@@ -237,40 +154,15 @@ MLB_TEAM_ALIASES: Dict[str, List[str]] = {
     "Washington Nationals": ["Washington Nationals", "Nationals"],
 }
 
-
-@dataclass
-class MLBEdge:
-    game_title: str       # "Philadelphia Phillies vs. Los Angeles Dodgers"
-    home_team: str
-    away_team: str
-    bet_team: str         # team this edge is for
-    market_type: str      # "moneyline", "spread", or "total"
-    odds_api_prob: float  # devigged bookmaker probability (0-1)
-    american_odds: int
-    polymarket_price: float  # Polymarket YES price (0-1)
-    edge_pct: float       # odds_api_prob - polymarket_price (signed)
-    direction: str        # "BUY" or "SELL"
-    commence_time: str
-    point_value: Optional[float] = None  # spread or total point, e.g. -1.5 or 8.5
-    poly_market_id: Optional[str] = None
-    poly_event_id: Optional[str] = None
-    # Order-book executable-edge enrichment (Scanner layer; reality check)
-    executable_price: Optional[float] = None  # VWAP fill price for $100, decimal
-    executable_edge: Optional[float] = None    # odds_api_prob - executable_price
-    book_spread: Optional[float] = None         # best_ask - best_bid
-    slippage_bps: Optional[float] = None
-    tradeable: bool = False                     # book ok AND executable_edge > 0
-    poly_move_1h: Optional[float] = None        # Polymarket price drift ~1h (pp)
-    poly_move_6h: Optional[float] = None        # Polymarket price drift ~6h (pp)
-    live_book: bool = False                     # P3.4: executable edge used live WS book
-
+# MLBEdge is now an alias for sec.Edge (migrated 2026-06-22, blocker B1).
+# sec.Edge has backward-compat properties: .game_title, .bet_team, .odds_api_prob, .polymarket_price
+MLBEdge = sec.Edge
 
 def _team_in_title(team: str, title: str) -> bool:
     """Check if a team name or any alias appears in a Polymarket event title."""
     title_lower = title.lower()
     aliases = MLB_TEAM_ALIASES.get(team, [team])
     return any(alias.lower() in title_lower for alias in aliases)
-
 
 def _fetch_polymarket_baseball_sync() -> List[Dict]:
     """Synchronous fetch of Polymarket baseball events (tag_slug=baseball)."""
@@ -286,13 +178,11 @@ def _fetch_polymarket_baseball_sync() -> List[Dict]:
         logger.error(f"Polymarket baseball fetch failed: {e}")
         return []
 
-
 async def get_polymarket_baseball_events() -> List[Dict]:
     """Async wrapper for Polymarket baseball event fetch."""
     loop = asyncio.get_event_loop()
     with ThreadPoolExecutor() as pool:
         return await loop.run_in_executor(pool, _fetch_polymarket_baseball_sync)
-
 
 def _find_matching_event(
     home_team: str, away_team: str, poly_events: List[Dict]
@@ -309,7 +199,6 @@ def _find_matching_event(
         if _team_in_title(home_team, title) and _team_in_title(away_team, title):
             return event
     return None
-
 
 def _extract_moneyline_prices(
     event: Dict, home_team: str, away_team: str
@@ -359,7 +248,6 @@ def _extract_moneyline_prices(
             return price1, price0, market.get("conditionId", market.get("id", ""))
 
     return None
-
 
 def _extract_spread_prices(
     event: Dict, target_team: str, target_point: float
@@ -428,7 +316,6 @@ def _extract_spread_prices(
         return target_cover, opp_cover, market.get("conditionId", market.get("id", ""))
     return None
 
-
 def _extract_total_prices(
     event: Dict, target_point: float
 ) -> Optional[Tuple[float, float, str]]:
@@ -475,7 +362,6 @@ def _extract_total_prices(
         return price0, price1, market.get("conditionId", market.get("id", ""))
     return None
 
-
 def _devig_two_way(odds_a: int, odds_b: int) -> Tuple[float, float]:
     """
     Remove bookmaker vig from a two-outcome market.
@@ -486,29 +372,33 @@ def _devig_two_way(odds_a: int, odds_b: int) -> Tuple[float, float]:
     total = p_a + p_b
     return p_a / total, p_b / total
 
-
 # ─── Moneyline consensus devig — dedup'd to the shared core ──────────
 # Per-book devig -> weighted consensus now lives in sports_edge_common (one
 # implementation across MLB / UFC / soccer). These thin wrappers preserve the
 # local call sites and pick up the shared, fuller BOOK_WEIGHTS (incl. the
 # williamhill + betfair_ex aliases).
+def _get_mlb_weights() -> Dict[str, float]:
+    """Sport-specific book weights for MLB."""
+    try:
+        from odds.book_weights import get_weights
+        return get_weights("baseball_mlb")
+    except ImportError:
+        return {}  # falls back to global BOOK_WEIGHTS inside sec.*
+
 def _consensus_devig(game: Dict) -> Dict[str, float]:
     """MLB moneyline true-probs via the shared weighted consensus (2-way)."""
-    return sec.consensus_devig_2way(game, "h2h")
-
+    return sec.consensus_devig_2way(game, "h2h", weights=_get_mlb_weights())
 
 def _best_odds_per_team(game: Dict) -> Dict[str, int]:
     """Raw h2h odds from the highest-weighted book with both teams (display /
     line-movement only). Delegates to the shared core."""
-    return sec.consensus_best_odds(game, "h2h")
-
+    return sec.consensus_best_odds(game, "h2h", weights=_get_mlb_weights())
 
 # _best_spreads / _best_totals removed: spreads & totals now use per-book weighted
 # consensus via sec.consensus_devig_spreads / sec.consensus_devig_totals (see the
 # SPREADS / TOTALS blocks in find_baseball_edges). The old best-of-all helpers
 # cherry-picked the most favorable line per side across books, collapsing the
 # overround and manufacturing phantom edges.
-
 
 async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdge]:
     """
@@ -573,34 +463,24 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
                     edge = true_prob - poly_price
                     if abs(edge) >= min_edge:
                         edges.append(MLBEdge(
-                            game_title=event.get("title", ""),
+                            event_title=event.get("title", ""),
                             home_team=home_team, away_team=away_team,
-                            bet_team=team, market_type="moneyline",
-                            odds_api_prob=true_prob, american_odds=american_odds,
-                            polymarket_price=poly_price, edge_pct=edge,
+                            participant=team, market_type="moneyline", market_model="2way",
+                            book_prob=true_prob, american_odds=american_odds,
+                            poly_price=poly_price, edge_pct=edge,
                             direction="BUY" if edge > 0 else "SELL",
                             commence_time=commence_time,
                             poly_market_id=ml_market_id, poly_event_id=event.get("id"),
                         ))
                     # Track line movement
                     _update_line_movement(game_id, team, american_odds, "moneyline")
-                    if abs(edge) >= 0.03:
-                        await _log_baseball_shadow(MLBEdge(
-                            game_title=event.get("title", ""),
-                            home_team=home_team, away_team=away_team,
-                            bet_team=team, market_type="moneyline",
-                            odds_api_prob=true_prob, american_odds=american_odds,
-                            polymarket_price=poly_price, edge_pct=edge,
-                            direction="BUY" if edge > 0 else "SELL",
-                            commence_time=commence_time,
-                            poly_market_id=ml_market_id, poly_event_id=event.get("id"),
-                        ), edge, game_id)
 
         # ── SPREADS ────────────────────────────────────────────────
         # Per-book devig -> weighted consensus, keyed by |point|. Raw odds for
         # display only. Polymarket "Spread: Team (-x.5)" YES = named team covers.
-        spread_consensus = sec.consensus_devig_spreads(game)   # {|pt|: {team: prob}}
-        spread_odds = sec.consensus_best_spread_odds(game)     # {|pt|: {team: (odds, signed_pt)}}
+        _mlb_w = _get_mlb_weights()
+        spread_consensus = sec.consensus_devig_spreads(game, weights=_mlb_w)   # {|pt|: {team: prob}}
+        spread_odds = sec.consensus_best_spread_odds(game, weights=_mlb_w)     # {|pt|: {team: (odds, signed_pt)}}
         for abs_point, team_probs in spread_consensus.items():
             odds_map = spread_odds.get(abs_point, {})
             for team, true_prob in team_probs.items():
@@ -613,34 +493,22 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
                 edge = true_prob - poly_price
                 if abs(edge) >= min_edge:
                     edges.append(MLBEdge(
-                        game_title=event.get("title", ""),
+                        event_title=event.get("title", ""),
                         home_team=home_team, away_team=away_team,
-                        bet_team=team, market_type="spread",
-                        odds_api_prob=true_prob, american_odds=american_odds,
-                        polymarket_price=poly_price, edge_pct=edge,
+                        participant=team, market_type="spread", market_model="2way",
+                        book_prob=true_prob, american_odds=american_odds,
+                        poly_price=poly_price, edge_pct=edge,
                         direction="BUY" if edge > 0 else "SELL",
                         commence_time=commence_time,
                         point_value=point,
                         poly_market_id=sp_market_id, poly_event_id=event.get("id"),
                     ))
                 _update_line_movement(game_id, team, american_odds, "spread")
-                if abs(edge) >= 0.03:
-                    await _log_baseball_shadow(MLBEdge(
-                        game_title=event.get("title", ""),
-                        home_team=home_team, away_team=away_team,
-                        bet_team=team, market_type="spread",
-                        odds_api_prob=true_prob, american_odds=american_odds,
-                        polymarket_price=poly_price, edge_pct=edge,
-                        direction="BUY" if edge > 0 else "SELL",
-                        commence_time=commence_time,
-                        point_value=point,
-                        poly_market_id=sp_market_id, poly_event_id=event.get("id"),
-                    ), edge, game_id)
 
         # ── TOTALS ─────────────────────────────────────────────────
         # Per-book devig -> weighted consensus, keyed by total point.
-        total_consensus = sec.consensus_devig_totals(game)    # {pt: {"Over":p,"Under":p}}
-        total_odds = sec.consensus_best_total_odds(game)      # {pt: (over_odds, under_odds)}
+        total_consensus = sec.consensus_devig_totals(game, weights=_mlb_w)    # {pt: {"Over":p,"Under":p}}
+        total_odds = sec.consensus_best_total_odds(game, weights=_mlb_w)      # {pt: (over_odds, under_odds)}
         for total_point, ou in total_consensus.items():
             over_odds, under_odds = total_odds.get(total_point, (0, 0))
             prices = _extract_total_prices(event, total_point)
@@ -654,30 +522,17 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
                 edge = true_prob - poly_price
                 if abs(edge) >= min_edge:
                     edges.append(MLBEdge(
-                        game_title=event.get("title", ""),
+                        event_title=event.get("title", ""),
                         home_team=home_team, away_team=away_team,
-                        bet_team=label, market_type="total",
-                        odds_api_prob=true_prob, american_odds=american_odds,
-                        polymarket_price=poly_price, edge_pct=edge,
+                        participant=label, market_type="total", market_model="2way",
+                        book_prob=true_prob, american_odds=american_odds,
+                        poly_price=poly_price, edge_pct=edge,
                         direction="BUY" if edge > 0 else "SELL",
                         commence_time=commence_time,
                         point_value=total_point,
                         poly_market_id=tot_market_id, poly_event_id=event.get("id"),
                     ))
                 _update_line_movement(game_id, label.replace(" ", ""), american_odds, "total")
-                if abs(edge) >= 0.03:
-                    await _log_baseball_shadow(MLBEdge(
-                        game_title=event.get("title", ""),
-                        home_team=home_team, away_team=away_team,
-                        bet_team=label, market_type="total",
-                        odds_api_prob=true_prob, american_odds=american_odds,
-                        polymarket_price=poly_price, edge_pct=edge,
-                        direction="BUY" if edge > 0 else "SELL",
-                        commence_time=commence_time,
-                        point_value=total_point,
-                        poly_market_id=tot_market_id, poly_event_id=event.get("id"),
-                    ), edge, game_id)
-
 
     # --- Executable-edge enrichment. Midpoint edge above is vs Polymarket's
     # last/mid price; the executable price is the ask walked to size. (P3.4)
@@ -732,6 +587,16 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
             _e.book_spread = _ex["spread"]
             _e.slippage_bps = _ex["slippage_bps"]
             _e.tradeable = _ex["tradeable"]
+            # fillable_usd and net_edge_pct were omitted here until 2026-08-28.
+            # This inline block is a copy of sec.enrich_executable_edge, and a
+            # PARTIAL copy is invisible: every field present looks right. The
+            # cost was total — sec.log_shadow gates on p2_depth_ok(fillable_usd),
+            # which returns "depth unavailable (book not fetched)" for None, so
+            # NO baseball edge could ever be logged as a shadow trade.
+            # tests/unit/test_enrichment_field_parity.py pins the two blocks
+            # to the same field set.
+            _e.fillable_usd = _ex.get("fillable_usd")
+            _e.net_edge_pct = sec.fee_adjusted_edge(_e)
         # Polymarket's own recent price drift (persistent momentum, survives restart)
         try:
             _pm = pee.poly_price_move(token_id=_tid, condition_id=_e.poly_market_id, outcome_index=_oi)
@@ -749,9 +614,50 @@ async def find_baseball_edges(min_edge: float = DEFAULT_MIN_EDGE) -> List[MLBEdg
         except Exception:
             pass
 
+    # Post-enrichment shadow logging (uses executable price, fee-adjusted, same
+    # pattern as soccer_match_edge.py / ufc_edge.py). Replaces the old pre-enrichment
+    # _log_baseball_shadow which logged midpoint prices.
+    _baseball_cfg = sec.SportConfig(
+        name="baseball",
+        odds_api_sport_keys=["baseball_mlb"],
+        polymarket_tag="baseball",
+        market_model="2way",
+        featured_markets=["h2h"],
+        shadow_strategy="baseball_{market_type}",
+    )
+    for _e in edges:
+        # sec.log_shadow uses the strategy from cfg.shadow_strategy, but baseball
+        # has per-market-type strategies. Override the cfg name per edge.
+        _cfg = sec.SportConfig(
+            name="baseball",
+            odds_api_sport_keys=["baseball_mlb"],
+            polymarket_tag="baseball",
+            market_model="2way",
+            featured_markets=["h2h"],
+            shadow_strategy=f"baseball_{_e.market_type}",
+        )
+        sec.log_shadow(_e, _cfg)
+
+        # --- Tight-filter experiment: BUY-only, edge 5-8% sweet spot ---
+        # Backtest (N=20): 70% WR, +$4.55/$1 vs original 3-15% gate 52% WR.
+        # Runs as a parallel shadow under strategy "baseball_{type}_tight"
+        # so original system is unaffected. Compare resolution rates weekly.
+        if (_e.direction == "BUY"
+                and 0.05 <= _e.edge_pct <= 0.08
+                and _e.tradeable
+                and _e.executable_price is not None):
+            _tight_cfg = sec.SportConfig(
+                name="baseball",
+                odds_api_sport_keys=["baseball_mlb"],
+                polymarket_tag="baseball",
+                market_model="2way",
+                featured_markets=["h2h"],
+                shadow_strategy=f"baseball_{_e.market_type}_tight",
+            )
+            sec.log_shadow(_e, _tight_cfg)
+
     edges.sort(key=lambda e: abs(e.edge_pct), reverse=True)
     return edges
-
 
 async def get_baseball_edge_summary(min_edge: float = DEFAULT_MIN_EDGE) -> Dict:
     """
@@ -823,7 +729,6 @@ async def get_baseball_edge_summary(min_edge: float = DEFAULT_MIN_EDGE) -> Dict:
             for e in edges[:5]
         ],
     }
-
 
 if __name__ == "__main__":
     async def _test():

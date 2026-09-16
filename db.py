@@ -13,8 +13,13 @@ Drop-in replacement::
     conn = db_connect(path, timeout=5)          # == sqlite3.connect(path, timeout=5)
     conn.row_factory = sqlite3.Row              # set row_factory yourself as before
 
-``connect()`` additionally runs ``PRAGMA busy_timeout=5000`` and (best-effort)
-``PRAGMA journal_mode=WAL``.
+``connect()`` additionally runs ``PRAGMA busy_timeout=BUSY_TIMEOUT_MS`` and
+(best-effort) ``PRAGMA journal_mode=WAL``.
+
+Do NOT re-issue ``PRAGMA busy_timeout=<smaller>`` on a connection returned by
+``connect()``: the pragma is last-write-wins, so a stray 5000/8000 downgrade
+silently undoes this factory. Callers that need a different value should pass
+it here instead.
 
 NOTE: importing this module requires the repo root on ``sys.path``. That holds
 for the ``api`` package (run via ``uvicorn api.main:app`` and under pytest) but
@@ -25,7 +30,7 @@ tasks/todo.md.
 
 import sqlite3
 
-BUSY_TIMEOUT_MS = 5000
+BUSY_TIMEOUT_MS = 30000
 
 
 def connect(database, timeout: float = 5.0, *, wal: bool = True, **kwargs) -> sqlite3.Connection:

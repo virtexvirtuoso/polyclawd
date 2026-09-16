@@ -25,12 +25,16 @@ from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from db import connect as db_connect  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent
 META_DB_PATH = BASE_DIR / "storage" / "whale_meta.db"
-CLOB_REST_URL = "https://clob.polymarket.com/orderbook"
-CLOB_MARKETS_URL = "https://clob.polymarket.com/markets"
+from config.polymarket_urls import clob_url  # polyproxy: central URL config
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
+CLOB_REST_URL = clob_url("/orderbook")  # proxied when POLYPROXY_BASE set
+CLOB_MARKETS_URL = clob_url("/markets")
 
 # Thresholds
 MIN_RESTING_USD = 5000.0  # $5K minimum to be a "large" resting order
@@ -41,7 +45,7 @@ ALERT_COOLDOWN_S = 3600  # 1 hour per market per wallet
 def get_meta_db(path: Optional[Path] = None) -> sqlite3.Connection:
     db_path = Path(path) if path else META_DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=30)
+    conn = db_connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
@@ -102,8 +106,8 @@ def _get_whale_active_markets(meta) -> list:
 def _resolve_token_id(market_slug: str) -> Optional[str]:
     """Resolve a Polymarket slug to a CLOB token ID via Gamma API."""
     # Gamma API is the reliable way to resolve slugs to token IDs
-    gamma_url = f"https://gamma-api.polymarket.com/markets?slug={market_slug}"
-    gamma_data = _fetch_json(gamma_url)
+    gamma_request_url = gamma_url(f"/markets?slug={market_slug}")
+    gamma_data = _fetch_json(gamma_request_url)
     if gamma_data:
         # Gamma can return a list (multiple) or a dict (single market)
         if isinstance(gamma_data, dict):

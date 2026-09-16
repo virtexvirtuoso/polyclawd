@@ -1,5 +1,6 @@
 # Pytest configuration and fixtures for polyclawd tests
 import asyncio
+import os
 import sys
 from pathlib import Path
 from typing import AsyncGenerator, Generator
@@ -7,6 +8,11 @@ from typing import AsyncGenerator, Generator
 import pytest
 import httpx
 from fastapi.testclient import TestClient
+
+# Kill all Telegram sends in test runs — prevents test fixtures from leaking
+# "Test Market" / "RN1" alerts into the real notification pipeline.
+os.environ["SMART_WALLET_ALERT_SEND"] = "0"
+os.environ.pop("TELEGRAM_BOT_TOKEN", None)
 
 # Add project root to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))

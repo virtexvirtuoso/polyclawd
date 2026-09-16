@@ -25,7 +25,9 @@ Usage:
     send_telegram(msg)
 """
 
-import os, json, urllib.request, urllib.parse, subprocess
+import html
+import os
+import re
 
 TELEGRAM_CHAT_ID = "468298295"
 
@@ -44,45 +46,52 @@ def format_alert(
     links: list[str] | None = None,
     tags: list[str] | None = None,
 ) -> str:
-    """Two-tier alert format — newcomer-friendly + power user data."""
+    """Two-tier alert format — newcomer-friendly + power user data.
+
+    All caller-supplied text fields are HTML-escaped here (the message is
+    sent with parse_mode=HTML; raw </>/& in market titles 400 at Telegram —
+    "can't parse entities"). `links` is the one exception: documented as
+    containing intentional <a> markup, passed through verbatim.
+    """
+    esc = lambda s: html.escape(str(s), quote=False)  # noqa: E731
     lines = []
 
     # ── Tags ─────────────────────────────────────────────────────────
     if tags:
-        lines.append(" · ".join(tags))
+        lines.append(" · ".join(esc(t) for t in tags))
 
     # ── Header ───────────────────────────────────────────────────────
-    lines.append(f"{emoji} <b>#{rank}</b> · {alert_type.upper()}")
+    lines.append(f"{esc(emoji)} <b>#{rank}</b> · {esc(alert_type.upper())}")
 
     # ── Blank line after header ──────────────────────────────────────
     lines.append("")
 
     # ── Title ────────────────────────────────────────────────────────
-    lines.append(title)
+    lines.append(esc(title))
 
     # ── Price ─────────────────────────────────────────────────────────
     if direction and price_cents is not None:
-        lines.append(f"{direction} @ {price_cents}¢")
+        lines.append(f"{esc(direction)} @ {price_cents}¢")
     elif price_cents is not None:
         lines.append(f"{price_cents}¢")
 
     # ── Action (what happened) ───────────────────────────────────────
     if action:
-        lines.append(action)
+        lines.append(esc(action))
 
     # ── Signal + close time ─────────────────────────────────────────
     info_parts = []
     if signal_score:
-        info_parts.append(f"⭐ {signal_score}")
+        info_parts.append(f"⭐ {esc(signal_score)}")
     if close_info:
-        info_parts.append(close_info)
+        info_parts.append(esc(close_info))
     if info_parts:
         lines.append(" · ".join(info_parts))
 
     # ── Power user data line ─────────────────────────────────────────
     if data_line:
         lines.append("")
-        lines.append(f"📊 {data_line}")
+        lines.append(f"📊 {esc(data_line)}")
 
     # ── Links ────────────────────────────────────────────────────────
     if links:
@@ -91,30 +100,74 @@ def format_alert(
     return "\n".join(lines)
 
 
-def send_telegram(message: str) -> bool:
-    """Send a Telegram message. Tries OpenClaw CLI first, falls back to Bot API."""
-    # Try OpenClaw CLI first
-    try:
-        target = TELEGRAM_CHAT_ID
-        cmd = ["openclaw", "message", "send", "--channel", "telegram",
-               "--target", target, "--message", message]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        if result.returncode == 0:
-            return True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+def format_grid(header: list[str], rows: list[list[str]]) -> str:
+    """Render a monospace-aligned table as a Telegram <pre> block.
 
-    # Fallback: direct Bot API
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    if not token:
-        return False
-    fields = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML",
-              "disable_web_page_preview": True}
-    payload = urllib.parse.urlencode(fields).encode()
-    try:
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{token}/sendMessage", data=payload)
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode()).get("ok", False)
-    except Exception:
-        return False
+    This is the ONLY way to get true column alignment in Telegram — normal
+    text is proportional-font, so space-padding never lines up. <pre> is
+    monospace, but you CANNOT nest <b>/<i> inside it (bold is sacrificed
+    inside the table).
+
+    Rules:
+      - Every cell is HTML-escaped (a team name with < or & inside <pre>
+        still breaks the parse).
+      - First column is left-aligned (labels); remaining columns are
+        right-aligned (numbers).
+      - Emoji are double-width in monospace and WILL break alignment — keep
+        them OUT of the aligned columns. Use ASCII markers (^/v, +/-, <-)
+        inside the table, or put the emoji in the HTML header line above it.
+
+    Returns the full "<pre>...</pre>" block (already escaped).
+    """
+    esc = lambda s: html.escape(str(s), quote=False)  # noqa: E731
+    ncols = max([len(header)] + [len(r) for r in rows])
+    norm = [list(r) + [""] * (ncols - len(r)) for r in ([header] + rows)]
+    widths = [0] * ncols
+    for r in norm:
+        for i, cell in enumerate(r):
+            widths[i] = max(widths[i], len(esc(cell)))
+    out = []
+    for r in norm:
+        cells = []
+        for i, cell in enumerate(r):
+            s = esc(cell)
+            cells.append(s.ljust(widths[i]) if i == 0 else s.rjust(widths[i]))
+        out.append("  ".join(cells).rstrip())
+    return "<pre>" + "\n".join(out) + "</pre>"
+
+
+def send_telegram(message: str) -> bool:
+    """Formatter delivery — delegates to the ONE hardened send path
+    (scripts.openclaw_alerts.alert_openclaw: ledger + err detail +
+    transient-only retry). Kept for API compat with format_alert callers."""
+    return _send_telegram_inner(message)
+
+
+def _send_telegram_inner(message: str) -> bool:
+    """Send a Telegram message through alert_openclaw in HTML mode; if the
+    HTML parse is rejected (raw </>/& interpolated by a caller — Telegram
+    400s 'can't parse entities'), escape stray entities and retry before
+    falling back to plain text with tags stripped.
+    Every attempt lands in the send ledger with an err class — never a
+    silent swallow."""
+    # Never fire during pytest runs — PYTEST_CURRENT_TEST is set before any module import
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("SMART_WALLET_ALERT_SEND") == "0":
+        return True
+    from scripts.openclaw_alerts import alert_openclaw, _escape_stray_entities
+
+    if alert_openclaw(message, parse_mode="HTML"):
+        return True
+
+    # First retry: escape stray & < > that are NOT part of known HTML tags
+    # (shared helper — 2026-09-14: single source of truth in openclaw_alerts;
+    # the old local copy's pattern missed </a> closing tags and would have
+    # corrupted links while "fixing" the 400. Also unreachable in practice:
+    # the send layer's plain-text fallback returned ok=True before this
+    # retry could ever run — the send layer now escape-retries first.)
+    escaped = _escape_stray_entities(message)
+    if escaped != message:
+        if alert_openclaw(escaped, parse_mode="HTML"):
+            return True
+
+    # Last resort: strip all tags and send plain text
+    return alert_openclaw(re.sub(r"<[^>]+>", "", message), parse_mode=None)

@@ -20,6 +20,7 @@ Called from scheduler tick_5min. Only snapshots open PM positions where
 the market resolves within the next 30 minutes (and hasn't been snapshotted).
 """
 import json
+from db import connect as db_connect
 import sqlite3
 import urllib.request
 from datetime import datetime, timezone
@@ -27,19 +28,18 @@ from pathlib import Path
 from typing import Optional
 
 from loguru import logger
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
+from config.polymarket_urls import CLOB_API  # polyproxy: central URL config
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DB_PATH = PROJECT_ROOT / "storage" / "shadow_trades.db"
-GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API = "https://clob.polymarket.com"
 
 # Snapshot window: between T-30min and T-5min before resolution
 WINDOW_EARLY_S = 1800   # 30 min before
 WINDOW_LATE_S  = 300    # 5 min before (don't snapshot too close — market may be locked)
 
-
 def _ensure_columns():
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = db_connect(str(DB_PATH))
     conn.execute("PRAGMA journal_mode=WAL")
     existing = {row[1] for row in conn.execute("PRAGMA table_info(paper_positions)")}
     for col, typ in [
@@ -52,7 +52,6 @@ def _ensure_columns():
     conn.commit()
     conn.close()
 
-
 def _fetch_json(url: str, timeout: int = 8) -> Optional[dict]:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
@@ -61,7 +60,6 @@ def _fetch_json(url: str, timeout: int = 8) -> Optional[dict]:
     except Exception as e:
         logger.debug("clv_snapshot fetch failed {}: {}", url, e)
         return None
-
 
 def _get_resolution_dt(market_slug: str) -> Optional[datetime]:
     """Fetch end_date_iso from Gamma API for a market slug."""
@@ -79,7 +77,6 @@ def _get_resolution_dt(market_slug: str) -> Optional[datetime]:
         return dt.astimezone(timezone.utc)
     except Exception:
         return None
-
 
 def _get_mid_price(market_id: str, side: str) -> Optional[float]:
     """Fetch PM CLOB mid for market_id (hex condition_id) + side."""
@@ -114,12 +111,11 @@ def _get_mid_price(market_id: str, side: str) -> Optional[float]:
         return None
     return round((bids[0] + asks[0]) / 2, 4)
 
-
 def run_once():
     """Snapshot CLV for open PM positions approaching resolution."""
     _ensure_columns()
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = db_connect(str(DB_PATH))
     conn.execute("PRAGMA journal_mode=WAL")
     rows = conn.execute("""
         SELECT id, market_id, market_slug, side, entry_price
@@ -138,7 +134,7 @@ def run_once():
     now = datetime.now(timezone.utc)
     snapshotted = 0
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = db_connect(str(DB_PATH))
     conn.execute("PRAGMA journal_mode=WAL")
 
     for pos_id, market_id, market_slug, side, entry_price in rows:

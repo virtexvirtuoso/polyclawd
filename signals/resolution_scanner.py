@@ -448,7 +448,8 @@ def scan_open_markets() -> List[Dict]:
 
     # Get open shadow trades
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(DB_PATH), timeout=15)
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT * FROM shadow_trades WHERE resolved = 0"
@@ -461,7 +462,8 @@ def scan_open_markets() -> List[Dict]:
 
     # Get open paper positions
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(DB_PATH), timeout=15)
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT * FROM paper_positions WHERE status = 'open'"
@@ -654,7 +656,11 @@ def get_resolution_summary() -> Dict[str, Any]:
 
 def main():
     import sys
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # NOTE: this module logs through loguru (see the module-level import), which
+    # needs no basicConfig. A leftover `logging.basicConfig(...)` here raised
+    # NameError on the first line of main(), so the CLI entry point never ran --
+    # and the scheduler swallowed it because the subprocess call did not check
+    # the return code (fixed 2026-08-28).
 
     cmd = sys.argv[1] if len(sys.argv) > 1 else "scan"
 

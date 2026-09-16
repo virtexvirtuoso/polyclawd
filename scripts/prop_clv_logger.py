@@ -162,6 +162,16 @@ def live_snapshot(con, config, window_hours, max_events, min_credits=1000):
     print(f"[snapshot] {config.name}: {n_rows} rows across {n_ev} events @ {snap_at}")
 
 
+# Minimum sharp books required before a row may influence a CLV verdict.
+# Deliberately 1, not 2: MLB pitcher_strikeouts carries exactly ONE sharp book
+# (Pinnacle) on every one of its 29,957 rows, and that is a legitimate anchor —
+# its mean edge is a sane -0.68%. A blanket >=2 would zero the MLB gate outright.
+# What actually needed removing was the two EPL markets with NO sharp coverage
+# at all (see prop_clv_config); this threshold only drops genuinely anchorless
+# rows, e.g. UFC's 3,576 n_sharp=0 h2h rows.
+MIN_SHARP_FOR_GATE = 1
+
+
 def wilson(k, n, z=1.96):
     if n == 0:
         return (0.0, 0.0)
@@ -173,11 +183,27 @@ def wilson(k, n, z=1.96):
 
 
 def report(con, config, send=False):
+    # MIN_SHARP gate (2026-08-22): a "consensus fair" derived from ONE book is
+    # not a consensus, and edge measured against it is noise. Measured on
+    # soccer_epl: rows with n_sharp<=1 showed +3.1% mean edge, n_sharp=2 +2.2%,
+    # n_sharp=3 exactly 0.0% — apparent edge decaying to zero as books are added
+    # is the signature of a stale-line artifact, not an inefficiency. Worse,
+    # player_shots_on_target was 100% anchorless yet produced 18,181 of the
+    # 22,958 flagged EPL bets. Excluded from the gate entirely; still SNAPSHOTTED
+    # so the raw record stays complete and this is re-derivable.
+    # Restrict to the markets this config CURRENTLY declares. Dropping a market
+    # from the config stops collection but leaves its history in the table, and
+    # report() keys on sport, not market — so without this the retired EPL
+    # shots_on_target/assists rows (53,310 of them, 100% unanchored, carrying an
+    # artifact +7.15% edge) would keep driving the EPL verdict forever.
+    _mk = config.market_keys
+    _ph = ",".join("?" * len(_mk))
     rows = con.execute(
-        """SELECT event_id, event_title, commence_time, participant, market, line, side,
-                  snapshot_at, soft_implied, edge_pct, mins_to_kickoff
-           FROM prop_snapshot WHERE sport=?""",
-        (config.name,),
+        f"""SELECT event_id, event_title, commence_time, participant, market, line, side,
+                   snapshot_at, soft_implied, edge_pct, mins_to_kickoff
+            FROM prop_snapshot
+           WHERE sport=? AND COALESCE(n_sharp,0) >= ? AND market IN ({_ph})""",
+        (config.name, MIN_SHARP_FOR_GATE, *_mk),
     ).fetchall()
 
     series = defaultdict(list)  # (eid,part,market,line,side) -> [(snap,soft,edge,mins)]

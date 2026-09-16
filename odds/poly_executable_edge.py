@@ -32,14 +32,12 @@ from typing import Dict, Optional, Tuple
 import json
 
 from execution.fee_model import fee_per_share as _fee_per_share
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 try:  # match the dual-import pattern used across odds/*
     from . import polymarket_clob as clob
 except ImportError:  # pragma: no cover
     import polymarket_clob as clob
-
-GAMMA_API = "https://gamma-api.polymarket.com"
-
 
 def _is_yes(side: str) -> bool:
     """Best-effort map of a side label to the YES (index-0) token."""

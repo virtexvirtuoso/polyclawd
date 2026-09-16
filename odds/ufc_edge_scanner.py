@@ -24,10 +24,10 @@ import os, sys, json, requests, sqlite3
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 from typing import Optional
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 # ── Config ──────────────────────────────────────────────────────────
 
-GAMMA_API = "https://gamma-api.polymarket.com"
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 ODDS_API = "https://api.the-odds-api.com/v4"
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -129,7 +129,8 @@ class UFCEdge:
 
 def _get_db() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA journal_mode=WAL")
     _init_tables(conn)
     return conn

@@ -108,10 +108,11 @@ OLD_SHARP_BOOK = "pinnacle"
 
 # NEW (B12 fix): Betfair-weighted consensus; Pinnacle demoted, not trusted alone.
 SOCCER_PROP_SHARP_WEIGHTS = {
-    "betfair_ex_uk": 0.40,
-    "betfair_ex_eu": 0.40,
-    "pinnacle": 0.15,
-    "williamhill": 0.05,
+    # [2026-06-30] Corrected: Betfair UK+EU were double-counting the same liquidity
+    # at 8x the weight of Pinnacle. Merged to a single 0.50 weight.
+    "betfair_ex_uk": 0.50,
+    "pinnacle": 0.35,
+    "williamhill": 0.15,
 }
 
 SOFT_BOOKS = {"draftkings", "fanduel", "betrivers", "betmgm", "caesars", "onexbet", "skybet", "williamhill_us"}

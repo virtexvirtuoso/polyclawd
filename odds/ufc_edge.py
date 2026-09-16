@@ -25,6 +25,14 @@ except ImportError:  # pragma: no cover
     import sports_edge_common as sec
     from odds_api_fetch import get_games_with_markets, MMA_SPORT_KEYS, upcoming_window
 
+def _ufc_weights():
+    try:
+        from odds.book_weights import get_weights
+        return get_weights("ufc")
+    except ImportError:
+        return None
+
+
 CFG = sec.SportConfig(
     name="ufc",
     odds_api_sport_keys=[MMA_SPORT_KEYS["ufc"]],
@@ -60,7 +68,8 @@ def compute_ufc_edges(fight: Dict, ev: Dict, min_edge: float = 0.03) -> List[sec
     """Pure (no network): weighted consensus 2-way ML edges + prop listings (un-enriched)."""
     # True probabilities from weighted consensus across books.
     # Falls back to single sharp book if consensus has insufficient data.
-    true = sec.consensus_devig_2way(fight, "h2h")
+    _uw = _ufc_weights()
+    true = sec.consensus_devig_2way(fight, "h2h", weights=_uw)
     if len(true) < 2:
         best = sec.sharp_odds_per_outcome(fight, "h2h")
         if len(best) < 2:
@@ -136,7 +145,7 @@ async def find_ufc_edges(min_edge: float = 0.03) -> List[sec.Edge]:
     for fight in raw or []:
         try:
             # Extract fighter names from any available book
-            fighters = sec.consensus_devig_2way(fight, "h2h")
+            fighters = sec.consensus_devig_2way(fight, "h2h", weights=_ufc_weights())
             if len(fighters) < 2:
                 best = sec.sharp_odds_per_outcome(fight, "h2h")
                 fighters = list(best.keys())

@@ -209,7 +209,8 @@ def _resolve_completed_fights() -> int:
 
 def _get_db() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
@@ -281,6 +282,26 @@ def run_ufc_edge_scan() -> dict:
 
     # Display
     display(edges)
+
+    # Phase 2c: Enrich with ESPN fighter stats
+    try:
+        from odds.ufc_stats import fetch_event_fighters, enrich_ufc_edge
+        from odds.sports_edge_common import log_enrichment
+        fetch_event_fighters()  # pre-populate cache
+        for e in edges:
+            enrichment = enrich_ufc_edge(e)
+            if enrichment:
+                log_enrichment(
+                    shadow_trade_id=None,
+                    sport="ufc",
+                    stats_score=enrichment.get("win_pct", 0.0),
+                    stats_confirmation=enrichment.get("stats_agrees", False) or False,
+                    alert_tier="confirmed" if enrichment.get("stats_agrees") else "speculative",
+                    stats_detail=f"{enrichment.get('wins', 0)}-{enrichment.get('losses', 0)}-{enrichment.get('draws', 0)} "
+                                 f"Win%={enrichment.get('win_pct', 0):.1%}",
+                )
+    except Exception:
+        pass  # never block scan on enrichment failure
 
     # Alert if actionable
     alerts_sent = 0

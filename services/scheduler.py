@@ -16,6 +16,7 @@ Run via: systemd polyclawd-scheduler.service
 """
 
 import asyncio
+import html
 import logging
 import os
 import sqlite3
@@ -30,6 +31,9 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 os.chdir(PROJECT_ROOT)
 
+from services import task_state
+from db import connect as db_connect
+
 DB_PATH = PROJECT_ROOT / "storage" / "shadow_trades.db"
 HEALTH_URL = "http://127.0.0.1:8420/health"
 SERVICE_NAME = "polyclawd-api"
@@ -40,6 +44,44 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger("scheduler")
+
+
+def _script_env() -> dict:
+    """Env for subprocess-launched project scripts.
+
+    A subprocess does NOT inherit the parent's sys.path, so a script with a
+    module-level `from config...` / `from signals...` import dies on
+    ModuleNotFoundError unless the project root is on PYTHONPATH. The cron
+    entries for these same scripts set PYTHONPATH explicitly; the scheduler
+    did not. See tests/test_scheduler_subprocess_imports.py.
+    """
+    env = os.environ.copy()
+    root = str(PROJECT_ROOT)
+    existing = env.get("PYTHONPATH", "")
+    if root not in existing.split(os.pathsep):
+        env["PYTHONPATH"] = f"{root}{os.pathsep}{existing}" if existing else root
+    return env
+
+
+def _run_script(argv, timeout, label):
+    """Run a project script with PYTHONPATH set, surfacing any failure.
+
+    capture_output=True with no returncode check is exactly how
+    task_shadow_resolution crashed on import every 5 minutes from 2026-06 to
+    2026-08-28 without a single log line.
+    """
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, env=_script_env()
+        )
+    except Exception as exc:
+        logger.error("%s failed to launch: %s", label, exc)
+        return None
+    if proc.returncode != 0:
+        logger.error(
+            "%s exited rc=%s: %s", label, proc.returncode, (proc.stderr or "")[-500:]
+        )
+    return proc
 
 # ============================================================================
 # State — persistent across ticks (advantage over cron)
@@ -66,10 +108,9 @@ _state = {
 # ============================================================================
 
 def _db():
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = db_connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -104,18 +145,69 @@ def _restart_service():
         from signals.discord_alerts import alert_api_down
         alert_api_down(count, "Health check failed 3x", restart_attempted=True)
     except Exception:
-        pass
+        logger.warning("alert_api_down failed (count=%d)", count, exc_info=True)
 
     subprocess.run(["sudo", "systemctl", "restart", SERVICE_NAME], timeout=30)
     logger.info("Service restarted")
 
 
+_task_locks: dict = {}
+
+# SQLite write-lock contention here is transient by construction:
+# shadow_trades.db is ~160MB in WAL mode, written concurrently by this
+# scheduler, 2 uvicorn workers and ~20 crons. Measured, the write lock is
+# normally held <0.2s, but a few times a day a writer holds it long enough to
+# blow through busy_timeout. A task must not DIE on that — a retry a second
+# later almost always succeeds.
+_LOCK_RETRIES = 3
+_LOCK_BACKOFF_BASE = 1.5
+
+
+def _is_lock_error(exc: BaseException) -> bool:
+    """True only for transient SQLite busy/locked errors.
+
+    Deliberately narrow: schema, integrity and I/O errors must still fail fast
+    instead of being retried into a slow, silent loop.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return "database is locked" in msg or "database is busy" in msg
+
+
 def _run_safe(name: str, fn, *args, **kwargs):
-    """Run a function, catching all exceptions."""
+    """Run a function, catching all exceptions.
+
+    Per-task non-blocking lock: if the same task is already running (e.g.
+    live-burst trigger overlapping the periodic tick), skip instead of
+    running concurrently — the monitors are stateful (score-snap tables)
+    and the next tick picks up anything missed.
+
+    Transient SQLite lock errors are retried with exponential backoff before
+    the task is declared failed."""
+    import random
+    import threading
+    lock = _task_locks.setdefault(name, threading.Lock())
+    if not lock.acquire(blocking=False):
+        logger.debug("Task %s already running — skipped", name)
+        return None
     try:
-        return fn(*args, **kwargs)
+        for attempt in range(_LOCK_RETRIES):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:
+                if not _is_lock_error(e) or attempt == _LOCK_RETRIES - 1:
+                    raise
+                delay = _LOCK_BACKOFF_BASE ** attempt + random.uniform(0, 1)
+                logger.warning(
+                    "Task %s hit a SQLite lock (attempt %d/%d) — retrying in %.1fs: %s",
+                    name, attempt + 1, _LOCK_RETRIES, delay, e,
+                )
+                time.sleep(delay)
     except Exception as e:
         logger.exception("Task %s failed: %s", name, e)
+    finally:
+        lock.release()
         return None
 
 
@@ -130,17 +222,26 @@ def _run_safe(name: str, fn, *args, **kwargs):
 TICK_TASKS = {
     "30s": ["hf_signals"],
 
-    "1min": ["stop_evaluator_urgent", "sport_whale_trades"],
+    "1min": [
+        "stop_evaluator_urgent", "sport_whale_trades",
+        # Moved from 5min tick 2026-07-10: in-play edges decay in 1-3 min.
+        # All self-gate on "any live game?" (free ESPN check) so idle cost ~0.
+        "soccer_live_monitor", "mlb_live_monitor", "ufc_live_monitor",
+        "ingame_monitor", "cross_sport_drift",
+    ],
 
     "5min": [
         "health_check", "stop_evaluator", "price_logger", "book_logger",
         "shadow_resolution", "paper_resolution", "equity_snapshot",
-        "resolution_scanner", "mlb_props_scratch", "dashboard_warm",
+        "position_sync", "resolution_scanner", "mlb_props_scratch", "dashboard_warm",
         "weather_reeval", "weather_fast_scan", "weather_shift_alerts",
         "tweet_pace_alerts", "calibration_check", "insider_scan",
+        "tier1_whale_alerts",
         "poly_delta", "manifold_shadow", "clv_snapshot",
-        "hf_spread_5m", "cross_sport_drift", "soccer_live_monitor", "mlb_live_monitor",
-        "ufc_live_monitor",
+        "hf_spread_5m",
+        # UNGATED (Task 5.2): gate counters reset on the 15-min health-check
+        # restart and would starve the dispatch-queue drain.
+        "alert_drain",
     ],
 
     # Tasks gated to every Nth tick of a parent group
@@ -151,8 +252,13 @@ TICK_TASKS = {
         "whale_wall_alerts", "whale_outcomes", "whale_wallets",
         "credit_refresh", "source_health_touch", "stale_line_scan",
         "ufc_prop_scan", "edge_alerts", "mlb_props_alert",
+        "stop_silence_alarm",
         "mlb_props_resolve", "baseball_resolve", "ufc_resolve", "nfl_resolve",
-        "scorer_clv_snapshot", "kalshi_fade_scan",
+        # scorer_clv_snapshot DISABLED 2026-09-13 (Mr. V approved): Odds API key
+        # returns DEACTIVATED_KEY (billing lapse 2026-08-30) — task failed 27x/48h.
+        # Re-enable on billing restore, or rewire to a free anchor (see
+        # QA-Session-2026-09-13 follow-up #5). Task def retained at :1558.
+        "kalshi_fade_scan",
         "pm_maker_shadow", "ensemble_recorder", "arb_scan",
         "resolution_edge_scan",
         "hf_backfill_outcomes",
@@ -162,7 +268,6 @@ TICK_TASKS = {
         "soccer_match_scan": 4,                   # every 2h
         "soccer_resolve": 4,
         "scorer_edge_scan": 4,                    # every 2h (same cadence as match scan)
-        "nfl_edge_scan": 4,                       # every 2h (self-gates in off-season)
         "betfair_scan": 4,                        # every 2h (futures don't move fast)
         "hf_window_snapshot": 2,                   # every 1h — conditional WR data collection
         "hf_spread_scan": 2,                        # every 1h — cross-asset spread anomaly scan
@@ -205,7 +310,7 @@ def task_health_check():
                 from signals.discord_alerts import alert_api_recovered
                 alert_api_recovered()
             except Exception:
-                pass
+                logger.warning("alert_api_recovered failed", exc_info=True)
         _state["consecutive_restarts"] = 0
     else:
         _restart_service()
@@ -215,9 +320,9 @@ def task_shadow_resolution():
     """Resolve shadow trades + snapshot + summary."""
     venv = str(PROJECT_ROOT / "venv" / "bin" / "python3")
     for cmd in ["resolve", "snapshot", "summary"]:
-        subprocess.run(
+        _run_script(
             [venv, str(PROJECT_ROOT / "signals" / "shadow_tracker.py"), cmd],
-            capture_output=True, timeout=60,
+            timeout=60, label=f"shadow_tracker {cmd}",
         )
 
 
@@ -235,6 +340,17 @@ def task_equity_snapshot():
     snap = snapshot_equity()
     logger.debug("Equity snapshot: $%.2f (realized $%.2f, unrealized $%.2f)",
                  snap.get("equity", 0), snap.get("realized", 0), snap.get("unrealized", 0))
+
+
+def task_position_sync():
+    """Sync live positions: check for market resolutions + wallet balance."""
+    from scripts.position_sync import run as _run
+    result = _run()
+    resolved = result.get("resolved", 0)
+    new = result.get("new", 0)
+    if resolved > 0 or new > 0:
+        logger.info("position_sync: %d resolved, %d new positions detected", resolved, new)
+
 
 
 def task_hf_signals():
@@ -306,9 +422,9 @@ def task_hf_spread_15m():
 def task_resolution_scanner():
     """Tier 1 resolution certainty scanning."""
     venv = str(PROJECT_ROOT / "venv" / "bin" / "python3")
-    subprocess.run(
+    _run_script(
         [venv, str(PROJECT_ROOT / "signals" / "resolution_scanner.py"), "scan"],
-        capture_output=True, timeout=60,
+        timeout=60, label="resolution_scanner scan",
     )
 
 
@@ -328,6 +444,94 @@ def task_stop_evaluator_urgent():
     """Fast stop check for positions resolving within 6 hours."""
     from services.stop_evaluator import evaluate_stops_urgent
     evaluate_stops_urgent()
+
+
+def _milestone_already_sent(strategy: str) -> bool:
+    """Durable milestone guard (kv row), mirroring task_stop_silence_alarm.
+    Backfilled as ALREADY-SENT for any strategy present in the historical
+    alerts ledger, so the 2026-08-21 repair cannot replay old milestones."""
+    try:
+        conn = db_connect(str(DB_PATH))
+        conn.execute("CREATE TABLE IF NOT EXISTS scheduler_kv (k TEXT PRIMARY KEY, v TEXT)")
+        row = conn.execute("SELECT v FROM scheduler_kv WHERE k=?",
+                           (f"milestone_sent:{strategy}",)).fetchone()
+        conn.close()
+        return row is not None
+    except Exception as exc:  # noqa: BLE001 — a guard failure must not spam
+        logger.warning("milestone guard read failed (%s); suppressing alert", exc)
+        return True  # fail CLOSED: never alert when the guard is unreadable
+
+
+def _mark_milestone_sent(strategy: str) -> None:
+    try:
+        conn = db_connect(str(DB_PATH))
+        conn.execute("CREATE TABLE IF NOT EXISTS scheduler_kv (k TEXT PRIMARY KEY, v TEXT)")
+        conn.execute("INSERT OR REPLACE INTO scheduler_kv (k, v) VALUES (?, ?)",
+                     (f"milestone_sent:{strategy}", str(int(time.time()))))
+        conn.commit()
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("milestone guard write failed (%s)", exc)
+
+
+STOP_SILENCE_THRESHOLD_SEC = 30 * 60   # heartbeat older than this = evaluator silent
+STOP_SILENCE_REFIRE_SEC = 6 * 3600      # alarm re-fires at most once per 6h
+
+
+def task_stop_silence_alarm(db_path=None, now=None):
+    """Alarm ONLY if the stop-evaluator heartbeat is silent >30 min (D3:
+    silence-alarm only — zero steady-state noise). Re-fire gated to once per
+    6h via a kv DB row, NOT _state — the 15-min health-check restart wipes
+    process memory. Healthy = silent."""
+    path = str(db_path or DB_PATH)
+    now_ts = int(now if now is not None else time.time())
+    conn = db_connect(path)
+    try:
+        conn.row_factory = sqlite3.Row
+        # Writer (stop_evaluator) may not be deployed yet — create both tables
+        # so registration order doesn't matter (plan Task 2.1 schema).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS stop_heartbeat ("
+            " id INTEGER PRIMARY KEY, ts INTEGER,"
+            " positions_checked INTEGER, warnings_fired INTEGER)")
+        conn.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
+        conn.commit()
+        row = conn.execute("SELECT ts FROM stop_heartbeat WHERE id=1").fetchone()
+        if row is None or row["ts"] is None:
+            return  # no heartbeat ever written (writer not deployed) — nothing to judge
+        age = now_ts - int(row["ts"])
+        if age <= STOP_SILENCE_THRESHOLD_SEC:
+            return
+        gate = conn.execute("SELECT v FROM kv WHERE k='last_silence_alarm'").fetchone()
+        if gate and now_ts - int(float(gate["v"])) < STOP_SILENCE_REFIRE_SEC:
+            return
+        from scripts.openclaw_alerts import alert_openclaw
+        msg = (
+            f"🚨 stop evaluator SILENT for {age // 60}m — no heartbeat in "
+            f"shadow_trades.db (threshold 30m). Check the polyclawd-scheduler "
+            f"stop_evaluator task."
+        )
+        if alert_openclaw(msg, parse_mode=None):
+            # Arm the 6h gate only on a delivered alarm — a failed send retries
+            # on the next 30-min tick.
+            conn.execute(
+                "INSERT INTO kv (k, v) VALUES ('last_silence_alarm', ?) "
+                "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (str(now_ts),))
+            conn.commit()
+    except Exception as e:
+        logger.error("stop_silence_alarm failed: %s", e)
+    finally:
+        conn.close()
+
+
+def task_alert_drain():
+    """Flush the tiered alert dispatch queue (signals/alert_dispatch.py):
+    tier-1 redeliveries first, then 15-min tier-2 batches. DB timestamps
+    drive the timing, so the 15-min restarts are harmless."""
+    from signals.alert_dispatch import drain
+    n = drain()
+    if n:
+        logger.info("Alert drain: %d message(s) sent", n)
 
 
 def task_price_logger():
@@ -599,22 +803,37 @@ def task_calibration_check():
                 strategy, auto_card["brier"], _status(auto_card["brier"]),
                 auto_card["win_rate"] * 100, auto_card["n"],
             )
+            # Milestone alert — fires the first time an auto-scorecard EXISTS.
+            # Moved here 2026-08-21 (/qa audit). It previously sat in the `else`
+            # (below-threshold) branch and referenced `records`, `n`, `wr`,
+            # `brier` — none bound in that scope — so it raised NameError on
+            # every tick and was swallowed by the except. This alert has never
+            # fired. The else-branch was also wrong by construction: auto_card
+            # is None there, i.e. the milestone had NOT been reached.
+            # Durable flag, NOT _state: process memory is wiped on every restart
+            # (14 restarts in the last 7 days), and the ledger shows 89 prior
+            # milestone alerts including 5 for weather_ensemble inside 90 min.
+            # Gate on the FIRST CROSSING to >=20, not on auto_card merely
+            # existing — otherwise a mature n=197 strategy re-announces
+            # "First 20 Resolutions!" after every restart.
+            _n = auto_card["n"]
+            if _n >= 20 and not _milestone_already_sent(strategy):
+                try:
+                    from signals.discord_alerts import alert_scorecard_milestone
+                    _wr = auto_card["win_rate"]
+                    alert_scorecard_milestone(
+                        strategy, _n, round(_wr * _n), _wr, auto_card["brier"]
+                    )
+                    _mark_milestone_sent(strategy)
+                except Exception:
+                    logger.warning("alert_scorecard_milestone failed (strategy=%s)",
+                                   strategy, exc_info=True)
         else:
             # Look up raw count even when below threshold so we can see growth
             from signals.resolution_logger import load_auto_resolutions
             n_auto = len(load_auto_resolutions(strategy))
             logger.info("CALIBRATION %s model: %d/20 (collecting auto-resolved)",
                         strategy, n_auto)
-
-            # Milestone alert (first time hitting 20)
-            if not _state["milestone_sent"].get(strategy):
-                try:
-                    from signals.discord_alerts import alert_scorecard_milestone
-                    wins = sum(1 for r in records if r.get("won"))
-                    alert_scorecard_milestone(strategy, n, wins, wr, brier)
-                    _state["milestone_sent"][strategy] = True
-                except Exception:
-                    pass
 
 
 def task_signal_scan():
@@ -693,6 +912,20 @@ def task_mlb_live_monitor():
     Alert-only: does NOT overlap with ingame_monitor.py (stop-loss stays there)."""
     from scripts.mlb_live_monitor import main as _main
     _main()
+
+
+def task_ingame_monitor():
+    """MLB in-game shadow monitor — stop-loss (−40%), take-profit (+67%), edge inversion.
+    Runs every 5min during MLB game hours (12:00–01:00 ET). Does not overlap with
+    task_mlb_live_monitor (alert-only). See signals/ingame_monitor.py."""
+    import datetime as _dt
+    now_et = _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
+    # UTC hours 16–05 = ET noon–1am (covers all MLB windows + extra buffer)
+    h = _dt.datetime.utcnow().hour
+    if not (16 <= h or h < 6):
+        return  # skip overnight/early morning ticks
+    from signals.ingame_monitor import run_monitor
+    run_monitor()
 
 
 def task_cross_sport_drift():
@@ -785,7 +1018,7 @@ def task_arb_scan():
         from pathlib import Path
         proc = subprocess.run(
             [sys.executable, str(PROJECT_ROOT / "scripts" / "arb_alert.py")],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=60, env=_script_env(),
         )
         if proc.returncode != 0:
             logger.warning("arb_alert stderr: %s", proc.stderr[:300])
@@ -799,7 +1032,8 @@ def task_arb_scan():
 
 def task_resolution_edge_scan():
     """Resolution-source edge scan for weather markets.
-    NWS edge for Kalshi, TWC edge for Polymarket. 30min cadence."""
+    NWS edge for Kalshi, TWC edge for Polymarket. 30min cadence.
+    Logs shadow trades for all PM signals, executes when in LIVE mode."""
     try:
         from signals.weather_resolution_edge import scan_resolution_edges
         signals = scan_resolution_edges()
@@ -807,13 +1041,72 @@ def task_resolution_edge_scan():
         if signals:
             logger.info("resolution_edge: %d signals (%d HIGH)", len(signals), len(high))
         if high:
-            # Alert on HIGH conviction edges
             for s in high:
                 logger.info("resolution_edge HIGH: %s %s edge=%+.1fpp %s (thr=%.0f)",
                             s["city"], s["resolution_source"], s["edge_pp"],
                             s["direction"], s["threshold_f"])
+
+        # Log shadow trades for all PM weather resolution signals
+        pm_signals = [s for s in signals if s.get("platform") == "polymarket" and s.get("condition_id")]
+        if pm_signals:
+            from signals.shadow_tracker import log_shadow_trade
+            logged = 0
+            for s in pm_signals:
+                shadow_signal = _weather_signal_to_shadow(s)
+                if shadow_signal and log_shadow_trade(shadow_signal):
+                    logged += 1
+            if logged:
+                logger.info("resolution_edge: logged %d/%d PM shadow trades", logged, len(pm_signals))
+
+            # Execute tradeable PM weather edges in LIVE mode
+            from execution.weather_executor import execute_tradeable_weather_edges
+            result = execute_tradeable_weather_edges(pm_signals)
+            if result.get("filled", 0) > 0:
+                logger.info("resolution_edge: weather executor filled %d/%d",
+                            result["filled"], len(pm_signals))
     except Exception as e:
         logger.debug("resolution_edge_scan: %s", e)
+
+
+def _weather_signal_to_shadow(s: dict) -> dict:
+    """Convert a weather resolution edge signal dict to shadow_trade format."""
+    direction = s.get("direction", "buy_no")
+    side = "NO" if direction == "buy_no" else "YES"
+    market_price = s.get("market_price", 0.5)
+    twc_implied = s.get("twc_implied_prob", 0.5)
+    edge_pp = s.get("edge_pp", 0)
+    horizon_hours = s.get("horizon_hours", 24)
+
+    if direction == "buy_no":
+        confidence = (1.0 - twc_implied) * 100
+    else:
+        confidence = twc_implied * 100
+
+    bracket_low = s.get("bracket_low_f")
+    bracket_high = s.get("bracket_high_f")
+    if bracket_low and bracket_high:
+        market_desc = f"{s['city']} {bracket_low:.0f}-{bracket_high:.0f}F"
+    else:
+        market_desc = f"{s['city']} {s.get('threshold_f', 0):.0f}F"
+
+    return {
+        "market_id": s.get("condition_id", ""),
+        "market": s.get("market_title", market_desc)[:200],
+        "category": "weather_resolution",
+        "category_tier": s.get("conviction_tier", "LOW"),
+        "platform": "polymarket",
+        "side": side,
+        "price": market_price,
+        "entry_price": (round(1.0 - market_price, 4)
+                        if side == "NO" else market_price),  # held-side cost
+        "confidence": confidence,
+        "confirmations": 1,
+        "days_to_close": max(0.5, horizon_hours / 24),
+        "volume": 0,
+        "reasoning": f"TWC={s.get('twc_forecast_f','?')}F RMSE={s.get('twc_rmse','?')} edge={edge_pp:+.1f}pp tier={s.get('conviction_tier','?')}",
+        "archetype": "weather_resolution",
+        "strategy": "twc_resolution_edge",
+    }
 
 
 def task_stale_line_scan():
@@ -837,7 +1130,7 @@ def _send_whale_alert_tg():
     try:
         proc = subprocess.run(
             [sys.executable, str(PROJECT_ROOT / "scripts" / "whale_alert_tg.py")],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, env=_script_env(),
         )
         if proc.returncode != 0:
             logger.warning("whale_alert_tg stderr: %s", proc.stderr[:300])
@@ -919,13 +1212,12 @@ def task_smart_wallet_resolve():
     import sqlite3
     from scripts.smart_wallet_alert import (SHADOW_DB, init_shadows,
                                             resolve_shadows,
-                                            settle_via_wallet_positions)
-    conn = sqlite3.connect(str(SHADOW_DB))
+                                            settle_via_market_resolution)
+    conn = db_connect(str(SHADOW_DB))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000")
     try:
         init_shadows(conn)
-        n = resolve_shadows(conn, settle_via_wallet_positions)
+        n = resolve_shadows(conn, settle_via_market_resolution)
         if n:
             logger.info("Smart-wallet shadows resolved: %d", n)
     finally:
@@ -950,6 +1242,43 @@ def task_whale_clob():
     result = run_scan()
     if result.get("alerts"):
         logger.info("Whale CLOB: %s", result)
+
+
+def task_tier1_whale_alerts():
+    """Process whale alerts through Tier-1 conviction pipeline.
+
+    Runs every 5min: reads from the whale_alerts DB table, evaluates for Tier-1,
+    logs sized alerts, fires Tier-1 alerts to Telegram, resolves pending.
+    """
+    try:
+        from signals.tier1_whale_alert import process_whale_alerts, resolve_tier1_alerts
+
+        resolve_tier1_alerts()
+
+        try:
+            conn = _db()
+            rows = conn.execute(
+                "SELECT * FROM whale_alerts WHERE ts > datetime('now', '-24 hours') "
+                "ORDER BY ts DESC LIMIT 200"
+            ).fetchall()
+            conn.close()
+            if rows:
+                alerts = [dict(r) for r in rows]
+                result = process_whale_alerts(alerts)
+                if result["tier1_fired"] > 0:
+                    logger.info(
+                        "TIER-1: %d fired, %d sized, %d processed",
+                        result["tier1_fired"], result["sized_alerts"], result["alerts_processed"],
+                    )
+                elif result["sized_alerts"] > 0:
+                    logger.debug(
+                        "TIER-1: %d sized alerts (no Tier-1), %d processed",
+                        result["sized_alerts"], result["alerts_processed"],
+                    )
+        except Exception as e:
+            logger.debug("Tier-1 whale alert DB read failed: %s", e)
+    except Exception as e:
+        logger.error("Tier-1 whale alert task failed: %s", e)
 
 
 def task_whale_wall_alerts():
@@ -1196,14 +1525,29 @@ def task_dashboard_warm():
 
 
 def task_soccer_match_scan():
-    """Soccer/WC: refresh the per-match 3-way edge cache (~every 2h) so the
-    dashboard stays live through the tournament. Odds-API spend is gated upstream
-    (odds_api_fetch.can_make_call + sports_edge_scan credit floor)."""
+    """Soccer/WC: refresh the per-match 3-way edge cache (~every 2h) and
+    execute tradeable edges when in LIVE mode."""
     import asyncio
 
     from scripts.sports_edge_scan import run
+    from odds.soccer_match_edge import find_soccer_match_edges
+    from execution.soccer_executor import execute_tradeable_soccer_edges
 
+    # 1. Find + enrich edges (same as before)
+    edges = asyncio.run(find_soccer_match_edges(min_edge=0.03))
+
+    # 2. Cache for dashboard
     asyncio.run(run(["soccer_match"]))
+
+    # 3. Execute tradeable edges in LIVE mode
+    if edges:
+        tradeable = [e for e in edges if getattr(e, "tradeable", False)]
+        if tradeable:
+            logger.info("soccer_match_scan: %d tradeable edges found", len(tradeable))
+            result = execute_tradeable_soccer_edges(tradeable)
+            logger.info("soccer_match_scan: execution result %s", result)
+        else:
+            logger.debug("soccer_match_scan: %d edges, none tradeable", len(edges))
 
 
 def task_soccer_futures_scan():
@@ -1221,7 +1565,7 @@ def task_scorer_clv_snapshot():
     from scripts.scorer_paper_logger import db_connect, live_snapshot
 
     con = db_connect(str(PROJECT_ROOT / "storage" / "scorer_clv.db"))
-    live_snapshot(con, "soccer_fifa_world_cup", window_hours=8.0)
+    live_snapshot(con, "soccer_fifa_world_cup", window_hours=30.0)
     con.close()
 
 
@@ -1330,16 +1674,42 @@ def task_nfl_resolve():
 
 def task_nfl_edge_scan():
     """NFL edge scan: consensus devig vs Polymarket. Self-gating: skips if
-    no games within 7-day window (off-season = 0 credits)."""
+    no games within the 42-day window (off-season = 0 credits). Scans both
+    regular season and preseason sport keys."""
     import asyncio
     from odds.nfl_edge import find_nfl_edges, CFG
     from odds.sports_edge_common import summarize
-    edges = asyncio.run(find_nfl_edges())
+    edges = []
+    source = "odds_api"
+    try:
+        edges = asyncio.run(find_nfl_edges()) or []
+    except Exception as e:
+        # Auth breaker raises while the key is dark — fall through to ESPN.
+        logger.debug(f"NFL edge scan (odds_api) failed: {e}")
+    if not edges:
+        # Odds API dark (key deactivated since Aug 30) → ESPN/DK fallback:
+        # DK devigged win probs vs PM-US full-game-winner books, net of fees.
+        try:
+            from odds.espn_odds import find_nfl_us_edges
+            from scripts.espn_edge_adapter import espn_edges_to_alerts
+            edges = espn_edges_to_alerts(find_nfl_us_edges(0.0))
+            source = "espn_dk"
+        except Exception as e:
+            logger.debug(f"NFL edge scan ESPN fallback failed: {e}")
     if edges:
-        summarize(edges, CFG)
-        logger.info(f"NFL edge scan: {len(edges)} edges")
+        if source == "odds_api":
+            summarize(edges, CFG)
+        logger.info(f"NFL edge scan: {len(edges)} edges ({source})")
+        # Fire Telegram alerts for tradeable edges above threshold (dedup'd)
+        try:
+            from signals.sport_edge_alerts import run_sport_edge_alerts
+            res = run_sport_edge_alerts(edges, sport="NFL")
+            if res.get("alerted"):
+                logger.info(f"NFL edge alerts: {res['alerted']} fired")
+        except Exception as e:
+            logger.debug(f"NFL edge alert step failed: {e}")
     else:
-        logger.debug("NFL edge scan: no edges (off-season or no games)")
+        logger.debug("NFL edge scan: no edges (off-season, no games, or both sources empty)")
 
 
 _BETFAIR_DEDUP_FILE = Path("/tmp/betfair_dedup.json")
@@ -1380,15 +1750,18 @@ def task_betfair_scan():
         lines = [f"⚡ Betfair Futures Edges ({len(to_alert)})"]
         for e in to_alert[:5]:
             pm_str = f"{e.polymarket_price*100:.0f}¢" if e.polymarket_price else "N/A"
+            sel = html.escape(e.selection, quote=False)
+            sprt = html.escape(e.sport, quote=False)
             lines.append(
-                f"  {e.selection} ({e.sport}): Betfair {e.betfair_prob*100:.1f}% vs PM {pm_str} → {e.edge_pct*100:+.1f}%"
+                f"  {sel} ({sprt}): Betfair {e.betfair_prob*100:.1f}% vs PM {pm_str} → {e.edge_pct*100:+.1f}%"
             )
         msg = "\n".join(lines)
         logger.info(msg)
         try:
-            send_telegram_alert(msg)
+            from scripts.alert_formatter import send_telegram
+            send_telegram(msg)
         except Exception:
-            pass
+            logger.warning("send_telegram (betfair) failed", exc_info=True)
     logger.info(f"Betfair scan: {len(edges)} edges, {len(to_alert)} alerted")
 
 
@@ -1397,7 +1770,7 @@ def task_arena_snapshot():
     venv = str(PROJECT_ROOT / "venv" / "bin" / "python3")
     result = subprocess.run(
         [venv, str(PROJECT_ROOT / "signals" / "ai_model_tracker.py"), "snapshot"],
-        capture_output=True, timeout=60, text=True,
+        capture_output=True, timeout=60, text=True, env=_script_env(),
     )
     if result.returncode != 0:
         logger.error(
@@ -1622,6 +1995,121 @@ async def tick_1min():
         await asyncio.sleep(60)
 
 
+# ── Live score burst (Phase 2 latency fix, 2026-07-10) ──────────────────────
+# Poll ESPN scoreboards every 20s while games are live; on any score/round/
+# status change, immediately run the matching live monitor instead of waiting
+# for the next 1-min tick. Alert lag target: ~25s from event.
+# ESPN polls are free (no API credits). Backs off to 120s when nothing live.
+
+BURST_ENDPOINTS = {
+    "soccer_live_monitor": [
+        "soccer/fifa.world/scoreboard", "soccer/usa.1/scoreboard",
+        "soccer/eng.1/scoreboard", "soccer/uefa.champions/scoreboard",
+        "soccer/esp.1/scoreboard",
+    ],
+    "mlb_live_monitor": ["baseball/mlb/scoreboard"],
+    "ufc_live_monitor": ["mma/ufc/scoreboard"],
+}
+_burst_state: dict = {}
+_burst_moves_seen: float = 0.0  # ts of newest PM move event already processed
+
+
+def _read_pm_moves():
+    """Read poly:moves:recent from memcached (written by polyclawd-ws).
+
+    Phase 3: sharp PM flow often reprices a live game before the ESPN
+    scoreboard updates — a >=10pp/60s mid move is treated like a score change."""
+    import socket
+    try:
+        s = socket.create_connection(("localhost", 11211), timeout=0.4)
+        s.settimeout(0.4)
+        s.sendall(b"get poly:moves:recent\r\n")
+        buf = b""
+        while b"END\r\n" not in buf and len(buf) < 500_000:
+            chunk = s.recv(8192)
+            if not chunk:
+                break
+            buf += chunk
+        s.close()
+        if not buf.startswith(b"VALUE"):
+            return []
+        body = buf.split(b"\r\n", 1)[1].rsplit(b"\r\nEND\r\n", 1)[0]
+        import json as _json
+        return _json.loads(body)
+    except Exception:
+        return []
+
+
+def _burst_fingerprint(path: str):
+    """Return (fingerprint, n_live) for one ESPN scoreboard.
+
+    Fingerprint covers every live event's per-competition status name, period
+    and scores — so goals, runs, round transitions and fight finishes all
+    register as a change. UFC cards are one event with many competitions."""
+    import requests
+    r = requests.get(
+        f"https://site.api.espn.com/apis/site/v2/sports/{path}", timeout=8
+    )
+    r.raise_for_status()
+    parts, n_live = [], 0
+    for ev in r.json().get("events", []):
+        state = ((ev.get("status") or {}).get("type") or {}).get("state")
+        if state != "in":
+            continue
+        n_live += 1
+        for comp in ev.get("competitions") or []:
+            st = comp.get("status") or ev.get("status") or {}
+            parts.append((
+                comp.get("id"),
+                (st.get("type") or {}).get("name"),
+                st.get("period"),
+                tuple(c.get("score") for c in comp.get("competitors") or []),
+            ))
+    return tuple(parts), n_live
+
+
+async def tick_live_burst():
+    """Every 20s while games are live: ESPN change detection → immediate
+    monitor run. Monitors are idempotent (DB score-snap state) and _run_safe's
+    per-task lock prevents overlap with the 1-min tick."""
+    global _burst_moves_seen
+    while True:
+        any_live = False
+        live_by_task: dict = {}
+        for task, paths in BURST_ENDPOINTS.items():
+            changed = False
+            for path in paths:
+                try:
+                    fp, n_live = await run_in_thread(_burst_fingerprint, path)
+                except Exception as e:
+                    logger.debug("live burst: %s fetch failed: %s", path, e)
+                    continue
+                if n_live:
+                    any_live = True
+                    live_by_task[task] = True
+                prev = _burst_state.get(path)
+                if prev is not None and fp != prev:
+                    changed = True
+                _burst_state[path] = fp
+            if changed:
+                logger.info("live burst: score/status change → %s", task)
+                await run_in_thread(_run_safe, task, _task_fn(task))
+
+        # Phase 3: PM websocket fast moves (>=10pp/60s) — treat like a score
+        # change for every sport that currently has a live game. Sharp flow
+        # front-runs the scoreboard, so this often fires BEFORE ESPN updates.
+        if any_live:
+            moves = await run_in_thread(_read_pm_moves)
+            fresh = [m for m in moves if m.get("ts", 0) > _burst_moves_seen]
+            if fresh:
+                _burst_moves_seen = max(m["ts"] for m in fresh)
+                logger.info("live burst: %d PM fast move(s) → running live monitors", len(fresh))
+                for task in live_by_task:
+                    await run_in_thread(_run_safe, task, _task_fn(task))
+
+        await asyncio.sleep(20 if any_live else 120)
+
+
 async def tick_5min():
     """Every 5 minutes: health, stops, resolution, reeval, weather scan, alerts, calibration."""
     while True:
@@ -1629,9 +2117,7 @@ async def tick_5min():
             await run_in_thread(_run_safe, name, _task_fn(name))
         # Gated tasks — run every Nth tick
         for name, every_n in TICK_TASKS["5min_gated"].items():
-            key = f"{name}_n"
-            _state[key] = _state.get(key, 0) + 1
-            if _state[key] % every_n == 0:
+            if task_state.should_run_safe(name, every_n * 300):
                 await run_in_thread(_run_safe, name, _task_fn(name))
         logger.debug("5-min tick complete")
         await asyncio.sleep(300)
@@ -1679,9 +2165,7 @@ async def tick_30min():
             await run_in_thread(_run_safe, name, _task_fn(name))
         # Gated tasks — run every Nth tick
         for name, every_n in TICK_TASKS["30min_gated"].items():
-            key = f"{name}_n"
-            _state[key] = _state.get(key, 0) + 1
-            if _state[key] % every_n == 0:
+            if task_state.should_run_safe(name, every_n * 1800):
                 await run_in_thread(_run_safe, name, _task_fn(name))
         logger.info("30-min tick complete")
         await asyncio.sleep(1800)
@@ -1757,8 +2241,7 @@ def task_db_maintenance():
 
     # VACUUM in separate connection (can't run inside transaction)
     try:
-        conn2 = sqlite3.connect(str(DB_PATH))
-        conn2.execute("PRAGMA busy_timeout=5000")
+        conn2 = db_connect(str(DB_PATH))
         conn2.execute("VACUUM")
         conn2.close()
         logger.info("DB maintenance: VACUUM complete")
@@ -1840,11 +2323,86 @@ async def tick_scheduled():
         await asyncio.sleep(600)
 
 
+def _assert_live_cap_fits_min_action() -> None:
+    """Startup assertion prescribed by the fleet ledger (2026-08-19):
+
+        "A risk gate that rejects 100% of actions is indistinguishable from
+         'no signal' — add a startup assertion effective_cap >= min_action."
+
+    The failure is silent by construction: the governor logs rejections at
+    INFO and the caller `continue`s, so a live system that can no longer fund
+    its own smallest legal trade looks exactly like a quiet market. This makes
+    that state LOUD at every start.
+    """
+    try:
+        import sqlite3 as _sq
+        from execution import live_config as _lc
+
+        allow = sorted(_lc.live_strategy_allowlist())
+        if not allow:
+            logger.warning("LIVE GATE: allowlist is EMPTY — no strategy may trade real money")
+            return
+        con = _sq.connect(str(DB_PATH))
+        row = con.execute(
+            "SELECT bankroll FROM live_portfolio_state ORDER BY id DESC LIMIT 1").fetchone()
+        con.close()
+        if not row:
+            return
+        bankroll = float(row[0] or 0.0)
+        eff = min(_lc.per_trade_cap(), bankroll * _lc.per_trade_frac())
+        sizes = [_lc.tiered_size_usd(e) for e in (0.03, 0.05, 0.08, 0.15)]
+        sizes = [x for x in sizes if x and x > 0]
+        min_action = min(sizes) if sizes else 0.0
+        if min_action and eff < min_action:
+            logger.error(
+                "LIVE GATE INERT: effective per-trade cap $%.2f < smallest legal action $%.2f "
+                "(bankroll $%.2f x frac %.2f, allowlist=%s). Every intent will be rejected and "
+                "the rejections are logged at INFO — this is indistinguishable from 'no signal'. "
+                "Raise POLYCLAWD_PER_TRADE_FRAC, lower the tier base, or empty the allowlist "
+                "so the halt is explicit.",
+                eff, min_action, bankroll, _lc.per_trade_frac(), allow,
+            )
+        else:
+            logger.info("LIVE GATE OK: cap $%.2f >= min action $%.2f (allowlist=%s)",
+                        eff, min_action, allow)
+    except Exception as exc:  # noqa: BLE001 — never let the assertion break startup
+        logger.warning("live-cap assertion failed to evaluate: %s", exc)
+
+
+async def tick_nfl_fast_move():
+    """NFL fast-move monitor: poll US-sports backend every ~30s, detect
+    moneyline mid moves >= 5pp, fire Telegram alerts. Own loop so it never
+    delays stop evaluation in tick_5min. Self-gates when no upcoming games."""
+    from signals.nfl_fast_move_monitor import run_fast_move_monitor
+    await run_fast_move_monitor()
+
+
+async def tick_nfl_edge_scan():
+    """NFL edge scan on its own 60s-poll loop so the persisted gate is
+    honored exactly. tick_30min runs its task list sequentially then sleeps a
+    fixed 1800s, so its effective period was 58-82 min (measured 2026-09-13
+    from journal tick timestamps) — structurally unable to deliver the
+    approved game-day cadence. Same gate key as before
+    (task_state.should_run_safe); interval 600s (10-min game-day cadence,
+    Mr. V approved 2026-09-13: 21% of live gap minutes moved >=3pp, 30-min
+    snapshots miss transient windows; 6 fires/hour keeps PM-US book-walk
+    pressure at the adapter's 429-softening level). Off-season self-gating
+    lives in task_nfl_edge_scan itself."""
+    while True:
+        try:
+            if task_state.should_run_safe("nfl_edge_scan", 600):
+                await run_in_thread(_run_safe, "nfl_edge_scan", _task_fn("nfl_edge_scan"))
+        except Exception:
+            logger.exception("tick_nfl_edge_scan loop error")
+        await asyncio.sleep(60)
+
+
 async def main():
     logger.info("=" * 60)
     logger.info("Polyclawd Scheduler starting")
     logger.info("Project: %s", PROJECT_ROOT)
     logger.info("DB: %s", DB_PATH)
+    _assert_live_cap_fits_min_action()
     logger.info("=" * 60)
 
     # Stagger starts to avoid thundering herd
@@ -1859,6 +2417,9 @@ async def main():
         asyncio.create_task(_delayed_start(120, tick_vpin)),
         asyncio.create_task(_delayed_start(60, tick_6h)),
         asyncio.create_task(_delayed_start(30, tick_scheduled)),
+        asyncio.create_task(_delayed_start(8, tick_live_burst)),
+        asyncio.create_task(_delayed_start(12, tick_nfl_fast_move)),
+        asyncio.create_task(_delayed_start(18, tick_nfl_edge_scan)),
     ]
 
     await asyncio.gather(*tasks)

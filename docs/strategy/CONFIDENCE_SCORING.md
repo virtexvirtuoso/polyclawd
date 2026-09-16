@@ -152,71 +152,51 @@ As samples grow, smoothing has less effect and raw rate dominates.
 
 ---
 
-## Bayesian Confidence v2
+## Source Win Rates: Seed Prior + Empirical Blend
 
-### Improvements Over v1
+> **Removed 2026-08-26:** this section previously documented
+> `calculate_bayesian_confidence_v2` (Laplace-smoothed weighted average with
+> agreement multipliers). That function was deleted with the 2026-08-25
+> per-source learning loop (commit 4703ba8); the description below is the
+> mechanism that replaced it.
 
-1. **Laplace smoothing** - prevents overfitting on small samples
-2. **Weighted average** - sources weighted by their win rate
-3. **Disagreement penalty** - reduces confidence when sources conflict
-4. **Capped multipliers** - prevents runaway confidence (max 1.8x)
+Per-source win rates now come from `get_source_win_rate(source)` in
+`api/routes/signals.py`, which blends a hand-set seed prior with realized
+outcomes computed from the database:
 
-### Formula
+1. **Seed prior** — `data/source_outcomes.json` holds
+   `{wins, losses, total}` per source key. This file is the prior only; the
+   read path never writes it.
+2. **Empirical counts** — `signals/source_win_rates.py` queries
+   `storage/shadow_trades.db` (read-only, results cached 60s, empty results
+   included) over both resolved-trade tables:
+   - `paper_positions`: `status IN ('won','lost')` — `'stopped'` is excluded
+     on purpose (stop-outs measure stop policy, not model accuracy), as is
+     `'open'`.
+   - `shadow_trades`: `resolved = 1` rows with `side` and `outcome` in
+     `'YES'`/`'NO'` and a non-NULL `pnl`; a win is `pnl > 0` — the
+     resolver's own signed settlement. (`side == outcome` is NOT the win
+     predicate: `outcome` stores the market-frame resolution, which
+     disagrees with the resolver's verdict on baseball rows. `VOID`, `''`
+     and `PASS` rows are unscoreable and excluded.) If resolved shadow rows
+     exist but none pass this filter, the module logs a WARNING — the arm
+     going silently dead is what hid a 0/334 match for the first day of the
+     loop.
+   - Source keys map to DB strategy labels via `SOURCE_TO_STRATEGY` (exact
+     strategy-name match takes precedence).
+3. **Blend** — with fewer than `N_FLOOR = 5` resolved trades the source keeps
+   its prior exactly; otherwise
 
-```python
-def calculate_bayesian_confidence_v2(
-    raw_scores: dict,      # {source: base_confidence}
-    source_stats: dict,    # {source: {wins, total, direction}}
-    alpha: float = 4.0,
-    max_multiplier: float = 1.8
-) -> dict:
-    
-    bayesian_confs = {}
-    smoothed_wrs = {}
-    directions = {}
-    
-    for source, base in raw_scores.items():
-        wins, total = source_stats[source]["wins"], source_stats[source]["total"]
-        
-        # 1. Laplace smoothed win rate
-        smoothed_wr = (wins + alpha) / (total + 2 * alpha)
-        
-        # 2. Capped multiplier
-        multiplier = min(smoothed_wr / 0.5, max_multiplier)
-        
-        # 3. Calculate Bayesian confidence
-        bayesian_confs[source] = base * multiplier
-        directions[source] = source_stats[source]["direction"]
-    
-    # 4. Weighted average (weight = smoothed win rate)
-    weighted_conf = sum(bayesian_confs[s] * smoothed_wrs[s] 
-                        for s in bayesian_confs) / sum(smoothed_wrs.values())
-    
-    # 5. Agreement/disagreement multiplier
-    has_disagreement = len(set(directions.values())) > 1
-    
-    if has_disagreement:
-        agreement_mult = 0.85   # 15% penalty
-    elif len(raw_scores) >= 3:
-        agreement_mult = 1.30   # 30% boost
-    elif len(raw_scores) == 2:
-        agreement_mult = 1.15   # 15% boost
-    else:
-        agreement_mult = 1.0
-    
-    final_conf = min(100, weighted_conf * agreement_mult)
-    
-    return {"final_confidence": final_conf, ...}
-```
+   ```python
+   win_rate = (prior_wins + empirical_wins) / (prior_total + empirical_total)
+   ```
 
-### Agreement Multipliers
+4. **Clamp** — the result is clamped to `[0.20, 0.80]` so no source can zero
+   out or dominate a confidence score.
 
-| Condition | Multiplier | Effect |
-|-----------|------------|--------|
-| Sources disagree (YES vs NO) | 0.85 | -15% penalty |
-| Single source | 1.00 | No change |
-| 2 sources agree | 1.15 | +15% boost |
-| 3+ sources agree | 1.30 | +30% boost |
+`GET /api/confidence/sources` reports both the seed and empirical components
+per source, plus the blended `win_rate` and its `bayesian_multiplier`
+(`win_rate / 0.5`) used in scoring.
 
 ---
 

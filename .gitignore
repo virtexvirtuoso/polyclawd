@@ -56,3 +56,20 @@ docs/screenshots/
 
 # MCP tool-discovery cache (machine state, not source)
 mcp/.tool_cache.json
+
+# --- prod additions 2026-09-16 (Repo Sync Contract rebuild) ---
+venv/
+.env.*
+!.env.example
+*.env.new
+*.db
+*.sqlite
+*.sqlite3
+*.bak
+*.bak.*
+Users/
+_archive/
+.claude/*
+!.claude/settings.json
+*.db-shm
+*.db-wal

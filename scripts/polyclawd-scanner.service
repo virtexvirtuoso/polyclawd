@@ -1,0 +1,13 @@
+[Unit]
+Description=Polyclawd mispriced-category scanner (decoupled from API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=linuxuser
+Group=linuxuser
+WorkingDirectory=/var/www/virtuosocrypto.com/polyclawd
+EnvironmentFile=/etc/default/polyclawd
+ExecStart=/usr/bin/flock -n -E 0 /run/lock/polyclawd-scanner.lock /var/www/virtuosocrypto.com/polyclawd/venv/bin/python3 /var/www/virtuosocrypto.com/polyclawd/scripts/polyclawd_scanner.py
+TimeoutStartSec=1200

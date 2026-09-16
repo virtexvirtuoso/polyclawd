@@ -6,6 +6,7 @@ callers can inject a test DB (tmp file or :memory:).
 """
 
 import sqlite3
+from db import connect as db_connect
 from pathlib import Path
 
 # Canonical prod DB path — same file the rest of the app uses.
@@ -87,6 +88,21 @@ _ALLOWED_LIVE_OPEN_ORDERS = frozenset(
         "size",
         "status",
         "ts",
+    }
+)
+
+_ALLOWED_LIVE_ENTRY_REASONING = frozenset(
+    {
+        "position_id",
+        "ts",
+        "trigger_source",
+        "wallet_address",
+        "wallet_win_rate",
+        "wallet_net_pnl",
+        "edge_pct",
+        "confidence",
+        "reasoning",
+        "raw_json",
     }
 )
 
@@ -173,6 +189,23 @@ CREATE INDEX IF NOT EXISTS idx_live_fills_position_id
 
 CREATE INDEX IF NOT EXISTS idx_live_open_orders_order_id
     ON live_open_orders(order_id);
+
+CREATE TABLE IF NOT EXISTS live_entry_reasoning (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id     INTEGER NOT NULL,
+    ts              TEXT,
+    trigger_source  TEXT,
+    wallet_address  TEXT,
+    wallet_win_rate REAL,
+    wallet_net_pnl  REAL,
+    edge_pct        REAL,
+    confidence      REAL,
+    reasoning       TEXT,
+    raw_json        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_entry_reasoning_position
+    ON live_entry_reasoning(position_id);
 """
 
 
@@ -196,10 +229,15 @@ def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), check_same_thread=False, timeout=10)
+    conn = db_connect(str(path), check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    # busy_timeout intentionally NOT set here — db_connect() already applies the
+    # central BUSY_TIMEOUT_MS (30000). A per-connection PRAGMA on the next line
+    # OVERRIDES the factory (same knob, last write wins), and a 5000 here is what
+    # turns a transient SQLITE_BUSY into a killed task on the live trading ledger,
+    # which is shared across async contexts (check_same_thread=False). Removed
+    # 2026-08-26 by /qa audit. Do not re-add.
     init_live_tables(conn)
     return conn
 
@@ -221,6 +259,27 @@ def insert_position(conn: sqlite3.Connection, commit: bool = True, **fields) -> 
     cols = ", ".join(fields.keys())
     placeholders = ", ".join(["?"] * len(fields))
     sql = f"INSERT INTO live_positions ({cols}) VALUES ({placeholders})"
+    cur = conn.execute(sql, list(fields.values()))
+    if commit:
+        conn.commit()
+    return cur.lastrowid
+
+
+def record_entry_reasoning(conn: sqlite3.Connection, commit: bool = True, **fields) -> int:
+    """Insert a new live_entry_reasoning row. Returns the new rowid.
+
+    position_id is required — this row is meaningless without a link back to
+    the live_positions row it explains. Raises ValueError if position_id is
+    missing/falsy, or if any key in *fields* is not in the allowed column set.
+    """
+    if not fields.get("position_id"):
+        raise ValueError("record_entry_reasoning: position_id is required")
+    unknown = set(fields) - _ALLOWED_LIVE_ENTRY_REASONING
+    if unknown:
+        raise ValueError(f"record_entry_reasoning: unknown column(s): {unknown}")
+    cols = ", ".join(fields.keys())
+    placeholders = ", ".join(["?"] * len(fields))
+    sql = f"INSERT INTO live_entry_reasoning ({cols}) VALUES ({placeholders})"
     cur = conn.execute(sql, list(fields.values()))
     if commit:
         conn.commit()

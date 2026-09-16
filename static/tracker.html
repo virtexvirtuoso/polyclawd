@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="css/polyclawd.css?v=1">
+<title>POLYCLAWD — WHALE TRACKER</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<style>
+:root{
+  --bg:var(--pc-bg); --surface:var(--pc-panel); --text:var(--pc-ink); --muted:var(--pc-dim);
+  --gold:var(--pc-gold); --green:var(--pc-up); --crit:var(--pc-crit); --high:var(--pc-warn);
+  --border:var(--pc-line); --dim:var(--pc-faint);
+  --serif:var(--pc-disp);
+  --mono:var(--pc-mono);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;line-height:1.6}
+a{color:var(--text);text-decoration:none}
+a:hover{color:var(--gold)}
+
+/* masthead */
+.mast{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 32px;padding:20px 28px 14px;border-bottom:1px solid var(--border)}
+.mast h1{font-family:var(--serif);font-size:24px;font-weight:600;letter-spacing:.01em;white-space:nowrap}
+.mast h1 .sub{font-style:italic;color:var(--gold)}
+.tagline{color:var(--muted);font-size:11px}
+.xlinks{display:flex;gap:6px;font-size:11px;letter-spacing:.14em}
+.xlinks a{display:inline-flex;align-items:center;min-height:44px;padding:0 10px;color:var(--muted);border-bottom:1px solid transparent}
+.xlinks a:hover{color:var(--text);border-bottom-color:var(--muted)}
+.xlinks .here{color:var(--gold);border-bottom-color:var(--gold)}
+.health{margin-left:auto;display:flex;gap:8px 20px;font-size:12px;align-items:baseline}
+.health dt{color:var(--muted);font-size:11px}
+.health dd{font-weight:500}
+
+/* stats bar */
+.stats-bar{display:flex;gap:24px;padding:14px 28px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.stat{display:flex;flex-direction:column;gap:2px}
+.stat .label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.12em}
+.stat .value{font-size:18px;font-weight:500}
+.stat .value.green{color:var(--green)}
+.stat .value.gold{color:var(--gold)}
+
+/* layout */
+main{display:grid;grid-template-columns:1fr 420px;gap:0;min-height:calc(100vh - 120px)}
+.left{border-right:1px solid var(--border);overflow-y:auto;max-height:calc(100vh - 120px)}
+.right{overflow-y:auto;max-height:calc(100vh - 120px)}
+
+/* tabs */
+.tabs{display:flex;gap:0;border-bottom:1px solid var(--border);padding:0 16px;position:sticky;top:0;background:var(--bg);z-index:10}
+.tab{padding:10px 16px;font-size:11px;letter-spacing:.1em;color:var(--muted);border-bottom:2px solid transparent;cursor:pointer}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--gold);border-bottom-color:var(--gold)}
+
+/* table */
+.tbl{width:100%;border-collapse:collapse}
+.tbl th{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.12em;text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);position:sticky;top:38px;background:var(--bg);cursor:pointer}
+.tbl th:hover{color:var(--gold)}
+.tbl td{padding:8px 12px;border-bottom:1px solid var(--border);vertical-align:middle}
+.tbl tr{cursor:pointer;transition:background .15s}
+.tbl tr:hover{background:#151825}
+.tbl tr.selected{background:#1a1f35}
+.tbl .smart-badge{display:inline-block;background:var(--gold);color:var(--bg);font-size:9px;padding:1px 5px;border-radius:2px;font-weight:500;letter-spacing:.06em;margin-left:4px}
+.tbl .name{font-weight:500;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tbl .pnl-pos{color:var(--green)}
+.tbl .pnl-neg{color:var(--crit)}
+.tbl .wr-good{color:var(--green)}
+.tbl .wr-bad{color:var(--high)}
+.tbl .mono-num{font-variant-numeric:tabular-nums}
+
+/* dossier (right panel) */
+.dossier{padding:20px}
+.dossier h2{font-family:var(--serif);font-size:18px;margin-bottom:12px}
+.dossier .field{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)}
+.dossier .field .k{color:var(--muted);font-size:11px}
+.dossier .field .v{font-weight:500}
+.dossier .section-title{color:var(--gold);font-size:11px;letter-spacing:.12em;margin:16px 0 8px;text-transform:uppercase}
+.empty-dossier{color:var(--muted);padding:40px 20px;text-align:center;font-size:12px}
+
+/* trade feed */
+.trade-feed{margin-top:8px}
+.trade-row{display:grid;grid-template-columns:60px 1fr 90px;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px;align-items:center}
+.trade-row .side{font-weight:500;font-size:11px;letter-spacing:.08em}
+.trade-row .side.buy{color:var(--green)}
+.trade-row .side.sell{color:var(--crit)}
+.trade-row .market{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trade-row .vol{text-align:right;color:var(--muted)}
+.trade-row .outcome{font-size:11px;color:var(--muted)}
+
+/* pm link */
+.pm-link{display:inline-flex;align-items:center;gap:4px;color:var(--gold);font-size:11px;margin-top:8px;padding:4px 8px;border:1px solid var(--gold);border-radius:3px}
+.pm-link:hover{background:var(--gold);color:var(--bg)}
+
+/* responsive */
+@media(max-width:900px){
+  main{grid-template-columns:1fr}
+  .right{max-height:none;border-top:1px solid var(--border)}
+}
+
+  /* ── Probability Bureau adoption (css/polyclawd.css) ── */
+  body{font-family:var(--pc-mono);background:var(--pc-bg);color:var(--pc-ink)}
+  body > *{position:relative;z-index:1}
+  *{border-radius:0!important;box-shadow:none!important;text-shadow:none!important}
+  h1,h2,h3,h4,.stat-value,.card-value,.page-title,.kpi-value,.big-num{font-family:var(--pc-disp);font-weight:400;letter-spacing:.03em}
+  .tab.active,.btn-primary{color:#0d0d0b}
+</style>
+</head>
+<body data-pc-section="Tracker">
+<header class="mast">
+  <h1>WHALE <span class="sub">Tracker</span></h1>
+  <span class="tagline">Smart wallet leaderboard · live trade feed</span>
+  <div class="health">
+    <div><dt>SMART</dt><dd id="vSmart">—</dd></div>
+    <div><dt>TRACKED</dt><dd id="vTracked">—</dd></div>
+    <div><dt>QUEUED</dt><dd id="vQueued">—</dd></div>
+    <div><dt>UPLINK</dt><dd id="vUplink">…</dd></div>
+  </div>
+</header>
+
+<div class="stats-bar">
+  <div class="stat"><span class="label">Top PnL</span><span class="value green" id="vTopPnl">—</span></div>
+  <div class="stat"><span class="label">Best WR</span><span class="value gold" id="vBestWr">—</span></div>
+  <div class="stat"><span class="label">Most Closed</span><span class="value" id="vMostClosed">—</span></div>
+  <div class="stat"><span class="label">Avg WR (Smart)</span><span class="value" id="vAvgWr">—</span></div>
+</div>
+
+<main>
+  <div class="left">
+    <div class="tabs">
+      <div class="tab active" data-sort="net_pnl">BY PROFIT</div>
+      <div class="tab" data-sort="win_rate">BY WIN RATE</div>
+      <div class="tab" data-sort="closed">BY VOLUME</div>
+    </div>
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>NAME</th>
+          <th>PNL</th>
+          <th>WR%</th>
+          <th>CLOSED</th>
+          <th>CONC</th>
+        </tr>
+      </thead>
+      <tbody id="walletBody"></tbody>
+    </table>
+  </div>
+  <div class="right">
+    <div class="dossier" id="dossier">
+      <div class="empty-dossier">Select a wallet to view details</div>
+    </div>
+  </div>
+</main>
+
+<script>
+const API = location.hostname === 'localhost'
+  ? 'http://localhost:8420'
+  : '/polyclawd';
+
+let wallets = [];
+let selectedWallet = null;
+let currentSort = 'net_pnl';
+
+// ── API ──
+async function api(path) {
+  const r = await fetch(API + path, { cache: 'no-store' });
+  if (!r.ok) throw new Error('http ' + r.status);
+  return r.json();
+}
+
+// ── Format helpers ──
+function fmtPnl(v) {
+  if (v == null) return '—';
+  const abs = Math.abs(v);
+  const s = abs >= 1e6 ? (abs/1e6).toFixed(1)+'M' : abs >= 1e3 ? (abs/1e3).toFixed(1)+'K' : abs.toFixed(0);
+  return (v >= 0 ? '+$' : '-$') + s;
+}
+function fmtWr(v) { return v != null ? (v * 100).toFixed(1) + '%' : '—'; }
+function fmtVol(v) {
+  if (v == null) return '—';
+  return v >= 1e6 ? '$'+(v/1e6).toFixed(1)+'M' : v >= 1e3 ? '$'+(v/1e3).toFixed(1)+'K' : '$'+v.toFixed(0);
+}
+function fmtAge(ts) {
+  if (!ts) return '—';
+  const s = Date.now()/1000 - ts;
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  if (s < 86400) return Math.floor(s/3600) + 'h ago';
+  return Math.floor(s/86400) + 'd ago';
+}
+
+// ── Render table ──
+function renderTable() {
+  const tbody = document.getElementById('walletBody');
+  tbody.innerHTML = '';
+  const smart = wallets.filter(w => w.smart === 1);
+  const rest = wallets.filter(w => w.smart !== 1);
+  const sorted = [...smart, ...rest];
+
+  sorted.forEach((w, i) => {
+    const tr = document.createElement('tr');
+    if (selectedWallet === w.wallet) tr.classList.add('selected');
+    const pnlClass = (w.net_pnl || 0) >= 0 ? 'pnl-pos' : 'pnl-neg';
+    const wrClass = (w.win_rate || 0) >= 0.55 ? 'wr-good' : (w.win_rate || 0) < 0.45 ? 'wr-bad' : '';
+    const badge = w.smart === 1 ? '<span class="smart-badge">SMART</span>' : '';
+    const conc = w.concentration != null ? (w.concentration * 100).toFixed(0) + '%' : '—';
+    tr.innerHTML = `
+      <td class="mono-num">${i + 1}</td>
+      <td class="name">${w.name || w.wallet.slice(0,10)+'…'}${badge}</td>
+      <td class="mono-num ${pnlClass}">${fmtPnl(w.net_pnl)}</td>
+      <td class="mono-num ${wrClass}">${fmtWr(w.win_rate)}</td>
+      <td class="mono-num">${w.closed_positions || 0}</td>
+      <td class="mono-num" style="color:var(--muted)">${conc}</td>
+    `;
+    tr.onclick = () => selectWallet(w.wallet);
+    tbody.appendChild(tr);
+  });
+}
+
+// ── Stats bar ──
+function updateStats() {
+  const smart = wallets.filter(w => w.smart === 1);
+  if (!wallets.length) return;
+
+  const topPnl = wallets.reduce((a, b) => (a.net_pnl || 0) > (b.net_pnl || 0) ? a : b);
+  document.getElementById('vTopPnl').textContent = fmtPnl(topPnl.net_pnl);
+
+  const bestWr = wallets.filter(w => (w.closed_positions || 0) >= 20)
+    .reduce((a, b) => (a.win_rate || 0) > (b.win_rate || 0) ? a : b, {});
+  document.getElementById('vBestWr').textContent = fmtWr(bestWr.win_rate);
+
+  const mostClosed = wallets.reduce((a, b) => (a.closed_positions || 0) > (b.closed_positions || 0) ? a : b);
+  document.getElementById('vMostClosed').textContent = (mostClosed.closed_positions || 0).toLocaleString();
+
+  if (smart.length) {
+    const avgWr = smart.reduce((s, w) => s + (w.win_rate || 0), 0) / smart.length;
+    document.getElementById('vAvgWr').textContent = fmtWr(avgWr);
+  }
+}
+
+// ── Dossier (right panel) ──
+async function selectWallet(addr) {
+  selectedWallet = addr;
+  renderTable();
+  const dossier = document.getElementById('dossier');
+  dossier.innerHTML = '<div class="empty-dossier">Loading…</div>';
+
+  try {
+    const d = await api('/whale/wallet/' + addr);
+    const w = d.wallet || {};
+    const trades = d.trades || [];
+
+    let html = `<h2>${w.name || addr.slice(0,12)+'…'}</h2>`;
+
+    // Stats
+    html += `
+      <div class="field"><span class="k">Wallet</span><span class="v" style="font-size:11px">${addr.slice(0,10)}…${addr.slice(-6)}</span></div>
+      <div class="field"><span class="k">Net PnL</span><span class="v ${(w.net_pnl||0)>=0?'pnl-pos':'pnl-neg'}">${fmtPnl(w.net_pnl)}</span></div>
+      <div class="field"><span class="k">Win Rate</span><span class="v">${fmtWr(w.win_rate)}</span></div>
+      <div class="field"><span class="k">Closed Positions</span><span class="v">${w.closed_positions || 0}</span></div>
+      <div class="field"><span class="k">Wins</span><span class="v">${w.wins || 0}</span></div>
+      <div class="field"><span class="k">Concentration</span><span class="v">${w.concentration != null ? (w.concentration*100).toFixed(0)+'%' : '—'}</span></div>
+      <div class="field"><span class="k">Smart</span><span class="v">${w.smart ? '✅ YES' : '❌ NO'}</span></div>
+      <div class="field"><span class="k">Last Refreshed</span><span class="v">${fmtAge(w.refreshed)}</span></div>
+    `;
+
+    // PM link
+    if (w.name) {
+      html += `<a class="pm-link" href="https://polymarket.com/@${w.name.toLowerCase()}" target="_blank" rel="noopener">↗ View on Polymarket</a>`;
+    }
+
+    // Recent trades
+    if (trades.length) {
+      html += `<div class="section-title">Recent Trades (${trades.length})</div>`;
+      html += '<div class="trade-feed">';
+
+      // Group by market
+      const byMarket = {};
+      trades.forEach(t => {
+        const key = t.title || 'unknown';
+        if (!byMarket[key]) byMarket[key] = { buys: 0, sells: 0, buy_vol: 0, sell_vol: 0, outcome: t.outcome, trades: [] };
+        if (t.side === 'BUY') { byMarket[key].buys++; byMarket[key].buy_vol += t.volume_usdc; }
+        else { byMarket[key].sells++; byMarket[key].sell_vol += t.volume_usdc; }
+        byMarket[key].trades.push(t);
+      });
+
+      const sorted = Object.entries(byMarket).sort((a, b) =>
+        (b[1].buy_vol + b[1].sell_vol) - (a[1].buy_vol + a[1].sell_vol)
+      );
+
+      sorted.slice(0, 12).forEach(([title, data]) => {
+        const total = data.buy_vol + data.sell_vol;
+        const net = data.buy_vol - data.sell_vol;
+        const dir = net >= 0 ? 'BUY' : 'SELL';
+        const dirClass = net >= 0 ? 'buy' : 'sell';
+        html += `
+          <div class="trade-row">
+            <span class="side ${dirClass}">${dir} ×${data.buys + data.sells}</span>
+            <span class="market" title="${title}">${title.slice(0, 50)}<br><span class="outcome">→ ${data.outcome}</span></span>
+            <span class="vol">${fmtVol(total)}</span>
+          </div>
+        `;
+      });
+
+      html += '</div>';
+    } else {
+      html += '<div class="section-title">Recent Trades</div><div style="color:var(--muted);font-size:12px">No trade data available</div>';
+    }
+
+    dossier.innerHTML = html;
+  } catch (e) {
+    dossier.innerHTML = `<div class="empty-dossier">Error loading wallet: ${e.message}</div>`;
+  }
+}
+
+// ── Tabs ──
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    currentSort = tab.dataset.sort;
+    pollWallets();
+  };
+});
+
+// ── Polling ──
+async function pollWallets() {
+  try {
+    const d = await api('/whale/wallets?limit=100&sort=' + currentSort);
+    document.getElementById('vUplink').textContent = '●';
+    document.getElementById('vUplink').style.color = 'var(--green)';
+    document.getElementById('vSmart').textContent = d.smart_count ?? '—';
+    document.getElementById('vTracked').textContent = d.tracked ?? '—';
+    document.getElementById('vQueued').textContent = d.queued ?? '—';
+    wallets = d.wallets || [];
+    updateStats();
+    renderTable();
+  } catch (e) {
+    document.getElementById('vUplink').textContent = '✗';
+    document.getElementById('vUplink').style.color = 'var(--crit)';
+  }
+}
+
+// ── Init ──
+pollWallets();
+setInterval(pollWallets, 30000);
+</script>
+<script src="polyclawd-shell.js" defer></script>
+</body>
+</html>

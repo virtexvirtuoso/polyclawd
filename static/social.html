@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Social Tracker - Polyclawd</title>
+<script src="auth.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  :root, [data-theme="dark"] {
+    --bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a26;--border:#2a2a3a;
+    --accent:#6c5ce7;--accent2:#a29bfe;--green:#00c853;--red:#ff5252;
+    --orange:#ffab40;--cyan:#18ffff;--text:#e8e8f0;--text2:#8888a0;--gold:#ffd700;
+    --noise-opacity:0.03;--shadow:rgba(0,0,0,0.3);
+  }
+  [data-theme="light"] {
+    --bg:#f5f5f8;--surface:#ffffff;--surface2:#eeeef2;--border:#d8d8e0;
+    --accent:#5b4cdb;--accent2:#6c5ce7;--green:#00a843;--red:#e53935;
+    --orange:#f57c00;--cyan:#0097a7;--text:#1a1a2e;--text2:#6b6b80;--gold:#c49000;
+    --noise-opacity:0;--shadow:rgba(0,0,0,0.08);
+  }
+  @media(prefers-color-scheme:light){
+    [data-theme="auto"]{
+      --bg:#f5f5f8;--surface:#ffffff;--surface2:#eeeef2;--border:#d8d8e0;
+      --accent:#5b4cdb;--accent2:#6c5ce7;--green:#00a843;--red:#e53935;
+      --orange:#f57c00;--cyan:#0097a7;--text:#1a1a2e;--text2:#6b6b80;--gold:#c49000;
+      --noise-opacity:0;--shadow:rgba(0,0,0,0.08);
+    }
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,sans-serif;min-height:100vh;line-height:1.7}
+  .noise{position:fixed;top:0;left:0;width:100%;height:100%;background:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");pointer-events:none;z-index:0;opacity:var(--noise-opacity,0.03)}
+  .container{max-width:900px;margin:0 auto;padding:40px 24px;position:relative;z-index:1}
+  header{text-align:center;margin-bottom:48px;position:relative}
+  header::before{content:'';position:absolute;top:-100px;left:50%;transform:translateX(-50%);width:600px;height:600px;background:radial-gradient(circle,rgba(108,92,231,0.08) 0%,transparent 70%);pointer-events:none}
+  .logo{font-size:13px;letter-spacing:6px;text-transform:uppercase;color:var(--accent2);margin-bottom:16px;font-weight:500}
+  .logo span{color:var(--gold)}
+  h1{font-size:36px;font-weight:700;letter-spacing:-1px;background:linear-gradient(135deg,var(--text) 0%,var(--accent2) 50%,var(--cyan) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:12px}
+  .subtitle{color:var(--text2);font-size:15px;font-weight:300}
+  .theme-toggle{position:absolute;top:0;right:0;background:none;border:1px solid var(--border);border-radius:8px;cursor:pointer;padding:6px 10px;font-size:16px;line-height:1;transition:all 0.2s;color:var(--text2)}
+  .theme-toggle:hover{border-color:var(--accent);color:var(--text)}
+  .nav-link{display:inline-block;font-size:12px;color:var(--text2);text-decoration:none;padding:8px 16px;border:1px solid var(--border);border-radius:8px;transition:all 0.2s;margin-bottom:16px}
+  .nav-link:hover{border-color:var(--accent);color:var(--accent2)}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:32px}
+  @media(max-width:640px){.cards{grid-template-columns:1fr}}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:28px;position:relative;overflow:hidden}
+  .card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px}
+  .card.musk::before{background:linear-gradient(90deg,#1da1f2,var(--cyan))}
+  .card.trump::before{background:linear-gradient(90deg,#e63946,var(--orange))}
+  .card-header{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+  .card-icon{font-size:32px}
+  .card-title{font-size:18px;font-weight:600}
+  .card-sub{font-size:12px;color:var(--text2)}
+  .stat-row{display:flex;justify-content:space-between;align-items:baseline;padding:10px 0;border-bottom:1px solid var(--border)}
+  .stat-row:last-child{border-bottom:none}
+  .stat-label{font-size:13px;color:var(--text2)}
+  .stat-value{font-size:18px;font-weight:600;font-family:'JetBrains Mono',monospace}
+  .stat-value.green{color:var(--green)}
+  .stat-value.red{color:var(--red)}
+  .stat-value.orange{color:var(--orange)}
+  .stat-value.cyan{color:var(--cyan)}
+  .section{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:28px;margin-bottom:24px}
+  .section h2{font-size:18px;font-weight:600;margin-bottom:16px;display:flex;align-items:center;gap:10px}
+  .section h2 .icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;color:var(--text2);font-weight:500;padding:10px 12px;border-bottom:1px solid var(--border);font-size:11px;text-transform:uppercase;letter-spacing:1px}
+  td{padding:10px 12px;border-bottom:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:13px}
+  tr:last-child td{border-bottom:none}
+  .model-tag{display:inline-block;font-size:11px;padding:3px 10px;border-radius:6px;font-weight:500}
+  .model-tag.poisson{background:rgba(108,92,231,0.15);color:var(--accent2)}
+  .model-tag.regime{background:rgba(255,171,64,0.15);color:var(--orange)}
+  .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+  .status-dot.active{background:var(--green);box-shadow:0 0 6px var(--green)}
+  .status-dot.pending{background:var(--orange);box-shadow:0 0 6px var(--orange)}
+  .status-dot.offline{background:var(--red)}
+  .progress-bar{height:6px;background:var(--surface2);border-radius:3px;overflow:hidden;margin-top:8px}
+  .progress-fill{height:100%;border-radius:3px;transition:width 0.5s ease}
+  .progress-fill.musk{background:linear-gradient(90deg,#1da1f2,var(--cyan))}
+  .progress-fill.trump{background:linear-gradient(90deg,#e63946,var(--orange))}
+  .refresh-btn{background:none;border:1px solid var(--border);color:var(--text2);padding:6px 14px;border-radius:8px;cursor:pointer;font-size:12px;font-family:inherit;transition:all 0.2s;margin-left:auto}
+  .refresh-btn:hover{border-color:var(--accent);color:var(--accent2)}
+  .refresh-btn.loading{opacity:0.5;pointer-events:none}
+</style>
+</head>
+<body>
+<div class="noise"></div>
+<div class="container">
+
+<header>
+  <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#9681;</button>
+  <div class="logo">Polyclawd <span>Social Tracker</span></div>
+  <h1>Post Count Monitor</h1>
+  <p class="subtitle">Real-time tracking for tweet/post count prediction markets</p>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:16px">
+    <a href="portfolio.html" class="nav-link">Portfolio</a>
+    <a href="how-it-works.html" class="nav-link">How It Works</a>
+    <a href="analysis.html" class="nav-link">Analysis</a>
+    <a href="weather.html" class="nav-link">Weather</a>
+  </div>
+</header>
+
+<div class="cards" id="cards">
+  <div class="card musk">
+    <div class="card-header">
+      <div class="card-icon">&#x1D54F;</div>
+      <div>
+        <div class="card-title">Elon Musk</div>
+        <div class="card-sub">@elonmusk &middot; X (Twitter)</div>
+      </div>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Total Tweets</span>
+      <span class="stat-value cyan" id="musk-total">--</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Daily Rate</span>
+      <span class="stat-value" id="musk-rate">--</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Data Points</span>
+      <span class="stat-value" id="musk-points">--</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Model</span>
+      <span><span class="model-tag poisson">Negative Binomial</span></span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Calibration</span>
+      <span id="musk-calibration">--</span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill musk" id="musk-progress" style="width:0%"></div></div>
+  </div>
+
+  <div class="card trump">
+    <div class="card-header">
+      <div class="card-icon">&#x1F4E2;</div>
+      <div>
+        <div class="card-title">Donald Trump</div>
+        <div class="card-sub">@realDonaldTrump &middot; Truth Social</div>
+      </div>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Total Posts</span>
+      <span class="stat-value orange" id="trump-total">--</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Daily Rate</span>
+      <span class="stat-value" id="trump-rate">--</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Data Points</span>
+      <span class="stat-value" id="trump-points">--</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Model</span>
+      <span><span class="model-tag regime">Regime-Switching</span></span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Calibration</span>
+      <span id="trump-calibration">--</span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill trump" id="trump-progress" style="width:0%"></div></div>
+  </div>
+</div>
+
+<div class="section">
+  <h2><div class="icon" style="background:rgba(108,92,231,0.15)">&#x2696;</div> Model Comparison</h2>
+  <table>
+    <thead><tr><th>Dimension</th><th>Musk (X)</th><th>Trump (Truth Social)</th></tr></thead>
+    <tbody>
+      <tr><td>Pattern</td><td>Habitual drift</td><td>Event-driven regimes</td></tr>
+      <tr><td>Model</td><td>Negative Binomial (&mu;=38.5)</td><td>Hidden Markov (2-state)</td></tr>
+      <tr><td>Daily Baseline</td><td id="musk-baseline">~38.5/day</td><td id="trump-baseline">~16/day</td></tr>
+      <tr><td>Variance</td><td>49% (stable)</td><td>700%+ (regime switches)</td></tr>
+      <tr><td>Prediction Source</td><td>Rate calculation</td><td>Calendar + events</td></tr>
+      <tr><td>Data Feed</td><td><span class="status-dot active"></span>FixTweet API</td><td><span class="status-dot active"></span>Mastodon API</td></tr>
+      <tr><td>Poll Interval</td><td>Every 6 hours</td><td>Every 6 hours</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h2>
+    <div class="icon" style="background:rgba(0,200,83,0.15)">&#x1F4C8;</div> Recent Snapshots
+    <button class="refresh-btn" onclick="loadData()" id="refresh-btn">Refresh</button>
+  </h2>
+  <table id="snapshot-table">
+    <thead><tr><th>Person</th><th>Timestamp</th><th>Count</th><th>Source</th></tr></thead>
+    <tbody id="snapshot-body">
+      <tr><td colspan="4" style="text-align:center;padding:40px;color:var(--text2)">Loading...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h2><div class="icon" style="background:rgba(255,171,64,0.15)">&#x1F3AF;</div> Weekly Bracket Predictions</h2>
+  <p style="color:var(--text2);font-size:13px;margin-bottom:16px">Model probabilities for Polymarket tweet/post count brackets. Updates as data accumulates.</p>
+  <h3 style="font-size:14px;margin-bottom:10px;color:var(--cyan)">Musk (Negative Binomial, &mu;=38.5/day)</h3>
+  <table>
+    <thead><tr><th>Weekly Bracket</th><th>Fair P</th><th>Confidence</th></tr></thead>
+    <tbody>
+      <tr><td>0-16/day</td><td>4%</td><td style="color:var(--text2)">Low (baseline only)</td></tr>
+      <tr><td>17-39/day</td><td>28%</td><td style="color:var(--text2)">Low</td></tr>
+      <tr><td style="color:var(--green);font-weight:600">40-64/day</td><td style="color:var(--green);font-weight:600">42%</td><td style="color:var(--text2)">Low</td></tr>
+      <tr><td>65-89/day</td><td>20%</td><td style="color:var(--text2)">Low</td></tr>
+      <tr><td>90+/day</td><td>6%</td><td style="color:var(--text2)">Low</td></tr>
+    </tbody>
+  </table>
+  <h3 style="font-size:14px;margin:20px 0 10px;color:var(--orange)">Trump (Regime-Switching)</h3>
+  <table>
+    <thead><tr><th>Weekly Bracket</th><th>Quiet (60%)</th><th>Active (40%)</th><th>Weighted P</th></tr></thead>
+    <tbody>
+      <tr><td>80-99/wk</td><td>15%</td><td>0.1%</td><td>9%</td></tr>
+      <tr><td>100-119/wk</td><td>28%</td><td>0.8%</td><td style="color:var(--green);font-weight:600">17%</td></tr>
+      <tr><td>120-139/wk</td><td>25%</td><td>3%</td><td style="color:var(--green);font-weight:600">16%</td></tr>
+      <tr><td>140-159/wk</td><td>15%</td><td>9%</td><td>13%</td></tr>
+      <tr><td>160-179/wk</td><td>8%</td><td>18%</td><td>12%</td></tr>
+      <tr><td>180-199/wk</td><td>4%</td><td>22%</td><td>12%</td></tr>
+      <tr><td>200+/wk</td><td>2%</td><td>47%</td><td>20%</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h2><div class="icon" style="background:rgba(24,255,255,0.15)">&#x2699;</div> System Status</h2>
+  <div class="stat-row">
+    <span class="stat-label">Polling</span>
+    <span><span class="status-dot active"></span>Every 6 hours via VPS scheduler</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">Musk Source</span>
+    <span>FixTweet API (api.fxtwitter.com)</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">Trump Source</span>
+    <span>Mastodon API (truthsocial.com)</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">Storage</span>
+    <span>SQLite (social_count_snapshots)</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">Calibration Target</span>
+    <span>28 snapshots (7 days &times; 4/day)</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">Last Updated</span>
+    <span id="last-updated">--</span>
+  </div>
+</div>
+
+</div>
+
+<script>
+const API_BASE = '/polyclawd/api/social';
+
+function fmt(n) {
+  return n != null ? n.toLocaleString() : '--';
+}
+
+function timeAgo(iso) {
+  if (!iso) return '--';
+  const d = new Date(iso);
+  const now = new Date();
+  const mins = Math.floor((now - d) / 60000);
+  if (mins < 60) return mins + 'm ago';
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + 'h ago';
+  return Math.floor(hrs / 24) + 'd ago';
+}
+
+async function loadData() {
+  const btn = document.getElementById('refresh-btn');
+  btn.classList.add('loading');
+  btn.textContent = 'Loading...';
+
+  try {
+    const [counts, snapshots] = await Promise.all([
+      fetch(API_BASE + '/counts').then(r => r.json()),
+      fetch(API_BASE + '/snapshots?limit=20').then(r => r.json())
+    ]);
+
+    // Musk card
+    const m = counts.musk || {};
+    document.getElementById('musk-total').textContent = fmt(m.total);
+    document.getElementById('musk-rate').textContent = m.rate != null ? m.rate.toFixed(1) + '/day' : 'Collecting...';
+    document.getElementById('musk-rate').className = 'stat-value' + (m.rate > 40 ? ' green' : m.rate > 25 ? ' orange' : '');
+    document.getElementById('musk-points').textContent = (m.points || 0) + '/28';
+    const mPct = Math.min(100, ((m.points || 0) / 28) * 100);
+    document.getElementById('musk-progress').style.width = mPct + '%';
+    document.getElementById('musk-calibration').innerHTML =
+      mPct >= 100 ? '<span class="status-dot active"></span>Calibrated' :
+      mPct > 0 ? '<span class="status-dot pending"></span>Collecting (' + Math.round(mPct) + '%)' :
+      '<span class="status-dot offline"></span>No data';
+
+    // Trump card
+    const t = counts.trump || {};
+    document.getElementById('trump-total').textContent = fmt(t.total);
+    document.getElementById('trump-rate').textContent = t.rate != null ? t.rate.toFixed(1) + '/day' : 'Collecting...';
+    document.getElementById('trump-rate').className = 'stat-value' + (t.rate > 20 ? ' orange' : '');
+    document.getElementById('trump-points').textContent = (t.points || 0) + '/28';
+    const tPct = Math.min(100, ((t.points || 0) / 28) * 100);
+    document.getElementById('trump-progress').style.width = tPct + '%';
+    document.getElementById('trump-calibration').innerHTML =
+      tPct >= 100 ? '<span class="status-dot active"></span>Calibrated' :
+      tPct > 0 ? '<span class="status-dot pending"></span>Collecting (' + Math.round(tPct) + '%)' :
+      '<span class="status-dot offline"></span>No data';
+
+    // Update baselines with live rates
+    if (m.rate) document.getElementById('musk-baseline').textContent = '~' + m.rate.toFixed(1) + '/day (live)';
+    if (t.rate) document.getElementById('trump-baseline').textContent = '~' + t.rate.toFixed(1) + '/day (live)';
+
+    // Last updated
+    const latest = m.last_updated || t.last_updated;
+    document.getElementById('last-updated').textContent = latest ? timeAgo(latest) + ' (' + new Date(latest).toLocaleString() + ')' : '--';
+
+    // Snapshots table
+    const body = document.getElementById('snapshot-body');
+    if (snapshots.snapshots && snapshots.snapshots.length > 0) {
+      body.innerHTML = snapshots.snapshots.map(function(s) {
+        const color = s.person === 'musk' ? 'var(--cyan)' : 'var(--orange)';
+        return '<tr>' +
+          '<td style="color:' + color + ';font-weight:500">' + (s.person === 'musk' ? 'Elon Musk' : 'Donald Trump') + '</td>' +
+          '<td>' + new Date(s.timestamp).toLocaleString() + '</td>' +
+          '<td>' + fmt(s.count) + '</td>' +
+          '<td style="color:var(--text2)">' + s.source + '</td>' +
+        '</tr>';
+      }).join('');
+    } else {
+      body.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:40px;color:var(--text2)">No snapshots yet. First poll in &lt;6 hours.</td></tr>';
+    }
+  } catch (e) {
+    console.error('Failed to load social data:', e);
+    document.getElementById('snapshot-body').innerHTML =
+      '<tr><td colspan="4" style="text-align:center;padding:40px;color:var(--text2)">Failed to load data. API may be restarting.</td></tr>';
+  }
+
+  btn.classList.remove('loading');
+  btn.textContent = 'Refresh';
+}
+
+function toggleTheme() {
+  var html = document.documentElement;
+  var cur = html.getAttribute('data-theme');
+  var next = cur === 'dark' ? 'light' : cur === 'light' ? 'auto' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('theme', next);
+}
+(function() {
+  var saved = localStorage.getItem('theme');
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+})();
+
+loadData();
+setInterval(loadData, 300000);
+</script>
+</body>
+</html>

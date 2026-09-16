@@ -509,7 +509,7 @@ def _fetch_weatherapi(lat: float, lon: float, date: str) -> Optional[dict]:
 # Free public API key, ICAO station codes, 5-day forecast + historical.
 # Double-weighted in ensemble because it IS the judge.
 
-TWC_API_KEY = "e1f10a1e78da46f5b10a1e78da96f525"  # Public key from WU website
+TWC_API_KEY = os.environ.get("TWC_API_KEY", "")  # was hardcoded; rotate + set in /etc/default/polyclawd
 
 # ICAO station codes for Polymarket weather cities
 # These match the stations in Polymarket market descriptions
@@ -1163,10 +1163,10 @@ def _get_empirical_std(city: str, horizon_hours: float, min_samples: int = 30) -
         db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'storage', 'shadow_trades.db')
         db = sqlite3.connect(db_path)
         rows = db.execute("""
-            SELECT AVG(forecast_error_f) as avg_err FROM forecast_log
+            SELECT AVG(ensemble_error_f) as avg_err FROM weather_forecast_log
             WHERE LOWER(city) = ? 
-              AND forecast_horizon_hours >= ? AND forecast_horizon_hours < ?
-              AND forecast_error_f IS NOT NULL
+              AND horizon_hours >= ? AND horizon_hours < ?
+              AND ensemble_error_f IS NOT NULL
             GROUP BY target_date
         """, (city.lower(), h_lo, h_hi)).fetchall()
         
@@ -1176,9 +1176,9 @@ def _get_empirical_std(city: str, horizon_hours: float, min_samples: int = 30) -
                 all_key = f"{city.lower()}:ALL"
                 if all_key not in _EMPIRICAL_CACHE:
                     all_rows = db.execute("""
-                        SELECT AVG(forecast_error_f) as avg_err FROM forecast_log
+                        SELECT AVG(ensemble_error_f) as avg_err FROM weather_forecast_log
                         WHERE LOWER(city) = ?
-                          AND forecast_error_f IS NOT NULL
+                          AND ensemble_error_f IS NOT NULL
                         GROUP BY target_date
                     """, (city.lower(),)).fetchall()
                     db.close()  # close after fallback query
@@ -1251,9 +1251,9 @@ def _get_empirical_bias(city: str, min_dates: int = 30) -> Optional[float]:
         db = sqlite3.connect(db_path)
         # Get per-date average errors, then average those (avoids weighting dates with more forecasts)
         rows = db.execute("""
-            SELECT AVG(forecast_error_f) as avg_err FROM forecast_log
+            SELECT AVG(ensemble_error_f) as avg_err FROM weather_forecast_log
             WHERE LOWER(city) = ?
-              AND forecast_error_f IS NOT NULL
+              AND ensemble_error_f IS NOT NULL
             GROUP BY target_date
         """, (city_norm,)).fetchall()
         db.close()
@@ -1537,7 +1537,8 @@ _DB_PATH = _os.path.join(_os.path.dirname(__file__), "..", "storage", "shadow_tr
 def _ensure_source_rmse_table():
     """Create per-source RMSE tracking table if not exists."""
     try:
-        conn = _sqlite3.connect(_DB_PATH)
+        conn = _sqlite3.connect(_DB_PATH, timeout=15)
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS source_city_rmse (
                 id INTEGER PRIMARY KEY,
@@ -1547,7 +1548,7 @@ def _ensure_source_rmse_table():
                 forecast_high_f REAL,
                 actual_high_f REAL,
                 error_f REAL,
-                forecast_horizon_hours REAL,
+                horizon_hours REAL,
                 logged_at TEXT DEFAULT (datetime('now')),
                 UNIQUE(city, source, target_date)
             )
@@ -1558,7 +1559,7 @@ def _ensure_source_rmse_table():
         """)
         # Add horizon column if missing (migration for existing tables)
         try:
-            conn.execute("ALTER TABLE source_city_rmse ADD COLUMN forecast_horizon_hours REAL")
+            conn.execute("ALTER TABLE source_city_rmse ADD COLUMN horizon_hours REAL")
         except Exception:
             pass  # Column already exists
         conn.commit()
@@ -1567,6 +1568,206 @@ def _ensure_source_rmse_table():
         logger.debug("source_city_rmse table init: {}", e)
 
 _ensure_source_rmse_table()
+
+
+def _ensure_forecast_log_table():
+    """Create weather_forecast_log table for resolution-source edge validation."""
+    try:
+        conn = _sqlite3.connect(_DB_PATH, timeout=15)
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS weather_forecast_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                horizon_hours REAL,
+                nws_forecast_high_f REAL,
+                twc_forecast_high_f REAL,
+                ensemble_forecast_f REAL,
+                ensemble_std_f REAL,
+                kalshi_price REAL,
+                pm_price REAL,
+                nws_edge_pp REAL,
+                twc_edge_pp REAL,
+                actual_high_f REAL,
+                nws_error_f REAL,
+                twc_error_f REAL,
+                ensemble_error_f REAL,
+                threshold_f REAL,
+                threshold_edge INTEGER DEFAULT 0,
+                platform TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(city, target_date, platform, threshold_f)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_wfl_city_date
+            ON weather_forecast_log(city, target_date)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_wfl_created
+            ON weather_forecast_log(created_at)
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug("weather_forecast_log table init: {}", e)
+
+_ensure_forecast_log_table()
+
+
+def _ensure_ensemble_forecast_log_table():
+    """Create forecast_log table for per-city per-date ensemble accuracy tracking.
+
+    Separate from weather_forecast_log (which records per-edge per-platform snapshots
+    with NWS/TWC/Kalshi/PM columns). forecast_log records one row per city/date with
+    ensemble aggregate stats + actual-backfill columns.
+
+    Referenced by: log_ensemble_forecast (INSERT), resolve_source_forecasts (UPDATE),
+    api/routes/weather_dashboard.py (SELECT), scripts/backtest/* (SELECT),
+    services/scheduler.py task_db_maintenance (DELETE on timestamp).
+    """
+    try:
+        conn = _sqlite3.connect(_DB_PATH, timeout=15)
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS forecast_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                horizon_hours REAL,
+                ensemble_mean_f REAL,
+                ensemble_std_f REAL,
+                effective_std_f REAL,
+                n_sources INTEGER,
+                source_agreement REAL,
+                actual_high_f REAL,
+                forecast_error_f REAL,
+                resolved_at TEXT,
+                timestamp TEXT DEFAULT (datetime('now')),
+                UNIQUE(city, target_date)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_fl_city_date
+            ON forecast_log(city, target_date)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_fl_timestamp
+            ON forecast_log(timestamp)
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug("forecast_log table init: {}", e)
+
+
+_ensure_ensemble_forecast_log_table()
+
+
+
+def log_forecast_for_edge(city: str, target_date: str, sources: dict,
+                          ensemble: dict, platform: str,
+                          market_price: float, threshold_f: float = None):
+    """Log a forecast snapshot for resolution-source edge validation.
+    
+    Records NWS + TWC individual forecasts alongside ensemble aggregate
+    and market price. Actuals backfilled next day via backfill_forecast_log_actuals().
+    """
+    try:
+        nws_high = None
+        twc_high = None
+        if "nws" in sources and sources["nws"]:
+            nws_high = sources["nws"].get("high_f")
+        if "weather_com" in sources and sources["weather_com"]:
+            twc_high = sources["weather_com"].get("high_f")
+
+        ens_mean = ensemble.get("high_mean_f")
+        ens_std = ensemble.get("high_std_f")
+
+        now = datetime.now(timezone.utc)
+        target = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+        horizon_hours = max(0, (target - now).total_seconds() / 3600)
+
+        threshold_edge = 0
+        if threshold_f is not None and ens_mean is not None:
+            threshold_edge = 1 if abs(ens_mean - threshold_f) < 2.0 else 0
+
+        # Use 0 instead of NULL for threshold_f to make UNIQUE constraint work
+        effective_threshold = threshold_f if threshold_f is not None else 0.0
+
+        conn = _sqlite3.connect(_DB_PATH, timeout=15)
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("""
+            INSERT OR REPLACE INTO weather_forecast_log
+            (city, target_date, horizon_hours, nws_forecast_high_f, twc_forecast_high_f,
+             ensemble_forecast_f, ensemble_std_f, kalshi_price, pm_price,
+             threshold_f, threshold_edge, platform)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            city.lower(), target_date, round(horizon_hours, 1),
+            nws_high, twc_high, ens_mean, ens_std,
+            market_price if platform == "kalshi" else None,
+            market_price if platform == "polymarket" else None,
+            effective_threshold, threshold_edge, platform,
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug("log_forecast_for_edge error: {}", e)
+
+
+def backfill_forecast_log_actuals():
+    """Backfill actual temperatures into weather_forecast_log rows missing actuals.
+    
+    Called from tick_weather or a daily cron. Uses TWC actuals (the PM resolution source).
+    """
+    try:
+        conn = _sqlite3.connect(_DB_PATH, timeout=15)
+        conn.execute("PRAGMA busy_timeout=30000")
+        # Find rows needing actuals (past dates without actual_high_f)
+        rows = conn.execute("""
+            SELECT DISTINCT city, target_date FROM weather_forecast_log
+            WHERE actual_high_f IS NULL
+            AND target_date < date('now')
+        """).fetchall()
+
+        if not rows:
+            conn.close()
+            return 0
+
+        filled = 0
+        for city, target_date in rows:
+            # Try to get actual from source_city_rmse (already resolved)
+            actual_row = conn.execute("""
+                SELECT actual_high_f FROM source_city_rmse
+                WHERE city = ? AND target_date = ? AND actual_high_f IS NOT NULL
+                LIMIT 1
+            """, (city, target_date)).fetchone()
+
+            if actual_row:
+                actual = actual_row[0]
+                conn.execute("""
+                    UPDATE weather_forecast_log
+                    SET actual_high_f = ?,
+                        nws_error_f = CASE WHEN nws_forecast_high_f IS NOT NULL
+                                      THEN nws_forecast_high_f - ? ELSE NULL END,
+                        twc_error_f = CASE WHEN twc_forecast_high_f IS NOT NULL
+                                      THEN twc_forecast_high_f - ? ELSE NULL END,
+                        ensemble_error_f = CASE WHEN ensemble_forecast_f IS NOT NULL
+                                           THEN ensemble_forecast_f - ? ELSE NULL END
+                    WHERE city = ? AND target_date = ? AND actual_high_f IS NULL
+                """, (actual, actual, actual, actual, city, target_date))
+                filled += conn.execute("SELECT changes()").fetchone()[0]
+
+        conn.commit()
+        conn.close()
+        if filled:
+            logger.info("Backfilled {} weather_forecast_log rows with actuals", filled)
+        return filled
+    except Exception as e:
+        logger.debug("backfill_forecast_log_actuals error: {}", e)
+        return 0
 
 
 def log_source_forecasts(city: str, date: str, sources: dict):
@@ -1581,14 +1782,15 @@ def log_source_forecasts(city: str, date: str, sources: dict):
         target = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
         horizon_hours = max(0, (target - now).total_seconds() / 3600)
         
-        conn = _sqlite3.connect(_DB_PATH)
+        conn = _sqlite3.connect(_DB_PATH, timeout=15)
+        conn.execute("PRAGMA busy_timeout=30000")
         for name, src in sources.items():
             high_f = src.get("high_f")
             if high_f is None or high_f == 0:
                 continue
             conn.execute("""
                 INSERT OR IGNORE INTO source_city_rmse 
-                (city, source, target_date, forecast_high_f, forecast_horizon_hours)
+                (city, source, target_date, forecast_high_f, horizon_hours)
                 VALUES (?, ?, ?, ?, ?)
             """, (city.lower(), name, date, high_f, round(horizon_hours, 1)))
         conn.commit()
@@ -1604,7 +1806,8 @@ def resolve_source_forecasts(city: str, date: str, actual_high_f: float):
     market resolution).
     """
     try:
-        conn = _sqlite3.connect(_DB_PATH)
+        conn = _sqlite3.connect(_DB_PATH, timeout=15)
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("""
             UPDATE source_city_rmse 
             SET actual_high_f = ?, error_f = forecast_high_f - ?
@@ -1638,10 +1841,11 @@ def log_ensemble_forecast(city: str, date: str, ensemble: dict):
         target = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
         horizon_hours = max(0, (target - now).total_seconds() / 3600)
         
-        conn = _sqlite3.connect(_DB_PATH)
+        conn = _sqlite3.connect(_DB_PATH, timeout=15)
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("""
             INSERT OR IGNORE INTO forecast_log
-            (city, target_date, forecast_horizon_hours,
+            (city, target_date, horizon_hours,
              ensemble_mean_f, ensemble_std_f, effective_std_f,
              n_sources, source_agreement)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1688,7 +1892,8 @@ def get_source_weights_for_city(city: str, min_samples: int = 3) -> dict:
     }
     
     try:
-        conn = _sqlite3.connect(_DB_PATH)
+        conn = _sqlite3.connect(_DB_PATH, timeout=15)
+        conn.execute("PRAGMA busy_timeout=30000")
         rows = conn.execute("""
             SELECT source, 
                    COUNT(*) as n,
@@ -1755,7 +1960,8 @@ def get_ensemble_status() -> dict:
         "weather_com", "open_meteo_ensemble", "visual_crossing",
         "weatherapi", "nws", "tomorrow_io", "pirate_weather", "open_meteo",
     )
-    conn = _sqlite3.connect(_DB_PATH)
+    conn = _sqlite3.connect(_DB_PATH, timeout=15)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = _sqlite3.Row
     try:
         placeholders = ",".join("?" * len(weather_sources))
@@ -1795,23 +2001,23 @@ def get_ensemble_status() -> dict:
 
         ens = conn.execute("""
             SELECT COUNT(*) AS n,
-                   SQRT(AVG(forecast_error_f * forecast_error_f)) AS rmse_f,
-                   AVG(ABS(forecast_error_f)) AS mae_f,
-                   AVG(forecast_error_f) AS bias_f
-            FROM forecast_log WHERE actual_high_f IS NOT NULL
+                   SQRT(AVG(ensemble_error_f * ensemble_error_f)) AS rmse_f,
+                   AVG(ABS(ensemble_error_f)) AS mae_f,
+                   AVG(ensemble_error_f) AS bias_f
+            FROM weather_forecast_log WHERE actual_high_f IS NOT NULL
         """).fetchone()
 
         cal = conn.execute("""
             SELECT COUNT(*) AS n,
                    AVG(CAST(hit AS REAL)) * 100.0 AS hit_rate_pct
-            FROM backtest_brackets WHERE actual_high_f IS NOT NULL
+            FROM backtest_brackets WHERE actual_high_f IS NOT NULL AND yes_final_price IS NOT NULL AND volume > 0
         """).fetchone()
 
         by_comp = [dict(r) for r in conn.execute("""
             SELECT comparison, COUNT(*) AS n,
                    ROUND(100.0 * AVG(CAST(hit AS REAL)), 1) AS hit_pct,
                    ROUND(AVG(yes_final_price), 2) AS avg_market_price
-            FROM backtest_brackets WHERE actual_high_f IS NOT NULL
+            FROM backtest_brackets WHERE actual_high_f IS NOT NULL AND yes_final_price IS NOT NULL AND volume > 0
             GROUP BY comparison ORDER BY n DESC
         """)]
 
@@ -1866,9 +2072,9 @@ def get_ensemble_status() -> dict:
         horizon_accuracy = [dict(r) for r in conn.execute("""
             SELECT
               CASE
-                WHEN forecast_horizon_hours <= 24 THEN '0-24h'
-                WHEN forecast_horizon_hours <= 48 THEN '24-48h'
-                WHEN forecast_horizon_hours <= 72 THEN '48-72h'
+                WHEN horizon_hours <= 24 THEN '0-24h'
+                WHEN horizon_hours <= 48 THEN '24-48h'
+                WHEN horizon_hours <= 72 THEN '48-72h'
                 ELSE '72h+'
               END AS horizon,
               COUNT(*) AS n,
@@ -1876,7 +2082,7 @@ def get_ensemble_status() -> dict:
               ROUND(AVG(ABS(error_f)), 2) AS mae_f,
               ROUND(AVG(error_f), 2) AS bias_f
             FROM source_city_rmse
-            WHERE error_f IS NOT NULL AND forecast_horizon_hours IS NOT NULL
+            WHERE error_f IS NOT NULL AND horizon_hours IS NOT NULL
             GROUP BY horizon
             ORDER BY horizon
         """)]

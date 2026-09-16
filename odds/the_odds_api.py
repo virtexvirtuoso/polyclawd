@@ -22,6 +22,7 @@ To activate:
        from this module instead of soccer_edge.get_soccer_edge_summary
     5. Watch source_health table for the_odds_api row + Discord alerts
 """
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 
 import os
 import json
@@ -100,7 +101,7 @@ def normalize_team(team: str) -> List[str]:
 def _fetch_polymarket_soccer_sync() -> list:
     try:
         resp = _requests.get(
-            "https://gamma-api.polymarket.com/events",
+            gamma_url("/events"),
             params={"closed": "false", "limit": "200"}, timeout=30,
         )
         return resp.json()
@@ -237,6 +238,42 @@ def _track_credits_from_response(resp) -> None:
         _record_credits(resp.headers.get("x-requests-remaining"), resp.headers.get("x-requests-used"))
     except (AttributeError, TypeError):
         pass
+    _note_auth_ok()
+
+
+def _note_auth_exc(e: Exception) -> None:
+    """Forward a failed fetch to the rate_limiter auth breaker when — and only
+    when — it is an auth failure (401/403). Everything else (timeouts, 5xx,
+    connection resets) is transient and must NOT halt the fleet.
+
+    Added 2026-08-29 after the prod key returned DEACTIVATED_KEY for ~a day
+    while every scheduler task retried it in a tight loop, unnoticed."""
+    import urllib.error
+
+    if not isinstance(e, urllib.error.HTTPError):
+        return
+    body = ""
+    try:
+        body = e.read()[:400].decode("utf-8", "replace")
+    except Exception:
+        pass
+    try:
+        from odds.rate_limiter import note_auth_failure
+
+        key = _get_api_key() or ""
+        note_auth_failure(e.code, body, key_prefix=key[:4])
+    except Exception as exc:  # pragma: no cover — breaker must never break a fetch
+        logger.debug(f"note_auth_failure skipped: {exc}")
+
+
+def _note_auth_ok() -> None:
+    """A successful authenticated response clears a tripped breaker."""
+    try:
+        from odds.rate_limiter import note_auth_success
+
+        note_auth_success()
+    except Exception as exc:  # pragma: no cover
+        logger.debug(f"note_auth_success skipped: {exc}")
 
 
 
@@ -261,6 +298,7 @@ def refresh_credit_balance() -> dict:
             logger.info(f"Credits: {used}/{remaining or '?'} used")
             return get_credit_status()
     except Exception as e:
+        _note_auth_exc(e)
         logger.warning(f"refresh_credit_balance failed: {e}")
         return get_credit_status()
 
@@ -368,6 +406,7 @@ def _fetch_league_sync(api_key: str, sport_key: str, timeout: int = 10) -> List[
             _track_credits_from_response(resp)
             return json.loads(resp.read().decode())
     except Exception as e:
+        _note_auth_exc(e)
         logger.warning(f"the_odds_api fetch failed for {sport_key}: {e}")
         return []
 
@@ -618,6 +657,7 @@ async def get_baseball_games_with_all_markets() -> List[Dict]:
             _track_credits_from_response(resp)
             return json.loads(resp.read().decode())
     except Exception as e:
+        _note_auth_exc(e)
         logger.warning(f"the_odds_api baseball all-markets fetch failed: {e}")
         return []
 
@@ -646,6 +686,8 @@ def health_probe(timeout: int = 5) -> Tuple[bool, str]:
         req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
+            _note_auth_ok()
             return True, f"{len(data) if isinstance(data, list) else 0} sports"
     except Exception as e:
+        _note_auth_exc(e)
         return False, str(e)

@@ -19,11 +19,15 @@ import json
 import sqlite3
 import time
 import urllib.request
+from collections import deque
 from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 from loguru import logger
+from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
+from config.polymarket_urls import CLOB_API  # polyproxy: central URL config
+from config.polymarket_urls import direct_equivalent
 
 # Paths
 BASE_DIR = Path(__file__).parent.parent
@@ -38,8 +42,7 @@ OPTIONS_DB = Path(
 SHADOW_DB = STORAGE_DIR / "shadow_trades.db"
 
 # Polymarket APIs
-GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API = "https://clob.polymarket.com"
+
 UA = {"User-Agent": "Mozilla/5.0 polyclawd-options-resolver"}
 
 # Tracked tickers (same as options_implied.py)
@@ -57,7 +60,7 @@ def get_options_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(OPTIONS_DB), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")  # match central BUSY_TIMEOUT_MS (/qa 2026-08-26)
     _init_tables(conn)
     return conn
 
@@ -68,7 +71,7 @@ def get_shadow_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(SHADOW_DB), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")  # match central BUSY_TIMEOUT_MS (/qa 2026-08-26)
     return conn
 
 
@@ -97,18 +100,112 @@ def _init_tables(conn: sqlite3.Connection):
     conn.commit()
 
 
+# ─── Fetch health / failure-rate alarm ───────────────────────────────
+# 2026-08-25: the Cloudflare Worker proxy 403'd 100% of this module's CLOB
+# reads for 35h. Every failure was logged at DEBUG and swallowed, so a wholly
+# dead subsystem alerted nobody. Fetch outcomes are now tracked and a wholesale
+# outage pages instead of failing quietly forever.
+#
+# Rates are measured over a SLIDING WINDOW, not process-lifetime totals: the
+# scheduler runs for weeks, so lifetime counters would dilute a fresh 100%
+# outage below any sane threshold and restore the very silence this fixes.
+
+_ALARM_WINDOW = 100  # outcomes considered when computing rates
+_ALARM_MIN_ATTEMPTS = 20  # never alarm off a handful of samples
+_ALARM_FAIL_RATE = 0.9  # >=90% hard failures == effectively dead
+_DEGRADED_RATE = 0.9  # >=90% served only via fallback == proxy dead
+_ALARM_COOLDOWN_S = 3600  # at most one notice per kind per hour
+
+_fetch_window: deque = deque(maxlen=_ALARM_WINDOW)
+_fetch_stats = {"ok": 0, "fail": 0, "degraded": 0, "outage_at": 0.0, "degraded_at": 0.0}
+
+
+def _send_alarm(message: str) -> None:
+    """Log at ERROR and page Telegram. Never raises into the caller."""
+    logger.error(message)
+    try:
+        from scripts.alert_formatter import send_telegram
+
+        send_telegram(message)
+    except Exception as e:
+        logger.error(f"options_resolver: alarm Telegram send failed: {e}")
+
+
+def _record_fetch(ok: bool, degraded: bool = False) -> None:
+    """Record a fetch outcome; alarm when this module is failing wholesale.
+
+    ok=False       -> both the proxy and the direct upstream failed.
+    degraded=True  -> the proxied route failed but the direct upstream served it.
+    """
+    outcome = "fail" if not ok else ("degraded" if degraded else "ok")
+    _fetch_window.append(outcome)
+    _fetch_stats["ok" if ok else "fail"] += 1
+    if degraded:
+        _fetch_stats["degraded"] += 1
+
+    attempts = len(_fetch_window)
+    if attempts < _ALARM_MIN_ATTEMPTS:
+        return
+    now = time.time()
+
+    fails = sum(1 for o in _fetch_window if o == "fail")
+    fail_rate = fails / attempts
+    if fail_rate >= _ALARM_FAIL_RATE and now - _fetch_stats["outage_at"] >= _ALARM_COOLDOWN_S:
+        _fetch_stats["outage_at"] = now
+        _send_alarm(
+            f"options_resolver OUTAGE: {fails}/{attempts} of the last Polymarket "
+            f"fetches are failing ({fail_rate:.0%}). Options resolution logging and "
+            f"shadow-trade auto-resolve are stalled."
+        )
+        return
+
+    degraded_count = sum(1 for o in _fetch_window if o == "degraded")
+    degraded_rate = degraded_count / attempts
+    if degraded_rate >= _DEGRADED_RATE and now - _fetch_stats["degraded_at"] >= _ALARM_COOLDOWN_S:
+        _fetch_stats["degraded_at"] = now
+        _send_alarm(
+            f"options_resolver DEGRADED: {degraded_count}/{attempts} recent reads "
+            f"only succeeded on the direct-upstream fallback — the polyproxy Worker "
+            f"route is dead. Data is correct but uncached."
+        )
+
+
 # ─── Polymarket API ──────────────────────────────────────────────────
 
 
-def _fetch_json(url: str, timeout: int = 10) -> Optional[Any]:
-    """Fetch JSON. Returns None on any failure."""
+def _fetch_once(url: str, timeout: int) -> tuple[Optional[Any], Optional[str]]:
+    """Single GET. Returns (payload, None) on success, (None, error) on failure."""
     try:
         req = urllib.request.Request(url, headers=UA)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
+            return json.loads(resp.read().decode()), None
     except Exception as e:
-        logger.debug(f"options_resolver fetch failed: {url[:60]} - {e}")
-        return None
+        return None, f"{type(e).__name__}: {e}"
+
+
+def _fetch_json(url: str, timeout: int = 10) -> Optional[Any]:
+    """Fetch JSON, retrying against the direct upstream if a proxied read fails.
+
+    Returns None only when every available route failed. URLs are logged in
+    full — the old 60-char truncation hid the failing path behind a prefix.
+    """
+    data, err = _fetch_once(url, timeout)
+    if err is None:
+        _record_fetch(ok=True)
+        return data
+
+    fallback = direct_equivalent(url)
+    if fallback:
+        data, direct_err = _fetch_once(fallback, timeout)
+        if direct_err is None:
+            logger.warning(f"options_resolver proxy fetch failed, served direct: {url} - {err}")
+            _record_fetch(ok=True, degraded=True)
+            return data
+        err = f"proxy={err} | direct={direct_err}"
+
+    _record_fetch(ok=False)
+    logger.warning(f"options_resolver fetch failed: {url} - {err}")
+    return None
 
 
 def _get_resolved_close_events(ticker: str) -> List[Dict]:
@@ -118,11 +215,13 @@ def _get_resolved_close_events(ticker: str) -> List[Dict]:
     """
     data = _fetch_json(
         f"{GAMMA_API}/public-search?"
-        + urllib.parse.urlencode({
-            "q": f"{ticker} close",
-            "limit_per_type": 20,
-            "events_status": "closed",
-        }),
+        + urllib.parse.urlencode(
+            {
+                "q": f"{ticker} close",
+                "limit_per_type": 20,
+                "events_status": "closed",
+            }
+        ),
         timeout=15,
     )
     if isinstance(data, dict):
@@ -305,28 +404,31 @@ def scan_resolved_options_markets() -> Dict[str, Any]:
 
         # 4. Log to options_forecast_log
         try:
-            oconn.execute("""
+            oconn.execute(
+                """
                 INSERT OR IGNORE INTO options_forecast_log
                 (ticker, expiry, strike, market_type, implied_prob, poly_price,
                  spread_pp, z_score, poly_market_id, actual_outcome,
                  predicted_side, predicted_correct, resolved_at, recorded_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                row.get("ticker", ""),
-                row.get("expiry", ""),
-                row.get("strike", 0),
-                row.get("market_type", ""),
-                row.get("implied_prob", 0),
-                row.get("poly_price", 0),
-                row.get("spread_pp", 0),
-                row.get("spread_pp", 0) / 3.0,  # approx z (SD_FLOOR=0.5, z=spread/0.5/2 -> rough)
-                poly_market_id,
-                outcome,
-                predicted_side,
-                is_correct,
-                datetime.now(timezone.utc).isoformat(),
-                datetime.now(timezone.utc).isoformat(),
-            ))
+            """,
+                (
+                    row.get("ticker", ""),
+                    row.get("expiry", ""),
+                    row.get("strike", 0),
+                    row.get("market_type", ""),
+                    row.get("implied_prob", 0),
+                    row.get("poly_price", 0),
+                    row.get("spread_pp", 0),
+                    row.get("spread_pp", 0) / 3.0,  # approx z (SD_FLOOR=0.5, z=spread/0.5/2 -> rough)
+                    poly_market_id,
+                    outcome,
+                    predicted_side,
+                    is_correct,
+                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
             result["forecast_logged"] += 1
         except Exception as e:
             logger.warning(f"forecast_log insert failed: {e}")
@@ -342,7 +444,8 @@ def scan_resolved_options_markets() -> Dict[str, Any]:
                 pnl = -entry_price if predicted_side == "YES" else entry_price
 
             try:
-                sconn.execute("""
+                sconn.execute(
+                    """
                     UPDATE shadow_trades
                     SET resolved = 1,
                         resolved_at = ?,
@@ -350,13 +453,15 @@ def scan_resolved_options_markets() -> Dict[str, Any]:
                         pnl = ?,
                         exit_price = ?
                     WHERE id = ?
-                """, (
-                    datetime.now(timezone.utc).isoformat(),
-                    outcome,
-                    round(pnl, 4),
-                    1.0 if is_correct else 0.0,
-                    shadow["id"],
-                ))
+                """,
+                    (
+                        datetime.now(timezone.utc).isoformat(),
+                        outcome,
+                        round(pnl, 4),
+                        1.0 if is_correct else 0.0,
+                        shadow["id"],
+                    ),
+                )
                 result["resolved"] += 1
             except Exception as e:
                 logger.warning(f"shadow_trade update failed: {e}")
@@ -411,9 +516,7 @@ def get_options_accuracy_summary() -> Dict[str, Any]:
         GROUP BY ticker
         ORDER BY total DESC
     """).fetchall():
-        by_ticker[r["ticker"]] = {
-            "total": r["total"], "correct": r["correct"], "accuracy": r["accuracy"]
-        }
+        by_ticker[r["ticker"]] = {"total": r["total"], "correct": r["correct"], "accuracy": r["accuracy"]}
 
     # By market_type
     by_market_type = {}
@@ -425,9 +528,7 @@ def get_options_accuracy_summary() -> Dict[str, Any]:
         GROUP BY market_type
         ORDER BY total DESC
     """).fetchall():
-        by_market_type[r["market_type"]] = {
-            "total": r["total"], "correct": r["correct"], "accuracy": r["accuracy"]
-        }
+        by_market_type[r["market_type"]] = {"total": r["total"], "correct": r["correct"], "accuracy": r["accuracy"]}
 
     # Recent resolved
     recent = []
@@ -438,18 +539,20 @@ def get_options_accuracy_summary() -> Dict[str, Any]:
         ORDER BY resolved_at DESC
         LIMIT 20
     """).fetchall():
-        recent.append({
-            "ticker": r["ticker"],
-            "expiry": r["expiry"],
-            "strike": r["strike"],
-            "market_type": r["market_type"],
-            "implied_prob": round(r["implied_prob"] * 100, 1) if r["implied_prob"] else None,
-            "poly_price": round(r["poly_price"] * 100, 1) if r["poly_price"] else None,
-            "spread_pp": round(r["spread_pp"], 2) if r["spread_pp"] else None,
-            "actual_outcome": r["actual_outcome"],
-            "predicted_side": r["predicted_side"],
-            "correct": bool(r["predicted_correct"]),
-        })
+        recent.append(
+            {
+                "ticker": r["ticker"],
+                "expiry": r["expiry"],
+                "strike": r["strike"],
+                "market_type": r["market_type"],
+                "implied_prob": round(r["implied_prob"] * 100, 1) if r["implied_prob"] else None,
+                "poly_price": round(r["poly_price"] * 100, 1) if r["poly_price"] else None,
+                "spread_pp": round(r["spread_pp"], 2) if r["spread_pp"] else None,
+                "actual_outcome": r["actual_outcome"],
+                "predicted_side": r["predicted_side"],
+                "correct": bool(r["predicted_correct"]),
+            }
+        )
 
     conn.close()
     return {
@@ -464,9 +567,9 @@ def get_options_accuracy_summary() -> Dict[str, Any]:
 
 # ─── CLI ─────────────────────────────────────────────────────────────
 
-
 if __name__ == "__main__":
     import logging as builtin_logging
+
     builtin_logging.basicConfig(level=builtin_logging.INFO, format="%(message)s")
     result = scan_resolved_options_markets()
     print(f"Resolved: {result['resolved']}")

@@ -33,7 +33,13 @@ from loguru import logger
 
 MIN_EDGE_PCT = 0.03   # 3pp minimum (r/algobetting community consensus + our calibration)
 MAX_EDGE_PCT = 0.15   # 15% cap (P1 recalibration — large claimed edges are usually wrong)
-ALERT_EDGE   = 0.05   # 5pp+ → worth acting on
+ALERT_EDGE   = 0.08   # 8pp+ → worth acting on (raised from 5pp — 5-8pp range was noise)
+
+# Alert noise gates
+ALERT_MIN_MINS = 0     # don't alert after game starts
+ALERT_MAX_MINS = 720   # 12h max — edges further out are noise (markets haven't tightened)
+ALERT_PER_SCAN = 5     # cap: only the strongest edges per scan
+ALERT_THREE_WAY_MIN = 8.0  # three-way: only alert when gap ≥8pp
 
 
 def _fmt_edge(e) -> str:
@@ -220,59 +226,294 @@ def _worst_sell(vegas: float | None, pm: float | None, kalshi: float | None) -> 
     return max(prices, key=lambda k: prices[k])
 
 
+DEDUP_FILE    = os.path.expanduser("~/.openclaw/wc_alert_dedup.json")
+DEDUP_TTL_H   = 6      # expire state after 6h (well past game end)
+REFIRE_PP     = 2.0    # re-alert (WIDENING) if edge grows ≥2pp
+LAST_CALL_MIN = 45     # LAST CALL fires when ≤45min to game start
+
+
+def _load_dedup() -> dict:
+    if os.path.exists(DEDUP_FILE):
+        try:
+            import json
+            with open(DEDUP_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_dedup(state: dict) -> None:
+    import json
+    os.makedirs(os.path.dirname(DEDUP_FILE), exist_ok=True)
+    with open(DEDUP_FILE, "w") as f:
+        json.dump(state, f)
+
+
+def _mins_to_game(commence_time_str: str) -> float | None:
+    """Parse ISO commence_time string → minutes until game. Negative = already started."""
+    if not commence_time_str:
+        return None
+    try:
+        ct_str = str(commence_time_str)[:19].replace(" ", "T")
+        if not ct_str.endswith("Z"):
+            ct_str += "Z"
+        ct = datetime.strptime(ct_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        delta = (ct - datetime.now(timezone.utc)).total_seconds() / 60
+        return delta
+    except Exception:
+        return None
+
+
+def _classify_alert(key: str, edge_pp: float, mins_left: float | None, state: dict, now: float) -> str | None:
+    """
+    Returns alert type string or None (suppress).
+
+    Types: "NEW", "WIDENING", "LAST_CALL"
+    EDGE_GONE removed — was the #1 noise source (fires every 30min for half the games).
+    If we didn't act on an edge, who cares it's gone?
+    """
+    entry = state.get(key)
+    active = entry and (now - entry["alerted_at"] <= DEDUP_TTL_H * 3600)
+
+    # Game-time gate: only alert for games within the window
+    if mins_left is not None:
+        if mins_left < ALERT_MIN_MINS or mins_left > ALERT_MAX_MINS:
+            return None
+
+    # Only fire positive alerts for edges ≥ ALERT_EDGE
+    if edge_pp < ALERT_EDGE * 100:
+        return None
+
+    # LAST CALL — game starting soon, haven't sent last call yet
+    if mins_left is not None and 0 < mins_left <= LAST_CALL_MIN:
+        if not (active and entry.get("last_call_sent")):
+            return "LAST_CALL"
+        return None  # already sent last call
+
+    # WIDENING — edge grew ≥ REFIRE_PP since last alert
+    if active and (edge_pp - entry["edge_pct"]) >= REFIRE_PP:
+        return "WIDENING"
+
+    # NEW — first time seeing this edge
+    if not active:
+        return "NEW"
+
+    return None  # suppress — same edge, no meaningful change
+
+
+def _format_alert(alert_type: str, label: str, title: str, edge_pp: float,
+                  direction: str, book_prob: float, poly_price: float,
+                  mins_left: float | None, prev_pp: float | None,
+                  extra: str = "") -> list[str]:
+    """Format a single typed alert block."""
+    icons = {"NEW": "🟢", "WIDENING": "📈", "LAST_CALL": "⏰"}
+    headers = {
+        "NEW":       "NEW EDGE",
+        "WIDENING":  "WIDENING",
+        "LAST_CALL": "LAST CALL",
+    }
+    icon   = icons[alert_type]
+    header = headers[alert_type]
+    arrow  = "↑" if direction == "BUY" else "↓"
+
+    lines = [f"{icon} <b>{header}</b>"]
+    if alert_type == "WIDENING" and prev_pp is not None:
+        lines[0] += f"  (+{edge_pp - prev_pp:.1f}pp,  was {prev_pp:.1f}pp)"
+
+    lines.append(
+        f"{arrow} <b>{label}</b>  Vegas {book_prob:.1%}  Poly {poly_price:.1%}  "
+        f"edge <b>{edge_pp/100:+.1%}</b>  [{direction}]"
+    )
+    if title:
+        lines.append(f"   {title[:55]}")
+    if mins_left is not None and mins_left > 0:
+        h, m = divmod(int(mins_left), 60)
+        time_str = f"{h}h {m}m" if h else f"{m}m"
+        if alert_type == "LAST_CALL":
+            lines.append(f"   ⚠️ Game starts in {time_str} — act now or pass")
+        else:
+            lines.append(f"   Game in {time_str}")
+    if extra:
+        lines.append(f"   {extra}")
+    return lines
+
+
+def _log_alert_row(sport: str, alert_type: str, participant: str, title: str,
+                   direction: str, edge_pp: float, book_prob: float | None,
+                   poly_price: float | None, kalshi_mid: float | None,
+                   mins_left: float | None, dedup_key: str) -> None:
+    """Append-only log of every FIRED edge alert (audit 2026-07-07: alerts were
+    Telegram-only — delivered then discarded, so direction/outcome/CLV could
+    never be scored). Probabilities stored 0-1. Never raises."""
+    try:
+        import sqlite3
+        from pathlib import Path
+        db = Path(__file__).resolve().parent.parent / "storage" / "shadow_trades.db"
+        conn = sqlite3.connect(str(db), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("""CREATE TABLE IF NOT EXISTS edge_alert_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fired_at     TEXT NOT NULL,
+            sport        TEXT,
+            alert_type   TEXT,      -- NEW / WIDENING / LAST_CALL
+            participant  TEXT,
+            event_title  TEXT,
+            direction    TEXT,      -- BUY / SELL
+            edge_pp      REAL,
+            book_prob    REAL,      -- 0-1 (Vegas devig)
+            poly_price   REAL,      -- 0-1
+            kalshi_mid   REAL,      -- 0-1, three-way only
+            mins_to_game REAL,
+            dedup_key    TEXT
+        )""")
+        conn.execute(
+            "INSERT INTO edge_alert_log (fired_at, sport, alert_type, participant,"
+            " event_title, direction, edge_pp, book_prob, poly_price, kalshi_mid,"
+            " mins_to_game, dedup_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (datetime.now(timezone.utc).isoformat(), sport, alert_type,
+             (participant or "")[:80], (title or "")[:180], direction,
+             round(edge_pp, 2),
+             round(book_prob, 4) if book_prob is not None else None,
+             round(poly_price, 4) if poly_price is not None else None,
+             round(kalshi_mid, 4) if kalshi_mid is not None else None,
+             round(mins_left, 1) if mins_left is not None else None,
+             dedup_key),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as ex:
+        logger.debug(f"edge_alert_log write failed: {ex}")
+
+
 def _send_edge_alerts(results: dict, three_way: list) -> None:
-    """Send Telegram for any edge >= ALERT_EDGE found this scan."""
-    import sys
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    """Classify and send typed edge alerts. Deduped per alert type."""
     try:
         from scripts.alert_formatter import send_telegram
     except Exception:
         return
 
-    lines = ["⚡ <b>EDGE ALERT</b> — Cross-platform scan\n"]
-    count = 0
+    now   = datetime.now(timezone.utc).timestamp()
+    state = _load_dedup()
 
+    all_blocks: list[list[str]] = []
+    state_updates: dict = {}
+
+    # ── Two-platform edges (WC + MLB) ────────────────────────────────────
     for sport_name, edges in results.items():
-        hot = [e for e in edges if abs(e.edge_pct) >= ALERT_EDGE]
-        if not hot:
-            continue
-        for e in sorted(hot, key=lambda x: abs(x.edge_pct), reverse=True):
+        seen_keys: set[str] = set()
+        scan_count = 0
+
+        for e in sorted(edges, key=lambda x: abs(x.edge_pct), reverse=True):
+            if scan_count >= ALERT_PER_SCAN:
+                break
             participant = getattr(e, "participant", None) or getattr(e, "bet_team", "?")
             book_prob   = getattr(e, "book_prob", None) or getattr(e, "true_prob", 0)
             poly_price  = getattr(e, "poly_price", None) or getattr(e, "polymarket_price", 0)
             title       = getattr(e, "event_title", None) or getattr(e, "game_title", "")
-            ct          = getattr(e, "commence_time", None) or getattr(e, "game_date", "")
+            ct_raw      = getattr(e, "commence_time", None) or getattr(e, "game_date", "")
             dir_str     = "BUY" if e.direction == "BUY" else "SELL"
-            lines.append(
-                f"{'↑' if e.direction == 'BUY' else '↓'} <b>{participant}</b>  "
-                f"Vegas {book_prob:.1%}  Poly {poly_price:.1%}  "
-                f"edge <b>{e.edge_pct:+.1%}</b>  [{dir_str}]"
-            )
-            if title:
-                lines.append(f"   {title[:55]}")
-            if ct:
-                lines.append(f"   Kickoff: {ct[:16]}")
-            lines.append("")
-            count += 1
+            edge_pp     = abs(e.edge_pct) * 100
+            mins_left   = _mins_to_game(str(ct_raw)) if ct_raw else None
+            key         = f"{sport_name}:{participant}:{dir_str}"
+            seen_keys.add(key)
+
+            alert_type = _classify_alert(key, edge_pp, mins_left, state, now)
+            if not alert_type:
+                continue
+
+            prev_pp = state[key]["edge_pct"] if key in state else None
+            block = _format_alert(alert_type, participant, title, edge_pp,
+                                   dir_str, book_prob, poly_price, mins_left, prev_pp)
+            all_blocks.append(block)
+            _log_alert_row(sport_name, alert_type, participant, title, dir_str,
+                           edge_pp, book_prob or None, poly_price or None, None,
+                           mins_left, key)
+            scan_count += 1
+
+            entry = state.get(key, {"edge_pct": edge_pp, "alerted_at": now,
+                                     "last_call_sent": False})
+            entry = dict(entry)
+            entry["edge_pct"]  = edge_pp
+            entry["alerted_at"] = now
+            if alert_type == "LAST_CALL":
+                entry["last_call_sent"] = True
+            state_updates[key] = entry
+
+    # ── Three-way (Vegas vs PM vs Kalshi) ────────────────────────────────
+    # One game, one alert: if the per-sport engine alerted a team this scan or
+    # within the dedup window, its threeway row is the same edge seen through a
+    # second engine — skip it (was double-firing every MLB game, 2026-07-06).
+    sport_alerted_teams = {
+        k.split(":")[1]
+        for k in (*state_updates, *state)
+        if not k.startswith("threeway:") and k.count(":") == 2
+        and (k in state_updates
+             or now - state[k]["alerted_at"] <= DEDUP_TTL_H * 3600)
+    }
+
+    seen_tw_keys: set[str] = set()
+    tw_count = 0
 
     for r in three_way:
-        if r["max_gap_pp"] >= ALERT_EDGE * 100:
-            v  = f"Vegas {r['vegas_fair']:.1f}%" if r["vegas_fair"] else ""
-            pm = f"PM {r['pm_price']:.1f}%"    if r["pm_price"]   else ""
-            kl = f"Kalshi {r['kalshi_mid']:.1f}%" if r["kalshi_mid"] else ""
-            lines.append(
-                f"↔ <b>{r['team']}</b>  {v}  {pm}  {kl}  "
-                f"gap <b>{r['max_gap_pp']:.1f}pp</b>  "
-                f"[Buy {r['best_buy']} / Sell {r['worst_sell']}]"
-            )
-            lines.append(f"   {r['game'][:55]}")
-            lines.append("")
-            count += 1
+        if tw_count >= ALERT_PER_SCAN:
+            break
+        edge_pp   = r["max_gap_pp"]
+        if edge_pp < ALERT_THREE_WAY_MIN:
+            continue
+        if r["team"] in sport_alerted_teams:
+            continue
+        key       = f"threeway:{r['team']}:{r['best_buy']}"
+        seen_tw_keys.add(key)
+        mins_left = _mins_to_game(r.get("commence", ""))
 
-    if count == 0:
+        alert_type = _classify_alert(key, edge_pp, mins_left, state, now)
+        if not alert_type:
+            continue
+
+        prev_pp = state[key]["edge_pct"] if key in state else None
+        v  = f"Vegas {r['vegas_fair']:.1f}%" if r.get("vegas_fair") else ""
+        pm = f"PM {r['pm_price']:.1f}%"      if r.get("pm_price")   else ""
+        kl = f"Kalshi {r['kalshi_mid']:.1f}%" if r.get("kalshi_mid") else ""
+        extra = f"{v}  {pm}  {kl}  → Buy {r['best_buy']} / Sell {r['worst_sell']}"
+
+        block = _format_alert(alert_type, r["team"], r.get("game", ""), edge_pp,
+                               r["best_buy"], r.get("vegas_fair", 0) / 100,
+                               r.get("pm_price", 0) / 100, mins_left, prev_pp, extra)
+        all_blocks.append(block)
+        _log_alert_row("threeway", alert_type, r["team"], r.get("game", ""),
+                       r["best_buy"], edge_pp,
+                       (r["vegas_fair"] / 100) if r.get("vegas_fair") else None,
+                       (r["pm_price"] / 100) if r.get("pm_price") else None,
+                       (r["kalshi_mid"] / 100) if r.get("kalshi_mid") else None,
+                       mins_left, key)
+        tw_count += 1
+
+        entry = state.get(key, {"edge_pct": edge_pp, "alerted_at": now,
+                                  "last_call_sent": False})
+        entry = dict(entry)
+        entry["edge_pct"]   = edge_pp
+        entry["alerted_at"] = now
+        if alert_type == "LAST_CALL":
+            entry["last_call_sent"] = True
+        state_updates[key] = entry
+
+    if not all_blocks:
         return
 
-    send_telegram("\n".join(lines).strip())
+    # Assemble message — one block per alert, separated by blank line
+    msg_lines: list[str] = []
+    for block in all_blocks:
+        msg_lines.extend(block)
+        msg_lines.append("")
+
+    # Persist state
+    state = {k: v for k, v in state.items() if now - v["alerted_at"] <= DEDUP_TTL_H * 3600}
+    state.update(state_updates)
+    _save_dedup(state)
+
+    send_telegram("\n".join(msg_lines).strip())
 
 
 async def main(sport: str = "all", dry: bool = False, alert: bool = False):

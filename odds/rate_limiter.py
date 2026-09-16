@@ -53,6 +53,194 @@ LOW_CREDIT_WATERMARK = 1_000_000
 # rate_limiter's own JSON counter is only an estimate; this file is the truth.
 REAL_CREDIT_FILE = CACHE_DIR / "odds_api_credit.json"
 
+# ---------------------------------------------------------------------------
+# Auth circuit breaker (added 2026-08-29)
+# ---------------------------------------------------------------------------
+# WHY: on 2026-08-29 the prod key (51ef…) started returning
+#   401 {"error_code": "DEACTIVATED_KEY"}  ("cancelation or a failed payment")
+# and every caller just retried. polyclawd-scheduler looped MLB/NFL/MLS/MMA
+# against a dead key for ~a day with no backoff and no alert. Nothing was spent
+# (a 401 costs 0 credits) but nothing was noticed either — and the SAME loop
+# against a 429 or a key with a live-but-drained balance WOULD have burned real
+# credits silently.
+#
+# This breaker lives in rate_limiter because can_make_call() is the one gate
+# every odds fetch path already funnels through (odds.the_odds_api,
+# odds.monitor_gate, the live monitors), so tripping here stops all of them at
+# once instead of patching N call sites.
+#
+# Behaviour: a 401/403 trips it immediately (auth failures are never transient —
+# retrying cannot fix a cancelled subscription). While tripped, can_make_call()
+# returns False for EVERY priority including "critical". It self-heals half-open:
+# one probe call is allowed through every BREAKER_PROBE_INTERVAL_S, and a single
+# success clears the breaker and re-opens the fleet.
+BREAKER_FILE = CACHE_DIR / "odds_api_key_breaker.json"
+# How often a lone probe call may test a tripped key. 15min => 96 probes/day
+# instead of the ~hundreds-per-minute retry storm this replaces.
+BREAKER_PROBE_INTERVAL_S = 900
+# HTTP statuses that mean "the key itself is bad" — retrying is pointless.
+BREAKER_AUTH_STATUSES = (401, 403)
+
+
+def _load_breaker() -> dict:
+    """Read breaker state. Returns an untripped default when absent/corrupt —
+    a missing state file must never fail closed and mute the whole fleet."""
+    try:
+        if BREAKER_FILE.exists():
+            with open(BREAKER_FILE) as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        pass
+    return {"tripped": False}
+
+
+def _save_breaker(state: dict) -> None:
+    try:
+        BREAKER_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(BREAKER_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:  # pragma: no cover — never let breaker IO break a fetch
+        logger.debug(f"_save_breaker failed: {e}")
+
+
+def read_breaker() -> dict:
+    """Public read of breaker state (for /health, dashboards, and the daily
+    credit check)."""
+    return _load_breaker()
+
+
+def _breaker_alert(text: str) -> None:
+    """Best-effort Telegram notify. Imported lazily so rate_limiter keeps no
+    hard dependency on the alerting stack (it is imported by standalone
+    scripts that do not ship scripts/openclaw_alerts.py)."""
+    try:
+        from scripts.openclaw_alerts import alert_openclaw
+
+        alert_openclaw(text, channel="telegram")
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"breaker alert not delivered ({e}): {text}")
+
+
+def note_auth_failure(status: int, body: str = "", key_prefix: str = "") -> bool:
+    """Record an auth failure from an odds-API response. Trips the breaker on
+    401/403. Returns True if this call is what newly tripped it (so the caller
+    can log a one-off), False otherwise.
+
+    Non-auth statuses are ignored here — a 500 or 429 is transient and belongs to
+    the retry/backoff layer, not to a breaker that blocks 'critical' traffic.
+    """
+    if status not in BREAKER_AUTH_STATUSES:
+        return False
+
+    error_code = ""
+    try:
+        error_code = str(json.loads(body).get("error_code", ""))
+    except Exception:
+        error_code = ""
+
+    state = _load_breaker()
+    already = bool(state.get("tripped"))
+    now = datetime.now().isoformat()
+
+    state["tripped"] = True
+    state["status"] = int(status)
+    state["error_code"] = error_code
+    state["detail"] = (body or "")[:300]
+    state["fail_count"] = int(state.get("fail_count", 0)) + 1
+    state["last_failure"] = now
+    if not already:
+        state["since"] = now
+        state["last_probe"] = now  # first probe is one full interval away
+    _save_breaker(state)
+
+    if not already:
+        logger.error(
+            f"ODDS API AUTH BREAKER TRIPPED — HTTP {status} {error_code or ''} — "
+            f"all odds fetches halted until a probe succeeds"
+        )
+        reason = {
+            "DEACTIVATED_KEY": "key deactivated — cancellation or failed payment",
+            "MISSING_KEY": "no API key sent — check the service EnvironmentFile",
+            "INVALID_KEY": "key rejected as invalid",
+        }.get(error_code, f"HTTP {status}")
+        _breaker_alert(
+            f"\U0001f6d1 Odds API auth breaker TRIPPED\n"
+            f"key {key_prefix or '?'}… · HTTP {status} {error_code}\n"
+            f"{reason}\n\n"
+            f"All odds fetches are now halted (no retry storm). One probe every "
+            f"{BREAKER_PROBE_INTERVAL_S // 60}min will auto-clear it once the key works.\n"
+            f"Fix: check billing at the-odds-api.com, then the fleet self-heals."
+        )
+    return not already
+
+
+def note_auth_success() -> None:
+    """Record a successful authenticated call. Clears a tripped breaker and
+    announces recovery once."""
+    state = _load_breaker()
+    if not state.get("tripped"):
+        return
+    downtime = ""
+    try:
+        since = datetime.fromisoformat(state["since"])
+        mins = int((datetime.now() - since).total_seconds() // 60)
+        downtime = f" after {mins // 60}h {mins % 60}m" if mins >= 60 else f" after {mins}m"
+    except Exception:
+        pass
+    _save_breaker({"tripped": False, "recovered_at": datetime.now().isoformat(),
+                   "previous_fail_count": int(state.get("fail_count", 0))})
+    logger.info(f"Odds API auth breaker CLEARED{downtime}")
+    _breaker_alert(
+        f"✅ Odds API auth breaker CLEARED{downtime}\n"
+        f"Key is answering again — odds fetches resumed."
+    )
+
+
+def clear_key_breaker(reason: str = "manual") -> dict:
+    """Force-reset the breaker (operator escape hatch, e.g. after rotating the
+    key). Returns the state that was cleared."""
+    prior = _load_breaker()
+    _save_breaker({"tripped": False, "recovered_at": datetime.now().isoformat(),
+                   "cleared_by": reason})
+    logger.info(f"Odds API auth breaker cleared ({reason})")
+    return prior
+
+
+def breaker_blocks() -> Tuple[bool, str]:
+    """Gate helper: should this call be blocked by the auth breaker?
+
+    Half-open: while tripped, exactly one probe is released per
+    BREAKER_PROBE_INTERVAL_S. Releasing the probe stamps `last_probe` before
+    returning, so concurrent workers do not all escape at once. (Two workers
+    racing the read-modify-write can leak an extra probe or two per interval —
+    acceptable: the failure mode this replaces was hundreds of calls per minute.)
+
+    Returns (blocked, reason).
+    """
+    state = _load_breaker()
+    if not state.get("tripped"):
+        return False, "OK"
+
+    now = datetime.now()
+    try:
+        last_probe = datetime.fromisoformat(state.get("last_probe", state.get("since", "")))
+    except Exception:
+        last_probe = None
+
+    if last_probe is None or (now - last_probe).total_seconds() >= BREAKER_PROBE_INTERVAL_S:
+        state["last_probe"] = now.isoformat()
+        _save_breaker(state)
+        return False, "auth breaker half-open: probe released"
+
+    waited = int((now - last_probe).total_seconds())
+    return True, (
+        f"Odds API auth breaker tripped (HTTP {state.get('status')} "
+        f"{state.get('error_code', '')}, {state.get('fail_count', 0)} failures); "
+        f"next probe in {max(0, BREAKER_PROBE_INTERVAL_S - waited)}s"
+    )
+
 
 @dataclass
 class UsageStats:
@@ -170,6 +358,12 @@ def can_make_call(priority: str = "normal") -> Tuple[bool, str]:
 
     Returns: (can_call, reason)
     """
+    # Auth breaker first: a dead/deactivated key cannot be fixed by any priority,
+    # so this blocks "critical" too. Half-open probes are released from here.
+    blocked, why = breaker_blocks()
+    if blocked:
+        return False, why
+
     stats = _load_usage()
     today = datetime.now().strftime("%Y-%m-%d")
     today_calls = stats.daily_calls.get(today, 0)

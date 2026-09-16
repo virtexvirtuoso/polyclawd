@@ -2,6 +2,7 @@
 Manifold Markets Integration
 Free API, play money but good signal quality
 """
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 
 import json
 import urllib.request
@@ -126,6 +127,7 @@ def find_polymarket_overlaps(poly_events: List[Dict], min_liquidity: float = 100
         
         for match in matches:
             poly_price = None
+            poly_cid = None
             for mkt in poly.get("markets", []):
                 # Handle outcomePrices which might be a JSON string
                 outcome_prices = mkt.get("outcomePrices", {})
@@ -136,6 +138,7 @@ def find_polymarket_overlaps(poly_events: List[Dict], min_liquidity: float = 100
                     except:
                         outcome_prices = {}
                 poly_price = mkt.get("bestAsk") or (outcome_prices.get("Yes") if isinstance(outcome_prices, dict) else None)
+                poly_cid = mkt.get("conditionId")
                 break
             
             if poly_price:
@@ -144,6 +147,7 @@ def find_polymarket_overlaps(poly_events: List[Dict], min_liquidity: float = 100
                 edge = (manifold_prob - poly_prob) * 100
                 
                 overlaps.append({
+                    "polymarket_id": poly_cid,
                     "polymarket_title": poly_title,
                     "polymarket_price": round(poly_prob * 100, 1),
                     "manifold_question": match.get("title", ""),
@@ -166,7 +170,7 @@ async def get_manifold_edges(min_edge: float = 5.0) -> Dict:
     # Fetch Polymarket events
     try:
         req = urllib.request.Request(
-            "https://gamma-api.polymarket.com/events?closed=false&limit=200",
+            gamma_url("/events?closed=false&limit=200"),
             headers={"User-Agent": "Polyclawd/1.0"}
         )
         with urllib.request.urlopen(req, timeout=20) as resp:

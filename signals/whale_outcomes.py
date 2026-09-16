@@ -34,6 +34,8 @@ from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from db import connect as db_connect  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent
@@ -45,6 +47,14 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 
 EPS = 0.005            # |move| below this = no-move, correctness stays NULL
 H1, H6 = 3600, 6 * 3600
+# A horizon price is only meaningful if it was SAMPLED near that horizon.
+# Before 2026-08-25 both price_1h and price_6h were written from the same
+# `mid` at whatever moment the backfill happened to reach the row — commonly
+# 960-1200 HOURS (40-50 days) after the alert. Those columns were therefore
+# not 1h/6h prices at all, and price_6h duplicated price_1h in 380,540 rows.
+# Past the tolerance the price is unknowable retroactively: record MISSED
+# rather than a wrong number.
+H1_TOL, H6_TOL = 3 * 3600, 12 * 3600
 BACKFILL_CAP = 500     # price lookups per run (batched, so cheap)
 GIVE_UP_AFTER = 35 * 24 * 3600   # stop chasing resolution after 35 days
 
@@ -52,7 +62,7 @@ GIVE_UP_AFTER = 35 * 24 * 3600   # stop chasing resolution after 35 days
 def get_meta_db(path: Optional[Path] = None) -> sqlite3.Connection:
     db_path = Path(path) if path else META_DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=30)
+    conn = db_connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
@@ -79,6 +89,8 @@ def get_meta_db(path: Optional[Path] = None) -> sqlite3.Connection:
         ("wallet_win_rate", "REAL"),
         ("wallet_n",      "INTEGER"),  # closed_positions count at alert time
         ("sub_title",     "TEXT"),
+        ("price_1h_missed", "INTEGER"),  # 1 = horizon passed unsampled (2026-08-25)
+        ("price_6h_missed", "INTEGER"),
     ]:
         try:
             conn.execute(f"ALTER TABLE whale_outcomes ADD COLUMN {col} {definition}")
@@ -152,7 +164,14 @@ def kalshi_lookup(tickers: list) -> dict:
             try:
                 bid = float(m.get("yes_bid_dollars") or 0)
                 ask = float(m.get("yes_ask_dollars") or 0)
-                mid = (bid + ask) / 2 if (bid or ask) else None
+                # An empty book spanning the full range (bid<=0, ask>=1) yields a
+                # mid of exactly 0.500 — a placeholder, not a price. It appeared in
+                # 340,353 rows and manufactured a phantom edge in the 0.35-0.50
+                # band. No two-sided quote => no price.
+                if bid <= 0 and ask >= 1:
+                    mid = None
+                else:
+                    mid = (bid + ask) / 2 if (bid or ask) else None
             except (TypeError, ValueError):
                 mid = None
             out[m["ticker"]] = {"mid": mid, "result": m.get("result") or ""}
@@ -165,6 +184,14 @@ def pm_lookup(slugs: list) -> dict:
     out = {}
     for slug in slugs:
         d = _fetch_json(f"{GAMMA_API}/markets?slug={slug}&limit=1")
+        if not d:
+            # Gamma's /markets?slug= EXCLUDES closed markets by default. This
+            # lookup exists to find RESOLUTIONS, i.e. precisely the markets it
+            # hides — which is why Polymarket resolution ran at 0.0% (0 of
+            # 615,394 rows labelled) while Kalshi ran at 26.2%. Retry
+            # explicitly for the closed row. (Diagnosed 2026-08-25:
+            # ?slug=X -> 0 rows; ?slug=X&closed=true -> 1 row, prices ["0","1"].)
+            d = _fetch_json(f"{GAMMA_API}/markets?slug={slug}&limit=1&closed=true")
         if not d:
             continue
         m = d[0]
@@ -187,7 +214,7 @@ def ingest_new_alerts(meta: sqlite3.Connection,
                       alerts_db_path: Optional[Path] = None) -> int:
     """Copy alerts not yet tracked into whale_outcomes with their at-alert
     price and (Kalshi) direction. PM direction resolves on first backfill."""
-    src = sqlite3.connect(f"file:{alerts_db_path or ALERTS_DB_PATH}?mode=ro", uri=True)
+    src = db_connect(f"file:{alerts_db_path or ALERTS_DB_PATH}?mode=ro", uri=True)
     src.row_factory = sqlite3.Row
     last = meta.execute("SELECT COALESCE(MAX(alert_id),0) FROM whale_outcomes").fetchone()[0]
     rows = src.execute("SELECT * FROM whale_alerts WHERE id > ? ORDER BY id LIMIT 2000",
@@ -202,7 +229,15 @@ def ingest_new_alerts(meta: sqlite3.Connection,
             p = {}
         if r["platform"] == "kalshi":
             bid, ask = p.get("best_bid"), p.get("best_ask")
-            p0 = (bid + ask) / 2 if (bid is not None and ask is not None and (bid or ask)) else None
+            # An empty book spanning the full range (bid<=0, ask>=1) midpoints to
+            # exactly 0.500 — a placeholder, not a price. 86,398 rows sit in the
+            # [0.485,0.505] band with null spread/volume, and they manufactured a
+            # phantom edge in the 0.35-0.50 price band. Fall through to the last
+            # traded price instead of inventing a midpoint.
+            if bid is not None and ask is not None and bid <= 0 and ask >= 1:
+                p0 = None
+            else:
+                p0 = (bid + ask) / 2 if (bid is not None and ask is not None and (bid or ask)) else None
             if p0 is None:
                 p0 = p.get("last_yes_price")
             direction = direction_from_alert("kalshi", r["reasons"] or "", p)
@@ -236,16 +271,32 @@ def ingest_new_alerts(meta: sqlite3.Connection,
     return n
 
 
-def backfill(meta: sqlite3.Connection) -> dict:
-    """Fill price_1h / price_6h / result for rows that are due."""
+def backfill(meta: sqlite3.Connection, only_directional: bool = False,
+             platform: Optional[str] = None) -> dict:
+    """Fill price_1h / price_6h / result for rows that are due.
+
+    only_directional restricts the batch to alert classes that carry a side, so
+    a lookup budget is not spent on rows that can never be graded: 87% of the
+    Polymarket backlog is liq$_spike_*, and a liquidity spike has no direction,
+    so direction_from_alert returns None and correct_res stays NULL forever.
+    Off by default -- the scheduler must keep retiring every row, gradable or
+    not, or the ungradable 87% never drains.
+    """
     now = time.time()
+    directional = (
+        " AND (reasons LIKE '%taker_%' OR reasons LIKE '%smart_wallet%'"
+        " OR reasons LIKE '%level_jump%')" if only_directional else "")
+    # Batch is ORDER BY ts across BOTH platforms, so the platform with the older
+    # tail starves the other. Scope it when one platform must actually finish.
+    plat_sql, plat_args = (" AND platform = ?", [platform]) if platform else ("", [])
     due = meta.execute(
         "SELECT * FROM whale_outcomes WHERE done=0 AND ("
-        " (price_1h IS NULL AND ts <= ?) OR"
-        " (price_6h IS NULL AND ts <= ?) OR"
+        " (price_1h IS NULL AND COALESCE(price_1h_missed,0)=0 AND ts <= ?) OR"
+        " (price_6h IS NULL AND COALESCE(price_6h_missed,0)=0 AND ts <= ?) OR"
         " (result IS NULL OR result = ''))"
+        + directional + plat_sql +
         " AND ts <= ? ORDER BY ts LIMIT ?",
-        (now - H1, now - H6, now - H1, BACKFILL_CAP)).fetchall()
+        (now - H1, now - H6, *plat_args, now - H1, BACKFILL_CAP)).fetchall()
     if not due:
         return {"due": 0}
 
@@ -255,6 +306,8 @@ def backfill(meta: sqlite3.Connection) -> dict:
     pm = pm_lookup(p_slugs[:150]) if p_slugs else {}   # gamma is 1 call/slug; cap
 
     filled = resolved = 0
+    _COMMIT_EVERY = 50  # commit in chunks so the write txn never spans network I/O
+
     for r in due:
         info = (k if r["platform"] == "kalshi" else pm).get(r["market"])
         if not info:
@@ -266,7 +319,7 @@ def backfill(meta: sqlite3.Connection) -> dict:
         direction = r["direction"]
         if r["platform"] == "polymarket" and direction is None and info.get("outcomes"):
             try:
-                payload = json.loads(sqlite3.connect(
+                payload = json.loads(db_connect(
                     f"file:{ALERTS_DB_PATH}?mode=ro", uri=True).execute(
                     "SELECT payload FROM whale_alerts WHERE id=?",
                     (r["alert_id"],)).fetchone()[0] or "{}")
@@ -277,12 +330,22 @@ def backfill(meta: sqlite3.Connection) -> dict:
 
         sets, vals = ["updated=?", "direction=?"], [now, direction]
         mid = info.get("mid")
-        if r["price_1h"] is None and now - r["ts"] >= H1 and mid is not None:
-            sets += ["price_1h=?", "correct_1h=?"]
-            vals += [mid, _correct(direction, r["price_at_alert"], mid)]
-        if r["price_6h"] is None and now - r["ts"] >= H6 and mid is not None:
-            sets += ["price_6h=?", "correct_6h=?"]
-            vals += [mid, _correct(direction, r["price_at_alert"], mid)]
+        age = now - r["ts"]
+        # price_1h: only if sampled inside [1h, 1h+tol]. Past that the t+1h price
+        # cannot be recovered — flag it missed so the row stops being retried and
+        # no study mistakes a 40-day-old quote for a 1-hour one.
+        if r["price_1h"] is None and not r["price_1h_missed"]:
+            if H1 <= age <= H1 + H1_TOL and mid is not None:
+                sets += ["price_1h=?", "correct_1h=?"]
+                vals += [mid, _correct(direction, r["price_at_alert"], mid)]
+            elif age > H1 + H1_TOL:
+                sets += ["price_1h_missed=1"]
+        if r["price_6h"] is None and not r["price_6h_missed"]:
+            if H6 <= age <= H6 + H6_TOL and mid is not None:
+                sets += ["price_6h=?", "correct_6h=?"]
+                vals += [mid, _correct(direction, r["price_at_alert"], mid)]
+            elif age > H6 + H6_TOL:
+                sets += ["price_6h_missed=1"]
 
         result = info.get("result") or ""
         if result:
@@ -302,6 +365,8 @@ def backfill(meta: sqlite3.Connection) -> dict:
         vals.append(r["alert_id"])
         meta.execute(f"UPDATE whale_outcomes SET {', '.join(sets)} WHERE alert_id=?", vals)
         filled += 1
+        if filled % _COMMIT_EVERY == 0:
+            meta.commit()  # release write lock periodically (see _COMMIT_EVERY)
     meta.commit()
     return {"due": len(due), "filled": filled, "resolved": resolved}
 
@@ -327,12 +392,15 @@ def backfill_wallet_n(conn: sqlite3.Connection) -> int:
     return updated
 
 
-def run_pass(meta: Optional[sqlite3.Connection] = None) -> dict:
+def run_pass(meta: Optional[sqlite3.Connection] = None,
+             only_directional: bool = False,
+             platform: Optional[str] = None) -> dict:
     """Scheduler entry point: ingest new alerts, backfill due ones."""
     conn = meta or get_meta_db()
     try:
         n = ingest_new_alerts(conn)
-        stats = backfill(conn)
+        stats = backfill(conn, only_directional=only_directional,
+                         platform=platform)
         stats["ingested"] = n
         return stats
     finally:

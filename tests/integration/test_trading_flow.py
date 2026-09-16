@@ -1,5 +1,6 @@
 # Integration tests for trading flow endpoints
 import pytest
+from fastapi.testclient import TestClient
 
 
 @pytest.fixture

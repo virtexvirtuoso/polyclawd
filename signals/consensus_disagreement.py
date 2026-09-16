@@ -17,25 +17,21 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 from loguru import logger
+from config.polymarket_urls import GAMMA_API as POLYMARKET_GAMMA  # polyproxy: central URL config
 
 # ─── Credit Budget Manager ──────────────────────────────────────────────
 CREDIT_FILE = Path(__file__).parent.parent / "storage" / "ce5_credit_usage.json"
 MAX_DAILY_CREDITS = 3000
 
 # ─── Fee map (CE-1 pattern) ────────────────────────────────────────────
-# Polymarket: 2% winner fee on settlement
+# Polymarket fee: per-category taker at entry (0% on winnings) -- see execution.fee_model
 # Kalshi: quadratic fee max ~1.75¢ at P=0.5
-FEE_MAP = {
-    "polymarket": 0.02,
-    "kalshi": 0.0175,
-}
+from execution.fee_model import taker_fee_fraction
 
 MIN_FEE_ADJUSTED_DISAGREEMENT_PP = 3.0
 MIN_BOOKMAKERS = 3
 CACHE_TTL_SEC = 900  # 15 min
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
-POLYMARKET_GAMMA = "https://gamma-api.polymarket.com"
-POLY_WINNER_FEE = 0.02
 
 # ─── Sport configs ─────────────────────────────────────────────────────
 SPORT_CONFIGS: Dict[str, dict] = {
@@ -262,7 +258,6 @@ SPORT_ALIAS_MAP: Dict[str, Dict[str, List[str]]] = {
 _sport_cache: Dict[str, dict] = {}
 _credit_state: Optional[dict] = None
 
-
 # ─── Helpers ───────────────────────────────────────────────────────────
 
 def _norm(s: str) -> str:
@@ -272,7 +267,6 @@ def _norm(s: str) -> str:
         if not unicodedata.combining(c)
     ).lower().strip()
 
-
 def _team_in_title(team: str, title: str, aliases: Dict[str, List[str]]) -> bool:
     """Check if team or any alias appears in title text."""
     title_lower = _norm(title)
@@ -281,22 +275,14 @@ def _team_in_title(team: str, title: str, aliases: Dict[str, List[str]]) -> bool
             return True
     return False
 
-
-def _american_to_implied_prob(odds: int) -> float:
-    odds = int(odds)
-    return (100.0 / (odds + 100.0)) if odds > 0 else (abs(odds) / (abs(odds) + 100.0))
-
-
-def _devig_two_way(odds_a: int, odds_b: int) -> Tuple[float, float]:
-    pa = _american_to_implied_prob(odds_a)
-    pb = _american_to_implied_prob(odds_b)
-    total = pa + pb
-    return (pa / total, pb / total) if total > 0 else (0.5, 0.5)
-
+from odds.sports_edge_common import (
+    american_to_implied_prob as _american_to_implied_prob,
+    consensus_devig_2way as _sec_consensus_devig_2way,
+    consensus_devig_3way as _sec_consensus_devig_3way,
+)
 
 def _get_api_key() -> Optional[str]:
     return os.getenv("ODDS_API_KEY") or None
-
 
 def _is_stale_event(commence_time: str) -> bool:
     if not commence_time:
@@ -306,7 +292,6 @@ def _is_stale_event(commence_time: str) -> bool:
         return (gt - datetime.now(timezone.utc)).total_seconds() / 60 < 30
     except (ValueError, TypeError):
         return True
-
 
 # ─── Credit Budget Manager ─────────────────────────────────────────────
 
@@ -326,7 +311,6 @@ def _ensure_credit_state():
     else:
         _credit_state = default
 
-
 def _save_credit_state():
     global _credit_state
     if _credit_state is None:
@@ -334,7 +318,6 @@ def _save_credit_state():
     CREDIT_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(CREDIT_FILE, "w") as f:
         json.dump(_credit_state, f, indent=2, sort_keys=True)
-
 
 def sports_odds_api_credit(credits: int = 1) -> bool:
     """Check budget and consume credits. Returns True if OK, False if exhausted."""
@@ -349,7 +332,6 @@ def sports_odds_api_credit(credits: int = 1) -> bool:
     _save_credit_state()
     return True
 
-
 def get_credit_status() -> dict:
     _ensure_credit_state()
     return {
@@ -358,7 +340,6 @@ def get_credit_status() -> dict:
         "max_daily": _credit_state["max_daily"],
         "date": _credit_state["date"],
     }
-
 
 # ─── Cache management ─────────────────────────────────────────────────
 
@@ -369,10 +350,8 @@ def _get_cached_sport(sport_key: str) -> Optional[list]:
         return entry["data"]
     return None
 
-
 def _set_sport_cache(sport_key: str, data: list):
     _sport_cache[sport_key] = {"ts": time.time(), "data": data}
-
 
 # ─── Odds API fetch ────────────────────────────────────────────────────
 
@@ -406,7 +385,6 @@ def _fetch_odds_sync(sport_key: str, api_key: str) -> list:
         logger.warning(f"CE-5 Odds API fetch failed for {sport_key}: {e}")
         return []
 
-
 # ─── Polymarket fetch ──────────────────────────────────────────────────
 
 def _fetch_polymarket_events_sync(tag_slug: str) -> list:
@@ -422,7 +400,6 @@ def _fetch_polymarket_events_sync(tag_slug: str) -> list:
     except Exception as e:
         logger.warning(f"CE-5 Polymarket fetch failed for tag={tag_slug}: {e}")
         return []
-
 
 def _find_poly_price(
     home_team: str,
@@ -468,78 +445,14 @@ def _find_poly_price(
                     return (price1, price0)
     return None
 
-
 def _compute_consensus_2way(event: dict) -> Optional[dict]:
     """Compute weighted consensus prob for a 2-way event.
     Returns {team: true_prob} or None."""
-    try:
-        from odds.sports_edge_common import consensus_devig_2way
-        return consensus_devig_2way(event, "h2h")
-    except ImportError:
-        pass
-
-    # Fallback: manual weighted consensus (simplified)
-    # Import BOOK_WEIGHTS from sports_edge_common
-    try:
-        sys_path_tmp = list(__import__("sys").path)
-        __import__("sys").path.insert(
-            0, str(Path(__file__).parent.parent / "odds")
-        )
-        from sports_edge_common import BOOK_WEIGHTS, consensus_devig_2way
-        return consensus_devig_2way(event, "h2h")
-    except Exception:
-        pass
-
-    # Manual fallback
-    weighted: Dict[str, float] = {}
-    total_w = 0.0
-    for bk in event.get("bookmakers", []):
-        w = {"pinnacle": 0.35, "draftkings": 0.20, "fanduel": 0.15,
-             "betmgm": 0.10, "betrivers": 0.05, "williamhill_us": 0.05,
-             "bovada": 0.02, "williamhill": 0.05}.get(bk.get("key", ""), 0.0)
-        if w <= 0.0:
-            continue
-        for mk in bk.get("markets", []):
-            if mk.get("key") != "h2h":
-                continue
-            outs = mk.get("outcomes", [])
-            if len(outs) < 2:
-                continue
-            names = [o.get("name") for o in outs]
-            prices = [o.get("price") for o in outs]
-            if any(n is None or p is None for n, p in zip(names, prices)):
-                continue
-            implied = [_american_to_implied_prob(int(p)) for p in prices]
-            t = sum(implied)
-            probs = [ip / t for ip in implied]
-            for nm, pr in zip(names, probs):
-                weighted[nm] = weighted.get(nm, 0.0) + w * pr
-            total_w += w
-            break
-    if total_w == 0.0 or len(weighted) < 2:
-        return None
-    return {nm: v / total_w for nm, v in weighted.items()}
-
+    return _sec_consensus_devig_2way(event, "h2h") or None
 
 def _compute_consensus_3way(event: dict) -> Optional[dict]:
     """Compute Shin-devigged weighted consensus for 3-way events."""
-    try:
-        from odds.sports_edge_common import consensus_devig_3way
-        return consensus_devig_3way(event, "h2h")
-    except ImportError:
-        pass
-
-    try:
-        sys_path_tmp = list(__import__("sys").path)
-        __import__("sys").path.insert(
-            0, str(Path(__file__).parent.parent / "odds")
-        )
-        from sports_edge_common import consensus_devig_3way
-        return consensus_devig_3way(event, "h2h")
-    except Exception:
-        pass
-    return None
-
+    return _sec_consensus_devig_3way(event, "h2h") or None
 
 def _count_bookmakers(event: dict) -> int:
     """Count bookmakers that contributed h2h odds for this event."""
@@ -556,7 +469,6 @@ def _count_bookmakers(event: dict) -> int:
                 break
     return count
 
-
 def _compute_fee_adjusted_disagreement(
     raw_disagreement_pp: float,
     poly_price: float,
@@ -568,22 +480,20 @@ def _compute_fee_adjusted_disagreement(
       "NO" (prediction_market > sportsbook) → buy NO at (1 - price)
       "YES" (prediction_market < sportsbook) → buy YES at price
 
-    Polymarket charges POLY_WINNER_FEE on the winning side at settlement.
-    For disagreement scanning, the round-trip estimate is conservative:
-    take the max single-direction fee.
+    Polymarket charges a per-category taker fee at the entry fill and 0% on
+    winnings, so a hold-to-resolution play pays only the entry leg (sports rate).
     """
     if direction == "NO":
-        # Buying NO: entry cost = 1 - poly_price, winner fee applied on NO win
+        # Buying NO: entry cost = 1 - poly_price
         entry_price = 1.0 - poly_price
     else:
         # Buying YES: entry cost = poly_price
         entry_price = poly_price
 
-    # Conservative round-trip estimate: winner fee on the bought side
-    round_trip_fees_pp = entry_price * POLY_WINNER_FEE * 100.0
+    # Real Polymarket sports taker fee at entry: 0.03 * p * (1-p).
+    round_trip_fees_pp = taker_fee_fraction(entry_price, "polymarket", "sports") * 100.0
     fee_adjusted_pp = raw_disagreement_pp - round_trip_fees_pp
     return fee_adjusted_pp, round_trip_fees_pp
-
 
 # ─── Main scanner ──────────────────────────────────────────────────────
 
@@ -746,8 +656,13 @@ def scan_all_sports_disagreement(sports_list: Optional[list] = None) -> list:
     # Sort by fee-adjusted disagreement descending
     results.sort(key=lambda r: r["fee_adjusted_disagreement_pp"], reverse=True)
 
-    return results
+    # Phase 1B: persist for reconciliation with per-sport engines
+    try:
+        persist_ce5_results(results)
+    except Exception:
+        pass
 
+    return results
 
 def scan_sport_disagreement(sport_key: str) -> dict:
     """Scan a single sport for consensus disagreement.
@@ -777,7 +692,6 @@ def scan_sport_disagreement(sport_key: str) -> dict:
         "credits_remaining": credit_status["credits_remaining"],
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
-
 
 # ─── CLI test ─────────────────────────────────────────────────────────
 
@@ -809,3 +723,92 @@ if __name__ == "__main__":
         print()
         cs = get_credit_status()
         print(f"Credits: {cs['credits_consumed']}/{cs['max_daily']} used ({cs['credits_remaining']} remaining)")
+
+# ─── Phase 1B: DB persistence for CE-5/per-sport reconciliation ────────────
+_CE5_DB_INIT = False
+
+def _init_ce5_cache(conn):
+    global _CE5_DB_INIT
+    if _CE5_DB_INIT:
+        return
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS ce5_signal_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scanned_at TEXT NOT NULL,
+            sport TEXT NOT NULL,
+            event_title TEXT NOT NULL,
+            team TEXT NOT NULL,
+            book_pct REAL,
+            pm_pct REAL,
+            fee_adj_pp REAL,
+            direction TEXT,
+            signal INTEGER DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_ce5_event ON ce5_signal_cache(event_title, team);
+    """)
+    _CE5_DB_INIT = True
+
+def persist_ce5_results(results: list) -> int:
+    """Write CE-5 scan results to DB for reconciliation with per-sport engines."""
+    if not results:
+        return 0
+    try:
+        import sqlite3 as _sq
+        from pathlib import Path as _P
+        db = _P(__file__).parent.parent / "storage" / "shadow_trades.db"
+        conn = _sq.connect(str(db), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        _init_ce5_cache(conn)
+        now = datetime.now(timezone.utc).isoformat()
+        # Purge entries older than 24h to keep table small
+        conn.execute("DELETE FROM ce5_signal_cache WHERE scanned_at < datetime('now', '-24 hours')")
+        n = 0
+        for r in results:
+            conn.execute(
+                """INSERT INTO ce5_signal_cache
+                   (scanned_at, sport, event_title, team, book_pct, pm_pct,
+                    fee_adj_pp, direction, signal)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (now, r.get("odds_key", ""), r.get("event", "")[:180],
+                 r.get("team", "")[:80],
+                 r.get("sportsbook_consensus_pct"), r.get("prediction_market_pct"),
+                 r.get("fee_adjusted_disagreement_pp"), r.get("direction"),
+                 1 if r.get("signal") else 0),
+            )
+            n += 1
+        conn.commit()
+        conn.close()
+        return n
+    except Exception as e:
+        logger.debug(f"CE-5 persist failed: {e}")
+        return 0
+
+def check_ce5_agrees(event_title: str, participant: str, direction: str) -> Optional[bool]:
+    """Check if CE-5 has a recent signal for this event+participant that agrees
+    on direction. Returns True (agrees), False (disagrees), None (no data)."""
+    try:
+        import sqlite3 as _sq
+        from pathlib import Path as _P
+        db = _P(__file__).parent.parent / "storage" / "shadow_trades.db"
+        conn = _sq.connect(str(db), timeout=5)
+        conn.row_factory = _sq.Row
+        _init_ce5_cache(conn)
+        # Fuzzy match: event title contains participant, or team matches
+        rows = conn.execute(
+            """SELECT direction, fee_adj_pp, signal FROM ce5_signal_cache
+               WHERE (team LIKE ? OR event_title LIKE ?)
+               AND scanned_at > datetime('now', '-6 hours')
+               ORDER BY scanned_at DESC LIMIT 1""",
+            (f"%{participant[:20]}%", f"%{participant[:20]}%"),
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return None
+        r = rows[0]
+        ce5_dir = r["direction"]
+        # CE-5 direction is YES/NO, per-sport is BUY/SELL (BUY=YES, SELL=NO)
+        norm_dir = "YES" if direction.upper() in ("YES", "BUY") else "NO"
+        return ce5_dir == norm_dir
+    except Exception:
+        return None

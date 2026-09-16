@@ -19,6 +19,7 @@ import os
 from datetime import datetime, timezone, timedelta
 from loguru import logger
 from typing import Optional, Dict, Any
+from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 
 # Test cities to probe
 CANARY_CITIES = [
@@ -30,8 +31,6 @@ CANARY_CITIES = [
 ]
 
 # Polymarket API base
-GAMMA_API = "https://gamma-api.polymarket.com"
-
 # Polyclawd local endpoint
 POLYCLAWD_WEATHER = "http://127.0.0.1:8420/api/signals/weather"
 

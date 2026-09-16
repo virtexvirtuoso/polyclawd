@@ -1,4 +1,6 @@
 """Tests for P0 bug fixes: Kelly variable odds, PRAGMA busy_timeout, Sharpe Bessel's correction."""
+import sqlite3
+import pytest
 from config.scaling_phases import calculate_position_size
 
 
@@ -75,12 +77,21 @@ class TestPragmaBusyTimeout:
         conn.close()
 
     def test_get_conn_busy_timeout(self, tmp_path):
-        """_get_conn should set busy_timeout=5000."""
+        """_get_conn should set the central busy_timeout, not a local downgrade.
+
+        Was asserting 5000. The 2026-08-25 sweep raised every connection to the
+        central BUSY_TIMEOUT_MS because low per-connection values silently override
+        the db.connect() factory (same knob, last write wins) and turn a transient
+        SQLITE_BUSY into a killed task. Assert against the constant rather than a
+        literal so this test tracks the factory instead of going stale again.
+        """
+        from db import BUSY_TIMEOUT_MS
         from signals.alpha_score_tracker import _get_conn
         db = str(tmp_path / "test.db")
         conn = _get_conn(db)
         timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
-        assert timeout == 5000
+        assert timeout == BUSY_TIMEOUT_MS
+        assert timeout >= 30000, "a low busy_timeout re-introduces the killed-task bug"
         conn.close()
 
 

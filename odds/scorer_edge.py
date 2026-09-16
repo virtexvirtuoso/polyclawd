@@ -41,13 +41,19 @@ from typing import Callable, Optional
 
 SCORER_MARKET = "player_goal_scorer_anytime"
 
-# ── §3.1 Betfair-weighted sharp consensus (NOT single-Pinnacle) ───────────────
+# ── §3.1 Sharp consensus weights (corrected 2026-06-30) ──────────────────────
+# betfair_ex_uk + betfair_ex_eu are the SAME exchange liquidity pool.
+# Old weights (0.40+0.40) gave Betfair 8x Pinnacle → wildly inflated fair values.
+# Corrected: merge Betfair to single 0.50 weight, raise Pinnacle, add WH.
 SOCCER_PROP_SHARP_WEIGHTS: dict = {
-    "betfair_ex_uk": 0.40,  # exchange — genuinely sharp on soccer
-    "betfair_ex_eu": 0.40,
-    "pinnacle": 0.15,  # one input, not the truth; absent ~20% of matches
-    "williamhill": 0.05,
+    "betfair_ex_uk": 0.25,  # ─┐ same pool — together = 0.50
+    "betfair_ex_eu": 0.25,  # ─┘
+    "pinnacle": 0.35,        # genuine sharp; absent ~20% of matches
+    "williamhill": 0.15,     # best European fixed-odds anchor
 }
+# GUARD: betfair combined weight must never exceed 0.55 (old bug was 0.80)
+assert SOCCER_PROP_SHARP_WEIGHTS.get("betfair_ex_uk", 0) + SOCCER_PROP_SHARP_WEIGHTS.get("betfair_ex_eu", 0) <= 0.55, \
+    "SCORER BUG: Betfair double-count — betfair_ex_uk + betfair_ex_eu combined weight > 0.55 (regression from 2026-07-08)"
 
 SOFT_BOOKS: tuple = ("draftkings", "fanduel", "betrivers", "onexbet", "skybet")
 
@@ -114,6 +120,7 @@ class ScorerSportConfig:
     soft_books: tuple = SOFT_BOOKS
     regions: str = "us,uk,eu"  # must include uk/eu for Betfair exchange
     min_edge_pp: float = 5.0  # placeholder — recalibrate on CLV, not realized W/L
+    max_edge_pp: float = 25.0  # cap — residual Betfair mismatch creates phantom 40pp+ edges
     kickoff_window_hours: int = 6  # FETCH window (cost gate), NOT tradeable window
     tradeable_window_hours: float = 1.0  # only post-lineup edges are tradeable (§4.3)
     prop_ttl_seconds: int = 1800
@@ -296,6 +303,8 @@ def find_scorer_edges(
 
             edge_pct = (fair - soft_implied) * 100.0
             if edge_pct < config.min_edge_pp:
+                continue
+            if edge_pct > config.max_edge_pp:
                 continue
 
             confirmed = lineup_checker(pc, ev)
