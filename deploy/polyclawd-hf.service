@@ -1,0 +1,20 @@
+[Unit]
+Description=Polyclawd HF Latency Engine
+After=network.target polyclawd-api.service
+
+[Service]
+Type=simple
+User=linuxuser
+Group=linuxuser
+WorkingDirectory=/var/www/virtuosocrypto.com/polyclawd
+Environment=PATH=/var/www/virtuosocrypto.com/polyclawd/venv/bin:/usr/bin:/usr/local/bin
+Environment=POLYGON_RPC=https://1rpc.io/matic
+Environment=HF_ENGINE_PORT=8422
+Environment=HF_DB_PATH=/var/www/virtuosocrypto.com/polyclawd/storage/shadow_trades.db
+ExecStart=/var/www/virtuosocrypto.com/polyclawd/venv/bin/python3 -m services.hf_engine
+Restart=always
+RestartSec=10
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
