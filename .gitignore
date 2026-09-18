@@ -78,3 +78,4 @@ _archive/
 static/kalshi_fade_sheet.json
 static/weather_mm_shadow.json
 *.bak-*
+scripts/wg-polymarket-drift-check.py
