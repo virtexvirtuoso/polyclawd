@@ -131,11 +131,14 @@ def _send_alarm(message: str) -> None:
         logger.error(f"options_resolver: alarm Telegram send failed: {e}")
 
 
-def _record_fetch(ok: bool, degraded: bool = False) -> None:
+def _record_fetch(ok: bool, degraded: bool = False, probe_url: Optional[str] = None) -> None:
     """Record a fetch outcome; alarm when this module is failing wholesale.
 
     ok=False       -> both the proxy and the direct upstream failed.
     degraded=True  -> the proxied route failed but the direct upstream served it.
+    probe_url      -> failing URL for ok=False records; re-probed on every
+                      route before an OUTAGE page so a stale window left by
+                      a recovered burst cannot re-page a dead incident.
     """
     outcome = "fail" if not ok else ("degraded" if degraded else "ok")
     _fetch_window.append(outcome)
@@ -151,6 +154,28 @@ def _record_fetch(ok: bool, degraded: bool = False) -> None:
     fails = sum(1 for o in _fetch_window if o == "fail")
     fail_rate = fails / attempts
     if fail_rate >= _ALARM_FAIL_RATE and now - _fetch_stats["outage_at"] >= _ALARM_COOLDOWN_S:
+        # 2026-09-18: the sliding window can outlive the incident it measured.
+        # A 2.5-min edge 403 burst plus sparse follow-up fetches left 99 stale
+        # fails in the window; when the 1h cooldown expired the alarm re-fired
+        # against data an hour old. Before paging, re-probe the failing URL on
+        # every route _fetch_json would use: if any route serves, the incident
+        # is over - flush the window instead of paging a dead outage.
+        if probe_url is not None:
+            _probe_data, probe_err = _fetch_once(probe_url, timeout=10)
+            if probe_err is not None:
+                _probe_fb = direct_equivalent(probe_url)
+                if _probe_fb:
+                    _probe_data, probe_err = _fetch_once(_probe_fb, timeout=10)
+            if probe_err is None:
+                _fetch_window.clear()
+                _fetch_window.append("ok")
+                _fetch_stats["ok"] += 1
+                logger.info(
+                    "options_resolver: OUTAGE page suppressed - re-probe of the "
+                    "failing URL succeeded on a live route (stale window from a "
+                    "recovered burst)"
+                )
+                return
         _fetch_stats["outage_at"] = now
         _send_alarm(
             f"options_resolver OUTAGE: {fails}/{attempts} of the last Polymarket "
@@ -203,7 +228,7 @@ def _fetch_json(url: str, timeout: int = 10) -> Optional[Any]:
             return data
         err = f"proxy={err} | direct={direct_err}"
 
-    _record_fetch(ok=False)
+    _record_fetch(ok=False, probe_url=url)
     logger.warning(f"options_resolver fetch failed: {url} - {err}")
     return None
 
