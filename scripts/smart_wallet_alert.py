@@ -520,6 +520,10 @@ def check_and_fire(
             "wallet_trades": f.get("wallet_trades"),
             "category": f.get("source_category"),
         }
+        # Slug lives in gamma (meta_for), not in the raw trade feed — restore it
+        # here so alert formatting keeps its market URL. (The old fills_from_trades
+        # referenced an undefined `meta` for this key and NameError'd every fill.)
+        rec["market_slug"] = m.get("slug", "")
         fade = _fade_gate_stats(shadow_conn, f["wallet"]) if f["direction"] == "BUY" else None
         if fade:
             # Inverted signal: shadow keeps the wallet's own side/price so the
@@ -797,7 +801,6 @@ def fills_from_trades(trades: list, smart: dict) -> list:
                 "wallet_pnl": sw.get("net_pnl"),
                 "wallet_trades": sw.get("closed_positions") or sw.get("closed"),
                 "source_category": sw.get("source_category"),
-            "market_slug": meta.get("slug", ""),
                 "is_bot": sw.get("is_bot", 0),
             }
         )
@@ -837,6 +840,14 @@ def scanner_hook(meta_conn, trades: list, gamma: dict, smart: dict) -> list:
         finally:
             sconn.close()
     except Exception:  # noqa: BLE001 - the alert must never break the scan
+        # 2026-09-19: a silent return here hid a NameError in fills_from_trades
+        # for 25 days (zero shadows logged while "0 alerts fired" looked like a
+        # quiet market). Crash loudly to stderr — journald captures it — then
+        # stand down for this sweep.
+        import traceback
+
+        print(f"SMART_WALLET_ALERT scanner_hook FAILED:\n{traceback.format_exc()}",
+              file=sys.stderr)
         return []
 
 
