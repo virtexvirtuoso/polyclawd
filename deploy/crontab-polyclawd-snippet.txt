@@ -12,3 +12,9 @@
 # dead-man switches (run on every invocation; see scripts/send_ledger_watchdog.py).
 5 * * * * cd /var/www/virtuosocrypto.com/polyclawd && set -a && . /home/linuxuser/.config/polyclawd/alerts.env && set +a && venv/bin/python3 scripts/send_ledger_watchdog.py --hours 1 --min-rate 0.10 >> /var/www/virtuosocrypto.com/polyclawd/logs/send_ledger_watchdog.log 2>&1
 30 13 * * * cd /var/www/virtuosocrypto.com/polyclawd && set -a && . /home/linuxuser/.config/polyclawd/alerts.env && set +a && venv/bin/python3 scripts/send_ledger_watchdog.py >> logs/send_ledger_watchdog.log 2>&1
+
+# Wallet allowlist — nightly rolling selector (02:45 UTC). Snapshots feed
+# scripts/wallet_allowlist.py; the producer promotes allowlisted wallets'
+# entry/refire alerts to tier-2 batched pages (fail-safe to digest if the
+# snapshot file is missing or >48h stale).
+45 2 * * * cd /var/www/virtuosocrypto.com/polyclawd && venv/bin/python3 scripts/wallet_allowlist.py select >> logs/wallet_allowlist.log 2>&1

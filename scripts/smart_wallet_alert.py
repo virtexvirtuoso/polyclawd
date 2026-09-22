@@ -42,6 +42,7 @@ from config.polymarket_urls import clob_url, data_url  # polyproxy: central URL 
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 from signals.alert_dispatch import TIER_DIGEST, dispatch  # noqa: E402
+from scripts.wallet_allowlist import page_tier_for  # noqa: E402
 # Canonical project shadow DB (NOT the stray 0-byte repo-root file) — matches
 # signals/shadow_tracker.py and services/scheduler.py.
 SHADOW_DB = BASE_DIR / "storage" / "shadow_trades.db"
@@ -563,7 +564,7 @@ def check_and_fire(
                                  f"({rec.get('num_fills') or 0} fills)")
                     except Exception:  # noqa: BLE001 — never lose the event to formatting
                         _line = _msg
-                    dispatch("wallet_moves", _line, TIER_DIGEST)
+                    dispatch("wallet_moves", _line, page_tier_for(f["wallet"], rec["alert_type"]))
                 else:
                     send_telegram(_msg)
             except Exception:  # noqa: BLE001 - delivery must never break the scan
