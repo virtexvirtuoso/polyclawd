@@ -44,8 +44,11 @@ TOKEN = "47627966085172760705785636278889708622869169862219868575174176690844073
 
 
 def _place_sw_order(
-    conn, token=TOKEN, price=0.62, size=7.67580967741935, ref="sw-2026-09-22-0xbc0070bd88b113-1", status="live"
+    conn, token=TOKEN, price=0.62, size=7.67580967741935, ref="sw-2026-09-22-0xbc0070bd88b113-1", status="cancelled"
 ):
+    # status='cancelled' mirrors production: sync_open_orders marks a vanished
+    # order cancelled before position_sync discovers the on-chain fill, so the
+    # token is NOT in _get_tracked_token_ids at discovery time.
     conn.execute(
         "INSERT INTO live_open_orders (client_order_ref, order_id, token_id, side, "
         "price, size, status, ts) VALUES (?,?,?,?,?,?,?,?)",
@@ -130,6 +133,17 @@ def test_non_sw_ref_ignored(conn, monkeypatch):
     new = _run_sync(conn, monkeypatch, _pm_position())
     assert len(new) == 1
     assert conn.execute("SELECT archetype FROM live_positions").fetchone()[0] == "manual"
+
+
+def test_still_live_order_token_is_skipped_not_reregistered(conn, monkeypatch):
+    # While our order for the token is still status='live', the position is
+    # considered tracked (executor owns it) and sync_positions skips it. If
+    # the fill lands later, the order flips to filled/cancelled and the next
+    # cycle attributes it — a one-cycle delay, not a provenance loss.
+    _place_sw_order(conn, status="live")
+    new = _run_sync(conn, monkeypatch, _pm_position())
+    assert new == []
+    assert conn.execute("SELECT COUNT(*) FROM live_positions").fetchone()[0] == 0
 
 
 def test_attribution_lookup_failure_returns_manual_default(conn):
