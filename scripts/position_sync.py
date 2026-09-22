@@ -6,12 +6,14 @@ for each new position found.
 
 Called by: scheduler.py task_position_sync() every 5 min.
 """
+
 from __future__ import annotations
 
+import json
 import logging
 import time
 import urllib.request
-import json
+
 from config.polymarket_urls import data_url, gamma_url  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
@@ -19,8 +21,11 @@ logger = logging.getLogger(__name__)
 _RESOLUTION_ALERT_CACHE_FILE = "/tmp/resolution_alert_cache.json"
 _REDEMPTION_CACHE_FILE = "/tmp/redemption_attempt_cache.json"
 
+
 def _already_resolution_alerted(position_id: int) -> bool:
-    import json, os
+    import json
+    import os
+
     try:
         if not os.path.exists(_RESOLUTION_ALERT_CACHE_FILE):
             return False
@@ -29,8 +34,11 @@ def _already_resolution_alerted(position_id: int) -> bool:
     except Exception:
         return False
 
+
 def _mark_resolution_alerted(position_id: int):
-    import json, os
+    import json
+    import os
+
     try:
         data = {}
         if os.path.exists(_RESOLUTION_ALERT_CACHE_FILE):
@@ -41,9 +49,10 @@ def _mark_resolution_alerted(position_id: int):
         pass
 
 
-
 def _already_redemption_attempted(position_id: int) -> bool:
-    import json, os
+    import json
+    import os
+
     try:
         if not os.path.exists(_REDEMPTION_CACHE_FILE):
             return False
@@ -52,8 +61,11 @@ def _already_redemption_attempted(position_id: int) -> bool:
     except Exception:
         return False
 
+
 def _mark_redemption_attempted(position_id: int):
-    import json, os
+    import json
+    import os
+
     try:
         data = {}
         if os.path.exists(_REDEMPTION_CACHE_FILE):
@@ -62,6 +74,7 @@ def _mark_redemption_attempted(position_id: int):
         open(_REDEMPTION_CACHE_FILE, "w").write(json.dumps(data))
     except Exception:
         pass
+
 
 def _try_redeem_position(market_id: str, position_id: int) -> str:
     """Attempt on-chain redemption of settled YES tokens via SDK.
@@ -75,6 +88,7 @@ def _try_redeem_position(market_id: str, position_id: int) -> str:
     _mark_redemption_attempted(position_id)
     try:
         from execution.clob_client import _get_client
+
         client = _get_client()
         handle = client.redeem_positions(condition_id=market_id)
         handle.wait()
@@ -84,6 +98,7 @@ def _try_redeem_position(market_id: str, position_id: int) -> str:
         logger.warning("position_sync: redeem failed for pos %d: %s", position_id, exc)
         return f"error:{exc}"
 
+
 _DEPOSIT_WALLET = "0xa495c42d60521ee28e1da237c0bab560d5095777"
 _PM_POSITIONS_URL = data_url(f"/positions?user={_DEPOSIT_WALLET}&sizeThreshold=0.01")
 
@@ -92,22 +107,25 @@ def _fetch_pm_positions() -> list[dict]:
     """Fetch open positions via SDK (typed, no raw REST parsing)."""
     try:
         from execution.clob_client import _get_client
+
         client = _get_client()
         positions = list(client.list_positions(size_threshold=0.01))
         result = []
         for p in positions:
-            result.append({
-                "asset":        str(getattr(p, "asset",         "") or ""),
-                "conditionId":  str(getattr(p, "condition_id",  "") or ""),
-                "slug":         str(getattr(p, "slug",          "") or ""),
-                "title":        str(getattr(p, "title",         "") or ""),
-                "avgPrice":     float(getattr(p, "avg_price",   0) or 0),
-                "size":         float(getattr(p, "size",        0) or 0),
-                "initialValue": float(getattr(p, "initial_value", 0) or 0),
-                "curPrice":     float(getattr(p, "cur_price",   0) or 0),
-                "cashPnl":      float(getattr(p, "cash_pnl",    0) or 0),
-                "redeemable":   bool(getattr(p,  "redeemable",  False)),
-            })
+            result.append(
+                {
+                    "asset": str(getattr(p, "asset", "") or ""),
+                    "conditionId": str(getattr(p, "condition_id", "") or ""),
+                    "slug": str(getattr(p, "slug", "") or ""),
+                    "title": str(getattr(p, "title", "") or ""),
+                    "avgPrice": float(getattr(p, "avg_price", 0) or 0),
+                    "size": float(getattr(p, "size", 0) or 0),
+                    "initialValue": float(getattr(p, "initial_value", 0) or 0),
+                    "curPrice": float(getattr(p, "cur_price", 0) or 0),
+                    "cashPnl": float(getattr(p, "cash_pnl", 0) or 0),
+                    "redeemable": bool(getattr(p, "redeemable", False)),
+                }
+            )
         return result
     except Exception as exc:
         logger.warning("position_sync: SDK list_positions failed (%s), falling back to REST", exc)
@@ -133,26 +151,26 @@ def _fetch_gamma_market(market_id: str) -> dict:
         return {}
 
 
-def _sdk_token_price_map() -> "dict[str, tuple] | None":
+def _sdk_token_price_map() -> dict[str, tuple] | None:
     """token_id -> (cur_price, redeemable) from SDK open positions. None on failure —
     absence must be proven, not inferred from a broken fetch."""
     out = {}
     try:
         from execution.clob_client import _get_client
+
         client = _get_client()
         for page in client.list_positions(size_threshold=0.001):
             for sdk_pos in page.items:
                 t = str(getattr(sdk_pos, "token_id", "") or getattr(sdk_pos, "asset", "") or "")
                 if t:
-                    out[t] = (getattr(sdk_pos, "cur_price", None),
-                              bool(getattr(sdk_pos, "redeemable", False)))
+                    out[t] = (getattr(sdk_pos, "cur_price", None), bool(getattr(sdk_pos, "redeemable", False)))
     except Exception as exc:
         logger.warning("position_sync: sdk position map failed: %s", exc)
         return None
     return out
 
 
-def _fetch_redeem_payouts() -> "dict[str, float] | None":
+def _fetch_redeem_payouts() -> dict[str, float] | None:
     """token_id -> USDC payout for redeemed conditions. REDEEM rows carry
     conditionId but NOT asset, so bridge via this wallet's TRADE rows.
     Keyed on (conditionId, outcomeIndex) so a losing outcome of a hedged
@@ -189,7 +207,7 @@ def _fetch_redeem_payouts() -> "dict[str, float] | None":
 _FILL_RECON_TOLERANCE_USD = 1.0
 # live_fills recording began 2026-07-14; June history predates the table and
 # would drift forever. Reconcile from the canary re-launch onward.
-_FILL_RECON_SINCE_TS = 1787011200          # 2026-08-18T00:00:00Z
+_FILL_RECON_SINCE_TS = 1787011200  # 2026-08-18T00:00:00Z
 _FILL_RECON_DB_CUTOFF = "2026-08-18T00:00:00+00:00"
 _FILL_DRIFT_ALERT_FILE = "/tmp/fill_drift_alerted.txt"
 _FILL_DRIFT_ALERT_COOLDOWN_S = 3600
@@ -205,22 +223,22 @@ def _fetch_trade_activity_usd(since_ts: int) -> tuple:
         raise TypeError(f"unexpected activity payload: {type(acts).__name__}")
     if len(acts) == 500:
         logger.warning("position_sync: activity window may be truncated (500-row limit)")
-    rows = [a for a in acts
-            if isinstance(a, dict) and a.get("type") == "TRADE"
-            and int(a.get("timestamp") or 0) >= since_ts]
+    rows = [
+        a for a in acts if isinstance(a, dict) and a.get("type") == "TRADE" and int(a.get("timestamp") or 0) >= since_ts
+    ]
     return len(rows), sum(float(a.get("usdcSize") or 0) for a in rows)
 
 
 def _alert_fill_drift(msg: str) -> None:
     try:
         from scripts.alert_formatter import send_telegram
+
         send_telegram(msg)
     except Exception as exc:
         logger.warning("position_sync: fill-drift alert failed: %s", exc)
 
 
-def check_fill_reconciliation(conn, since_ts: int = 0,
-                              db_cutoff_iso: str = "1970-01-01T00:00:00+00:00") -> dict:
+def check_fill_reconciliation(conn, since_ts: int = 0, db_cutoff_iso: str = "1970-01-01T00:00:00+00:00") -> dict:
     """Compare on-chain TRADE activity vs recorded live_fills since a cutoff.
     Pages on VALUE drift only: chain counts match-events while live_fills
     records per-order fills, so split prints (one order crossing several
@@ -228,19 +246,18 @@ def check_fill_reconciliation(conn, since_ts: int = 0,
     Untracked fills (June Mariners class) differ in dollars too. Alerts are
     cooldown-guarded (mirrors check_wallet_balance) so persistent drift pages
     once per hour, not once per 5-minute cycle."""
-    import os, time
+    import os
+
     try:
         chain_n, chain_usd = _fetch_trade_activity_usd(since_ts)
     except Exception as exc:
         logger.warning("position_sync: fill recon fetch failed: %s", exc)
         return {"error": str(exc)}
     row = conn.execute(
-        "SELECT COUNT(*), COALESCE(SUM(usd), 0) FROM live_fills WHERE ts >= ?",
-        (db_cutoff_iso,)
+        "SELECT COUNT(*), COALESCE(SUM(usd), 0) FROM live_fills WHERE ts >= ?", (db_cutoff_iso,)
     ).fetchone()
     db_n, db_usd = int(row[0]), float(row[1] or 0)
-    drift = {"chain_trades": chain_n, "db_fills": db_n,
-             "chain_usd": round(chain_usd, 2), "db_usd": round(db_usd, 2)}
+    drift = {"chain_trades": chain_n, "db_fills": db_n, "chain_usd": round(chain_usd, 2), "db_usd": round(db_usd, 2)}
     # Page on VALUE drift only. Chain counts match-events; live_fills records
     # per-order fills, so one order crossing multiple maker prints (Braves
     # 2026-09-20: $2.7671 + $2.158537 same second, one db row) shows count
@@ -253,7 +270,9 @@ def check_fill_reconciliation(conn, since_ts: int = 0,
             logger.info(
                 "position_sync: count-only fill drift (chain %d vs db %d, "
                 "usd match $%.2f) - split on-chain prints; not paging",
-                chain_n, db_n, chain_usd,
+                chain_n,
+                db_n,
+                chain_usd,
             )
         try:
             if os.path.exists(_FILL_DRIFT_ALERT_FILE):
@@ -275,13 +294,15 @@ def check_fill_reconciliation(conn, since_ts: int = 0,
             msg = (
                 "⚠️ LIVE FILL DRIFT — UNTRACKED FILLS: chain shows "
                 f"{chain_n} trades (${chain_usd:,.2f}) vs {db_n} recorded "
-                f"(${db_usd:,.2f}) — money moved without a live_fills row")
+                f"(${db_usd:,.2f}) — money moved without a live_fills row"
+            )
         else:
             msg = (
                 "⚠️ LIVE FILL DRIFT — db > chain: "
                 f"{db_n} recorded fills (${db_usd:,.2f}) vs {chain_n} on-chain "
                 f"(${chain_usd:,.2f}) — phantom/duplicate fills or truncated "
-                "activity window")
+                "activity window"
+            )
         _alert_fill_drift(msg)
         try:
             open(_FILL_DRIFT_ALERT_FILE, "w").write(str(time.time()))
@@ -319,7 +340,6 @@ def check_resolutions(conn) -> list[dict]:
         pos_id = row[0]
         market_id = row[1] or ""
         market_title = row[2] or row[1] or "Unknown"
-        side = row[4] or "BUY"
         entry_price = float(row[5] or 0)
         shares = float(row[6] or 0)
         cost_usd = float(row[7] or 0)
@@ -339,7 +359,11 @@ def check_resolutions(conn) -> list[dict]:
             if abs(payout - shares) > max(0.02, shares * 0.01):
                 logger.warning(
                     "position_sync: redeem payout %.4f does not match shares %.4f "
-                    "for pos %s — leaving open for manual review", payout, shares, pos_id)
+                    "for pos %s — leaving open for manual review",
+                    payout,
+                    shares,
+                    pos_id,
+                )
                 continue
             exit_price = round(payout / shares, 4) if shares else 1.0
             pnl = round(payout - cost_usd - fee_total, 4)
@@ -347,11 +371,22 @@ def check_resolutions(conn) -> list[dict]:
             conn.execute(
                 "UPDATE live_positions SET status='closed', closed_at=?, exit_price=?, "
                 "pnl=?, close_reason='redeemed_detected' WHERE id=?",
-                (now_iso, exit_price, pnl, pos_id))
+                (now_iso, exit_price, pnl, pos_id),
+            )
             conn.commit()
-            resolved.append({"id": pos_id, "market_title": market_title, "pnl": pnl,
-                             "entry_price": entry_price, "exit_price": exit_price, "shares": shares,
-                             "opened_at": row[10], "result_emoji": "\U0001f3c6", "result_label": "WIN (redeemed)"})
+            resolved.append(
+                {
+                    "id": pos_id,
+                    "market_title": market_title,
+                    "pnl": pnl,
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "shares": shares,
+                    "opened_at": row[10],
+                    "result_emoji": "\U0001f3c6",
+                    "result_label": "WIN (redeemed)",
+                }
+            )
             _mark_resolution_alerted(pos_id)
             continue
 
@@ -362,6 +397,7 @@ def check_resolutions(conn) -> list[dict]:
         p0, p1 = None, None
         try:
             from execution.clob_client import _get_client
+
             client = _get_client()
 
             if token_id in sdk_price_map:
@@ -400,7 +436,7 @@ def check_resolutions(conn) -> list[dict]:
             continue  # not settled
 
         # Determine WIN/LOSS — we always buy YES (BUY side = YES token)
-        yes_won = (p0 == 1.0)
+        yes_won = p0 == 1.0
         won = yes_won  # BUY = YES position
 
         if won:
@@ -423,7 +459,7 @@ def check_resolutions(conn) -> list[dict]:
         conn.execute(
             "UPDATE live_positions SET status='closed', closed_at=?, exit_price=?, "
             "pnl=?, close_reason='resolution' WHERE id=?",
-            (now_iso, exit_price, pnl, pos_id)
+            (now_iso, exit_price, pnl, pos_id),
         )
         conn.commit()
         logger.info("position_sync: resolution %s for %s | pnl=%+.4f", result_label, market_title[:50], pnl)
@@ -439,6 +475,7 @@ def check_resolutions(conn) -> list[dict]:
         try:
             from execution.clob_client import _get_client as _clv_client
             from execution.live_db import insert_fill_clv
+
             ltp = _clv_client().get_last_trade_price(token_id=token_id_for_clv)
             closing_price = round(float(ltp.price), 6)
             clv_pp = round(closing_price - entry_price, 6)
@@ -453,23 +490,28 @@ def check_resolutions(conn) -> list[dict]:
             )
             logger.info(
                 "position_sync: CLV pos %d fill=%.4f close=%.4f clv=%+.4f",
-                pos_id, entry_price, closing_price, clv_pp,
+                pos_id,
+                entry_price,
+                closing_price,
+                clv_pp,
             )
         except Exception as _clv_exc:
             logger.debug("position_sync: CLV tracking failed (non-fatal): %s", _clv_exc)
 
-        resolved.append({
-            "pos_id": pos_id,
-            "market_title": market_title,
-            "entry_price": entry_price,
-            "exit_price": exit_price,
-            "shares": shares,
-            "pnl": pnl,
-            "won": won,
-            "result_emoji": result_emoji,
-            "result_label": result_label,
-            "opened_at": row[10] if len(row) > 10 else "",
-        })
+        resolved.append(
+            {
+                "pos_id": pos_id,
+                "market_title": market_title,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "shares": shares,
+                "pnl": pnl,
+                "won": won,
+                "result_emoji": result_emoji,
+                "result_label": result_label,
+                "opened_at": row[10] if len(row) > 10 else "",
+            }
+        )
 
     return resolved
 
@@ -482,9 +524,11 @@ def check_wallet_balance(conn) -> None:
     """
     _MIN_BALANCE_USD = 5.0
     _CACHE_FILE = "/tmp/low_balance_alerted.txt"
-    import os, time
+    import os
+
     try:
         from execution.clob_client import _get_client
+
         client = _get_client()
         bal_obj = client.get_balance_allowance(asset_type="COLLATERAL")
         raw = getattr(bal_obj, "balance", None)
@@ -507,6 +551,7 @@ def check_wallet_balance(conn) -> None:
             open(_CACHE_FILE, "w").write(str(now))
             try:
                 from scripts.alert_formatter import send_telegram
+
                 send_telegram(
                     f"⚠️ <b>LOW WALLET BALANCE</b>\n"
                     f"CLOB balance: ${balance:.2f} USDC\n"
@@ -521,17 +566,66 @@ def check_wallet_balance(conn) -> None:
             except Exception:
                 pass
 
+
 def _get_tracked_token_ids(conn) -> set[str]:
-    rows = conn.execute(
-        "SELECT token_id FROM live_positions WHERE status='open'"
-    ).fetchall()
+    rows = conn.execute("SELECT token_id FROM live_positions WHERE status='open'").fetchall()
     tracked = {r[0] for r in rows}
     # Also exclude tokens with active open orders (executor placed, not yet filled)
-    order_rows = conn.execute(
-        "SELECT token_id FROM live_open_orders WHERE status='live'"
-    ).fetchall()
+    order_rows = conn.execute("SELECT token_id FROM live_open_orders WHERE status='live'").fetchall()
     tracked |= {r[0] for r in order_rows}
     return tracked
+
+
+def _attribute_to_placed_order(conn, token_id: str, shares: float, entry_price: float) -> dict:
+    """Try to attribute an on-chain position to one of our placed sw- orders.
+
+    The sw_live executor places maker orders whose fills can land minutes or
+    hours later, outside the executor's post-place watch window (2026-09-22:
+    Cury 3rd-place maker filled ~11h after placement). Such a fill never
+    reaches live_positions/live_fills, so position_sync discovers the position
+    on-chain with no provenance and mislabels it "manual". Matching the token
+    (exact) plus price/size (tolerant) against live_open_orders recovers the
+    true origin.
+
+    Returns dict with keys: archetype, trigger_source, reasoning, order.
+    Never raises; on any problem returns the manual defaults.
+    """
+    default = {
+        "archetype": "manual",
+        "trigger_source": "position_sync",
+        "reasoning": ("discovered on-chain by position_sync reconciliation; not originated by a strategy executor"),
+        "order": None,
+    }
+    try:
+        rows = conn.execute(
+            "SELECT id, client_order_ref, order_id, side, price, size, status, ts "
+            "FROM live_open_orders WHERE token_id = ? ORDER BY id DESC LIMIT 5",
+            (token_id,),
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - attribution must never block registration
+        logger.warning("position_sync: attribution lookup failed for %.16s: %s", token_id, exc)
+        return default
+
+    for row in rows:
+        _row_id, ref, order_id, _side, price, size, _status, ts = row
+        if not str(ref or "").startswith("sw-"):
+            continue
+        # PM reports avgPrice/size possibly rounded; allow 1% (floored) drift.
+        price_ok = price is None or abs(float(price) - entry_price) <= max(0.01, 0.01 * entry_price)
+        size_ok = size is None or abs(float(size) - shares) <= max(0.05, 0.01 * shares)
+        if not (price_ok and size_ok):
+            continue
+        return {
+            "archetype": "smart_wallet",
+            "trigger_source": "smart_wallet",
+            "reasoning": (
+                "late maker fill attributed to sw_live executor order "
+                f"{str(order_id or '')[:16]} (placed {ts}, ref {str(ref)[:40]}); fill landed "
+                "outside the executor's post-place watch window and was reconciled here"
+            ),
+            "order": row,
+        }
+    return default
 
 
 def sync_positions(conn) -> list[dict]:
@@ -564,6 +658,10 @@ def sync_positions(conn) -> list[dict]:
         shares = float(pos.get("size", 0))
         cost_usd = float(pos.get("initialValue", entry_price * shares))
 
+        # LATE-MAKER-FILL ATTRIBUTION 2026-09-22: before labeling this "manual",
+        # check whether the token matches one of OUR placed orders (sw- refs).
+        attribution = _attribute_to_placed_order(conn, token_id, shares, entry_price)
+
         _cur = conn.execute(
             "INSERT INTO live_positions "
             "(opened_at, market_id, market_slug, market_title, token_id, side, "
@@ -581,7 +679,7 @@ def sync_positions(conn) -> list[dict]:
                 cost_usd,
                 "open",
                 0.0,
-                "manual",
+                attribution["archetype"],
             ),
         )
         # POSITION_SYNC_ENTRY_REASONING 2026-08-25: record WHY this row exists.
@@ -598,11 +696,8 @@ def sync_positions(conn) -> list[dict]:
                 commit=False,
                 position_id=_cur.lastrowid,
                 ts=datetime.now(timezone.utc).isoformat(),
-                trigger_source="position_sync",
-                reasoning=(
-                    "discovered on-chain by position_sync reconciliation; "
-                    "not originated by a strategy executor"
-                ),
+                trigger_source=attribution["trigger_source"],
+                reasoning=attribution["reasoning"],
                 raw_json=json.dumps(pos, default=str),
             )
         except Exception as _reason_exc:  # noqa: BLE001 - audit must not block sync
@@ -612,17 +707,59 @@ def sync_positions(conn) -> list[dict]:
                 _reason_exc,
             )
         conn.commit()
-        logger.info("position_sync: registered manual position %s @ %.2f", market_title, entry_price)
+        logger.info(
+            "position_sync: registered %s position %s @ %.2f",
+            attribution["archetype"],
+            market_title,
+            entry_price,
+        )
 
-        new_positions.append({
-            "title": market_title,
-            "token_id": token_id,
-            "entry_price": entry_price,
-            "shares": shares,
-            "cost_usd": cost_usd,
-            "cur_price": float(pos.get("curPrice", entry_price)),
-            "cash_pnl": float(pos.get("cashPnl", 0)),
-        })
+        # Backfill the missing fill row + flip the order status so the ledger
+        # reflects reality (the executor's watch window missed this fill).
+        if attribution["order"] is not None:
+            try:
+                from execution.live_db import record_fill
+
+                _ord = attribution["order"]
+                record_fill(
+                    conn,
+                    commit=False,
+                    ts=datetime.now(timezone.utc).isoformat(),
+                    position_id=_cur.lastrowid,
+                    order_id=str(_ord[2] or ""),
+                    side="BUY",
+                    liquidity="maker",
+                    price=entry_price,
+                    shares=shares,
+                    usd=round(cost_usd, 4),
+                    fee_paid=0.0,
+                    fair_price=entry_price,
+                    slippage_vs_fair=0.0,
+                )
+                conn.execute(
+                    "UPDATE live_open_orders SET status='filled' WHERE id=?",
+                    (_ord[0],),
+                )
+                conn.commit()
+                logger.info(
+                    "position_sync: attributed %.40s to sw order %.16s — fill backfilled, order marked filled",
+                    market_title,
+                    str(_ord[2]),
+                )
+            except Exception as _fill_exc:  # noqa: BLE001 - backfill must not block registration
+                logger.warning("position_sync: late-fill backfill failed for %.40s: %s", market_title, _fill_exc)
+
+        new_positions.append(
+            {
+                "title": market_title,
+                "token_id": token_id,
+                "entry_price": entry_price,
+                "shares": shares,
+                "cost_usd": cost_usd,
+                "cur_price": float(pos.get("curPrice", entry_price)),
+                "cash_pnl": float(pos.get("cashPnl", 0)),
+            }
+        )
 
     return new_positions
 
@@ -631,45 +768,58 @@ def sync_open_orders(conn) -> dict:
     """Reconcile live_open_orders against CLOB.
 
     Fetches current open orders from CLOB via SDK, compares against DB rows
-    with status='live'. Any DB-live orders NOT in CLOB are marked 'cancelled'
-    (filled externally, expired, or cancelled elsewhere).
+    with status='live'. Any DB-live orders NOT in CLOB are classified: if the
+    CLOB reports the order fully filled (size_matched >= original_size) it is
+    marked 'filled', otherwise 'cancelled' (2026-09-22: filled maker orders
+    were previously mislabeled 'cancelled').
 
-    Returns: {'reconciled': N, 'cancelled_stale': N}
+    Returns: {'reconciled': N, 'cancelled_stale': N, 'filled_stale': N}
     """
     try:
-        from execution.clob_client import _get_client
+        from execution.clob_client import _get_client, get_order, order_is_filled
+
         client = _get_client()
         clob_orders = list(client.list_open_orders())
         clob_ids = {str(getattr(o, "id", "") or "") for o in clob_orders}
     except Exception as exc:
         logger.warning("position_sync: sync_open_orders CLOB fetch failed: %s", exc)
-        return {"reconciled": 0, "cancelled_stale": 0, "error": str(exc)}
+        return {"reconciled": 0, "cancelled_stale": 0, "filled_stale": 0, "error": str(exc)}
 
-    db_rows = conn.execute(
-        "SELECT id, order_id, token_id FROM live_open_orders WHERE status='live'"
-    ).fetchall()
+    db_rows = conn.execute("SELECT id, order_id, token_id FROM live_open_orders WHERE status='live'").fetchall()
 
     cancelled_stale = 0
+    filled_stale = 0
     for row in db_rows:
         db_order_id = str(row[1] or "")
         if db_order_id and db_order_id not in clob_ids:
+            filled = False
+            try:
+                filled = order_is_filled(get_order(db_order_id))
+            except Exception as probe_exc:  # noqa: BLE001 - classify best-effort
+                logger.warning("position_sync: order-status probe failed for %.16s: %s", db_order_id, probe_exc)
+            new_status = "filled" if filled else "cancelled"
             conn.execute(
-                "UPDATE live_open_orders SET status='cancelled' WHERE id=?",
-                (row[0],)
+                "UPDATE live_open_orders SET status=? WHERE id=?",
+                (new_status, row[0]),
             )
-            cancelled_stale += 1
-            logger.info("position_sync: stale order %s not in CLOB → marked cancelled", db_order_id[:16])
+            if filled:
+                filled_stale += 1
+                logger.info("position_sync: order %.16s fully filled → marked filled", db_order_id)
+            else:
+                cancelled_stale += 1
+                logger.info("position_sync: stale order %.16s not in CLOB → marked cancelled", db_order_id)
 
-    if cancelled_stale:
+    if cancelled_stale or filled_stale:
         conn.commit()
 
-    return {"reconciled": len(db_rows), "cancelled_stale": cancelled_stale}
+    return {"reconciled": len(db_rows), "cancelled_stale": cancelled_stale, "filled_stale": filled_stale}
 
 
 def run() -> dict:
     """Entry point called by scheduler. Returns summary dict."""
     try:
         from execution import live_db
+
         conn = live_db.connect()
     except Exception as exc:
         logger.warning("position_sync: db connect failed: %s", exc)
@@ -681,6 +831,7 @@ def run() -> dict:
         if resolved:
             try:
                 from scripts.alert_formatter import send_telegram
+
                 for r in resolved:
                     pnl_str = f"${r['pnl']:+.2f}"
                     # Time held
@@ -689,6 +840,7 @@ def run() -> dict:
                     if opened:
                         try:
                             from datetime import datetime, timezone
+
                             opened_dt = datetime.fromisoformat(opened)
                             held_h = (datetime.now(timezone.utc) - opened_dt).total_seconds() / 3600
                             time_held = f" | Held {held_h:.1f}h"
@@ -710,17 +862,16 @@ def run() -> dict:
         # Fill reconciliation from the canary re-launch onward (June/July history
         # predates the live_fills table and would false-alarm forever).
         try:
-            check_fill_reconciliation(conn, since_ts=_FILL_RECON_SINCE_TS,
-                                      db_cutoff_iso=_FILL_RECON_DB_CUTOFF)
+            check_fill_reconciliation(conn, since_ts=_FILL_RECON_SINCE_TS, db_cutoff_iso=_FILL_RECON_DB_CUTOFF)
         except Exception as recon_exc:
             logger.warning("position_sync: fill reconciliation failed: %s", recon_exc)
 
         # Sync bankroll: CLOB liquid + deployed cost = true bankroll
         try:
+            from execution import live_config, live_db
             from execution.clob_client import _get_client
-            from execution import live_db
             from execution.risk_governor import RiskGovernor
-            from execution import live_config
+
             clob_bal_raw = _get_client().get_balance_allowance(asset_type="COLLATERAL").balance
             clob_liquid = float(clob_bal_raw) / 1e6
             # deployed = sum of cost_usd for open live positions
@@ -745,6 +896,7 @@ def run() -> dict:
                 realized_pnl_from_ledger,
                 unrealized_loss_from_snapshot,
             )
+
             ledger_realized, _ = realized_pnl_from_ledger(conn)
             daily_loss = realized_loss_today(conn)
             unrealized_loss = unrealized_loss_from_snapshot(conn)
@@ -753,25 +905,38 @@ def run() -> dict:
             # UTC midnight, so it self-zeroes overnight. reset_day() has no
             # other caller anywhere in the tree, so without this the FIRST trip
             # would become a permanent unattended halt.
-            if (gov.state() == "DAILY_HALT"
-                    and daily_loss + unrealized_loss < live_config.daily_loss_halt()):
-                logger.info("position_sync: clearing stale DAILY_HALT "
-                            "(daily_loss $%.2f + unrealized $%.2f < limit $%.2f)",
-                            daily_loss, unrealized_loss, live_config.daily_loss_halt())
+            if gov.state() == "DAILY_HALT" and daily_loss + unrealized_loss < live_config.daily_loss_halt():
+                logger.info(
+                    "position_sync: clearing stale DAILY_HALT (daily_loss $%.2f + unrealized $%.2f < limit $%.2f)",
+                    daily_loss,
+                    unrealized_loss,
+                    live_config.daily_loss_halt(),
+                )
                 gov.reset_day()
 
             # ONE write transaction for the whole sync (was four). Batching also
             # makes the DAILY_HALT decision see a consistent snapshot instead of
             # depending on setter order. See RiskGovernor.apply_sync.
-            gov.apply_sync(bankroll=true_bankroll, deployed_usd=deployed,
-                           realized_pnl=ledger_realized, daily_loss=daily_loss,
-                           unrealized_loss=unrealized_loss)
+            gov.apply_sync(
+                bankroll=true_bankroll,
+                deployed_usd=deployed,
+                realized_pnl=ledger_realized,
+                daily_loss=daily_loss,
+                unrealized_loss=unrealized_loss,
+            )
 
             gov_conn.close()
-            logger.info("position_sync: bankroll synced → $%.2f (liquid $%.2f + deployed $%.2f) | "
-                        "realized $%.2f daily_loss $%.2f unrealized_loss $%.2f state %s",
-                        true_bankroll, clob_liquid, deployed,
-                        ledger_realized, daily_loss, unrealized_loss, gov.state())
+            logger.info(
+                "position_sync: bankroll synced → $%.2f (liquid $%.2f + deployed $%.2f) | "
+                "realized $%.2f daily_loss $%.2f unrealized_loss $%.2f state %s",
+                true_bankroll,
+                clob_liquid,
+                deployed,
+                ledger_realized,
+                daily_loss,
+                unrealized_loss,
+                gov.state(),
+            )
         except Exception as bk_exc:
             logger.debug("position_sync: bankroll sync failed: %s", bk_exc)
 
@@ -784,21 +949,27 @@ def run() -> dict:
         if new:
             try:
                 from scripts.alert_formatter import send_telegram
+
                 for p in new:
                     pnl = p["cash_pnl"]
                     pnl_str = f"${pnl:+.2f}" if pnl else "~$0.00"
                     lines = [
-                        f"\U0001f4e1 <b>MANUAL POSITION DETECTED</b>",
+                        "\U0001f4e1 <b>MANUAL POSITION DETECTED</b>",
                         f"Market: {p['title']}",
                         f"Side: BUY | Entry: {p['entry_price']:.2f} | Now: {p['cur_price']:.2f}",
                         f"Shares: {p['shares']:.1f} | Cost: ${p['cost_usd']:.2f} | PnL: {pnl_str}",
-                        f"<i>Registered in live_positions — stop evaluator now active.</i>",
+                        "<i>Registered in live_positions — stop evaluator now active.</i>",
                     ]
                     send_telegram("\n".join(lines))
             except Exception as tg_exc:
                 logger.warning("position_sync: telegram alert failed: %s", tg_exc)
 
-        return {"new": len(new), "resolved": len(resolved), "cancelled_stale": order_sync.get("cancelled_stale", 0), "titles": [p["title"] for p in new]}
+        return {
+            "new": len(new),
+            "resolved": len(resolved),
+            "cancelled_stale": order_sync.get("cancelled_stale", 0),
+            "titles": [p["title"] for p in new],
+        }
     except Exception as exc:
         logger.error("position_sync: sync failed: %s", exc)
         return {"new": 0, "error": str(exc)}
