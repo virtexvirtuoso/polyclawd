@@ -83,6 +83,8 @@ def test_select_replaces_same_day_snapshot(env):
 
 
 def test_current_allowlist_fresh_lowercased(env):
+    for _ in range(12):
+        _add(env, "0xAAA", 5, 0.30, "WIN")
     wa.select()
     got = wa.current_allowlist()
     assert got == {"0xaaa"}
@@ -105,6 +107,8 @@ def test_page_tier_for_promotes_allowlisted(env, monkeypatch):
 
     monkeypatch.setattr(ad, "TIER_BATCH", 2, raising=False)
     monkeypatch.setattr(ad, "TIER_DIGEST", 3, raising=False)
+    for _ in range(12):
+        _add(env, "0xAAA", 5, 0.30, "WIN")
     wa.select()
     assert wa.page_tier_for("0xAAA", "entry") == 2
     assert wa.page_tier_for("0xaaa", "refire") == 2
@@ -119,6 +123,8 @@ def test_page_tier_for_failsafe_on_missing_state(env, monkeypatch):
 
 
 def test_allowlisted_at_uses_latest_snapshot_before_ts(env):
+    for _ in range(12):
+        _add(env, "0xAAA", 5, 0.30, "WIN")
     wa.select()
     snaps = json.loads(Path(wa._snapshots_path()).read_text())["snapshots"]
     s = snaps[0]
