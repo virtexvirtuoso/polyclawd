@@ -117,6 +117,7 @@ _QUEUE_DDL = (
 
 def _make_queue_db(path, n_tier3):
     con = sqlite3.connect(str(path))
+    con.execute("DROP TABLE IF EXISTS alert_queue")
     con.execute(_QUEUE_DDL)
     con.executemany(
         "INSERT INTO alert_queue (ts, pipeline, tier, message, shadow) VALUES (?,?,?,?,0)",
@@ -128,6 +129,7 @@ def _make_queue_db(path, n_tier3):
 
 def _make_shadow_db(path, last_ts):
     con = sqlite3.connect(str(path))
+    con.execute("DROP TABLE IF EXISTS smart_wallet_shadows")
     con.execute("CREATE TABLE smart_wallet_shadows (id INTEGER PRIMARY KEY, ts_alert INTEGER)")
     if last_ts is not None:
         con.execute("INSERT INTO smart_wallet_shadows (ts_alert) VALUES (?)", (last_ts,))

@@ -170,7 +170,7 @@ def main() -> None:
     out = {"refire_stats": refire_stats(con)}
     if not args.skip_grader:
         out["grader_check"] = grader_check(con, args.grader_n)
-    out["backlog_triage"] = triage(con, args.triage_full, args.triage_n if hasattr(args, "triage_sample") else args.triage_n)
+    out["backlog_triage"] = triage(con, args.triage_full, args.triage_sample)
     if args.apply:
         out["resolver_pass"] = apply_resolver(con)
     con.close()
