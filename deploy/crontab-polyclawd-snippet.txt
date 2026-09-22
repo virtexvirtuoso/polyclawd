@@ -1,0 +1,14 @@
+# Polyclawd VPS crontab — alert-durability entries (documented 2026-09-21)
+# Live location: linuxuser@vps `crontab -l`. Recovery: re-add these lines after
+# a prod rebuild, and restore the script from deploy/alert-digest-drain.sh to
+# /home/linuxuser/bin/alert-digest-drain.sh (chmod +x, chown linuxuser).
+
+# Tier-3 digest flusher — 10:00 / 23:30 ET (14:00 / 03:30 UTC). Installed 2026-08-19 (Gate 2).
+0 14 * * * /home/linuxuser/bin/alert-digest-drain.sh >> /home/linuxuser/logs/alert-digest.log 2>&1
+30 3 * * * /home/linuxuser/bin/alert-digest-drain.sh >> /home/linuxuser/logs/alert-digest.log 2>&1
+
+# Send-ledger watchdog — hourly failure-rate mode + daily full scan.
+# Since 2026-09-21 the script also carries the digest-liveness + shadow-stall
+# dead-man switches (run on every invocation; see scripts/send_ledger_watchdog.py).
+5 * * * * cd /var/www/virtuosocrypto.com/polyclawd && set -a && . /home/linuxuser/.config/polyclawd/alerts.env && set +a && venv/bin/python3 scripts/send_ledger_watchdog.py --hours 1 --min-rate 0.10 >> /var/www/virtuosocrypto.com/polyclawd/logs/send_ledger_watchdog.log 2>&1
+30 13 * * * cd /var/www/virtuosocrypto.com/polyclawd && set -a && . /home/linuxuser/.config/polyclawd/alerts.env && set +a && venv/bin/python3 scripts/send_ledger_watchdog.py >> logs/send_ledger_watchdog.log 2>&1
