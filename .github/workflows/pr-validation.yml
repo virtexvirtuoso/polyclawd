@@ -83,6 +83,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -93,11 +95,20 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev
 
-      - name: Run linter
-        run: uv run ruff check .
-
-      - name: Check formatting
-        run: uv run ruff format --check .
+      # Ratchet policy: only files changed by this PR must be clean. Repo-wide
+      # lint debt (~6.9k pre-existing violations) shrinks as files are touched
+      # instead of demanding a mass rewrite of live trading code.
+      - name: Lint changed Python files
+        run: |
+          BASE="origin/${{ github.base_ref }}"
+          CHANGED=$(git diff --name-only --diff-filter=ACMRTUXB "$BASE"...HEAD | grep '\.py$' || true)
+          if [ -z "$CHANGED" ]; then
+            echo "No Python files changed - lint skipped."
+            exit 0
+          fi
+          echo "Linting changed files:"
+          echo "$CHANGED"
+          uv run ruff check $CHANGED
 
   format:
     name: Code Quality (Formatting)
@@ -105,6 +116,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -115,5 +128,14 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev
 
-      - name: Check formatting
-        run: uv run ruff format --check .
+      - name: Check formatting of changed Python files
+        run: |
+          BASE="origin/${{ github.base_ref }}"
+          CHANGED=$(git diff --name-only --diff-filter=ACMRTUXB "$BASE"...HEAD | grep '\.py$' || true)
+          if [ -z "$CHANGED" ]; then
+            echo "No Python files changed - format check skipped."
+            exit 0
+          fi
+          echo "Format-checking changed files:"
+          echo "$CHANGED"
+          uv run ruff format --check $CHANGED
