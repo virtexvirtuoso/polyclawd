@@ -18,3 +18,10 @@
 # entry/refire alerts to tier-2 batched pages (fail-safe to digest if the
 # snapshot file is missing or >48h stale).
 45 2 * * * cd /var/www/virtuosocrypto.com/polyclawd && venv/bin/python3 scripts/wallet_allowlist.py select >> logs/wallet_allowlist.log 2>&1
+
+# Wallet-allowlist gate check — weekly forward-test verdict to Telegram
+# (Sundays 09:00 ET / 13:00 UTC). Sends the pre-registered gate verdict +
+# scoreboard via alert_openclaw; a failed check pages with the error instead
+# of failing silently. PASS is a recommendation only — live revival needs
+# Mr. V's explicit go.
+0 13 * * 0 cd /var/www/virtuosocrypto.com/polyclawd && set -a && . /home/linuxuser/.config/polyclawd/alerts.env && set +a && venv/bin/python3 scripts/wallet_allowlist_gate_check.py >> logs/wallet_allowlist_gate_check.log 2>&1
