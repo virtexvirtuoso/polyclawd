@@ -103,7 +103,7 @@ def test_current_allowlist_missing_file_failsafe(env):
 
 
 def test_page_tier_for_promotes_allowlisted(env, monkeypatch):
-    import scripts.alert_dispatch as ad
+    import signals.alert_dispatch as ad
 
     monkeypatch.setattr(ad, "TIER_BATCH", 2, raising=False)
     monkeypatch.setattr(ad, "TIER_DIGEST", 3, raising=False)
