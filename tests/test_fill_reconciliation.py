@@ -101,3 +101,20 @@ def test_clears_on_healthy_then_realerts(conn, monkeypatch):
     monkeypatch.setattr(ps, "_fetch_trade_activity_usd", lambda since_ts: (3, 25.0))
     ps.check_fill_reconciliation(conn, since_ts=0)
     assert len(alerts) == 2, "healthy clear must reset the cooldown"
+
+
+def test_count_only_drift_matching_usd_no_alert(conn, monkeypatch):
+    """Braves 2026-09-20 class: one order crossed two maker prints on-chain,
+    recorded as one aggregated live_fills row - count drift, zero value drift."""
+    conn.execute(
+        "INSERT INTO live_fills (ts, side, price, shares, usd, fee_paid)"
+        " VALUES ('2026-09-20T18:57:26+00:00','BUY',0.59,8.348537,4.92563683,0)"
+    )
+    conn.commit()
+    alerts = []
+    monkeypatch.setattr(ps, "_alert_fill_drift", lambda msg: alerts.append(msg))
+    # Two chain prints, same second, summing to the recorded fill.
+    monkeypatch.setattr(ps, "_fetch_trade_activity_usd", lambda since_ts: (2, 4.925637))
+    drift = ps.check_fill_reconciliation(conn, since_ts=0)
+    assert drift["chain_trades"] == 2 and drift["db_fills"] == 1
+    assert alerts == [], "count-only drift with matching usd must not page"

@@ -222,7 +222,10 @@ def _alert_fill_drift(msg: str) -> None:
 def check_fill_reconciliation(conn, since_ts: int = 0,
                               db_cutoff_iso: str = "1970-01-01T00:00:00+00:00") -> dict:
     """Compare on-chain TRADE activity vs recorded live_fills since a cutoff.
-    Untracked fills (June Mariners class) show up as chain > db. Alerts are
+    Pages on VALUE drift only: chain counts match-events while live_fills
+    records per-order fills, so split prints (one order crossing several
+    maker orders) are count-drift with matching dollars - logged, not paged.
+    Untracked fills (June Mariners class) differ in dollars too. Alerts are
     cooldown-guarded (mirrors check_wallet_balance) so persistent drift pages
     once per hour, not once per 5-minute cycle."""
     import os, time
@@ -238,9 +241,20 @@ def check_fill_reconciliation(conn, since_ts: int = 0,
     db_n, db_usd = int(row[0]), float(row[1] or 0)
     drift = {"chain_trades": chain_n, "db_fills": db_n,
              "chain_usd": round(chain_usd, 2), "db_usd": round(db_usd, 2)}
-    drifted = chain_n != db_n or abs(chain_usd - db_usd) > _FILL_RECON_TOLERANCE_USD
+    # Page on VALUE drift only. Chain counts match-events; live_fills records
+    # per-order fills, so one order crossing multiple maker prints (Braves
+    # 2026-09-20: $2.7671 + $2.158537 same second, one db row) shows count
+    # drift with zero value drift - not untracked money. The June Mariners
+    # catch had real value drift and still pages.
+    drifted = abs(chain_usd - db_usd) > _FILL_RECON_TOLERANCE_USD
 
     if not drifted:
+        if chain_n != db_n:
+            logger.info(
+                "position_sync: count-only fill drift (chain %d vs db %d, "
+                "usd match $%.2f) - split on-chain prints; not paging",
+                chain_n, db_n, chain_usd,
+            )
         try:
             if os.path.exists(_FILL_DRIFT_ALERT_FILE):
                 os.remove(_FILL_DRIFT_ALERT_FILE)
