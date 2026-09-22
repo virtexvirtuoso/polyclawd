@@ -10,6 +10,7 @@ Wallet-Allowlist-Forward-Test-2026-09-21.md.
 A PASS verdict changes NOTHING automatically — it is a recommendation that
 requires Mr. V's explicit go to revive the live book.
 """
+
 import contextlib
 import io
 import re

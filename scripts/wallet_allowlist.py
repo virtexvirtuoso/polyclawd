@@ -28,6 +28,7 @@ Usage:
     venv/bin/python3 scripts/wallet_allowlist.py report
     venv/bin/python3 scripts/wallet_allowlist.py current
 """
+
 import argparse
 import json
 import os

@@ -130,10 +130,10 @@ def check_degraded(path: Path, dry: bool) -> None:
 # mlb_prop_gate2_report share the 14:00-UTC cron window and would mask a dead
 # digest (both flaws proven in the 2026-09-21 pre-execution review).
 
-DIGEST_STALE_H = 26.0         # flushes <=10.5h apart; 26h = two missed flushes
+DIGEST_STALE_H = 26.0  # flushes <=10.5h apart; 26h = two missed flushes
 DIGEST_ERROR_WINDOW_H = 26.0  # any error line newer than this pages
-QUEUE_MAX = 60                # healthy max ~35 at observed ~80 alerts/day
-SHADOW_STALL_H = 36.0         # largest legit inter-alert gap ever: 27.5h (Jun 29)
+QUEUE_MAX = 60  # healthy max ~35 at observed ~80 alerts/day
+SHADOW_STALL_H = 36.0  # largest legit inter-alert gap ever: 27.5h (Jun 29)
 REPAGE_COOLDOWN_H = 12.0
 
 _TS_LINE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s+(.*)$")

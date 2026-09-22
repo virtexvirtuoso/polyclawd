@@ -17,6 +17,7 @@ Usage:
     venv/bin/python3 scripts/refire_reaudit.py --triage-full    # dry-run settler over ALL unresolved (slow, CLOB)
     venv/bin/python3 scripts/refire_reaudit.py --apply          # after triage: run the real resolver pass
 """
+
 import argparse
 import json
 import random
@@ -87,8 +88,7 @@ def grader_check(con, n_sample: int) -> dict:
     from scripts.smart_wallet_alert import settle_via_market_resolution
 
     rows = con.execute(
-        "SELECT * FROM smart_wallet_shadows WHERE alert_type='refire' AND resolved=1 "
-        "ORDER BY RANDOM() LIMIT ?",
+        "SELECT * FROM smart_wallet_shadows WHERE alert_type='refire' AND resolved=1 ORDER BY RANDOM() LIMIT ?",
         (n_sample,),
     ).fetchall()
     checked = agree = 0
@@ -111,7 +111,13 @@ def grader_check(con, n_sample: int) -> dict:
             disagreements.append({"id": d["id"], "stored": d["outcome_result"], "fresh": fresh})
         time.sleep(0.25)
     rate = round(agree / checked, 3) if checked else None
-    return {"sampled": len(rows), "checked": checked, "agree": agree, "agreement": rate, "disagreements": disagreements[:10]}
+    return {
+        "sampled": len(rows),
+        "checked": checked,
+        "agree": agree,
+        "agreement": rate,
+        "disagreements": disagreements[:10],
+    }
 
 
 def triage(con, full: bool, sample_n: int) -> dict:
