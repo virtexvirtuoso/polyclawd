@@ -97,7 +97,7 @@ def test_late_maker_fill_attributed_to_sw_order(conn, monkeypatch):
     ).fetchone()
     assert reason[0] == "smart_wallet"
     assert "late maker fill attributed" in reason[1]
-    assert "0xe5f96b1fa82f610e" in reason[1]
+    assert "0xe5f96b1fa82f61" in reason[1]  # 16-char order-id prefix, as written by the code
     fill = conn.execute("SELECT position_id, liquidity, price, shares, order_id FROM live_fills").fetchone()
     assert fill[0] == 1
     assert fill[1] == "maker"
