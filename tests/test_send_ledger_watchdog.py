@@ -6,16 +6,19 @@ Forged ledger lines in a temp file via POLYCLAWD_LEDGER_PATH; sends monkeypatche
 """
 
 import json
+import os
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import scripts.send_ledger_watchdog as wd
 import scripts.openclaw_alerts as oa
+import scripts.send_ledger_watchdog as wd
 
 
 def forge_ledger(path: Path, n_ok: int, n_fail: int, minutes_ago: float = 5.0):
@@ -91,11 +94,9 @@ def test_old_rows_outside_window_ignored(run):
     forge_ledger(ledger, n_ok=0, n_fail=5, minutes_ago=120)  # outside 1h window
     sent = go(["--hours", "1", "--min-rate", "0.10"])
     assert sent == []
-# --- Digest liveness + shadow stall (2026-09-21 durability plan) ------------
 
-import os
-import sqlite3
-from types import SimpleNamespace
+
+# --- Digest liveness + shadow stall (2026-09-21 durability plan) ------------
 
 
 def _hb(hours_ago, batches=1):
@@ -199,9 +200,7 @@ def test_digest_liveness_missing_log_alarms(liveness):
 def test_digest_liveness_missing_log_fresh_state_silent(liveness):
     """Logrotate ate the log but state recorded a fresh heartbeat -> silent."""
     liveness.digest_log.unlink()
-    liveness.state.write_text(
-        json.dumps({"heartbeat_ts": datetime.now(timezone.utc).timestamp() - 3600, "pages": {}})
-    )
+    liveness.state.write_text(json.dumps({"heartbeat_ts": datetime.now(timezone.utc).timestamp() - 3600, "pages": {}}))
     assert wd.check_digest_liveness() == []
 
 
