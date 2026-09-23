@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# post-merge — git runs THIS, not post-commit, after `git merge` / `git pull` (incl.
+# fast-forwards, which create no commit at all). Without it a merge on the writer
+# never auto-pushes. The push itself lives only in post-commit, so the two can't drift.
+#   $1 = 1 for `git merge --squash`: nothing is committed yet; the commit that follows
+#        fires post-commit, which pushes it.
+# Replicas: post-commit's writer-role guard makes this a no-op on every non-writer clone.
+set -u
+
+[ "${1:-0}" = 1 ] && exit 0                               # squash: post-commit will push
+
+branch=$(git symbolic-ref --short -q HEAD) || exit 0      # detached HEAD: nothing to mirror
+# Fast-forward TO origin (session-start's ff, `git pull`): origin already has HEAD.
+git merge-base --is-ancestor HEAD "refs/remotes/origin/$branch" 2>/dev/null && exit 0
+
+exec "$(dirname "$0")/post-commit"

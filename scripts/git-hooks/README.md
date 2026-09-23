@@ -15,6 +15,7 @@ git config virtuoso.notify ~/bin/infra-notify   # optional: host-local Telegram 
 | Hook | Runs on | Does |
 |---|---|---|
 | `post-commit` | writer | `git push origin <branch>` in the background; logs to `.git/hooks-push.log`; notifies on failure |
+| `post-merge` | writer | same push, for `git merge`/`pull` (git runs post-merge, not post-commit, there); delegates to `post-commit`; skips squash (arg 1) and fast-forwards to what origin already has |
 | `pre-commit` | all | replica: refuses commits on `main` (feature branch → PR is the only path). all: refuses `*.bak`, `*.pre-*`, `*_old*` files — git is the backup |
 | `session-start.sh` | all (Claude Code `SessionStart`) | bootstraps git config, `fetch`, fast-forwards a clean tree, prints `git status -sb` so every session opens knowing where it stands |
 

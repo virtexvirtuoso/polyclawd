@@ -15,7 +15,7 @@ setdef core.hooksPath scripts/git-hooks
 setdef pull.ff only
 setdef fetch.prune true
 setdef push.autoSetupRemote true
-chmod +x scripts/git-hooks/post-commit scripts/git-hooks/pre-commit 2>/dev/null
+chmod +x scripts/git-hooks/post-commit scripts/git-hooks/post-merge scripts/git-hooks/pre-commit 2>/dev/null
 
 role=$(git config --get virtuoso.role || echo replica)
 branch=$(git symbolic-ref --short -q HEAD || echo detached)
