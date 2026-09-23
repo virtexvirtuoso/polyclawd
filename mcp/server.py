@@ -16,7 +16,7 @@ import re
 import sys
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -228,12 +228,12 @@ def _extract_params(schema: dict, openapi_spec: dict) -> dict:
 # ── auto-discovery ───────────────────────────────────────────────────────
 
 
-def build_tools(spec: dict) -> List[dict]:
+def build_tools(spec: dict) -> list[dict]:
     """Filter the OpenAPI spec to the curated ALLOWLIST and emit MCP tool defs.
 
     Guard order: ALLOWLIST first -> curated name -> dedup on final name.
     """
-    tools: List[dict] = []
+    tools: list[dict] = []
     seen_names: set = set()
     paths = spec.get("paths", {})
     for path in sorted(paths):
@@ -267,7 +267,7 @@ def build_tools(spec: dict) -> List[dict]:
     return tools
 
 
-def _save_cached_tools(tools: List[dict]) -> None:
+def _save_cached_tools(tools: list[dict]) -> None:
     """Atomically persist the discovered manifest (tmp + os.replace; iCloud-safe)."""
     try:
         tmp = str(CACHE_PATH) + ".tmp"
@@ -278,7 +278,7 @@ def _save_cached_tools(tools: List[dict]) -> None:
         logger.warning("tool cache write failed: %s", e)
 
 
-def _load_cached_tools() -> List[dict]:
+def _load_cached_tools() -> list[dict]:
     """Serve cached manifest when OpenAPI fetch fails; never silently expose zero tools."""
     try:
         with open(CACHE_PATH) as f:
@@ -290,7 +290,7 @@ def _load_cached_tools() -> List[dict]:
         return []
 
 
-def discover_tools(base_url: str = None) -> List[dict]:
+def discover_tools(base_url: str = None) -> list[dict]:
     """Fetch OpenAPI spec and build curated tools; fall back to cache on failure."""
     url = (base_url or BASE_URL).rstrip("/") + "/api/openapi.json"
     try:
@@ -308,8 +308,8 @@ def discover_tools(base_url: str = None) -> List[dict]:
 
 # ── global tool registry (populated on first use) ───────────────────────
 
-TOOLS: List[dict] = []
-_TOOL_MAP: Dict[str, dict] = {}
+TOOLS: list[dict] = []
+_TOOL_MAP: dict[str, dict] = {}
 
 
 def _ensure_tools():
@@ -321,7 +321,7 @@ def _ensure_tools():
     _TOOL_MAP = {t["name"]: t for t in TOOLS}
 
 
-def get_tools() -> List[dict]:
+def get_tools() -> list[dict]:
     """Return tool definitions (without internal fields)."""
     _ensure_tools()
     return [{k: v for k, v in t.items() if not k.startswith("_")} for t in TOOLS]

@@ -167,7 +167,7 @@ def test_stdio_server_lists_26_and_calls_signals():
         assert all(t["name"].startswith("polyclawd_") for t in tools)
         # curated descriptions match TOOL_META exactly
         names_to_desc = {t["name"]: t["description"] for t in tools}
-        for path, (name, desc) in server.TOOL_META.items():
+        for _path, (name, desc) in server.TOOL_META.items():
             assert names_to_desc[name] == desc
         # call one tool, assert envelope + real data
         called = _rpc(
