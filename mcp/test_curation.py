@@ -39,8 +39,9 @@ def test_build_tools_filters_to_allowlist_and_curates():
     assert by_path["/api/whale/outcomes"]["_method"] == "get"
 
 
-def test_allowlist_and_tool_meta_cover_same_25_paths():
-    assert len(server.ALLOWLIST) == 25
+def test_allowlist_and_tool_meta_cover_same_26_paths():
+    assert len(server.ALLOWLIST) == 26
+    assert "/api/portfolio/status" in server.ALLOWLIST
     assert set(server.TOOL_META) == server.ALLOWLIST  # every allowlisted path has curated meta
 
 
@@ -154,7 +155,7 @@ def _rpc(proc, obj):
 
 
 @pytest.mark.skipif(not _api_up(), reason="public Polyclawd API unreachable")
-def test_stdio_server_lists_25_and_calls_signals():
+def test_stdio_server_lists_26_and_calls_signals():
     proc = subprocess.Popen(
         [sys.executable, SERVER], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1
     )
@@ -162,11 +163,11 @@ def test_stdio_server_lists_25_and_calls_signals():
         _rpc(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
         listed = _rpc(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         tools = listed["result"]["tools"]
-        assert len(tools) == 25
+        assert len(tools) == 26
         assert all(t["name"].startswith("polyclawd_") for t in tools)
         # curated descriptions match TOOL_META exactly
         names_to_desc = {t["name"]: t["description"] for t in tools}
-        for path, (name, desc) in server.TOOL_META.items():
+        for _path, (name, desc) in server.TOOL_META.items():
             assert names_to_desc[name] == desc
         # call one tool, assert envelope + real data
         called = _rpc(
