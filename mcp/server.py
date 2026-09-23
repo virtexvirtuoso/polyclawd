@@ -11,9 +11,13 @@ HTTP transport:   imported by http_server.py (FastMCP wrapper)
 
 import json
 import logging
+import os
 import re
 import sys
+import threading
+import time
 import urllib.request
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -136,17 +140,101 @@ def _extract_params(schema: dict, openapi_spec: dict) -> dict:
     return {"type": "object", "properties": properties, "required": required}
 
 
-# ── auto-discovery ───────────────────────────────────────────────────────
+# ── OpenAPI spec cache ───────────────────────────────────────────────────
+# The API serves this 162 KB document in 21-34s, which overruns the 20s budget
+# an MCP client allows for `initialize`.  Keep the spec on disk, serve it from
+# there, and refresh it in the background so no startup path blocks on the
+# network.
 
-def discover_tools(base_url: str = None) -> List[dict]:
-    """Fetch OpenAPI spec and convert GET endpoints to MCP tool definitions."""
+CACHE_DIR = Path(os.environ.get(
+    "POLYCLAWD_CACHE_DIR", Path.home() / ".cache" / "polyclawd"))
+SPEC_CACHE = CACHE_DIR / "openapi.json"
+SPEC_TTL_SECONDS = 24 * 3600
+SPEC_FETCH_TIMEOUT = 60
+
+_spec_lock = threading.Lock()
+
+
+def _fetch_spec(base_url: str = None) -> Optional[dict]:
     url = (base_url or BASE_URL).rstrip("/") + "/api/openapi.json"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd-MCP/2.1"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            spec = json.loads(resp.read().decode())
+        with urllib.request.urlopen(req, timeout=SPEC_FETCH_TIMEOUT) as resp:
+            return json.loads(resp.read().decode())
     except Exception as e:
         logger.error("Failed to fetch OpenAPI spec from %s: %s", url, e)
+        return None
+
+
+def _read_spec_cache():
+    """Return (spec, age_seconds), or (None, None) when there is no usable cache."""
+    try:
+        if not SPEC_CACHE.is_file():
+            return None, None
+        age = time.time() - SPEC_CACHE.stat().st_mtime
+        return json.loads(SPEC_CACHE.read_text()), age
+    except Exception as e:
+        logger.warning("Ignoring unreadable spec cache %s: %s", SPEC_CACHE, e)
+        return None, None
+
+
+def _write_spec_cache(spec: dict) -> None:
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = SPEC_CACHE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(spec))
+        os.replace(tmp, SPEC_CACHE)
+    except Exception as e:
+        logger.warning("Could not write spec cache %s: %s", SPEC_CACHE, e)
+
+
+def _refresh_spec_cache() -> None:
+    """Fetch the spec and update the cache.  Safe to call from a thread."""
+    with _spec_lock:
+        spec = _fetch_spec()
+        if spec:
+            _write_spec_cache(spec)
+
+
+def warm_spec_cache_async() -> None:
+    """Refresh the cache off the critical path."""
+    threading.Thread(target=_refresh_spec_cache, name="spec-refresh", daemon=True).start()
+
+
+def _load_spec(base_url: str = None) -> Optional[dict]:
+    """Return the OpenAPI spec, preferring the on-disk cache.
+
+    A non-default base_url bypasses the cache entirely, so callers pointing at
+    another host (or at an unreachable one, as the curation tests do) always
+    see that host's real answer.
+    """
+    if base_url is not None and base_url.rstrip("/") != BASE_URL.rstrip("/"):
+        return _fetch_spec(base_url)
+
+    spec, age = _read_spec_cache()
+    if spec is not None:
+        if age > SPEC_TTL_SECONDS:
+            warm_spec_cache_async()   # serve what we have, freshen for next time
+        return spec
+
+    # Cold start: no cache yet.  Wait behind any in-flight refresh, then re-check
+    # so two callers never fetch the same document twice.
+    with _spec_lock:
+        spec, _ = _read_spec_cache()
+        if spec is not None:
+            return spec
+        spec = _fetch_spec()
+        if spec:
+            _write_spec_cache(spec)
+        return spec
+
+
+# ── auto-discovery ───────────────────────────────────────────────────────
+
+def discover_tools(base_url: str = None) -> List[dict]:
+    """Convert the OpenAPI spec's GET endpoints to MCP tool definitions."""
+    spec = _load_spec(base_url)
+    if not spec:
         return []
 
     tools = []
@@ -281,9 +369,15 @@ def send_error(id, code, message):
 
 
 def main():
-    """Run MCP server in stdio mode."""
-    _ensure_tools()
-    logger.info("Polyclawd MCP Server started — %d tools", len(TOOLS))
+    """Run MCP server in stdio mode.
+
+    Tools are discovered lazily from the cached spec, so `initialize` is
+    answered immediately even when the upstream spec endpoint is slow.
+    """
+    _, age = _read_spec_cache()
+    if age is None or age > SPEC_TTL_SECONDS:
+        warm_spec_cache_async()
+    logger.info("Polyclawd MCP Server started (tools load on first use)")
 
     for line in sys.stdin:
         line = line.strip()
