@@ -79,8 +79,16 @@ def _local_manifest() -> dict:
                     continue
                 full = os.path.join(dirpath, fn)
                 rel = os.path.relpath(full, PROJECT_DIR)
-                with open(full, "rb") as fh:
-                    out[rel] = hashlib.md5(fh.read()).hexdigest()
+                # 2026-09-18: a symlink whose target is VPS-only (e.g.
+                # scripts/wg-polymarket-drift-check.py -> /home/linuxuser/bin/...)
+                # is dangling on the Mac; open() raised Errno 2 and killed the
+                # whole check (exit 5, verify blind 2 days). md5sum on the VPS
+                # side follows symlinks, so hash when readable, skip when not.
+                try:
+                    with open(full, "rb") as fh:
+                        out[rel] = hashlib.md5(fh.read()).hexdigest()
+                except OSError:
+                    continue
     return out
 
 
