@@ -558,7 +558,19 @@ def check_and_fire(
                 if rec["alert_type"] in ("entry", "refire"):
                     _kind = "add" if rec["alert_type"] == "refire" else "entry"
                     try:
-                        _line = (f"{_kind}: {rec['title'][:70]} — {rec['outcome']} "
+                        # 2026-09-25: identify WHO entered - the one-liner used to
+                        # omit the wallet, forcing Mr. V to ask "what account?".
+                        _who = str(rec.get("name") or rec.get("wallet") or "")[:16]
+                        _wr = rec.get("wallet_wr")
+                        _pnl = rec.get("wallet_pnl")
+                        _stats = []
+                        if _wr is not None:
+                            _stats.append(f"{_wr * 100:.0f}%WR")
+                        if _pnl is not None:
+                            _stats.append(("+" if _pnl >= 0 else "-") + f"${abs(_pnl):,.0f}")
+                        _tag = " · ".join([_who] + _stats) if _who else ""
+                        _prefix = f"{_kind} [{_tag}]" if _tag else _kind
+                        _line = (f"{_prefix}: {rec['title'][:70]} — {rec['outcome']} "
                                  f"@ {(rec.get('price_at_alert') or 0) * 100:.0f}¢, "
                                  f"${(rec.get('cumulative_usd') or 0):,.0f} "
                                  f"({rec.get('num_fills') or 0} fills)")
