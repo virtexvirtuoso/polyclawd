@@ -13,9 +13,20 @@ log="$(git rev-parse --git-dir)/hooks-push.log"
 sha=$(git rev-parse --short HEAD)
 
 # Background so the commit returns instantly; stdin closed so nothing can block on a tty.
+# Retried: a commit made seconds after another starts a second push while the first is
+# in flight; whichever lands second finds origin moved ("cannot lock ref ... expected")
+# (2026-09-25: two merges in one second left main 8 commits ahead). Our branch tip
+# already contains the other commit, so the retry is a plain fast-forward. A real
+# divergence fails every attempt and still alerts.
 (
-    if git push -q origin "$branch" </dev/null 2>>"$log"; then
-        printf '%s pushed %s %s\n' "$(date "+%Y-%m-%dT%H:%M:%S%z")" "$sha" "$branch" >>"$log"
+    ok=false; attempt=0
+    while [ "$attempt" -lt 5 ]; do
+        attempt=$((attempt + 1))
+        if git push -q origin "$branch" </dev/null 2>>"$log"; then ok=true; break; fi
+        sleep "$attempt"
+    done
+    if $ok; then
+        printf '%s pushed %s %s (attempt %s)\n' "$(date "+%Y-%m-%dT%H:%M:%S%z")" "$sha" "$branch" "$attempt" >>"$log"
     else
         printf '%s PUSH FAILED %s %s\n' "$(date "+%Y-%m-%dT%H:%M:%S%z")" "$sha" "$branch" >>"$log"
         notify=$(git config --get virtuoso.notify || true)
