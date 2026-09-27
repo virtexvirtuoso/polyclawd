@@ -52,6 +52,16 @@ def _log_alert(alert_type: str, metadata: dict, sent: bool) -> None:
             "sent": sent,
             **metadata,
         }
+        # 2026-09-26: size-cap rotation - the log grew unbounded to 251MB.
+        # Keep one .old generation (~100MB steady-state max).
+        try:
+            if ALERTS_LOG.exists() and ALERTS_LOG.stat().st_size > 50 * 1024 * 1024:
+                _old = ALERTS_LOG.with_suffix(".jsonl.old")
+                if _old.exists():
+                    _old.unlink()
+                ALERTS_LOG.rename(_old)
+        except Exception:
+            pass
         with open(ALERTS_LOG, "a") as f:
             f.write(json.dumps(record, default=str) + "\n")
     except Exception as e:
