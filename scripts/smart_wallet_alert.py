@@ -51,6 +51,12 @@ SHADOW_DB = BASE_DIR / "storage" / "shadow_trades.db"
 ACCUM_WINDOW = 4 * 3600  # 4h rolling window
 CONVERGENCE_WINDOW = 15 * 60  # fallback window when close_time unavailable
 CONVERGENCE_MIN_WALLETS = 2   # ≥2 distinct wallets needed
+# 2026-09-30: convergence DELIVERY suspended pending the 2–4 week forward test —
+# pre-fix 52% of fired events were opposite-side false convergences and true
+# same-side convergence graded -0.023 CLV (n=124, P(<=0)=0.689). Dedup rows
+# still record every would-have-fired event for the forward test. Re-enable
+# with SMART_WALLET_CONVERGENCE_SEND=1 only after it earns the gate back.
+CONVERGENCE_SEND = os.environ.get("SMART_WALLET_CONVERGENCE_SEND", "0") == "1"
 THRESHOLD = 1000.0  # $ cumulative that triggers an alert (raised from $500 2026-06-25 — sub-$1K too noisy)
 REFIRE_MULT = 2.0  # re-alert when cumulative doubles
 MIN_ALERT_MARKET_VOL = 100_000.0
@@ -82,12 +88,22 @@ FADE_MAX_CLV = -0.15     # avg CLV at/below this => deliver inverted FADE alerts
 # --------------------------------------------------------------------------- #
 def init_accum(conn) -> None:
     """Rolling-window accumulator (lives in whale_meta.db). One row per
-    (wallet, market, direction); `fills_json` is the pruned 4h fill list."""
+    (wallet, market, direction, outcome); `fills_json` is the pruned 4h fill
+    list."""
+    # 2026-09-30: outcome added to the key. The old (wallet, market, direction)
+    # key blended same-cycle fills on OPPOSITE outcomes of one market — a
+    # two-sided scalper's NYY @0.88 + BOS @0.12 merged into one "BOS @86.6c"
+    # record (Edge-Significance-Tests-2026-09-26, Round 5). State is a 4h
+    # rolling window: the rebuild discards at most in-flight accumulation.
+    _cols = [r[1] for r in conn.execute("PRAGMA table_info(smart_wallet_accum)")]
+    if _cols and "outcome" not in _cols:
+        conn.execute("DROP TABLE smart_wallet_accum")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS smart_wallet_accum (
             wallet       TEXT,
             market       TEXT,
             direction    TEXT,
+            outcome      TEXT,
             fills_json   TEXT,
             total_usd    REAL,
             num_fills    INTEGER,
@@ -95,7 +111,7 @@ def init_accum(conn) -> None:
             last_seen    INTEGER,
             alert_fired  INTEGER DEFAULT 0,
             fired_total  REAL DEFAULT 0,
-            PRIMARY KEY (wallet, market, direction)
+            PRIMARY KEY (wallet, market, direction, outcome)
         )""")
     conn.commit()
 
@@ -134,15 +150,21 @@ def init_shadows(conn) -> None:
             conn.execute(f"ALTER TABLE smart_wallet_shadows ADD COLUMN {_col}")
         except Exception:
             pass
-    # T1-C: convergence dedup table
+    # T1-C: convergence dedup table — 2026-09-30: outcome added to the key so
+    # opposite-side groups can't suppress each other. Old table preserved as
+    # smart_wallet_convergence_dedup_pre0130 (all-time event audit trail).
+    _cols = [r[1] for r in conn.execute("PRAGMA table_info(smart_wallet_convergence_dedup)")]
+    if _cols and "outcome" not in _cols:
+        conn.execute("ALTER TABLE smart_wallet_convergence_dedup RENAME TO smart_wallet_convergence_dedup_pre0130")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS smart_wallet_convergence_dedup (
             market     TEXT,
             direction  TEXT,
+            outcome    TEXT,
             alerted_at INTEGER,
             n_wallets  INTEGER,
             total_usd  REAL,
-            PRIMARY KEY (market, direction)
+            PRIMARY KEY (market, direction, outcome)
         )""")
     conn.commit()
 
@@ -150,13 +172,17 @@ def init_shadows(conn) -> None:
 # --------------------------------------------------------------------------- #
 # Accumulator (true rolling window)
 # --------------------------------------------------------------------------- #
-def _accumulate(conn, wallet: str, market: str, direction: str, usd: float, price: float, now: int):
+def _accumulate(conn, wallet: str, market: str, direction: str, outcome: str,
+                usd: float, price: float, now: int):
     """Add a fill, prune the 4h window, persist. Returns
-    (total_usd, num_fills, alert_fired, fired_total) AFTER the update."""
+    (total_usd, num_fills, alert_fired, fired_total) AFTER the update.
+
+    2026-09-30: keyed per-outcome — the old (wallet, market, direction) key
+    blended opposite outcomes of the same market into one total/price."""
     row = conn.execute(
         "SELECT fills_json, alert_fired, fired_total, first_seen "
-        "FROM smart_wallet_accum WHERE wallet=? AND market=? AND direction=?",
-        (wallet, market, direction),
+        "FROM smart_wallet_accum WHERE wallet=? AND market=? AND direction=? AND outcome=?",
+        (wallet, market, direction, outcome),
     ).fetchone()
     if row:
         fills = json.loads(row["fills_json"] or "[]")
@@ -178,10 +204,10 @@ def _accumulate(conn, wallet: str, market: str, direction: str, usd: float, pric
 
     conn.execute(
         "INSERT INTO smart_wallet_accum "
-        "(wallet, market, direction, fills_json, total_usd, num_fills, "
+        "(wallet, market, direction, outcome, fills_json, total_usd, num_fills, "
         " first_seen, last_seen, alert_fired, fired_total) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?) "
-        "ON CONFLICT(wallet, market, direction) DO UPDATE SET "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(wallet, market, direction, outcome) DO UPDATE SET "
         " fills_json=excluded.fills_json, total_usd=excluded.total_usd, "
         " num_fills=excluded.num_fills, last_seen=excluded.last_seen, "
         " alert_fired=excluded.alert_fired, fired_total=excluded.fired_total",
@@ -189,6 +215,7 @@ def _accumulate(conn, wallet: str, market: str, direction: str, usd: float, pric
             wallet,
             market,
             direction,
+            outcome,
             json.dumps(fills),
             total,
             len(fills),
@@ -209,10 +236,11 @@ def _decide(total: float, alert_fired: int, fired_total: float) -> Optional[str]
     return None
 
 
-def _mark_fired(conn, wallet, market, direction, now: int, total: float) -> None:
+def _mark_fired(conn, wallet, market, direction, outcome, now: int, total: float) -> None:
     conn.execute(
-        "UPDATE smart_wallet_accum SET alert_fired=?, fired_total=? WHERE wallet=? AND market=? AND direction=?",
-        (int(now), float(total), wallet, market, direction),
+        "UPDATE smart_wallet_accum SET alert_fired=?, fired_total=? "
+        "WHERE wallet=? AND market=? AND direction=? AND outcome=?",
+        (int(now), float(total), wallet, market, direction, outcome),
     )
 
 
@@ -352,10 +380,32 @@ def _convergence_tier(span_secs: int) -> tuple:
         return "📊", "Gradual accumulation"
 
 
+def _bots_from_smart(smart: Optional[dict]) -> set:
+    """Wallets flagged is_bot in the smart ledger (lowercased). Convergence
+    excludes them: the entry/refire delivery path gates bots but convergence
+    historically didn't — 337/585 multi-wallet groups included a bot wallet."""
+    if not smart:
+        return set()
+    return {
+        str(w).lower()
+        for w, meta in smart.items()
+        if isinstance(meta, dict) and meta.get("is_bot")
+    }
+
+
 def _check_convergence(shadow_conn, market: str, direction: str, title: str, now: int,
-                       close_time: str = "") -> None:
+                       close_time: str = "", outcome_index=None,
+                       bots: Optional[set] = None) -> None:
     """Fire a convergence alert if ≥2 distinct smart wallets have alerted on
-    the same market+direction within the adaptive window."""
+    the same market+direction+OUTCOME within the adaptive window.
+
+    2026-09-30 gates (Edge-Significance-Tests-2026-09-26, Rounds 4–5):
+      * same-outcome — the old market+direction grouping counted two wallets on
+        opposite teams as agreement (52% of 248 fired events were false);
+      * bot exclusion — is_bot wallets never counted here before;
+      * delivery suspended via CONVERGENCE_SEND pending the forward test —
+        dedup rows still record would-have-fired events.
+    """
     # Skip if market already closed — no actionable edge.
     # Grace period: allow 45 min past close_time to cover soccer ET/penalties
     # (PM close_time is set to kickoff + ~105 min; real final whistle may be up to
@@ -379,14 +429,24 @@ def _check_convergence(shadow_conn, market: str, direction: str, title: str, now
         ORDER BY ts_alert ASC
     """, (market, direction, window)).fetchall()
 
-    # Deduplicate by wallet (keep first occurrence per wallet in time order)
+    if outcome_index is None:
+        return  # cannot verify side — never count unverified agreement
+
+    # Deduplicate by wallet (keep first occurrence per wallet in time order).
+    # 2026-09-30: only same-outcome rows count, and bot wallets are excluded.
+    bots = bots or set()
     wallets: dict = {}
     timestamps = []
     prices = []
     outcome_indices = []
     for r in rows:
-        if r["wallet"] not in wallets:
-            wallets[r["wallet"]] = r["cumulative_usd"] or 0
+        if outcome_index is not None and r["outcome_index"] != outcome_index:
+            continue  # opposite/unlabeled side — not agreement with this fill
+        w = (r["wallet"] or "").lower()
+        if w in bots:
+            continue
+        if w not in wallets:
+            wallets[w] = r["cumulative_usd"] or 0
             timestamps.append(r["ts_alert"])
             if r["price_at_alert"] is not None:
                 prices.append(float(r["price_at_alert"]))
@@ -398,8 +458,9 @@ def _check_convergence(shadow_conn, market: str, direction: str, title: str, now
 
     # Dedup: don't re-fire for same convergence event unless wallet count grew
     dedup = shadow_conn.execute(
-        "SELECT alerted_at, n_wallets FROM smart_wallet_convergence_dedup WHERE market=? AND direction=?",
-        (market, direction),
+        "SELECT alerted_at, n_wallets FROM smart_wallet_convergence_dedup "
+        "WHERE market=? AND direction=? AND outcome=?",
+        (market, direction, str(outcome_index)),
     ).fetchone()
 
     n = len(wallets)
@@ -409,23 +470,29 @@ def _check_convergence(shadow_conn, market: str, direction: str, title: str, now
     total_usd = sum(wallets.values())
     span_secs = (max(timestamps) - min(timestamps)) if len(timestamps) > 1 else 0
     avg_price = (sum(prices) / len(prices)) if prices else None
-    # Most common outcome_index among fills
-    outcome_index = max(set(outcome_indices), key=outcome_indices.count) if outcome_indices else None
+    # Most common outcome_index among fills (== the anchored outcome post-gate)
+    modal_oi = max(set(outcome_indices), key=outcome_indices.count) if outcome_indices else outcome_index
 
     shadow_conn.execute("""
-        INSERT INTO smart_wallet_convergence_dedup (market, direction, alerted_at, n_wallets, total_usd)
-        VALUES (?,?,?,?,?)
-        ON CONFLICT(market, direction) DO UPDATE SET
+        INSERT INTO smart_wallet_convergence_dedup (market, direction, outcome, alerted_at, n_wallets, total_usd)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(market, direction, outcome) DO UPDATE SET
             alerted_at=excluded.alerted_at,
             n_wallets=excluded.n_wallets,
             total_usd=excluded.total_usd
-    """, (market, direction, now, n, total_usd))
+    """, (market, direction, str(outcome_index), now, n, total_usd))
     shadow_conn.commit()
 
+    if not CONVERGENCE_SEND:
+        # Delivery suspended (see CONVERGENCE_SEND constant). The dedup row
+        # above keeps the would-have-fired event on record for the forward test.
+        print(f"SMART_WALLET_ALERT convergence (suspended): {title} n={n} ${total_usd:,.0f}",
+              file=sys.stderr)
+        return
     if _SEND_ENABLED:
         msg = _format_convergence(market, direction, title, n, total_usd,
                                   span_secs=span_secs, avg_price=avg_price,
-                                  outcome_index=outcome_index)
+                                  outcome_index=modal_oi)
         try:
             from scripts.alert_formatter import send_telegram
             send_telegram(msg)
@@ -475,12 +542,15 @@ def check_and_fire(
     *,
     send: Optional[bool] = None,
     now: Optional[int] = None,
+    smart: Optional[dict] = None,
 ) -> list:
     """Process this cycle's smart-wallet fills; fire + shadow-log crossings.
 
     smart_fills: list of dicts {wallet, market, direction, usd, price,
                  outcome, outcome_index, name, title}
     meta_for(market) -> {volume, price, title, close_time}
+    smart: optional wallet ledger {wallet: {..., is_bot}} — feeds the
+           convergence bot gate (2026-09-30).
     """
     if now is None:
         now = int(time.time())
@@ -489,7 +559,8 @@ def check_and_fire(
     fired = []
     for f in smart_fills:
         total, nfills, af, ft = _accumulate(
-            meta_conn, f["wallet"], f["market"], f["direction"], f["usd"], f["price"], now
+            meta_conn, f["wallet"], f["market"], f["direction"],
+            f.get("outcome") or "", f["usd"], f["price"], now
         )
         kind = _decide(total, af, ft)
         if not kind:
@@ -497,7 +568,8 @@ def check_and_fire(
         m = meta_for(f["market"]) or {}
         if _gates_suppress(m, fill_price=f.get("price"), outcome_index=f.get("outcome_index")):
             continue
-        _mark_fired(meta_conn, f["wallet"], f["market"], f["direction"], now, total)
+        _mark_fired(meta_conn, f["wallet"], f["market"], f["direction"],
+                    f.get("outcome") or "", now, total)
         alert_type = "refire" if kind == "refire" else "entry" if f["direction"] == "BUY" else "exit"
         # Suppress bot wallets from Telegram delivery (still shadow-log for CLV tracking)
         is_bot = bool(f.get("is_bot"))
@@ -537,7 +609,9 @@ def check_and_fire(
             rec.update(_executable_snapshot(f["market"], f.get("outcome_index"), f["direction"]))
         _log_shadow(shadow_conn, rec)
         _check_convergence(shadow_conn, rec["market"], rec["direction"], rec["title"], now,
-                           close_time=rec.get("close_time") or "")
+                           close_time=rec.get("close_time") or "",
+                           outcome_index=rec.get("outcome_index"),
+                           bots=_bots_from_smart(smart))
         deliver = send and not is_bot and (
             rec["alert_type"] == "fade"  # fades bypass band/CLV gates (they'd self-suppress)
             or (not _price_band_gate_suppress(rec)
@@ -781,7 +855,11 @@ def fills_from_trades(trades: list, smart: dict) -> list:
         usd = size * price
         if usd <= 0:
             continue
-        k = (w, cid, side)
+        # 2026-09-30: outcome in the key — same-cycle fills on opposite
+        # outcomes of one market must not merge (label from first trade seen,
+        # price blended across sides). oi=None falls back to the label.
+        _oi = t.get("outcomeIndex")
+        k = (w, cid, side, _oi if _oi is not None else (t.get("outcome") or ""))
         a = agg.setdefault(
             k,
             {
@@ -796,7 +874,7 @@ def fills_from_trades(trades: list, smart: dict) -> list:
         a["usd"] += usd
         a["pxw"] += usd * price
     out = []
-    for (w, cid, side), a in agg.items():
+    for (w, cid, side, _koi), a in agg.items():
         px = a["pxw"] / a["usd"] if a["usd"] else 0.0
         sw = smart.get(w, {})
         out.append(
@@ -837,7 +915,7 @@ def run_from_scan(meta_conn, shadow_conn, trades: list, gamma: dict, smart: dict
             "slug": g.get("slug") or "",
         }
 
-    return check_and_fire(meta_conn, shadow_conn, fills, meta_for)
+    return check_and_fire(meta_conn, shadow_conn, fills, meta_for, smart=smart)
 
 
 def scanner_hook(meta_conn, trades: list, gamma: dict, smart: dict) -> list:
