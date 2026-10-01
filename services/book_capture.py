@@ -15,17 +15,20 @@ watchset, reconnect, SIGTERM handling and CLI (Task 3) build on this API:
         or malformed becomes a `quarantine` row. "PING"/"PONG"/blank -> [].
 
     w = BookCaptureWriter(root="storage/book_capture", **knobs)
-        Startup renames any crash-leftover `*.inprogress` to `*.corrupt` and
-        records meta kind="crash_leftover".
+        Takes an exclusive flock on <root>/.writer.lock (raises WriterLockedError if
+        another writer holds it), then renames any crash-leftover `*.inprogress` to a
+        unique `*.corrupt` name (never overwriting) and records meta kind="crash_leftover".
     w.add_frame(raw: str, recv_ts: int | None = None) -> int
         Sync, call from the event-loop thread. Normalizes + buffers; O(rows);
         never touches disk, never raises. Returns rows buffered (0 when paused/closed).
     w.add_meta(kind: str, detail: dict, recv_ts: int | None = None) -> None
-        Buffer a meta row (connects, reconnects, subscriptions, ...). Never raises.
+        Buffer a meta row (connects, reconnects, subscriptions, ...). Never raises;
+        after close() the row is dropped and logged.
     await w.flush()            write everything buffered now + rotate past hours.
     await w.run_flush_loop()   background task: flush every flush_interval_s or when
                                rows_buffered >= flush_rows; exits after close().
-    await w.close()            final flush, finalize every open file. Idempotent.
+    await w.close()            final flush, finalize every open file, release the
+                               root lock. Idempotent.
     w.stats() -> dict          counters for a status endpoint.
 
 Layout:  <root>/<dataset>/YYYY-MM-DD/HH.parquet   (hour = row's recv_ts, UTC)
@@ -40,6 +43,7 @@ Clocks: every row stores recv_ts (local UTC ms) and, where the exchange sends on
 exch_ts (the event `timestamp`).
 """
 import asyncio
+import fcntl
 import json
 import math
 import os
@@ -291,6 +295,24 @@ def normalize_frame(raw, recv_ts):
 
 # ---------------------------------------------------------------- writer
 
+class WriterLockedError(RuntimeError):
+    """Another BookCaptureWriter already owns this root (its .writer.lock is held)."""
+
+
+def _corrupt_dest(tmp_path):
+    """Unique `*.corrupt` name for a `*.inprogress` file — never an existing path.
+    HH[.N].parquet.inprogress -> HH[.N].parquet.corrupt, else HH[.N].1.parquet.corrupt, ..."""
+    tmp_path = Path(tmp_path)
+    name = tmp_path.name[: -len(".inprogress")] if tmp_path.name.endswith(".inprogress") else tmp_path.name
+    stem = name[: -len(".parquet")] if name.endswith(".parquet") else name
+    n = 0
+    while True:
+        cand = tmp_path.with_name(f"{stem}.parquet.corrupt" if n == 0 else f"{stem}.{n}.parquet.corrupt")
+        if not cand.exists():
+            return cand
+        n += 1
+
+
 class _OpenFile:
     __slots__ = ("writer", "tmp_path", "final_path", "rows")
 
@@ -353,6 +375,7 @@ class BookCaptureWriter:
         }
 
         self.root.mkdir(parents=True, exist_ok=True)
+        self._lock_fh = self._acquire_root_lock()   # BEFORE recovery: never touch a live writer's files
         self._recover_leftovers()
 
     # -- public, event-loop side -------------------------------------------------
@@ -393,8 +416,11 @@ class BookCaptureWriter:
             return 0
 
     def add_meta(self, kind, detail=None, recv_ts=None):
-        """Buffer a meta row (kind + JSON detail). Never raises."""
+        """Buffer a meta row (kind + JSON detail). Never raises; dropped after close()."""
         try:
+            if self._closed:
+                print(f"[meta] dropped after close: {kind}")
+                return
             self._meta.append({"recv_ts": int(recv_ts if recv_ts is not None else self._now_ms()),
                                "kind": str(kind), "detail_json": _safe_dumps(detail or {})})
         except Exception as e:  # pragma: no cover
@@ -463,9 +489,12 @@ class BookCaptureWriter:
         self._closed = True
         if self._wake is not None:
             self._wake.set()
-        await self.flush(_final=True)
-        if self._meta:  # meta produced by the final flush itself (errors, drops)
+        try:
             await self.flush(_final=True)
+            if self._meta:  # meta produced by the final flush itself (errors, drops)
+                await self.flush(_final=True)
+        finally:
+            self._release_root_lock()
         print(f"[book_capture] closed: written={self.counters['rows_written']} "
               f"dropped_overflow={self.counters['rows_dropped_overflow']} "
               f"flush_errors={self.counters['flush_errors']}")
@@ -506,11 +535,41 @@ class BookCaptureWriter:
         return {"recv_ts": int(recv_ts if recv_ts is not None else self._now_ms()),
                 "kind": kind, "detail_json": _safe_dumps(detail)}
 
+    def _acquire_root_lock(self):
+        path = self.root / ".writer.lock"
+        fh = open(path, "a+")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            fh.close()
+            raise WriterLockedError(f"another book_capture writer holds {path}") from e
+        try:
+            fh.seek(0)
+            fh.truncate()
+            fh.write(f"{os.getpid()}\n")
+            fh.flush()
+        except Exception:
+            pass
+        return fh
+
+    def _release_root_lock(self):
+        fh, self._lock_fh = self._lock_fh, None
+        if fh is None:
+            return
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            fh.close()
+        except Exception:
+            pass
+
     def _recover_leftovers(self):
         """Startup: rename crash-leftover *.inprogress -> *.corrupt (never delete)."""
         for p in sorted(self.root.glob("*/*/*.inprogress")):
-            dst = p.with_name(p.name[: -len(".inprogress")] + ".corrupt")
             try:
+                dst = _corrupt_dest(p)
                 os.replace(p, dst)
                 print(f"[book_capture] crash leftover {p} -> {dst.name}")
                 self.counters["files_corrupt"] += 1
@@ -557,9 +616,8 @@ class BookCaptureWriter:
             self.counters["files_finalized"] += 1
             return []
         except Exception as e:
-            dst = f.tmp_path.with_name(f.tmp_path.name[: -len(".inprogress")] + ".corrupt")
             try:
-                os.replace(f.tmp_path, dst)
+                os.replace(f.tmp_path, _corrupt_dest(f.tmp_path))
             except Exception:
                 pass
             self.counters["files_corrupt"] += 1

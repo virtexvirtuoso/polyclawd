@@ -513,3 +513,59 @@ async def test_perf_100k_events_under_60s(tmp_path):
     assert _count(root, "book") == n_books
     print(f"\n[perf] 100K events -> {n_changes} changes + {n_books} book rows in {elapsed:.2f}s")
     assert elapsed < 60
+
+
+# ---------------------------------------------------------------- spec-review fixes
+
+def test_recover_never_overwrites_existing_corrupt(tmp_path):
+    day = tmp_path / "bc" / "changes" / "2026-10-01"
+    day.mkdir(parents=True)
+    (day / "05.parquet.corrupt").write_bytes(b"older-crash")
+    (day / "05.parquet.inprogress").write_bytes(b"newer-crash")
+    w = _writer(tmp_path)
+    corrupt = sorted(day.glob("*.corrupt"))
+    assert len(corrupt) == 2
+    assert sorted(p.read_bytes() for p in corrupt) == [b"newer-crash", b"older-crash"]
+    assert (day / "05.parquet.corrupt").read_bytes() == b"older-crash"
+    assert not list(day.glob("*.inprogress"))
+    asyncio.run(w.close())
+
+
+async def test_finalize_failure_never_overwrites_existing_corrupt(tmp_path, monkeypatch):
+    w = _writer(tmp_path)
+    w.add_frame(_pc(), T10 + 1)
+    await w.flush()
+    (f,) = w._open.values()
+    pre = f.tmp_path.with_name(f.tmp_path.name[: -len(".inprogress")] + ".corrupt")
+    pre.write_bytes(b"pre-existing")
+    monkeypatch.setattr(bc.pq, "read_metadata", lambda *a, **k: (_ for _ in ()).throw(OSError("bad footer")))
+    await w.close()
+    monkeypatch.undo()
+    assert pre.read_bytes() == b"pre-existing"
+    corrupt = sorted(pre.parent.glob("*.corrupt"))
+    assert len(corrupt) == 2
+    assert w.stats()["files_corrupt"] >= 1   # the meta file also fails the patched footer check
+
+
+async def test_second_writer_on_same_root_is_refused(tmp_path):
+    w1 = _writer(tmp_path)
+    w1.add_frame(_pc(), T10 + 1)
+    await w1.flush()
+    live = list((tmp_path / "bc").rglob("*.inprogress"))
+    assert len(live) == 1
+    with pytest.raises(bc.WriterLockedError):
+        _writer(tmp_path)
+    assert live[0].exists()                                   # not renamed to .corrupt
+    assert not list((tmp_path / "bc").rglob("*.corrupt"))
+    await w1.close()
+    assert _count(tmp_path / "bc", "changes") == 1
+    w2 = _writer(tmp_path)                                    # lock released on close
+    await w2.close()
+
+
+async def test_add_meta_after_close_is_dropped_and_logged(tmp_path, capsys):
+    w = _writer(tmp_path)
+    await w.close()
+    w.add_meta("late_kind", {"x": 1})
+    assert w.stats()["meta_buffered"] == 0
+    assert "[meta] dropped after close: late_kind" in capsys.readouterr().out
