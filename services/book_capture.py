@@ -65,13 +65,17 @@ from services.book_capture_writer import (  # noqa: F401 — re-exported public 
 #                     — at the subscribe that applies it (diff vs previous subscription)
 #   watchset_missing  {kept_universe_size, startup, error} — once per outage
 #   watchset_restored {outage_s, universe_size}
-#   gap_start         {last_recv_ts, reason, reconnects} — an established connection ended
+#   gap_start         {last_recv_ts, last_data_ts, reason, reconnects} — an established
+#                     connection ended; last_recv_ts = last frame of ANY kind (incl. PONG),
+#                     last_data_ts = last non-heartbeat frame (None if none yet)
 #                     (reason "universe_change", "data silence" from the watchdog, or the
 #                     connection error)
 #   gap_end           {gap_ms, tokens}          — next successful subscribe; gap_ms is
-#                     subscribe time minus last_recv_ts (last frame of ANY kind, incl.
-#                     PONG), i.e. an upper bound on the uncovered interval. The server
-#                     sends a fresh full `book` per token on subscribe (free re-anchor).
+#                     subscribe time minus min(last data frame, last frame of any kind),
+#                     where "last data frame" falls back to the ended connection's connect
+#                     time if it carried no data — an upper bound on the uncovered interval
+#                     even when PONGs kept arriving (data-silence gaps). The server sends
+#                     a fresh full `book` per token on subscribe (free re-anchor).
 
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 MC_HOST, MC_PORT = "localhost", 11211
@@ -180,6 +184,7 @@ class BookCapture:
         self._conn_start_ms = None
         self._gap_start_ms = None
         self._gap_last_recv = None
+        self._gap_last_data = None
         self.universe_reconnect_decisions = []   # monotonic times of planned reconnects
         self.start_ms = self._now_ms()
         self._gap_open = False
@@ -321,7 +326,8 @@ class BookCapture:
                 "added": added, "removed": removed, "universe_size": len(sub)}, recv_ts=now)
         if self._gap_open:
             self._gap_open = False
-            base = self._gap_last_recv if self._gap_last_recv is not None else self._gap_start_ms
+            known = [t for t in (self._gap_last_data, self._gap_last_recv) if t is not None]
+            base = min(known) if known else self._gap_start_ms
             self.writer.add_meta("gap_end", {"gap_ms": max(0, now - base), "tokens": len(sub)},
                                  recv_ts=now)
         self._prev_subscribed = set(sub)
@@ -332,8 +338,13 @@ class BookCapture:
         self._gap_open = True
         self._gap_start_ms = self._now_ms()
         self._gap_last_recv = self.last_recv_ms
-        self.writer.add_meta("gap_start", {"last_recv_ts": self.last_recv_ms, "reason": reason,
-                                           "reconnects": self.reconnects},
+        # Data coverage ended at the last DATA frame — or, if this connection never
+        # carried one, at its connect (PONGs keep last_recv fresh but cover nothing).
+        self._gap_last_data = (self.last_data_ms if self.last_data_ms is not None
+                               else self._conn_start_ms)
+        self.writer.add_meta("gap_start", {"last_recv_ts": self.last_recv_ms,
+                                           "last_data_ts": self.last_data_ms,
+                                           "reason": reason, "reconnects": self.reconnects},
                              recv_ts=self._gap_start_ms)
 
     async def run_once(self, deadline):
@@ -611,6 +622,9 @@ def main(argv=None):
     ap.add_argument("--tokens", type=str, default=None,
                     help="comma-separated token ids: static universe, skips memcached")
     ap.add_argument("--ws-url", type=str, default=WS_URL)
+    ap.add_argument("--data-silence-s", type=float, default=DATA_SILENCE_S,
+                    help="reconnect after this many seconds without a data frame "
+                         "(heartbeats don't count); 0 disables")
     a = ap.parse_args(argv)
     toks = [t.strip() for t in a.tokens.split(",") if t.strip()] if a.tokens else None
     try:
@@ -618,7 +632,7 @@ def main(argv=None):
     except WriterLockedError as e:
         print(f"[capture] refusing to start: {e} (is another book_capture running?)")
         return EXIT_WRITER_LOCKED
-    cap = BookCapture(writer, tokens=toks, ws_url=a.ws_url)
+    cap = BookCapture(writer, tokens=toks, ws_url=a.ws_url, data_silence_s=a.data_silence_s)
 
     async def _run():
         await cap.run(a.seconds)

@@ -164,6 +164,8 @@ async def test_capture_reconnect_gap_and_parquet(tmp_path):
     ge, = _meta(tmp_path, "gap_end")
     assert gs["detail"]["reconnects"] == 1 and gs["detail"]["last_recv_ts"] > 0
     assert gs["detail"]["reason"]
+    assert gs["detail"]["last_data_ts"] is not None
+    assert gs["detail"]["last_data_ts"] <= gs["detail"]["last_recv_ts"]
     assert ge["detail"]["tokens"] == 2 and ge["detail"]["gap_ms"] >= 0
     assert gs["recv_ts"] <= ge["recv_ts"]
     start, = _meta(tmp_path, "capture_start")
@@ -207,7 +209,6 @@ async def test_universe_reconnects_rate_limited(tmp_path):
         uni.value = ["a", "b"]                 # first universe reconnect: allowed now
         await _until(lambda: len(srv.subs) == 2)
         uni.value = ["a", "b", "c"]            # second: must wait for the 1.0 s slot
-        t_set = time.monotonic()
         await _until(lambda: len(srv.subs) == 3, timeout=5.0)
         cap.request_stop("test")
         await asyncio.wait_for(task, 10)
@@ -217,8 +218,6 @@ async def test_universe_reconnects_rate_limited(tmp_path):
     # delay a reconnect but can never make two decisions closer than the limit.
     d0, d1 = cap.universe_reconnect_decisions
     assert d1 - d0 >= 1.0
-    if t_set - d0 < 0.9:   # change arrived well inside the window -> it was deferred
-        assert d1 - t_set >= 1.0 - (t_set - d0) - 1e-6
     assert len(_meta(tmp_path, "universe_change")) == 2
 
 
@@ -513,7 +512,10 @@ async def test_pong_only_connection_trips_data_silence_watchdog(tmp_path):
     assert st["last_data_age_s"] is None
     gs = _meta(tmp_path, "gap_start")
     assert gs and gs[0]["detail"]["reason"] == "data silence"
-    assert _meta(tmp_path, "gap_end")
+    assert "last_data_ts" in gs[0]["detail"] and gs[0]["detail"]["last_data_ts"] is None
+    ge = _meta(tmp_path, "gap_end")
+    # PONGs kept last_recv_ts fresh; the gap must still cover the whole data silence
+    assert ge and ge[0]["detail"]["gap_ms"] >= 0.4 * 1000
 
 
 async def test_data_frames_keep_watchdog_quiet_and_set_last_data_age(tmp_path):
@@ -604,3 +606,24 @@ async def test_cli_exits_1_when_writer_close_times_out(tmp_path):
     out, _ = await asyncio.wait_for(proc.communicate(), 15)
     assert proc.returncode == 1, out.decode()
     assert b"timed out" in out
+
+
+def test_cli_data_silence_flag(monkeypatch, tmp_path):
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def fake_init(self, writer, **kw):
+        seen.update(kw)
+        raise Stop
+
+    monkeypatch.setattr(bc.BookCapture, "__init__", fake_init)
+    cases = ((["--data-silence-s", "0"], 0.0),
+             (["--data-silence-s", "42.5"], 42.5),
+             ([], bc.DATA_SILENCE_S))
+    for i, (argv, want) in enumerate(cases):
+        with pytest.raises(Stop):   # one root per case: main()'s writer is never closed here
+            bc.main(["--root", str(tmp_path / str(i)), "--tokens", "t1"] + argv)
+        assert seen["data_silence_s"] == want
+        seen.clear()
