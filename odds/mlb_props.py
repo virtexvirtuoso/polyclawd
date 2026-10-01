@@ -35,6 +35,8 @@ also (a) only fetch games in the next PROP_WINDOW_HOURS, (b) cap at MAX_GAMES,
 
 from __future__ import annotations
 
+import asyncio
+import os
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -96,6 +98,12 @@ except Exception:  # pragma: no cover
     CREDIT_FLOOR = 5_000  # below this remaining, do not spend on props (100K plan)
 
 _CACHE: Dict[str, object] = {"ts": 0.0, "data": None}
+
+
+def _prop_source() -> str:
+    """Sharp-line source selector. Default 'pinnacle' (free guest API, no key).
+    POLYCLAWD_PROP_SOURCE=odds_api reverts to the Odds API path without redeploy."""
+    return (os.environ.get("POLYCLAWD_PROP_SOURCE", "pinnacle").strip().lower() or "pinnacle")
 
 
 def _american_to_ip(price: int) -> float:
@@ -205,6 +213,26 @@ async def get_mlb_props(force: bool = False) -> Dict:
     now = time.time()
     if not force and _CACHE["data"] is not None and (now - float(_CACHE["ts"])) < CACHE_TTL_S:
         return _CACHE["data"]  # type: ignore[return-value]
+
+    # ── Pinnacle first (free guest API, no key) unless killed via env.
+    # Empty/exception → fall through to the Odds API path below, unchanged.
+    if _prop_source() == "pinnacle":
+        try:
+            try:
+                from .pinnacle_fetch import get_pinnacle_props
+            except ImportError:  # pragma: no cover
+                from pinnacle_fetch import get_pinnacle_props
+            loop = asyncio.get_event_loop()
+            pin = await loop.run_in_executor(None, lambda: get_pinnacle_props(force=True))
+            if pin.get("games"):
+                _CACHE["data"] = pin
+                _CACHE["ts"] = now
+                return pin
+            logger.info(
+                f"mlb_props: pinnacle empty ({pin.get('note', 'no games')}) — falling back to Odds API"
+            )
+        except Exception as e:  # pragma: no cover — never let the new path break the old one
+            logger.warning(f"mlb_props: pinnacle path failed — {e}")
 
     ts_iso = datetime.now(timezone.utc).isoformat()
     remaining = get_credit_status().get("remaining")
