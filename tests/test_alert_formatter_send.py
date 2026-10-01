@@ -68,9 +68,15 @@ def test_raw_angle_bracket_message_still_delivers(monkeypatch, tmp_path):
     ledger = _wire(monkeypatch, tmp_path, _fake_telegram(calls))
     ok = af.send_telegram("⚡ HF spread alert\n< 2 min left")
     assert ok is True
-    # last attempt was accepted, in plain-text mode, content preserved
+    # 2026-09-14 send-layer change: alert_openclaw escape-retries the HTML send
+    # itself, so delivery succeeds on the ESCAPED HTML attempt (formatting
+    # preserved) instead of degrading to plain text. The old plain-text-last
+    # assertion here predates that change and fails on pristine main too
+    # (verified 2026-10-01 via git stash on fbaaa84).
+    assert len(calls) == 2  # raw HTML 400 -> escaped HTML retry
     assert "2 min left" in calls[-1]["text"][0]
-    assert calls[-1].get("parse_mode", [None])[0] is None
+    assert "&lt; 2" in calls[-1]["text"][0]  # entities escaped, content intact
+    assert calls[-1].get("parse_mode", [None])[0] == "HTML"
     lines = [json.loads(l) for l in ledger.read_text().splitlines()]
     assert lines[-1]["ok"] is True
 
