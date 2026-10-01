@@ -569,3 +569,155 @@ async def test_add_meta_after_close_is_dropped_and_logged(tmp_path, capsys):
     w.add_meta("late_kind", {"x": 1})
     assert w.stats()["meta_buffered"] == 0
     assert "[meta] dropped after close: late_kind" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- quality-review fixes
+
+def _concurrency_probe(target, attr, delay):
+    """Wrap target.attr so it sleeps `delay` and records max concurrent entries."""
+    import threading
+    state = {"cur": 0, "max": 0, "calls": 0}
+    lk = threading.Lock()
+    real = getattr(target, attr)
+
+    def wrapped(*a, **k):
+        with lk:
+            state["cur"] += 1
+            state["calls"] += 1
+            state["max"] = max(state["max"], state["cur"])
+        try:
+            time.sleep(delay)
+            return real(*a, **k)
+        finally:
+            with lk:
+                state["cur"] -= 1
+
+    setattr(target, attr, wrapped)
+    return state
+
+
+async def test_cancelled_flush_loop_never_overlaps_close(tmp_path):
+    w = _writer(tmp_path, flush_rows=10, flush_interval_s=3600, loop_tick_s=0.01)
+    probe = _concurrency_probe(w, "_flush_sync", 0.3)
+    task = asyncio.create_task(w.run_flush_loop())
+    for i in range(20):
+        w.add_frame(_pc(asset=f"A{i}"), T10 + i)
+    for _ in range(100):                       # wait until the loop's flush is inside the thread
+        await asyncio.sleep(0.01)
+        if probe["cur"] == 1:
+            break
+    assert probe["cur"] == 1
+    for i in range(5):
+        w.add_frame(_pc(asset=f"B{i}"), T10 + 100 + i)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await w.close()
+    assert probe["max"] == 1 and probe["calls"] >= 2
+    assert _count(tmp_path / "bc", "changes") == 25
+    assert not list((tmp_path / "bc").rglob("*.inprogress"))
+
+
+def test_flush_sync_io_lock_serializes_threads(tmp_path):
+    import threading
+    from collections import deque
+    w = _writer(tmp_path)
+    probe = _concurrency_probe(w, "_flush_sync_unlocked", 0.2)
+    batches = [deque([("changes", bc.normalize_frame(_pc(asset=f"T{i}"), T10 + i)[0][1])])
+               for i in range(3)]
+    ts = [threading.Thread(target=w._flush_sync, args=(b, [], False)) for b in batches]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert probe["max"] == 1 and probe["calls"] == 3
+    asyncio.run(w.close())
+    assert _count(tmp_path / "bc", "changes") == 3
+
+
+@pytest.mark.parametrize("ts", ["99999999999999999999999", 1e30, -5, 2 ** 63])
+def test_out_of_range_timestamp_quarantined(ts):
+    raw = json.dumps({"market": "0xM", "event_type": "price_change", "timestamp": ts,
+                      "price_changes": [{"asset_id": "A", "price": "0.5", "size": "1", "side": "BUY"}]})
+    (ds, r), = bc.normalize_frame(raw, 1)
+    assert ds == "quarantine" and r["event_type"] == "price_change"
+
+
+async def test_unconvertible_row_is_quarantined_not_batch_dropped(tmp_path):
+    w = _writer(tmp_path)
+    for i in range(1000):
+        w.add_frame(_pc(asset=f"G{i}"), T10 + i)
+    bad = bc.normalize_frame(_pc(asset="BAD"), T10 + 5000)[0][1]
+    bad["exch_ts"] = 10 ** 30                   # slipped past normalization somehow
+    w._buf.append(("changes", bad))
+    await w.close()
+    root = tmp_path / "bc"
+    s = w.stats()
+    assert s["rows_written"]["changes"] == 1000
+    assert s["rows_written"]["quarantine"] == 1
+    assert s["rows_dropped_flush_error"] == 0 and s["flush_errors"] == 0
+    assert [f.name for f in _files(root, "changes")] == ["10.parquet"]      # hour file not split
+    q = pq.read_table(_files(root, "quarantine")[0]).to_pylist()
+    assert q[0]["event_type"] == "changes" and "BAD" in q[0]["raw_json"]
+
+
+def test_buffer_cap_default_lowered():
+    assert bc.BUFFER_CAP == 150_000
+
+
+async def test_add_frame_coerces_recv_ts(tmp_path):
+    clock = Clock(T10 + 7)
+    w = _writer(tmp_path, clock=clock)
+    w.add_frame(_pc(asset="str"), str(T10 + 1))
+    w.add_frame(_pc(asset="float"), float(T10 + 2))
+    w.add_frame(_pc(asset="junk"), "not-a-ts")
+    w.add_frame(_pc(asset="obj"), object())
+    rows = [r for _, r in w._buf]
+    assert [r["recv_ts"] for r in rows] == [T10 + 1, T10 + 2, T10 + 7, T10 + 7]
+    assert all(type(r["recv_ts"]) is int for r in rows)
+    await w.close()
+    assert _count(tmp_path / "bc", "changes") == 4
+
+
+async def test_flush_thread_crash_counts_as_flush_error(tmp_path, monkeypatch):
+    w = _writer(tmp_path)
+    for i in range(3):
+        w.add_frame(_pc(), T10 + i)
+
+    def boom(*a, **k):
+        raise RuntimeError("thread blew up")
+
+    monkeypatch.setattr(w, "_flush_sync", boom)
+    await w.flush()
+    monkeypatch.undo()
+    s = w.stats()
+    assert s["flush_errors"] == 1 and s["rows_dropped_flush_error"] == 3
+    await w.close()
+    errs = [m for m in _meta(tmp_path / "bc") if m["kind"] == "flush_error"]
+    assert len(errs) == 1 and "thread blew up" in json.loads(errs[0]["detail_json"])["error"]
+
+
+async def test_flush_loop_survives_flush_raising(tmp_path, capsys):
+    w = _writer(tmp_path, flush_rows=1, flush_interval_s=3600, loop_tick_s=0.01)
+    real = w.flush
+    calls = {"n": 0}
+
+    async def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("flush exploded")
+        return await real(*a, **k)
+
+    w.flush = flaky
+    task = asyncio.create_task(w.run_flush_loop())
+    w.add_frame(_pc(), T10)
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if w.stats()["rows_written"]["changes"] == 1:
+            break
+    assert not task.done()
+    assert calls["n"] >= 2 and w.stats()["rows_written"]["changes"] == 1
+    assert "flush loop error RuntimeError: flush exploded" in capsys.readouterr().out
+    w.flush = real
+    await w.close()
+    await asyncio.wait_for(task, 2)

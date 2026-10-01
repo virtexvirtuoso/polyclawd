@@ -25,6 +25,9 @@ watchset, reconnect, SIGTERM handling and CLI (Task 3) build on this API:
         Buffer a meta row (connects, reconnects, subscriptions, ...). Never raises;
         after close() the row is dropped and logged.
     await w.flush()            write everything buffered now + rotate past hours.
+                               If a dataset-hour write fails twice its rows are DROPPED
+                               (not requeued) and recorded as meta kind="flush_error".
+                               Rows pyarrow cannot convert go to quarantine individually.
     await w.run_flush_loop()   background task: flush every flush_interval_s or when
                                rows_buffered >= flush_rows; exits after close().
     await w.close()            final flush, finalize every open file, release the
@@ -39,6 +42,9 @@ Layout:  <root>/<dataset>/YYYY-MM-DD/HH.parquet   (hour = row's recv_ts, UTC)
     name is taken — never overwritten). So `<dataset>/*/*.parquet` globs only
     complete, readable files.
 
+Memory: buffered rows are capped at BUFFER_CAP (150K, ~60 MB; up to ~2x during a
+flush). On overflow the OLDEST rows are dropped and summarized in meta "overflow_drop".
+
 Clocks: every row stores recv_ts (local UTC ms) and, where the exchange sends one,
 exch_ts (the event `timestamp`).
 """
@@ -48,6 +54,7 @@ import json
 import math
 import os
 import shutil
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -61,7 +68,9 @@ HOUR_MS = 3_600_000
 
 FLUSH_INTERVAL_S = 30.0      # flush at least this often
 FLUSH_ROWS = 50_000          # ...or as soon as this many rows are buffered
-BUFFER_CAP = 500_000         # hard cap on buffered data rows; overflow drops OLDEST
+BUFFER_CAP = 150_000         # hard cap on buffered data rows; overflow drops OLDEST.
+                             # ~400 B/row -> ~60 MB (x2 during a flush); live rate is ~30 rows/s
+INT64_MAX = 2 ** 63
 DISK_FLOOR_BYTES = 2 * GB    # pause buffering below this much free space
 DISK_RESUME_MARGIN = GB // 2 # resume only above floor + margin (hysteresis)
 DISK_CHECK_INTERVAL_S = 5.0  # free-space syscall at most this often
@@ -113,6 +122,19 @@ class _Malformed(ValueError):
     pass
 
 
+def _coerce_ms(v, fallback_fn):
+    """recv_ts from a caller -> int64 ms; anything unusable -> fallback_fn()."""
+    try:
+        if v is None or isinstance(v, bool):
+            return int(fallback_fn())
+        i = int(v)
+        if 0 <= i < INT64_MAX:
+            return i
+    except Exception:
+        pass
+    return int(fallback_fn())
+
+
 def _num(v, required=False):
     """Exchange numeric string -> finite float. ''/None -> None (or _Malformed if required)."""
     if v is None or v == "":
@@ -136,8 +158,10 @@ def _ts(v):
     if isinstance(v, float):
         if not math.isfinite(v):
             raise _Malformed(f"bad timestamp {v!r}")
-        return int(v)
-    return int(v)
+    i = int(v)
+    if not 0 <= i < INT64_MAX:
+        raise _Malformed(f"timestamp out of int64 range {v!r}")
+    return i
 
 
 def _str(v, required=False):
@@ -358,6 +382,7 @@ class BookCaptureWriter:
         self._meta = []               # meta rows, never dropped by the cap
         self._open = {}               # (dataset, hour bucket) -> _OpenFile (worker thread only)
         self._lock = None             # asyncio.Lock, created lazily inside the loop
+        self._io_lock = threading.Lock()  # one _flush_sync at a time, even across cancellation
         self._wake = None             # asyncio.Event
         self._closed = False
         self._paused = False
@@ -386,8 +411,7 @@ class BookCaptureWriter:
             if self._closed:
                 self.counters["frames_after_close"] += 1
                 return 0
-            if recv_ts is None:
-                recv_ts = self._now_ms()
+            recv_ts = _coerce_ms(recv_ts, self._now_ms)
             self.counters["frames_seen"] += 1
             self._maybe_check_disk(recv_ts)
             if self._paused:
@@ -421,7 +445,7 @@ class BookCaptureWriter:
             if self._closed:
                 print(f"[meta] dropped after close: {kind}")
                 return
-            self._meta.append({"recv_ts": int(recv_ts if recv_ts is not None else self._now_ms()),
+            self._meta.append({"recv_ts": _coerce_ms(recv_ts, self._now_ms),
                                "kind": str(kind), "detail_json": _safe_dumps(detail or {})})
         except Exception as e:  # pragma: no cover
             print(f"[book_capture] add_meta error {type(e).__name__}: {e}")
@@ -451,12 +475,24 @@ class BookCaptureWriter:
                                             "buffer_cap": self.buffer_cap}))
                 self._overflow_since_flush = 0
             t0 = time.monotonic()
+            # to_thread cannot be cancelled: if our caller is cancelled, keep holding the
+            # asyncio lock until the thread really finishes, then re-raise.
+            fut = asyncio.ensure_future(asyncio.to_thread(self._flush_sync, batch, meta, _final))
             try:
-                new_meta = await asyncio.to_thread(self._flush_sync, batch, meta, _final)
-            except Exception as e:  # pragma: no cover — _flush_sync handles its own errors
-                print(f"[book_capture] flush crashed {type(e).__name__}: {e}")
+                new_meta = await asyncio.shield(fut)
+            except asyncio.CancelledError:
+                try:
+                    self._meta.extend(await fut)
+                except Exception as e:
+                    print(f"[book_capture] flush crashed during cancel {type(e).__name__}: {e}")
+                raise
+            except Exception as e:  # _flush_sync handles its own errors; this is the backstop
+                dropped = len(batch) + len(meta)
+                print(f"[book_capture] flush crashed {type(e).__name__}: {e} — dropped {dropped} rows")
+                self.counters["flush_errors"] += 1
+                self.counters["rows_dropped_flush_error"] += dropped
                 new_meta = [self._meta_row("flush_error", {"error": f"{type(e).__name__}: {e}",
-                                                           "dropped_rows": len(batch) + len(meta)})]
+                                                           "dropped_rows": dropped})]
             self._meta.extend(new_meta)
             self._last_flush_mono = time.monotonic()
             self.counters["flushes"] += 1
@@ -479,7 +515,7 @@ class BookCaptureWriter:
             if due or len(self._buf) >= self.flush_rows:
                 try:
                     await self.flush()
-                except Exception as e:  # pragma: no cover
+                except Exception as e:
                     print(f"[book_capture] flush loop error {type(e).__name__}: {e}")
 
     async def close(self):
@@ -625,25 +661,70 @@ class BookCaptureWriter:
             return [self._meta_row("finalize_error", {"path": str(f.tmp_path), "rows": f.rows,
                                                       "error": f"{type(e).__name__}: {e}"})]
 
-    def _write_group(self, dataset, bucket, rows):
-        table = pa.Table.from_pylist(rows, schema=SCHEMAS[dataset])
+    def _to_table(self, dataset, rows):
+        """rows -> (table, bad_rows). A conversion error (not I/O) falls back to
+        per-row conversion so one bad value cannot sink the whole batch."""
+        schema = SCHEMAS[dataset]
+        try:
+            return pa.Table.from_pylist(rows, schema=schema), []
+        except Exception:
+            pass
+        good, bad = [], []
+        for r in rows:
+            try:
+                pa.Table.from_pylist([r], schema=schema)
+                good.append(r)
+            except Exception:
+                bad.append(r)
+        return pa.Table.from_pylist(good, schema=schema), bad
+
+    def _write_table(self, dataset, bucket, table):
         f = self._get_file(dataset, bucket)
         f.writer.write_table(table)
-        f.rows += len(rows)
+        f.rows += table.num_rows
 
     def _flush_sync(self, batch, meta, final):
+        with self._io_lock:
+            return self._flush_sync_unlocked(batch, meta, final)
+
+    def _flush_sync_unlocked(self, batch, meta, final):
         groups = {}
         for ds, row in batch:
             groups.setdefault((ds, row["recv_ts"] // HOUR_MS), []).append(row)
         for row in meta:
             groups.setdefault(("meta", row["recv_ts"] // HOUR_MS), []).append(row)
 
-        new_meta = []
+        # Convert first (pure CPU); unconvertible rows become quarantine rows.
+        tables, quarantined, new_meta = {}, [], []
         for (ds, bucket), rows in groups.items():
+            table, bad = self._to_table(ds, rows)
+            tables[(ds, bucket)] = table
+            for r in bad:
+                quarantined.append({"recv_ts": _coerce_ms(r.get("recv_ts"), self._now_ms),
+                                    "event_type": ds, "raw_json": _safe_dumps(r)})
+        if quarantined:
+            print(f"[book_capture] {len(quarantined)} unconvertible rows -> quarantine")
+            self.counters["quarantined"] += len(quarantined)
+            qgroups = {}
+            for r in quarantined:
+                qgroups.setdefault(r["recv_ts"] // HOUR_MS, []).append(r)
+            for bucket, rows in qgroups.items():
+                table, bad = self._to_table("quarantine", rows)
+                key = ("quarantine", bucket)
+                if key in tables:
+                    table = pa.concat_tables([tables[key], table])
+                tables[key] = table
+                if bad:  # cannot happen with coerced recv_ts; count rather than loop
+                    self.counters["rows_dropped_flush_error"] += len(bad)
+
+        for (ds, bucket), table in tables.items():
+            if table.num_rows == 0:
+                continue
+            n = table.num_rows
             err = None
             for attempt in (1, 2):
                 try:
-                    self._write_group(ds, bucket, rows)
+                    self._write_table(ds, bucket, table)
                     err = None
                     break
                 except Exception as e:
@@ -653,15 +734,15 @@ class BookCaptureWriter:
                     if attempt == 1:
                         self.counters["flush_retries"] += 1
             if err is None:
-                self.counters["rows_written"][ds] += len(rows)
+                self.counters["rows_written"][ds] += n
             else:
                 self.counters["flush_errors"] += 1
-                self.counters["rows_dropped_flush_error"] += len(rows)
+                self.counters["rows_dropped_flush_error"] += n
                 msg = f"{type(err).__name__}: {err}"
                 print(f"[book_capture] flush FAILED twice {ds} hour={bucket}: {msg} "
-                      f"— dropped {len(rows)} rows")
+                      f"— dropped {n} rows")
                 new_meta.append(self._meta_row("flush_error", {
-                    "dataset": ds, "hour_bucket": bucket, "dropped_rows": len(rows), "error": msg}))
+                    "dataset": ds, "hour_bucket": bucket, "dropped_rows": n, "error": msg}))
 
         current = self._now_ms() // HOUR_MS
         for key in list(self._open):
