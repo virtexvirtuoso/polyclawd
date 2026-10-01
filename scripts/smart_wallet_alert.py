@@ -59,6 +59,12 @@ CONVERGENCE_MIN_WALLETS = 2   # ≥2 distinct wallets needed
 CONVERGENCE_SEND = os.environ.get("SMART_WALLET_CONVERGENCE_SEND", "0") == "1"
 THRESHOLD = 1000.0  # $ cumulative that triggers an alert (raised from $500 2026-06-25 — sub-$1K too noisy)
 REFIRE_MULT = 2.0  # re-alert when cumulative doubles
+# 2026-10-01: two-sided merge-arb suppressor. Wallets buying BOTH outcomes of
+# one market inside the accumulation window are running the complete-set merge
+# arb (buy YES+NO when sum < $1.00, MERGE sets back to USDC) — copying either
+# leg takes directional risk the wallet never held. Trace 2026-10-01: 31/48
+# alerts in 12h were this pattern (LoL MAGAZA/Otter + Dota Yandex/BetBoom).
+ARB_SUPPRESS_ENABLED = os.environ.get("POLYCLAWD_ARB_SUPPRESS", "1") == "1"
 MIN_ALERT_MARKET_VOL = 100_000.0
 NEAR_SETTLED_HI = 0.90  # suppress when held outcome priced >= this
 NEAR_SETTLED_LO = 0.10  # ...or <= this (no edge near resolution)
@@ -114,6 +120,13 @@ def init_accum(conn) -> None:
             PRIMARY KEY (wallet, market, direction, outcome)
         )""")
     conn.commit()
+    # 2026-10-01: arb dedup columns — ALTER covers pre-existing tables
+    # and keeps the CREATE block untouched (no-op when columns exist).
+    for _col in ("arb_fired INTEGER DEFAULT 0", "arb_fired_total REAL DEFAULT 0"):
+        try:
+            conn.execute(f"ALTER TABLE smart_wallet_accum ADD COLUMN {_col}")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def init_shadows(conn) -> None:
@@ -244,6 +257,34 @@ def _mark_fired(conn, wallet, market, direction, outcome, now: int, total: float
     )
 
 
+def _is_arb_cycle(meta_conn, f: dict, now: int) -> bool:
+    """Cross-cycle arb evidence: smart_wallet_accum holds a fresh (4h window)
+    row for the SAME (wallet, market, direction) on a DIFFERENT outcome with
+    dollars in it — the wallet is buying both sides. Two more triggers:
+    set_ops > 0 (MERGE/SPLIT/CONVERSION rows in the raw feed, attached by
+    fills_from_trades). Unknown-outcome fills (outcome="") can't be
+    side-attributed -> never flagged (fail open, same rule as the convergence
+    unknown-side guard). A broken check also fails open: it must never
+    silently eat real entries."""
+    outcome = f.get("outcome") or ""
+    if not outcome:
+        return False
+    if int(f.get("set_ops") or 0) > 0:
+        return True
+    try:
+        row = meta_conn.execute(
+            "SELECT 1 FROM smart_wallet_accum "
+            "WHERE wallet=? AND market=? AND direction=? "
+            "AND outcome != ? AND outcome != '' "
+            "AND last_seen >= ? AND total_usd > 0 LIMIT 1",
+            (f["wallet"], f["market"], f["direction"], outcome,
+             int(now) - ACCUM_WINDOW),
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        return False
+    return row is not None
+
+
 def _gates_suppress(m: dict, fill_price: float = None, outcome_index: int = None) -> bool:
     """True = suppress this alert. Applied BEFORE marking fired, so a gated
     crossing can still fire later when conditions clear."""
@@ -275,6 +316,7 @@ def _clv_gate_suppress(shadow_conn, wallet: str) -> bool:
         SELECT COUNT(*) as n, AVG(clv) as avg_clv
         FROM smart_wallet_shadows
         WHERE wallet=? AND resolved=1 AND clv IS NOT NULL
+          AND (alert_type IS NULL OR alert_type != 'arb')
     """, (wallet,)).fetchone()
     if not row or row["n"] < CLV_GATE_MIN_SHADOWS:
         return False  # free pass — not enough data
@@ -291,7 +333,8 @@ def _fade_gate_stats(shadow_conn, wallet: str):
         row = shadow_conn.execute(
             """SELECT COUNT(*) AS n, AVG(clv) AS c FROM smart_wallet_shadows
                WHERE wallet=? AND resolved=1 AND clv IS NOT NULL
-                 AND (near_settled=0 OR near_settled IS NULL)""",
+                 AND (near_settled=0 OR near_settled IS NULL)
+                 AND (alert_type IS NULL OR alert_type != 'arb')""",
             (wallet,),
         ).fetchone()
     except Exception:  # noqa: BLE001
@@ -557,6 +600,16 @@ def check_and_fire(
     if send is None:
         send = _SEND_ENABLED
     fired = []
+    # 2026-10-01 arb pre-scan: (wallet, market, direction) keys with fills on
+    # >=2 distinct outcomes in THIS cycle — catches first-seen two-sided
+    # cycles before per-outcome accum rows exist.
+    _cycle_sides = {}
+    for _f in smart_fills:
+        _o = _f.get("outcome") or ""
+        if not _o:
+            continue
+        _cycle_sides.setdefault((_f["wallet"], _f["market"], _f["direction"]), set()).add(_o)
+    _two_sided = {k for k, s in _cycle_sides.items() if len(s) >= 2}
     for f in smart_fills:
         total, nfills, af, ft = _accumulate(
             meta_conn, f["wallet"], f["market"], f["direction"],
@@ -567,6 +620,48 @@ def check_and_fire(
             continue
         m = meta_for(f["market"]) or {}
         if _gates_suppress(m, fill_price=f.get("price"), outcome_index=f.get("outcome_index")):
+            continue
+        # 2026-10-01: two-sided merge-arb suppressor (see ARB_SUPPRESS_ENABLED).
+        # Shadow-log as 'arb' (counterfactual grading; excluded from wallet
+        # CLV/allowlist stats) and do NOT mark fired, so a later genuinely
+        # one-sided cycle fires fresh. Never delivered, never routed to the
+        # executor, never convergence-counted.
+        if ARB_SUPPRESS_ENABLED and (
+            (f["wallet"], f["market"], f["direction"]) in _two_sided
+            or _is_arb_cycle(meta_conn, f, now)
+        ):
+            # Dedup (mirrors entry/refire): one 'arb' counterfactual per
+            # crossing — re-log only when the cycle doubles again. Without
+            # this a sustained two-sided cycle re-logs every sweep.
+            _arow = meta_conn.execute(
+                "SELECT arb_fired, arb_fired_total FROM smart_wallet_accum "
+                "WHERE wallet=? AND market=? AND direction=? AND outcome=?",
+                (f["wallet"], f["market"], f["direction"], f.get("outcome") or ""),
+            ).fetchone()
+            _af = (_arow["arb_fired"] or 0) if _arow else 0
+            _aft = (_arow["arb_fired_total"] or 0.0) if _arow else 0.0
+            if _af and total < _aft * REFIRE_MULT:
+                continue
+            _log_shadow(shadow_conn, {
+                "wallet": f["wallet"],
+                "market": f["market"],
+                "title": f.get("title") or m.get("title") or f["market"],
+                "direction": f["direction"],
+                "outcome": f.get("outcome") or "",
+                "outcome_index": f.get("outcome_index"),
+                "price_at_alert": float(f["price"]),
+                "cumulative_usd": round(total, 2),
+                "num_fills": nfills,
+                "alert_type": "arb",
+                "ts_alert": int(now),
+                "category": f.get("source_category"),
+            })
+            meta_conn.execute(
+                "UPDATE smart_wallet_accum SET arb_fired=?, arb_fired_total=? "
+                "WHERE wallet=? AND market=? AND direction=? AND outcome=?",
+                (int(now), float(total), f["wallet"], f["market"],
+                 f["direction"], f.get("outcome") or ""),
+            )
             continue
         _mark_fired(meta_conn, f["wallet"], f["market"], f["direction"],
                     f.get("outcome") or "", now, total)
@@ -679,6 +774,7 @@ def _kelly_hint(shadow_conn, price, direction):
             """SELECT COUNT(*) AS n, AVG(clv) AS e FROM smart_wallet_shadows
                WHERE resolved=1 AND clv IS NOT NULL
                  AND (near_settled=0 OR near_settled IS NULL)
+                 AND (alert_type IS NULL OR alert_type != 'arb')
                  AND direction='BUY' AND price_at_alert >= ? AND price_at_alert < ?""",
             (lo, hi)).fetchone()
     except Exception:  # noqa: BLE001 - a hint must never break delivery
@@ -842,11 +938,22 @@ def fills_from_trades(trades: list, smart: dict) -> list:
     """Collapse raw PM trades into per-(wallet, market, side) fills, restricted
     to graduated smart wallets. price = $-weighted avg of the cycle's fills."""
     agg = {}
+    _setops = {}  # (wallet, conditionId) -> count of MERGE/SPLIT/CONVERSION rows
     for t in trades:
         w = t.get("proxyWallet")
         if not w or w not in smart:
             continue
         cid = t.get("conditionId")
+        # 2026-10-01: complete-set operations are the merge-arb signature.
+        # Count them per wallet+market for the suppressor; never accumulate
+        # them as fill dollars. (REDEEM excluded — routine post-resolution
+        # settlement every winning wallet does. NOTE: the /trades sweep feed
+        # carries no `type` field — set_ops is defense-in-depth for feeds
+        # that do; the two-sided window check is the primary trigger.)
+        _ttype = (t.get("type") or "TRADE").upper()
+        if cid and _ttype in ("MERGE", "SPLIT", "CONVERSION"):
+            _setops[(w, cid)] = _setops.get((w, cid), 0) + 1
+            continue
         side = (t.get("side") or "").upper()
         if not cid or side not in ("BUY", "SELL"):
             continue
@@ -893,6 +1000,7 @@ def fills_from_trades(trades: list, smart: dict) -> list:
                 "wallet_trades": sw.get("closed_positions") or sw.get("closed"),
                 "source_category": sw.get("source_category"),
                 "is_bot": sw.get("is_bot", 0),
+                "set_ops": _setops.get((w, cid), 0),
             }
         )
     return out
