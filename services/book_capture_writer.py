@@ -1,0 +1,754 @@
+#!/usr/bin/env python3
+"""
+book_capture_writer.py — normalizer + buffered zstd-parquet writer for book_capture.
+
+Split out of services/book_capture.py (which keeps the WS lifecycle + CLI and
+re-exports the public names below). The WS read loop never blocks on disk — rows
+are buffered in memory and written from a worker thread.
+
+Writer API:
+
+    normalize_frame(raw: str, recv_ts: int) -> list[tuple[str, dict]]
+        Pure. One WS frame -> (dataset, row) pairs. Never raises; anything unknown
+        or malformed becomes a `quarantine` row. "PING"/"PONG"/blank -> [].
+
+    w = BookCaptureWriter(root="storage/book_capture", **knobs)
+        Takes an exclusive flock on <root>/.writer.lock (raises WriterLockedError if
+        another writer holds it), then renames any crash-leftover `*.inprogress` to a
+        unique `*.corrupt` name (never overwriting) and records meta kind="crash_leftover".
+    w.add_frame(raw: str, recv_ts: int | None = None) -> int
+        Sync, call from the event-loop thread. Normalizes + buffers; O(rows);
+        never touches disk, never raises. Returns rows buffered (0 when paused/closed).
+    w.add_meta(kind: str, detail: dict, recv_ts: int | None = None) -> None
+        Buffer a meta row (connects, reconnects, subscriptions, ...). Never raises;
+        after close() the row is dropped and logged.
+    await w.flush()            write everything buffered now + rotate past hours.
+                               If a dataset-hour write fails twice its rows are DROPPED
+                               (not requeued) and recorded as meta kind="flush_error".
+                               Rows pyarrow cannot convert go to quarantine individually,
+                               as event_type=<dataset name> (e.g. "changes") and
+                               raw_json=<the normalized row as JSON>, not the raw frame.
+    await w.run_flush_loop()   background task: flush every flush_interval_s or when
+                               rows_buffered >= flush_rows; exits after close().
+    await w.close()            final flush, finalize every open file, release the
+                               root lock. Idempotent.
+    w.stats() -> dict          counters for a status endpoint.
+
+Layout:  <root>/<dataset>/YYYY-MM-DD/HH.parquet   (hour = row's recv_ts, UTC)
+    datasets: changes, book, trades, meta, quarantine (schemas: SCHEMAS)
+    One open pq.ParquetWriter per (dataset, hour); each flush adds a row group.
+    While open the file is `HH.parquet.inprogress`; on rotation/close it is
+    atomically renamed to `HH.parquet` (or HH.1.parquet, HH.2.parquet, ... if the
+    name is taken — never overwritten). So `<dataset>/*/*.parquet` globs only
+    complete, readable files.
+
+Memory: buffered rows are capped at BUFFER_CAP (150K). Measured ~814 B per buffered
+change row (Python dict + strings) -> ~120 MB at the cap, up to ~250 MB during a flush
+(the batch being converted plus a refilling buffer). On overflow the OLDEST rows are
+dropped and summarized in meta "overflow_drop".
+
+Clocks: every row stores recv_ts (local UTC ms) and, where the exchange sends one,
+exch_ts (the event `timestamp`).
+"""
+import asyncio
+import fcntl
+import json
+import math
+import os
+import shutil
+import threading
+import time
+from collections import deque
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+DEFAULT_ROOT = "storage/book_capture"
+GB = 1024 ** 3
+HOUR_MS = 3_600_000
+
+FLUSH_INTERVAL_S = 30.0      # flush at least this often
+FLUSH_ROWS = 50_000          # ...or as soon as this many rows are buffered
+BUFFER_CAP = 150_000         # hard cap on buffered data rows; overflow drops OLDEST.
+                             # ~814 B/row measured -> ~120 MB (~250 MB during a flush);
+                             # live rate is ~30 rows/s
+INT64_MAX = 2 ** 63
+DISK_FLOOR_BYTES = 2 * GB    # pause buffering below this much free space
+DISK_RESUME_MARGIN = GB // 2 # resume only above floor + margin (hysteresis)
+DISK_CHECK_INTERVAL_S = 5.0  # free-space syscall at most this often
+LOOP_TICK_S = 1.0            # flush-loop wake-up granularity
+ZSTD_LEVEL = 3
+
+_HEARTBEATS = frozenset({"PING", "PONG"})
+
+CHANGES_SCHEMA = pa.schema([
+    ("recv_ts", pa.int64()), ("exch_ts", pa.int64()),
+    ("asset_id", pa.string()), ("market", pa.string()),
+    ("price", pa.float64()), ("size", pa.float64()), ("side", pa.string()),
+    ("hash", pa.string()), ("best_bid", pa.float64()), ("best_ask", pa.float64()),
+])
+BOOK_SCHEMA = pa.schema([
+    ("recv_ts", pa.int64()), ("exch_ts", pa.int64()),
+    ("asset_id", pa.string()), ("market", pa.string()), ("hash", pa.string()),
+    ("tick_size", pa.float64()),
+    ("bids_json", pa.string()), ("asks_json", pa.string()),   # [[price, size], ...] full depth
+])
+TRADES_SCHEMA = pa.schema([
+    ("recv_ts", pa.int64()), ("exch_ts", pa.int64()),
+    ("asset_id", pa.string()), ("market", pa.string()),
+    ("price", pa.float64()), ("size", pa.float64()), ("side", pa.string()),
+    ("fee_rate_bps", pa.float64()), ("tx_hash", pa.string()),
+])
+META_SCHEMA = pa.schema([
+    ("recv_ts", pa.int64()), ("kind", pa.string()), ("detail_json", pa.string()),
+])
+QUARANTINE_SCHEMA = pa.schema([
+    ("recv_ts", pa.int64()), ("event_type", pa.string()), ("raw_json", pa.string()),
+])
+SCHEMAS = {
+    "changes": CHANGES_SCHEMA,
+    "book": BOOK_SCHEMA,
+    "trades": TRADES_SCHEMA,
+    "meta": META_SCHEMA,
+    "quarantine": QUARANTINE_SCHEMA,
+}
+
+
+def _now_ms():
+    return int(time.time() * 1000)
+
+
+# ---------------------------------------------------------------- normalization
+
+class _Malformed(ValueError):
+    pass
+
+
+def _coerce_ms(v, fallback_fn):
+    """recv_ts from a caller -> int64 ms; anything unusable -> fallback_fn()."""
+    try:
+        if v is None or isinstance(v, bool):
+            return int(fallback_fn())
+        i = int(v)
+        if 0 <= i < INT64_MAX:
+            return i
+    except Exception:
+        pass
+    return int(fallback_fn())
+
+
+def _num(v, required=False):
+    """Exchange numeric string -> finite float. ''/None -> None (or _Malformed if required)."""
+    if v is None or v == "":
+        if required:
+            raise _Malformed("missing number")
+        return None
+    if isinstance(v, bool):
+        raise _Malformed(f"bool not a number: {v!r}")
+    f = float(v)  # ValueError/TypeError -> caller quarantines
+    if not math.isfinite(f):
+        raise _Malformed(f"non-finite: {v!r}")
+    return f
+
+
+def _ts(v):
+    """Exchange `timestamp` (ms, string or int) -> int; missing -> None; garbage -> _Malformed."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, bool):
+        raise _Malformed(f"bad timestamp {v!r}")
+    if isinstance(v, float):
+        if not math.isfinite(v):
+            raise _Malformed(f"bad timestamp {v!r}")
+    i = int(v)
+    if not 0 <= i < INT64_MAX:
+        raise _Malformed(f"timestamp out of int64 range {v!r}")
+    return i
+
+
+def _str(v, required=False):
+    if v is None or v == "":
+        if required:
+            raise _Malformed("missing string")
+        return None
+    if not isinstance(v, (str, int)) or isinstance(v, bool):
+        raise _Malformed(f"not a string: {v!r}")
+    return str(v)
+
+
+def _side(v, required=False):
+    s = _str(v, required=required)
+    return s.upper() if s is not None else None
+
+
+def _levels(v):
+    if not isinstance(v, list):
+        raise _Malformed("levels not a list")
+    out = []
+    for lv in v:
+        if not isinstance(lv, dict):
+            raise _Malformed("level not a dict")
+        out.append([_num(lv.get("price"), True), _num(lv.get("size"), True)])
+    return json.dumps(out, separators=(",", ":"))
+
+
+def _first(ev, *keys):
+    for k in keys:
+        if k in ev and ev[k] not in (None, ""):
+            return ev[k]
+    return None
+
+
+def _norm_price_change(ev, recv_ts):
+    pcs = ev.get("price_changes")
+    if not isinstance(pcs, list) or not pcs:
+        raise _Malformed("price_changes missing/not a list")
+    exch_ts = _ts(ev.get("timestamp"))
+    market = _str(ev.get("market"))
+    rows = []
+    for pc in pcs:
+        if not isinstance(pc, dict):
+            raise _Malformed("price_change entry not a dict")
+        rows.append(("changes", {
+            "recv_ts": recv_ts, "exch_ts": exch_ts,
+            "asset_id": _str(pc.get("asset_id"), True),
+            "market": _str(pc.get("market")) or market,
+            "price": _num(pc.get("price"), True),
+            "size": _num(pc.get("size"), True),
+            "side": _side(pc.get("side"), True),
+            "hash": _str(pc.get("hash")),
+            "best_bid": _num(pc.get("best_bid")),
+            "best_ask": _num(pc.get("best_ask")),
+        }))
+    return rows
+
+
+def _norm_book(ev, recv_ts):
+    return [("book", {
+        "recv_ts": recv_ts, "exch_ts": _ts(ev.get("timestamp")),
+        "asset_id": _str(ev.get("asset_id"), True),
+        "market": _str(ev.get("market")),
+        "hash": _str(ev.get("hash")),
+        "tick_size": _num(ev.get("tick_size")),
+        "bids_json": _levels(ev.get("bids")),
+        "asks_json": _levels(ev.get("asks")),
+    })]
+
+
+def _norm_trade(ev, recv_ts):
+    return [("trades", {
+        "recv_ts": recv_ts, "exch_ts": _ts(ev.get("timestamp")),
+        "asset_id": _str(ev.get("asset_id"), True),
+        "market": _str(ev.get("market")),
+        "price": _num(ev.get("price"), True),
+        "size": _num(ev.get("size"), True),
+        "side": _side(ev.get("side")),
+        "fee_rate_bps": _num(_first(ev, "fee_rate_bps", "feeRateBps")),
+        "tx_hash": _str(_first(ev, "transaction_hash", "transactionHash")),
+    })]
+
+
+def _norm_tick_size(ev, recv_ts):
+    return [("meta", {"recv_ts": recv_ts, "kind": "tick_size_change",
+                      "detail_json": json.dumps(ev, separators=(",", ":"))})]
+
+
+_HANDLERS = {
+    "price_change": _norm_price_change,
+    "book": _norm_book,
+    "last_trade_price": _norm_trade,
+    "tick_size_change": _norm_tick_size,
+}
+
+
+def _safe_dumps(obj):
+    try:
+        return json.dumps(obj, separators=(",", ":"), default=repr)
+    except Exception:
+        return repr(obj)
+
+
+def _quarantine(recv_ts, event_type, raw_json):
+    return ("quarantine", {"recv_ts": recv_ts,
+                           "event_type": event_type if isinstance(event_type, str) else None,
+                           "raw_json": raw_json if raw_json else "<empty>"})
+
+
+def _norm_event(ev, recv_ts):
+    if not isinstance(ev, dict):
+        return [_quarantine(recv_ts, None, _safe_dumps(ev))]
+    etype = ev.get("event_type")
+    handler = _HANDLERS.get(etype) if isinstance(etype, str) else None
+    if handler is None:
+        return [_quarantine(recv_ts, etype, _safe_dumps(ev))]
+    try:
+        return handler(ev, recv_ts)
+    except Exception:  # malformed field in a known type -> keep the raw event
+        return [_quarantine(recv_ts, etype, _safe_dumps(ev))]
+
+
+def normalize_frame(raw, recv_ts):
+    """One raw WS frame -> list of (dataset, row dict). Pure; never raises.
+
+    A frame is a JSON dict (one event) or list (e.g. the subscribe snapshot of
+    `book` events). Heartbeats and blank frames yield []. Unknown event types,
+    non-JSON, and known types with unparseable fields yield `quarantine` rows.
+    """
+    try:
+        if isinstance(raw, (bytes, bytearray)):
+            try:
+                raw = raw.decode("utf-8")
+            except Exception:
+                return [_quarantine(recv_ts, None, repr(bytes(raw)))]
+        if not isinstance(raw, str):
+            return [_quarantine(recv_ts, None, repr(raw))]
+        s = raw.strip()
+        if not s or s in _HEARTBEATS:
+            return []
+        try:
+            obj = json.loads(s)
+        except Exception:
+            return [_quarantine(recv_ts, None, raw)]
+        if isinstance(obj, list):
+            out = []
+            for ev in obj:
+                out.extend(_norm_event(ev, recv_ts))
+            return out
+        return _norm_event(obj, recv_ts)
+    except Exception as e:  # pragma: no cover — belt and braces
+        return [_quarantine(recv_ts, None, f"<normalize error {type(e).__name__}> {raw!r}"[:100_000])]
+
+
+# ---------------------------------------------------------------- writer
+
+class WriterLockedError(RuntimeError):
+    """Another BookCaptureWriter already owns this root (its .writer.lock is held)."""
+
+
+def _corrupt_dest(tmp_path):
+    """Unique `*.corrupt` name for a `*.inprogress` file — never an existing path.
+    HH[.N].parquet.inprogress -> HH[.N].parquet.corrupt, else HH[.N].1.parquet.corrupt, ..."""
+    tmp_path = Path(tmp_path)
+    name = tmp_path.name[: -len(".inprogress")] if tmp_path.name.endswith(".inprogress") else tmp_path.name
+    stem = name[: -len(".parquet")] if name.endswith(".parquet") else name
+    n = 0
+    while True:
+        cand = tmp_path.with_name(f"{stem}.parquet.corrupt" if n == 0 else f"{stem}.{n}.parquet.corrupt")
+        if not cand.exists():
+            return cand
+        n += 1
+
+
+class _OpenFile:
+    __slots__ = ("writer", "tmp_path", "final_path", "rows")
+
+    def __init__(self, writer, tmp_path, final_path):
+        self.writer = writer
+        self.tmp_path = tmp_path
+        self.final_path = final_path
+        self.rows = 0
+
+
+def _hour_dir_and_stem(root, dataset, bucket):
+    st = time.gmtime(bucket * 3600)
+    return root / dataset / time.strftime("%Y-%m-%d", st), time.strftime("%H", st)
+
+
+class BookCaptureWriter:
+    """Buffered, hour-partitioned parquet writer. See module docstring for the API."""
+
+    def __init__(self, root=DEFAULT_ROOT, *,
+                 flush_interval_s=FLUSH_INTERVAL_S,
+                 flush_rows=FLUSH_ROWS,
+                 buffer_cap=BUFFER_CAP,
+                 disk_floor_bytes=DISK_FLOOR_BYTES,
+                 disk_resume_margin_bytes=DISK_RESUME_MARGIN,
+                 disk_check_interval_s=DISK_CHECK_INTERVAL_S,
+                 free_bytes_fn=None,
+                 now_ms_fn=None,
+                 loop_tick_s=LOOP_TICK_S,
+                 compression_level=ZSTD_LEVEL):
+        self.root = Path(root)
+        self.flush_interval_s = flush_interval_s
+        self.flush_rows = flush_rows
+        self.buffer_cap = buffer_cap
+        self.disk_floor_bytes = disk_floor_bytes
+        self.disk_resume_bytes = disk_floor_bytes + disk_resume_margin_bytes
+        self.disk_check_interval_s = disk_check_interval_s
+        self.loop_tick_s = loop_tick_s
+        self.compression_level = compression_level
+        self._now_ms = now_ms_fn or _now_ms
+        self._free_bytes = free_bytes_fn or self._default_free_bytes
+
+        self._buf = deque()           # (dataset, row) data rows, capped
+        self._meta = []               # meta rows, never dropped by the cap
+        self._open = {}               # (dataset, hour bucket) -> _OpenFile (worker thread only)
+        self._lock = None             # asyncio.Lock, created lazily inside the loop
+        self._io_lock = threading.Lock()  # one _flush_sync at a time, even across cancellation
+        self._wake = None             # asyncio.Event
+        self._closed = False
+        self._paused = False
+        self._last_disk_check = float("-inf")
+        self._last_flush_mono = time.monotonic()
+        self._overflow_since_flush = 0
+
+        self.counters = {
+            "frames_seen": 0, "frames_discarded_paused": 0, "frames_after_close": 0,
+            "rows_written": {ds: 0 for ds in SCHEMAS},
+            "rows_dropped_overflow": 0, "rows_dropped_flush_error": 0,
+            "flushes": 0, "flush_retries": 0, "flush_errors": 0,
+            "files_finalized": 0, "files_corrupt": 0, "quarantined": 0,
+            "last_flush_ms": None, "last_flush_secs": None,
+        }
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        self._lock_fh = self._acquire_root_lock()   # BEFORE recovery: never touch a live writer's files
+        self._recover_leftovers()
+
+    # -- public, event-loop side -------------------------------------------------
+
+    def add_frame(self, raw, recv_ts=None):
+        """Normalize + buffer one WS frame. Never touches disk, never raises."""
+        try:
+            if self._closed:
+                self.counters["frames_after_close"] += 1
+                return 0
+            recv_ts = _coerce_ms(recv_ts, self._now_ms)
+            self.counters["frames_seen"] += 1
+            self._maybe_check_disk(recv_ts)
+            if self._paused:
+                self.counters["frames_discarded_paused"] += 1
+                return 0
+            rows = normalize_frame(raw, recv_ts)
+            buf = self._buf
+            for item in rows:
+                if item[0] == "meta":
+                    self._meta.append(item[1])
+                    continue
+                if item[0] == "quarantine":
+                    self.counters["quarantined"] += 1
+                buf.append(item)
+            over = len(buf) - self.buffer_cap
+            if over > 0:
+                for _ in range(over):
+                    buf.popleft()
+                self._overflow_since_flush += over
+                self.counters["rows_dropped_overflow"] += over
+            if len(buf) >= self.flush_rows and self._wake is not None:
+                self._wake.set()
+            return len(rows)
+        except Exception as e:  # pragma: no cover — must never take down the WS loop
+            print(f"[book_capture] add_frame error {type(e).__name__}: {e}")
+            return 0
+
+    def add_meta(self, kind, detail=None, recv_ts=None):
+        """Buffer a meta row (kind + JSON detail). Never raises; dropped after close()."""
+        try:
+            if self._closed:
+                print(f"[meta] dropped after close: {kind}")
+                return
+            self._meta.append({"recv_ts": _coerce_ms(recv_ts, self._now_ms),
+                               "kind": str(kind), "detail_json": _safe_dumps(detail or {})})
+        except Exception as e:  # pragma: no cover
+            print(f"[book_capture] add_meta error {type(e).__name__}: {e}")
+
+    def stats(self):
+        s = dict(self.counters)
+        s["rows_written"] = dict(self.counters["rows_written"])
+        s["rows_buffered"] = len(self._buf)
+        s["meta_buffered"] = len(self._meta)
+        s["paused"] = self._paused
+        s["closed"] = self._closed
+        s["open_files"] = len(self._open)
+        s["root"] = str(self.root)
+        return s
+
+    async def flush(self, _final=False):
+        """Write all buffered rows (one row group per dataset-hour) and rotate past
+        hours. Disk I/O runs in a worker thread; flushes are serialized."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            batch, self._buf = self._buf, deque()
+            meta, self._meta = self._meta, []
+            if self._overflow_since_flush:
+                meta.append(self._meta_row("overflow_drop",
+                                           {"dropped_rows": self._overflow_since_flush,
+                                            "buffer_cap": self.buffer_cap}))
+                self._overflow_since_flush = 0
+            t0 = time.monotonic()
+            # to_thread cannot be cancelled: if our caller is cancelled, keep holding the
+            # asyncio lock until the thread really finishes, then re-raise.
+            fut = asyncio.ensure_future(asyncio.to_thread(self._flush_sync, batch, meta, _final))
+            try:
+                new_meta = await asyncio.shield(fut)
+            except asyncio.CancelledError:
+                try:
+                    self._meta.extend(await fut)
+                except Exception as e:
+                    print(f"[book_capture] flush crashed during cancel {type(e).__name__}: {e}")
+                raise
+            except Exception as e:  # _flush_sync handles its own errors; this is the backstop
+                dropped = len(batch) + len(meta)
+                print(f"[book_capture] flush crashed {type(e).__name__}: {e} — dropped {dropped} rows")
+                self.counters["flush_errors"] += 1
+                self.counters["rows_dropped_flush_error"] += dropped
+                new_meta = [self._meta_row("flush_error", {"error": f"{type(e).__name__}: {e}",
+                                                           "dropped_rows": dropped})]
+            self._meta.extend(new_meta)
+            self._last_flush_mono = time.monotonic()
+            self.counters["flushes"] += 1
+            self.counters["last_flush_ms"] = self._now_ms()
+            self.counters["last_flush_secs"] = round(self._last_flush_mono - t0, 3)
+
+    async def run_flush_loop(self):
+        """Background task: flush on interval or row threshold until close()."""
+        if self._wake is None:
+            self._wake = asyncio.Event()
+        while not self._closed:
+            try:
+                await asyncio.wait_for(self._wake.wait(), timeout=self.loop_tick_s)
+            except asyncio.TimeoutError:
+                pass
+            self._wake.clear()
+            if self._closed:
+                break
+            due = time.monotonic() - self._last_flush_mono >= self.flush_interval_s
+            if due or len(self._buf) >= self.flush_rows:
+                try:
+                    await self.flush()
+                except Exception as e:
+                    print(f"[book_capture] flush loop error {type(e).__name__}: {e}")
+
+    async def close(self):
+        """Flush everything and finalize all open files. Idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._wake is not None:
+            self._wake.set()
+        try:
+            await self.flush(_final=True)
+            if self._meta:  # meta produced by the final flush itself (errors, drops)
+                await self.flush(_final=True)
+        finally:
+            self._release_root_lock()
+        print(f"[book_capture] closed: written={self.counters['rows_written']} "
+              f"dropped_overflow={self.counters['rows_dropped_overflow']} "
+              f"flush_errors={self.counters['flush_errors']}")
+
+    # -- disk floor ----------------------------------------------------------------
+
+    def _default_free_bytes(self):
+        return shutil.disk_usage(self.root).free
+
+    def _maybe_check_disk(self, recv_ts):
+        now = time.monotonic()
+        if now - self._last_disk_check < self.disk_check_interval_s:
+            return
+        self._last_disk_check = now
+        try:
+            free = self._free_bytes()
+        except Exception as e:
+            print(f"[book_capture] free-space check failed {type(e).__name__}: {e}")
+            return
+        if not self._paused and free < self.disk_floor_bytes:
+            self._paused = True
+            print(f"[book_capture] DISK FLOOR: {free / GB:.2f} GB free < "
+                  f"{self.disk_floor_bytes / GB:.2f} GB — pausing capture")
+            self._meta.append(self._meta_row("disk_floor_pause",
+                                             {"free_bytes": free, "floor_bytes": self.disk_floor_bytes},
+                                             recv_ts))
+        elif self._paused and free > self.disk_resume_bytes:
+            self._paused = False
+            print(f"[book_capture] disk recovered: {free / GB:.2f} GB free — resuming capture")
+            self._meta.append(self._meta_row("disk_floor_resume",
+                                             {"free_bytes": free,
+                                              "frames_discarded_total": self.counters["frames_discarded_paused"]},
+                                             recv_ts))
+
+    # -- worker-thread side --------------------------------------------------------
+
+    def _meta_row(self, kind, detail, recv_ts=None):
+        return {"recv_ts": int(recv_ts if recv_ts is not None else self._now_ms()),
+                "kind": kind, "detail_json": _safe_dumps(detail)}
+
+    def _acquire_root_lock(self):
+        path = self.root / ".writer.lock"
+        fh = open(path, "a+")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            fh.close()
+            raise WriterLockedError(f"another book_capture writer holds {path}") from e
+        try:
+            fh.seek(0)
+            fh.truncate()
+            fh.write(f"{os.getpid()}\n")
+            fh.flush()
+        except Exception:
+            pass
+        return fh
+
+    def _release_root_lock(self):
+        fh, self._lock_fh = self._lock_fh, None
+        if fh is None:
+            return
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            fh.close()
+        except Exception:
+            pass
+
+    def _recover_leftovers(self):
+        """Startup: rename crash-leftover *.inprogress -> *.corrupt (never delete)."""
+        for p in sorted(self.root.glob("*/*/*.inprogress")):
+            try:
+                dst = _corrupt_dest(p)
+                os.replace(p, dst)
+                print(f"[book_capture] crash leftover {p} -> {dst.name}")
+                self.counters["files_corrupt"] += 1
+                self._meta.append(self._meta_row("crash_leftover",
+                                                 {"path": str(p), "renamed_to": str(dst)}))
+            except Exception as e:
+                print(f"[book_capture] could not rename leftover {p}: {type(e).__name__}: {e}")
+
+    def _pick_name(self, dataset, bucket):
+        d, hh = _hour_dir_and_stem(self.root, dataset, bucket)
+        d.mkdir(parents=True, exist_ok=True)
+        n = 0
+        while True:
+            stem = hh if n == 0 else f"{hh}.{n}"
+            final = d / f"{stem}.parquet"
+            tmp = d / f"{stem}.parquet.inprogress"
+            corrupt = d / f"{stem}.parquet.corrupt"
+            if not (final.exists() or tmp.exists() or corrupt.exists()):
+                return tmp, final
+            n += 1
+
+    def _get_file(self, dataset, bucket):
+        key = (dataset, bucket)
+        f = self._open.get(key)
+        if f is None:
+            tmp, final = self._pick_name(dataset, bucket)
+            w = pq.ParquetWriter(str(tmp), SCHEMAS[dataset], compression="zstd",
+                                 compression_level=self.compression_level)
+            f = self._open[key] = _OpenFile(w, tmp, final)
+        return f
+
+    def _finalize(self, key):
+        """Close + atomically rename one open file. Returns meta rows on trouble."""
+        f = self._open.pop(key, None)
+        if f is None:
+            return []
+        try:
+            f.writer.close()
+            if f.rows == 0:
+                os.remove(f.tmp_path)   # never wrote a row group (failed first write)
+                return []
+            pq.read_metadata(str(f.tmp_path))   # footer must be readable before publishing
+            os.replace(f.tmp_path, f.final_path)
+            self.counters["files_finalized"] += 1
+            return []
+        except Exception as e:
+            try:
+                os.replace(f.tmp_path, _corrupt_dest(f.tmp_path))
+            except Exception:
+                pass
+            self.counters["files_corrupt"] += 1
+            print(f"[book_capture] finalize failed {f.tmp_path}: {type(e).__name__}: {e}")
+            return [self._meta_row("finalize_error", {"path": str(f.tmp_path), "rows": f.rows,
+                                                      "error": f"{type(e).__name__}: {e}"})]
+
+    def _to_table(self, dataset, rows):
+        """rows -> (table, bad_rows). A conversion error (not I/O) falls back to
+        per-row conversion so one bad value cannot sink the whole batch."""
+        schema = SCHEMAS[dataset]
+        try:
+            return pa.Table.from_pylist(rows, schema=schema), []
+        except Exception:
+            pass
+        good, bad = [], []
+        for r in rows:
+            try:
+                pa.Table.from_pylist([r], schema=schema)
+                good.append(r)
+            except Exception:
+                bad.append(r)
+        return pa.Table.from_pylist(good, schema=schema), bad
+
+    def _write_table(self, dataset, bucket, table):
+        f = self._get_file(dataset, bucket)
+        f.writer.write_table(table)
+        f.rows += table.num_rows
+
+    def _flush_sync(self, batch, meta, final):
+        with self._io_lock:
+            return self._flush_sync_unlocked(batch, meta, final)
+
+    def _flush_sync_unlocked(self, batch, meta, final):
+        groups = {}
+        for ds, row in batch:
+            groups.setdefault((ds, row["recv_ts"] // HOUR_MS), []).append(row)
+        for row in meta:
+            groups.setdefault(("meta", row["recv_ts"] // HOUR_MS), []).append(row)
+
+        # Convert first (pure CPU); unconvertible rows become quarantine rows.
+        tables, quarantined, new_meta = {}, [], []
+        for (ds, bucket), rows in groups.items():
+            table, bad = self._to_table(ds, rows)
+            tables[(ds, bucket)] = table
+            for r in bad:
+                quarantined.append({"recv_ts": _coerce_ms(r.get("recv_ts"), self._now_ms),
+                                    "event_type": ds, "raw_json": _safe_dumps(r)})
+        if quarantined:
+            print(f"[book_capture] {len(quarantined)} unconvertible rows -> quarantine")
+            self.counters["quarantined"] += len(quarantined)
+            qgroups = {}
+            for r in quarantined:
+                qgroups.setdefault(r["recv_ts"] // HOUR_MS, []).append(r)
+            for bucket, rows in qgroups.items():
+                table, bad = self._to_table("quarantine", rows)
+                key = ("quarantine", bucket)
+                if key in tables:
+                    table = pa.concat_tables([tables[key], table])
+                tables[key] = table
+                if bad:  # cannot happen with coerced recv_ts; count rather than loop
+                    self.counters["rows_dropped_flush_error"] += len(bad)
+
+        for (ds, bucket), table in tables.items():
+            if table.num_rows == 0:
+                continue
+            n = table.num_rows
+            err = None
+            for attempt in (1, 2):
+                try:
+                    self._write_table(ds, bucket, table)
+                    err = None
+                    break
+                except Exception as e:
+                    err = e
+                    # writer state is suspect: finalize what it already holds, retry on a fresh file
+                    new_meta.extend(self._finalize((ds, bucket)))
+                    if attempt == 1:
+                        self.counters["flush_retries"] += 1
+            if err is None:
+                self.counters["rows_written"][ds] += n
+            else:
+                self.counters["flush_errors"] += 1
+                self.counters["rows_dropped_flush_error"] += n
+                msg = f"{type(err).__name__}: {err}"
+                print(f"[book_capture] flush FAILED twice {ds} hour={bucket}: {msg} "
+                      f"— dropped {n} rows")
+                new_meta.append(self._meta_row("flush_error", {
+                    "dataset": ds, "hour_bucket": bucket, "dropped_rows": n, "error": msg}))
+
+        current = self._now_ms() // HOUR_MS
+        for key in list(self._open):
+            if final or key[1] < current:
+                new_meta.extend(self._finalize(key))
+        return new_meta

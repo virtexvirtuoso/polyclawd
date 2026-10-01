@@ -13,7 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from services import book_capture as bc
+from services import book_capture_writer as bc
 
 FIXTURE = Path(__file__).parent / "fixtures" / "book_capture_events.jsonl"
 HOUR_MS = 3_600_000
