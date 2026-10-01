@@ -54,6 +54,57 @@ from scripts.openclaw_alerts import alert_openclaw
 # fixed earlier the same day, different code path).
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
+# Telegram hard-caps one message at 4096 chars. Batch/digest groups used to be
+# joined into a single message regardless — an oversized group failed as ONE
+# send (http_400) and lingered queued until the 6h/15h expiry silently dropped
+# it. 4000 leaves margin for the "(redelivery)" prefix and header drift.
+TG_MSG_MAX = 4000
+
+
+def _batch_header(pipeline: str, rows: list) -> str:
+    fmt = lambda ts: datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M")  # noqa: E731
+    return (f"📨 {pipeline} — {len(rows)} events "
+            f"({fmt(min(r['ts'] for r in rows))}–{fmt(max(r['ts'] for r in rows))})")
+
+
+def _pack_chunks(rows: list, header: str = "") -> list:
+    """Pack rows into (text, ids) chunks, each <= TG_MSG_MAX chars.
+
+    First chunk carries the group header; overflow spills to continuation
+    chunks prefixed "(cont'd)". A single row longer than the limit is
+    truncated (never dropped). Returns [] for empty rows. Callers delete
+    exactly the ids paired with each chunk AFTER its send returns ok —
+    at-least-once semantics preserved per chunk.
+    """
+    chunks = []
+    cur_lines, cur_ids, cur_len = [], [], 0
+
+    def _flush():
+        nonlocal cur_lines, cur_ids, cur_len
+        if not cur_lines:
+            return
+        text = "\n".join(cur_lines)
+        if chunks:
+            text = "(cont'd)\n" + text
+        chunks.append((text, list(cur_ids)))
+        cur_lines, cur_ids, cur_len = [], [], 0
+
+    if header:
+        cur_lines.append(header)
+        cur_len = len(header)
+    for r in rows:
+        msg = _HTML_TAG_RE.sub("", r["message"] or "")
+        if len(msg) > TG_MSG_MAX:
+            msg = msg[:TG_MSG_MAX - 15] + " …[truncated]"
+        extra = len(msg) + (1 if cur_lines else 0)  # newline join
+        if cur_lines and cur_len + extra > TG_MSG_MAX:
+            _flush()
+        cur_lines.append(msg)
+        cur_ids.append(r["id"])
+        cur_len += len(msg) + (1 if len(cur_lines) > 1 else 0)
+    _flush()
+    return chunks
+
 DB_PATH = Path(__file__).resolve().parent.parent / "storage" / "shadow_trades.db"
 
 TIER_CRITICAL, TIER_BATCH, TIER_DIGEST, TIER_SUPPRESS = 1, 2, 3, 4
@@ -314,12 +365,15 @@ def drain(db_path=None, now=None, force=False) -> int:
                 _delete_ids(con, [r["id"]])
                 sent += 1
 
-        # Tier-2 batches: one combined plain-text message per pipeline group.
+        # Tier-2 batches: plain-text messages per pipeline group, packed in
+        # <=TG_MSG_MAX chunks (an oversized group used to fail as ONE send and
+        # linger queued until expiry silently dropped it).
         for pipeline, grp in groupby(due, key=lambda r: r["pipeline"]):
             grp = list(grp)
-            if alert_openclaw(_batch_text(pipeline, grp), parse_mode=None):
-                _delete_ids(con, [r["id"] for r in grp])
-                sent += 1
+            for text, ids in _pack_chunks(grp, header=_batch_header(pipeline, grp)):
+                if alert_openclaw(text, parse_mode=None):
+                    _delete_ids(con, ids)
+                    sent += 1
         return sent
     except Exception as ex:  # noqa: BLE001 — drain bugs must not kill the tick task
         print(f"[dispatch] drain error: {ex}", flush=True)
@@ -410,16 +464,25 @@ def drain_digest(db_path=None, now=None) -> int:
                 return 1
             return 0
 
-        # Summary header + detail sections for signal rows only.
+        # Summary header + detail sections for signal rows only. Noise rows
+        # are counted in the header but never in a body — delete them upfront
+        # so a failed chunk send can't strand them in the queue forever.
         header = (f"📊 Digest — {label} — {n_total} events | "
                   f"{n_noise} noise | {n_signal} signals")
-        sections = [header]
+        if noise_rows:
+            _delete_ids(con, [r["id"] for r in noise_rows])
+        sent = 0
+        first = True
         for pipeline, grp in groupby(signal_rows, key=lambda r: r["pipeline"]):
-            sections.append(_batch_text(pipeline, list(grp)))
-        if alert_openclaw("\n\n".join(sections), parse_mode=None):
-            _delete_ids(con, [r["id"] for r in rows])
-            return 1
-        return 0
+            grp = list(grp)
+            for text, ids in _pack_chunks(grp, header=_batch_header(pipeline, grp)):
+                if first:
+                    text = header + "\n" + text
+                    first = False
+                if alert_openclaw(text, parse_mode=None):
+                    _delete_ids(con, ids)
+                    sent += 1
+        return sent
     except Exception as ex:  # noqa: BLE001 — digest bugs must not kill the cron
         print(f"[dispatch] digest error: {ex}", flush=True)
         try:

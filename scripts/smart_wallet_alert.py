@@ -725,24 +725,13 @@ def check_and_fire(
                 # sits outside this block, so the executor sees every record.
                 _msg = _format_alert(rec)
                 if rec["alert_type"] in ("entry", "refire"):
-                    _kind = "add" if rec["alert_type"] == "refire" else "entry"
+                    # 2026-10-01: structured plain-text block (see
+                    # _format_wallet_one_liner) — the old single line truncated
+                    # the title mid-word and buried the market behind a dense
+                    # bracket tag; batch/digest strip HTML, so the block is
+                    # authored tag-free.
                     try:
-                        # 2026-09-25: identify WHO entered - the one-liner used to
-                        # omit the wallet, forcing Mr. V to ask "what account?".
-                        _who = str(rec.get("name") or rec.get("wallet") or "")[:16]
-                        _wr = rec.get("wallet_wr")
-                        _pnl = rec.get("wallet_pnl")
-                        _stats = []
-                        if _wr is not None:
-                            _stats.append(f"{_wr * 100:.0f}%WR")
-                        if _pnl is not None:
-                            _stats.append(("+" if _pnl >= 0 else "-") + f"${abs(_pnl):,.0f}")
-                        _tag = " · ".join([_who] + _stats) if _who else ""
-                        _prefix = f"{_kind} [{_tag}]" if _tag else _kind
-                        _line = (f"{_prefix}: {rec['title'][:70]} — {rec['outcome']} "
-                                 f"@ {(rec.get('price_at_alert') or 0) * 100:.0f}¢, "
-                                 f"${(rec.get('cumulative_usd') or 0):,.0f} "
-                                 f"({rec.get('num_fills') or 0} fills)")
+                        _line = _format_wallet_one_liner(rec)
                     except Exception:  # noqa: BLE001 — never lose the event to formatting
                         _line = _msg
                     dispatch("wallet_moves", _line, page_tier_for(f["wallet"], rec["alert_type"]))
@@ -920,14 +909,62 @@ def _format_alert(rec: dict) -> str:
             f"(n={rec['fade_n']}) — consider <b>{'YES' if is_no else 'NO'} @ ~"
             f"{(1 - rec['price_at_alert'])*100:.0f}¢</b> (fading their {side})"
         )
-    # Action instruction for entry/refire
+    # Action instruction for entry/refire. 2026-10-01: wr/trades are None for
+    # wallets with no closed positions yet — the unguarded {wr*100} crashed
+    # _format_alert AFTER the shadow log but BEFORE dispatch, silently
+    # dropping the alert (found by test_entry_dispatch_uses_block).
     if rec["alert_type"] in ("entry", "refire") and not is_exit:
         lines.append("")
-        lines.append(
-            f"💡 Follow on Polymarket: buy {side} @ ~{fill_cents:.0f}¢. "
-            f"Smart wallet with {wr*100:.0f}% WR over {trades} trades."
-        )
+        if wr is not None and trades is not None:
+            lines.append(
+                f"💡 Follow on Polymarket: buy {side} @ ~{fill_cents:.0f}¢. "
+                f"Smart wallet with {wr*100:.0f}% WR over {trades} trades."
+            )
+        else:
+            lines.append(f"💡 Follow on Polymarket: buy {side} @ ~{fill_cents:.0f}¢.")
 
+    return "\n".join(lines)
+
+
+def _format_wallet_one_liner(rec: dict) -> str:
+    """Plain-text-first entry/refire block for the wallet_moves queue.
+
+    Entry/refire route through dispatch tier-2/3, which strip HTML and force
+    parse_mode=None — the old single line truncated the title mid-word and
+    buried the market behind a dense bracket tag. Authored tag-free so what
+    is queued is exactly what renders. Shape:
+        🧠 ENTRY — The Otter Side @ 56¢
+        LoL: MAGAZA vs The Otter Side (BO3) - EMEA Masters Swiss Stage
+        $1,242 in 6 fills · 28% WR · +$18,742 · 21372137
+        polymarket.com/event/<slug>
+    """
+    kind = "🔁 ADD" if rec.get("alert_type") == "refire" else "🧠 ENTRY"
+    is_no = rec.get("outcome_index") == 1
+    outcome = rec.get("outcome") or ("NO" if is_no else "YES")
+    cents = (rec.get("price_at_alert") or 0) * 100
+    head = f"{kind} — {outcome} @ {cents:.0f}¢"
+
+    title = (rec.get("title") or rec.get("market") or "").strip()
+    if len(title) > 70:
+        title = title[:69] + "…"
+
+    parts = [f"${(rec.get('cumulative_usd') or 0):,.0f} in {rec.get('num_fills') or 0} fills"]
+    wr = rec.get("wallet_wr")
+    if wr is not None:
+        parts.append(f"{wr * 100:.0f}% WR")
+    pnl = rec.get("wallet_pnl")
+    if pnl is not None:
+        parts.append(("+" if pnl >= 0 else "-") + f"${abs(pnl):,.0f}")
+    name = str(rec.get("name") or rec.get("wallet") or "")[:16]
+    if name:
+        parts.append(name)
+
+    lines = [head, title, " · ".join(parts)]
+    slug = rec.get("market_slug") or ""
+    if slug:
+        lines.append(f"polymarket.com/event/{slug}")
+    if rec.get("size_hint"):
+        lines.append(f"📐 {rec['size_hint']}")
     return "\n".join(lines)
 
 
