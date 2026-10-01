@@ -9,6 +9,7 @@ loguru>=0.7.2
 requests>=2.31
 aiomcache>=0.8
 websockets>=12.0
+pyarrow>=18.0.0  # services/book_capture_writer.py (zstd parquet)
 scipy>=1.10.0
 pytest
 pytest-asyncio

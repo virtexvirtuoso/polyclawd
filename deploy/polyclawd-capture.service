@@ -3,8 +3,8 @@
 # price changes + trades -> hourly zstd parquet under storage/book_capture/ (research data).
 # Reads poly_ws's memcached watchset (poly:ws:watchset) only; never writes to memcached.
 # Zero trading blast radius: stop = `systemctl stop polyclawd-capture`.
-# Status: curl 127.0.0.1:8424/status. Nightly offload to G-DRIVE from the Mac Mini
-# (~/bin/poly-book-offload, launchd com.virtuoso.poly-book-offload) prunes VPS files >14 d.
+# Status: curl 127.0.0.1:8424/status. A nightly offload job archives finished files and
+# prunes VPS copies >14 d only after verifying them.
 # Git stamp: install the same drop-in as polyclawd-ws (polyclawd-capture.service.d/git-stamp.conf).
 [Unit]
 Description=Polyclawd Polymarket Order-Book Capture (parquet)
