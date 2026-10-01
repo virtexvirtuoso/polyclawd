@@ -81,6 +81,7 @@ def _eligible_rows(con, since_ts):
         "SELECT wallet, ts_alert, price_at_alert, outcome_result, alert_type "
         "FROM smart_wallet_shadows "
         "WHERE resolved=1 AND direction='BUY' AND near_settled=0 "
+        "AND (alert_type IS NULL OR alert_type != 'arb') "
         "AND price_at_alert > 0.01 AND price_at_alert < 0.60 AND ts_alert >= ?",
         (since_ts,),
     ).fetchall()
