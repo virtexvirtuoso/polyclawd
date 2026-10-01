@@ -406,3 +406,65 @@ async def test_status_port_bind_failure_does_not_raise(tmp_path, capsys):
     assert "status server not started" in capsys.readouterr().out
     blocker.close()
     await cap.shutdown("test")
+
+
+# ---------------------------------------------------------------- review fixes
+
+async def test_shutdown_bounded_when_disk_hangs_mid_periodic_flush(tmp_path, capsys):
+    """Disk hangs inside a flush-loop flush: close() times out AND the flush-loop task
+    cannot finish its cancellation — shutdown must still return within its bound."""
+    import threading
+    w = bc.BookCaptureWriter(tmp_path, flush_interval_s=0.05, loop_tick_s=0.02)
+    release, entered = threading.Event(), threading.Event()
+    real = w._flush_sync_unlocked
+
+    def hung(batch, meta, final):
+        entered.set()
+        release.wait(30)
+        return real(batch, meta, final)
+
+    w._flush_sync_unlocked = hung
+    cap = _capture(w, tokens=["t1"], close_timeout_s=0.3, teardown_timeout_s=0.3)
+    cap._tasks.append(asyncio.create_task(w.run_flush_loop()))
+    w.add_frame(_fixture_raws()[0])
+    await _until(entered.is_set, timeout=3.0)
+    t0 = time.monotonic()
+    try:
+        assert await asyncio.wait_for(cap.shutdown("SIGTERM"), 5.0) is False
+        assert time.monotonic() - t0 < 1.5
+        assert cap.close_timed_out
+        out = capsys.readouterr().out
+        assert "timed out" in out and "abandoning" in out
+    finally:
+        release.set()
+        await asyncio.sleep(0.3)
+        for t in asyncio.all_tasks():
+            if t is not asyncio.current_task():
+                t.cancel()
+        w._release_root_lock()
+
+
+async def test_capture_start_precedes_startup_watchset_missing(tmp_path):
+    uni = Universe(None)
+    w = _writer(tmp_path)
+    cap = _capture(w, universe_fn=uni)
+    task = asyncio.create_task(cap.run(0))
+    await _until(lambda: uni.reads >= 2)
+    cap.request_stop("test")
+    await asyncio.wait_for(task, 10)
+    kinds = [m["kind"] for m in _meta(tmp_path)]
+    assert kinds[:2] == ["capture_start", "watchset_missing"], kinds
+    start, = _meta(tmp_path, "capture_start")
+    assert start["detail"]["universe_size"] == 0
+    assert len(_meta(tmp_path, "watchset_missing")) == 1
+
+
+async def test_gap_open_in_status_and_capture_stop(tmp_path):
+    w = _writer(tmp_path)
+    cap = _capture(w, tokens=["t1"])
+    assert cap.status()["gap_open"] is False
+    cap._on_disconnect("ConnectionClosedError: boom")
+    assert cap.status()["gap_open"] is True
+    await cap.shutdown("SIGTERM")
+    stop, = _meta(tmp_path, "capture_stop")
+    assert stop["detail"]["stats"]["gap_open"] is True

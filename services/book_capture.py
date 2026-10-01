@@ -790,7 +790,12 @@ class BookCaptureWriter:
 #
 # Meta rows written here (dataset `meta`, detail_json):
 #   capture_start     {pid, root, universe_size, static_universe, ws_url, git_sha}
-#   capture_stop      {reason, stats}           (written BEFORE writer.close())
+#   capture_start is always the FIRST lifecycle row of a run (before any startup
+#                     watchset_missing).
+#   capture_stop      {reason, stats}           (written BEFORE writer.close()).
+#                     capture_stop TERMINATES any open gap: a gap_start with no gap_end
+#                     before the next capture_stop ends at capture_stop (no gap_end is
+#                     written); stats.gap_open says whether one was open.
 #   universe_change   {added_count, removed_count, added, removed, universe_size}
 #                     — at the subscribe that applies it (diff vs previous subscription)
 #   watchset_missing  {kept_universe_size, startup, error} — once per outage
@@ -816,8 +821,10 @@ BACKOFF_MAX_S = 60.0
 BACKOFF_JITTER_S = 0.5
 STABLE_RESET_S = 30.0            # a connection that lived longer resets the backoff
 CLOSE_TIMEOUT_S = 20.0           # bound on writer.close() at shutdown (hung disk)
+TEARDOWN_TIMEOUT_S = 3.0         # bound on cancelling each group of background tasks
 CONTROL_TICK_S = 1.0             # connection control-loop wake-up granularity
 EXIT_WRITER_LOCKED = 3
+EXIT_CLOSE_TIMEOUT = 1           # writer.close() timed out: data may be unflushed
 
 
 def _git_sha():
@@ -859,7 +866,8 @@ class BookCapture:
                  ping_interval_s=PING_INTERVAL_S,
                  backoff_base_s=BACKOFF_BASE_S, backoff_max_s=BACKOFF_MAX_S,
                  jitter_s=BACKOFF_JITTER_S, stable_reset_s=STABLE_RESET_S,
-                 close_timeout_s=CLOSE_TIMEOUT_S, tick_s=CONTROL_TICK_S,
+                 close_timeout_s=CLOSE_TIMEOUT_S, teardown_timeout_s=TEARDOWN_TIMEOUT_S,
+                 tick_s=CONTROL_TICK_S,
                  now_ms_fn=None):
         self.writer = writer
         self.static = tokens is not None
@@ -876,6 +884,7 @@ class BookCapture:
         self.jitter_s = jitter_s
         self.stable_reset_s = stable_reset_s
         self.close_timeout_s = close_timeout_s
+        self.teardown_timeout_s = teardown_timeout_s
         self.tick_s = tick_s
         self._now_ms = now_ms_fn or _now_ms
 
@@ -901,6 +910,7 @@ class BookCapture:
         self._tasks = []
         self._http = None
         self.close_timed_out = False
+        self.teardown_abandoned = False
 
     # -- universe --------------------------------------------------------------------
 
@@ -911,16 +921,21 @@ class BookCapture:
             self._mc = aiomcache.Client(MC_HOST, MC_PORT, pool_size=1)
         return _parse_watchset(await asyncio.wait_for(self._mc.get(WATCHSET_KEY), MC_TIMEOUT_S))
 
+    async def _read_universe(self):
+        """-> (tokens or None, error string or None). Never raises."""
+        try:
+            return await self._universe_fn(), None
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
+
     async def _refresh_universe(self, startup=False):
         """Re-read the universe. Missing/unreadable/empty -> keep the last one and
         record watchset_missing once per outage. Never raises."""
         if self.static:
             return
-        err = None
-        try:
-            toks = await self._universe_fn()
-        except Exception as e:
-            toks, err = None, f"{type(e).__name__}: {e}"
+        self._apply_universe_read(*await self._read_universe(), startup=startup)
+
+    def _apply_universe_read(self, toks, err, startup=False):
         if not toks:
             if self._watchset_missing_since is None:
                 self._watchset_missing_since = time.monotonic()
@@ -1084,11 +1099,17 @@ class BookCapture:
         try:
             self._tasks.append(asyncio.create_task(self.writer.run_flush_loop()))
             self._http = await self._start_http()
-            await self._refresh_universe(startup=True)
+            # Read the universe first (for universe_size) but record its outcome only
+            # AFTER capture_start, so capture_start is always the first lifecycle row.
+            first = None if self.static else await self._read_universe()
+            if first is not None and first[0]:
+                self.desired = set(first[0])
             self.writer.add_meta("capture_start", {
                 "pid": os.getpid(), "root": str(self.writer.root),
                 "universe_size": len(self.desired), "static_universe": self.static,
                 "ws_url": self.ws_url, "git_sha": _git_sha()})
+            if first is not None:
+                self._apply_universe_read(*first, startup=True)
             await self._wait_for_universe(deadline)
             if not self.static:
                 self._tasks.append(asyncio.create_task(self._universe_loop()))
@@ -1139,10 +1160,7 @@ class BookCapture:
         if self._stop_reason is None:
             self._stop_reason = reason
         self._stop.set()
-        rt = self._read_task
-        if rt is not None and not rt.done():
-            rt.cancel()
-            await asyncio.gather(rt, return_exceptions=True)
+        await self._cancel_bounded([self._read_task], "read")
         self.connected = False
         self.writer.add_meta("capture_stop", {"reason": reason, "stats": self.status()})
         # asyncio.wait (not wait_for): on timeout we must NOT await the cancellation of a
@@ -1160,22 +1178,40 @@ class BookCapture:
             self.close_timed_out = True
             print(f"[capture] writer.close() timed out after {self.close_timeout_s}s — "
                   f"buffered rows may be lost; exiting anyway")
-        for t in self._tasks:
-            if not t.done():
-                t.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        # Bounded too: a flush-loop task stuck in flush()'s cancel handler (awaiting a
+        # hung disk thread) never finishes cancelling — abandon it rather than hang.
+        await self._cancel_bounded(self._tasks, "background")
         self._tasks = []
         if self._http is not None:
             self._http.close()
             self._http = None
         if self._mc is not None:
             try:
-                await self._mc.close()
-            except Exception:
+                await asyncio.wait_for(self._mc.close(), self.teardown_timeout_s)
+            except BaseException:
                 pass
             self._mc = None
         self._shutdown_result = ok
         return ok
+
+    async def _cancel_bounded(self, tasks, what):
+        """Cancel tasks and wait at most teardown_timeout_s for them to finish.
+        Stragglers are abandoned (logged, self.teardown_abandoned set). True if all ended."""
+        tasks = [t for t in tasks if t is not None and not t.done()]
+        if not tasks:
+            return True
+        for t in tasks:
+            t.cancel()
+        done, pending = await asyncio.wait(tasks, timeout=self.teardown_timeout_s)
+        for t in done:
+            if not t.cancelled():
+                t.exception()   # retrieve, so asyncio does not log "never retrieved"
+        if pending:
+            self.teardown_abandoned = True
+            print(f"[capture] {len(pending)} {what} task(s) did not stop within "
+                  f"{self.teardown_timeout_s}s — abandoning")
+            return False
+        return True
 
     # -- status ----------------------------------------------------------------------
 
@@ -1191,6 +1227,7 @@ class BookCapture:
             "last_msg_age_s": (round((now - self.last_recv_ms) / 1000, 1)
                                if self.last_recv_ms else None),
             "gap_count": self.gap_count,
+            "gap_open": self._gap_open,
             "universe_size": len(self.desired),
             "static_universe": self.static,
             "frames": self.frames,
@@ -1266,11 +1303,13 @@ def main(argv=None):
 
     async def _run():
         await cap.run(a.seconds)
-        if cap.close_timed_out:
-            # a close() stuck in a disk thread would also block asyncio.run()'s executor
-            # shutdown and interpreter exit — leave now, exit 0 as a normal stop.
+        if cap.close_timed_out or cap.teardown_abandoned:
+            # A task/thread stuck on a hung disk would also block asyncio.run()'s
+            # cleanup, executor shutdown and interpreter exit — leave now. Exit 1 when
+            # close() timed out (buffered rows may be unflushed), so systemd and
+            # monitoring see a failed stop; 0 if only teardown stragglers were abandoned.
             sys.stdout.flush()
-            os._exit(0)
+            os._exit(EXIT_CLOSE_TIMEOUT if cap.close_timed_out else 0)
 
     asyncio.run(_run())
     return 0
