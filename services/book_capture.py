@@ -15,6 +15,7 @@ meta, SIGTERM, status HTTP, CLI — see the "capture process" section).
 Run:  python -m services.book_capture --seconds 60 --tokens a,b      (static universe)
       python -m services.book_capture --seconds 0                     (service: watchset)
 """
+
 import argparse
 import asyncio
 import json
@@ -36,11 +37,22 @@ except ImportError:  # pragma: no cover — only needed for the memcached watchs
     aiomcache = None
 
 from services.book_capture_writer import (  # noqa: F401 — re-exported public writer API
-    BOOK_SCHEMA, BUFFER_CAP, CHANGES_SCHEMA, DEFAULT_ROOT, GB, HOUR_MS, META_SCHEMA,
-    QUARANTINE_SCHEMA, SCHEMAS, TRADES_SCHEMA, BookCaptureWriter, WriterLockedError,
-    _HEARTBEATS, _now_ms, normalize_frame,
+    _HEARTBEATS,
+    BOOK_SCHEMA,
+    BUFFER_CAP,
+    CHANGES_SCHEMA,
+    DEFAULT_ROOT,
+    GB,
+    HOUR_MS,
+    META_SCHEMA,
+    QUARANTINE_SCHEMA,
+    SCHEMAS,
+    TRADES_SCHEMA,
+    BookCaptureWriter,
+    WriterLockedError,
+    _now_ms,
+    normalize_frame,
 )
-
 
 # ---------------------------------------------------------------- capture process
 #
@@ -82,31 +94,35 @@ MC_HOST, MC_PORT = "localhost", 11211
 WATCHSET_KEY = b"poly:ws:watchset"
 CAPTURE_HTTP_PORT = int(os.environ.get("POLY_CAPTURE_PORT", "8424"))
 
-UNIVERSE_INTERVAL_S = 60.0       # watchset re-read cadence
-UNIVERSE_RECONNECT_MIN_S = 120.0 # min gap between universe-driven reconnects
-NO_UNIVERSE_RETRY_S = 10.0       # startup: retry cadence while there is no universe
-MC_TIMEOUT_S = 5.0               # memcached get must not hang the universe loop
-PING_INTERVAL_S = 10.0           # app-level "PING" text heartbeat (server answers "PONG")
-BACKOFF_BASE_S = 1.0             # error reconnect: 1 s doubling to 60 s + jitter (poly_ws)
+UNIVERSE_INTERVAL_S = 60.0  # watchset re-read cadence
+UNIVERSE_RECONNECT_MIN_S = 120.0  # min gap between universe-driven reconnects
+NO_UNIVERSE_RETRY_S = 10.0  # startup: retry cadence while there is no universe
+MC_TIMEOUT_S = 5.0  # memcached get must not hang the universe loop
+PING_INTERVAL_S = 10.0  # app-level "PING" text heartbeat (server answers "PONG")
+BACKOFF_BASE_S = 1.0  # error reconnect: 1 s doubling to 60 s + jitter (poly_ws)
 BACKOFF_MAX_S = 60.0
 BACKOFF_JITTER_S = 0.5
-STABLE_RESET_S = 30.0            # a connection that lived longer resets the backoff
-DATA_SILENCE_S = 300.0           # no DATA frame (PONGs don't count) this long -> reconnect;
-                                 # live rate is ~20 frames/s across ~240 tokens. 0 = off
+STABLE_RESET_S = 30.0  # a connection that lived longer resets the backoff
+DATA_SILENCE_S = 300.0  # no DATA frame (PONGs don't count) this long -> reconnect;
+# live rate is ~20 frames/s across ~240 tokens. 0 = off
 DATA_SILENCE_MIN_CONN_S = 120.0  # ...only on a connection at least this old
-CLOSE_TIMEOUT_S = 20.0           # bound on writer.close() at shutdown (hung disk)
-TEARDOWN_TIMEOUT_S = 3.0         # bound on cancelling each group of background tasks
-CONTROL_TICK_S = 1.0             # connection control-loop wake-up granularity
+CLOSE_TIMEOUT_S = 20.0  # bound on writer.close() at shutdown (hung disk)
+TEARDOWN_TIMEOUT_S = 3.0  # bound on cancelling each group of background tasks
+CONTROL_TICK_S = 1.0  # connection control-loop wake-up granularity
 EXIT_WRITER_LOCKED = 3
-EXIT_CLOSE_TIMEOUT = 1           # writer.close() timed out: data may be unflushed
+EXIT_CLOSE_TIMEOUT = 1  # writer.close() timed out: data may be unflushed
 
 
 def _git_sha():
     """Short git sha of this checkout, or None (cheap: one subprocess at startup)."""
     try:
-        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
-                             cwd=os.path.dirname(os.path.abspath(__file__)),
-                             capture_output=True, text=True, timeout=2)
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
         return out.stdout.strip() or None if out.returncode == 0 else None
     except Exception:
         return None
@@ -136,18 +152,29 @@ class _DataSilence(ConnectionError):
 class BookCapture:
     """WS lifecycle around a BookCaptureWriter. See the section comment above."""
 
-    def __init__(self, writer, *, tokens=None, universe_fn=None, ws_url=WS_URL,
-                 http_port=CAPTURE_HTTP_PORT,
-                 universe_interval_s=UNIVERSE_INTERVAL_S,
-                 universe_reconnect_min_s=UNIVERSE_RECONNECT_MIN_S,
-                 no_universe_retry_s=NO_UNIVERSE_RETRY_S,
-                 ping_interval_s=PING_INTERVAL_S,
-                 backoff_base_s=BACKOFF_BASE_S, backoff_max_s=BACKOFF_MAX_S,
-                 jitter_s=BACKOFF_JITTER_S, stable_reset_s=STABLE_RESET_S,
-                 data_silence_s=DATA_SILENCE_S, data_silence_min_conn_s=DATA_SILENCE_MIN_CONN_S,
-                 close_timeout_s=CLOSE_TIMEOUT_S, teardown_timeout_s=TEARDOWN_TIMEOUT_S,
-                 tick_s=CONTROL_TICK_S,
-                 now_ms_fn=None):
+    def __init__(
+        self,
+        writer,
+        *,
+        tokens=None,
+        universe_fn=None,
+        ws_url=WS_URL,
+        http_port=CAPTURE_HTTP_PORT,
+        universe_interval_s=UNIVERSE_INTERVAL_S,
+        universe_reconnect_min_s=UNIVERSE_RECONNECT_MIN_S,
+        no_universe_retry_s=NO_UNIVERSE_RETRY_S,
+        ping_interval_s=PING_INTERVAL_S,
+        backoff_base_s=BACKOFF_BASE_S,
+        backoff_max_s=BACKOFF_MAX_S,
+        jitter_s=BACKOFF_JITTER_S,
+        stable_reset_s=STABLE_RESET_S,
+        data_silence_s=DATA_SILENCE_S,
+        data_silence_min_conn_s=DATA_SILENCE_MIN_CONN_S,
+        close_timeout_s=CLOSE_TIMEOUT_S,
+        teardown_timeout_s=TEARDOWN_TIMEOUT_S,
+        tick_s=CONTROL_TICK_S,
+        now_ms_fn=None,
+    ):
         self.writer = writer
         self.static = tokens is not None
         self.tokens = [str(t) for t in tokens] if tokens is not None else []
@@ -169,23 +196,23 @@ class BookCapture:
         self.tick_s = tick_s
         self._now_ms = now_ms_fn or _now_ms
 
-        self.desired = set(self.tokens)   # universe we want subscribed
-        self.subscribed = set()           # tokens sent on the current/last connection
-        self._prev_subscribed = None      # set of the previous successful subscribe
+        self.desired = set(self.tokens)  # universe we want subscribed
+        self.subscribed = set()  # tokens sent on the current/last connection
+        self._prev_subscribed = None  # set of the previous successful subscribe
         self.connected = False
         self.reconnects = 0
         self.gap_count = 0
-        self.frames = 0                   # non-heartbeat frames handed to the writer
+        self.frames = 0  # non-heartbeat frames handed to the writer
         self.heartbeats = 0
-        self.last_recv_ms = None          # last frame of ANY kind (liveness, gap bound)
-        self.last_data_ms = None          # last NON-heartbeat frame (data-silence watchdog)
-        self._established = False         # current run_once attempt reached subscribe
-        self._conn_start = None           # monotonic start of the current connection
+        self.last_recv_ms = None  # last frame of ANY kind (liveness, gap bound)
+        self.last_data_ms = None  # last NON-heartbeat frame (data-silence watchdog)
+        self._established = False  # current run_once attempt reached subscribe
+        self._conn_start = None  # monotonic start of the current connection
         self._conn_start_ms = None
         self._gap_start_ms = None
         self._gap_last_recv = None
         self._gap_last_data = None
-        self.universe_reconnect_decisions = []   # monotonic times of planned reconnects
+        self.universe_reconnect_decisions = []  # monotonic times of planned reconnects
         self.start_ms = self._now_ms()
         self._gap_open = False
         self._backoff = backoff_base_s
@@ -194,7 +221,7 @@ class BookCapture:
         self._mc = None
         self._stop = asyncio.Event()
         self._stop_reason = None
-        self._shutdown_result = None      # None until shutdown() ran; then True/False
+        self._shutdown_result = None  # None until shutdown() ran; then True/False
         self._read_task = None
         self._tasks = []
         self._http = None
@@ -239,10 +266,13 @@ class BookCapture:
         if not toks:
             if self._watchset_missing_since is None:
                 self._watchset_missing_since = time.monotonic()
-                print(f"[universe] watchset missing/unreadable ({err or 'no key'}) — "
-                      f"keeping last universe ({len(self.desired)} tokens)")
-                self.writer.add_meta("watchset_missing", {
-                    "kept_universe_size": len(self.desired), "startup": startup, "error": err})
+                print(
+                    f"[universe] watchset missing/unreadable ({err or 'no key'}) — "
+                    f"keeping last universe ({len(self.desired)} tokens)"
+                )
+                self.writer.add_meta(
+                    "watchset_missing", {"kept_universe_size": len(self.desired), "startup": startup, "error": err}
+                )
             return
         if self._watchset_missing_since is not None:
             outage = round(time.monotonic() - self._watchset_missing_since, 1)
@@ -321,15 +351,22 @@ class BookCapture:
         if prev is not None and prev != set(sub):
             added, removed = sorted(set(sub) - prev), sorted(prev - set(sub))
             print(f"[universe] resubscribed: +{len(added)} -{len(removed)} (now {len(sub)})")
-            self.writer.add_meta("universe_change", {
-                "added_count": len(added), "removed_count": len(removed),
-                "added": added, "removed": removed, "universe_size": len(sub)}, recv_ts=now)
+            self.writer.add_meta(
+                "universe_change",
+                {
+                    "added_count": len(added),
+                    "removed_count": len(removed),
+                    "added": added,
+                    "removed": removed,
+                    "universe_size": len(sub),
+                },
+                recv_ts=now,
+            )
         if self._gap_open:
             self._gap_open = False
             known = [t for t in (self._gap_last_data, self._gap_last_recv) if t is not None]
             base = min(known) if known else self._gap_start_ms
-            self.writer.add_meta("gap_end", {"gap_ms": max(0, now - base), "tokens": len(sub)},
-                                 recv_ts=now)
+            self.writer.add_meta("gap_end", {"gap_ms": max(0, now - base), "tokens": len(sub)}, recv_ts=now)
         self._prev_subscribed = set(sub)
 
     def _on_disconnect(self, reason):
@@ -340,20 +377,25 @@ class BookCapture:
         self._gap_last_recv = self.last_recv_ms
         # Data coverage ended at the last DATA frame — or, if this connection never
         # carried one, at its connect (PONGs keep last_recv fresh but cover nothing).
-        self._gap_last_data = (self.last_data_ms if self.last_data_ms is not None
-                               else self._conn_start_ms)
-        self.writer.add_meta("gap_start", {"last_recv_ts": self.last_recv_ms,
-                                           "last_data_ts": self.last_data_ms,
-                                           "reason": reason, "reconnects": self.reconnects},
-                             recv_ts=self._gap_start_ms)
+        self._gap_last_data = self.last_data_ms if self.last_data_ms is not None else self._conn_start_ms
+        self.writer.add_meta(
+            "gap_start",
+            {
+                "last_recv_ts": self.last_recv_ms,
+                "last_data_ts": self.last_data_ms,
+                "reason": reason,
+                "reconnects": self.reconnects,
+            },
+            recv_ts=self._gap_start_ms,
+        )
 
     async def run_once(self, deadline):
         """One connection. Returns "stop" | "deadline" | "universe_change"; raises on
         any connection error (incl. a clean server close). Sets self._established."""
         self._established = False
-        async with websockets.connect(self.ws_url, ping_interval=10, ping_timeout=25,
-                                      max_size=2 ** 23, open_timeout=15,
-                                      close_timeout=2) as ws:
+        async with websockets.connect(
+            self.ws_url, ping_interval=10, ping_timeout=25, max_size=2**23, open_timeout=15, close_timeout=2
+        ) as ws:
             sub = sorted(self.desired)
             await ws.send(json.dumps({"assets_ids": sub, "type": "market"}))
             self.subscribed = set(sub)
@@ -368,10 +410,11 @@ class BookCapture:
             stop_task = asyncio.create_task(self._stop.wait())
             try:
                 while True:
-                    done, _ = await asyncio.wait({read_task, stop_task}, timeout=self.tick_s,
-                                                 return_when=asyncio.FIRST_COMPLETED)
+                    done, _ = await asyncio.wait(
+                        {read_task, stop_task}, timeout=self.tick_s, return_when=asyncio.FIRST_COMPLETED
+                    )
                     if read_task in done:
-                        read_task.result()            # raises the connection error
+                        read_task.result()  # raises the connection error
                         raise _ServerClosed("read loop ended")
                     if self._stop.is_set():
                         return "stop"
@@ -381,8 +424,10 @@ class BookCapture:
                     if self._universe_reconnect_due():
                         self._last_universe_reconnect = time.monotonic()
                         self.universe_reconnect_decisions.append(self._last_universe_reconnect)
-                        print(f"[universe] resubscribe via reconnect "
-                              f"(desired={len(self.desired)} subscribed={len(self.subscribed)})")
+                        print(
+                            f"[universe] resubscribe via reconnect "
+                            f"(desired={len(self.desired)} subscribed={len(self.subscribed)})"
+                        )
                         return "universe_change"
             finally:
                 self.connected = False
@@ -401,8 +446,7 @@ class BookCapture:
         ref = max(self.last_data_ms or 0, self._conn_start_ms)
         silent_s = (self._now_ms() - ref) / 1000
         if silent_s > self.data_silence_s:
-            print(f"[watchdog] no data frames for {silent_s:.0f}s "
-                  f"(heartbeats={self.heartbeats}) — reconnecting")
+            print(f"[watchdog] no data frames for {silent_s:.0f}s (heartbeats={self.heartbeats}) — reconnecting")
             raise _DataSilence("data silence")
 
     async def _wait_for_universe(self, deadline):
@@ -433,10 +477,17 @@ class BookCapture:
             first = None if self.static else await self._read_universe()
             if first is not None and first[0]:
                 self.desired = set(first[0])
-            self.writer.add_meta("capture_start", {
-                "pid": os.getpid(), "root": str(self.writer.root),
-                "universe_size": len(self.desired), "static_universe": self.static,
-                "ws_url": self.ws_url, "git_sha": _git_sha()})
+            self.writer.add_meta(
+                "capture_start",
+                {
+                    "pid": os.getpid(),
+                    "root": str(self.writer.root),
+                    "universe_size": len(self.desired),
+                    "static_universe": self.static,
+                    "ws_url": self.ws_url,
+                    "git_sha": _git_sha(),
+                },
+            )
             if first is not None:
                 self._apply_universe_read(*first, startup=True)
             await self._wait_for_universe(deadline)
@@ -448,16 +499,15 @@ class BookCapture:
                     if outcome == "universe_change":
                         self.reconnects += 1
                         self._on_disconnect("universe_change")
-                        continue                  # planned: reconnect now, no backoff
-                    break                         # stop / deadline
+                        continue  # planned: reconnect now, no backoff
+                    break  # stop / deadline
                 except Exception as e:
                     self.connected = False
                     if self._stop.is_set():
                         break
                     self.reconnects += 1
                     if self._established:
-                        self._on_disconnect(str(e) if isinstance(e, _DataSilence)
-                                            else f"{type(e).__name__}: {e}"[:500])
+                        self._on_disconnect(str(e) if isinstance(e, _DataSilence) else f"{type(e).__name__}: {e}"[:500])
                     remaining = deadline - time.time()
                     if remaining <= 0:
                         break
@@ -504,8 +554,10 @@ class BookCapture:
                 print(f"[capture] writer.close() failed: {type(e).__name__}: {e}")
         else:
             self.close_timed_out = True
-            print(f"[capture] writer.close() timed out after {self.close_timeout_s}s — "
-                  f"buffered rows may be lost; exiting anyway")
+            print(
+                f"[capture] writer.close() timed out after {self.close_timeout_s}s — "
+                f"buffered rows may be lost; exiting anyway"
+            )
         # Bounded too: a flush-loop task stuck in flush()'s cancel handler (awaiting a
         # hung disk thread) never finishes cancelling — abandon it rather than hang.
         await self._cancel_bounded(self._tasks, "background")
@@ -533,11 +585,12 @@ class BookCapture:
         done, pending = await asyncio.wait(tasks, timeout=self.teardown_timeout_s)
         for t in done:
             if not t.cancelled():
-                t.exception()   # retrieve, so asyncio does not log "never retrieved"
+                t.exception()  # retrieve, so asyncio does not log "never retrieved"
         if pending:
             self.teardown_abandoned = True
-            print(f"[capture] {len(pending)} {what} task(s) did not stop within "
-                  f"{self.teardown_timeout_s}s — abandoning")
+            print(
+                f"[capture] {len(pending)} {what} task(s) did not stop within {self.teardown_timeout_s}s — abandoning"
+            )
             return False
         return True
 
@@ -552,10 +605,8 @@ class BookCapture:
             "connected": self.connected,
             "subscribed_count": len(self.subscribed) if self.connected else 0,
             "reconnects": self.reconnects,
-            "last_msg_age_s": (round((now - self.last_recv_ms) / 1000, 1)
-                               if self.last_recv_ms else None),
-            "last_data_age_s": (round((now - self.last_data_ms) / 1000, 1)
-                                if self.last_data_ms else None),
+            "last_msg_age_s": (round((now - self.last_recv_ms) / 1000, 1) if self.last_recv_ms else None),
+            "last_data_age_s": (round((now - self.last_data_ms) / 1000, 1) if self.last_data_ms else None),
             "gap_count": self.gap_count,
             "gap_open": self._gap_open,
             "universe_size": len(self.desired),
@@ -577,9 +628,10 @@ class BookCapture:
             try:
                 await reader.readline()
                 body = json.dumps(self.status(), default=repr).encode()
-                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                             b"Connection: close\r\nContent-Length: " +
-                             str(len(body)).encode() + b"\r\n\r\n" + body)
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    b"Connection: close\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+                )
                 await writer.drain()
             except Exception:
                 pass
@@ -588,6 +640,7 @@ class BookCapture:
                     writer.close()
                 except Exception:
                     pass
+
         try:
             srv = await asyncio.start_server(handler, "127.0.0.1", self.http_port)
             print(f"[http] status server on 127.0.0.1:{srv.sockets[0].getsockname()[1]}")
@@ -605,9 +658,14 @@ class BookCapture:
         print("frames / pongs:   ", self.frames, "/", self.heartbeats)
         print("rows written:     ", w["rows_written"])
         print("quarantined:      ", w["quarantined"])
-        print("dropped:          ", {"overflow": w["rows_dropped_overflow"],
-                                     "flush_error": w["rows_dropped_flush_error"],
-                                     "paused_frames": w["frames_discarded_paused"]})
+        print(
+            "dropped:          ",
+            {
+                "overflow": w["rows_dropped_overflow"],
+                "flush_error": w["rows_dropped_flush_error"],
+                "paused_frames": w["frames_discarded_paused"],
+            },
+        )
         print("reconnects / gaps:", self.reconnects, "/", self.gap_count)
         print("universe size:    ", st["universe_size"], "(static)" if self.static else "(watchset)")
         print("root:             ", w["root"])
@@ -619,12 +677,16 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Polymarket market-channel raw capture to parquet")
     ap.add_argument("--seconds", type=int, default=0, help="0 = run forever (service mode)")
     ap.add_argument("--root", type=str, default=DEFAULT_ROOT)
-    ap.add_argument("--tokens", type=str, default=None,
-                    help="comma-separated token ids: static universe, skips memcached")
+    ap.add_argument(
+        "--tokens", type=str, default=None, help="comma-separated token ids: static universe, skips memcached"
+    )
     ap.add_argument("--ws-url", type=str, default=WS_URL)
-    ap.add_argument("--data-silence-s", type=float, default=DATA_SILENCE_S,
-                    help="reconnect after this many seconds without a data frame "
-                         "(heartbeats don't count); 0 disables")
+    ap.add_argument(
+        "--data-silence-s",
+        type=float,
+        default=DATA_SILENCE_S,
+        help="reconnect after this many seconds without a data frame (heartbeats don't count); 0 disables",
+    )
     a = ap.parse_args(argv)
     toks = [t.strip() for t in a.tokens.split(",") if t.strip()] if a.tokens else None
     try:

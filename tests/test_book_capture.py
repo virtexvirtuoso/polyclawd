@@ -2,9 +2,9 @@
 
 All output goes to tmp_path; nothing touches the real storage/ tree.
 """
+
 import asyncio
 import json
-import os
 import time
 from pathlib import Path
 
@@ -34,11 +34,17 @@ def _by_ds(rows):
 
 
 def _pc(asset="A1", price="0.5", size="10", side="buy", ts="1790848800000", **extra):
-    entry = {"asset_id": asset, "price": price, "size": size, "side": side,
-             "hash": "h1", "best_bid": "0.49", "best_ask": "0.51"}
+    entry = {
+        "asset_id": asset,
+        "price": price,
+        "size": size,
+        "side": side,
+        "hash": "h1",
+        "best_bid": "0.49",
+        "best_ask": "0.51",
+    }
     entry.update(extra)
-    return json.dumps({"market": "0xM", "price_changes": [entry],
-                       "timestamp": ts, "event_type": "price_change"})
+    return json.dumps({"market": "0xM", "price_changes": [entry], "timestamp": ts, "event_type": "price_change"})
 
 
 def _files(root, ds, pattern="*/*.parquet"):
@@ -46,8 +52,7 @@ def _files(root, ds, pattern="*/*.parquet"):
 
 
 def _count(root, ds):
-    return duckdb.sql(
-        f"select count(*) from read_parquet('{root}/{ds}/*/*.parquet')").fetchone()[0]
+    return duckdb.sql(f"select count(*) from read_parquet('{root}/{ds}/*/*.parquet')").fetchone()[0]
 
 
 def _meta(root):
@@ -59,6 +64,7 @@ def _meta(root):
 
 # ---------------------------------------------------------------- Task 1: normalization
 
+
 def test_fixture_normalizes_without_exceptions_and_counts_match():
     frames = _fixture_frames()
     assert len(frames) == 296
@@ -66,7 +72,7 @@ def test_fixture_normalizes_without_exceptions_and_counts_match():
     book_levels = []
     for fr in frames:
         obj = json.loads(fr["raw"])
-        for ev in (obj if isinstance(obj, list) else [obj]):
+        for ev in obj if isinstance(obj, list) else [obj]:
             if ev["event_type"] == "price_change":
                 n_entries += len(ev["price_changes"])
             elif ev["event_type"] == "book":
@@ -83,8 +89,7 @@ def test_fixture_normalizes_without_exceptions_and_counts_match():
     assert len(by.get("book", [])) == n_books == 22
     assert "quarantine" not in by
     # full depth preserved, in order received
-    got_levels = [(len(json.loads(r["bids_json"])), len(json.loads(r["asks_json"])))
-                  for r in by["book"]]
+    got_levels = [(len(json.loads(r["bids_json"])), len(json.loads(r["asks_json"]))) for r in by["book"]]
     assert got_levels == book_levels
     for r in by["changes"]:
         assert r["side"] in ("BUY", "SELL")
@@ -92,28 +97,67 @@ def test_fixture_normalizes_without_exceptions_and_counts_match():
 
 
 def test_price_change_multi_asset_one_event_n_rows():
-    raw = json.dumps({"market": "0xM", "timestamp": "1790876622756", "event_type": "price_change",
-                      "price_changes": [
-                          {"asset_id": "A", "price": "0.9", "size": "0", "side": "buy",
-                           "hash": "h", "best_bid": "0.91", "best_ask": "0.95"},
-                          {"asset_id": "B", "price": "0.1", "size": "5", "side": "SELL",
-                           "hash": "h2", "best_bid": "", "best_ask": None}]})
+    raw = json.dumps(
+        {
+            "market": "0xM",
+            "timestamp": "1790876622756",
+            "event_type": "price_change",
+            "price_changes": [
+                {
+                    "asset_id": "A",
+                    "price": "0.9",
+                    "size": "0",
+                    "side": "buy",
+                    "hash": "h",
+                    "best_bid": "0.91",
+                    "best_ask": "0.95",
+                },
+                {
+                    "asset_id": "B",
+                    "price": "0.1",
+                    "size": "5",
+                    "side": "SELL",
+                    "hash": "h2",
+                    "best_bid": "",
+                    "best_ask": None,
+                },
+            ],
+        }
+    )
     out = bc.normalize_frame(raw, 123)
     assert [ds for ds, _ in out] == ["changes", "changes"]
     a, b = out[0][1], out[1][1]
-    assert a == {"recv_ts": 123, "exch_ts": 1790876622756, "asset_id": "A", "market": "0xM",
-                 "price": 0.9, "size": 0.0, "side": "BUY", "hash": "h",
-                 "best_bid": 0.91, "best_ask": 0.95}
+    assert a == {
+        "recv_ts": 123,
+        "exch_ts": 1790876622756,
+        "asset_id": "A",
+        "market": "0xM",
+        "price": 0.9,
+        "size": 0.0,
+        "side": "BUY",
+        "hash": "h",
+        "best_bid": 0.91,
+        "best_ask": 0.95,
+    }
     assert b["asset_id"] == "B" and b["side"] == "SELL"
     assert b["best_bid"] is None and b["best_ask"] is None
 
 
 def test_book_levels_compact_json_and_empty_sides():
-    raw = json.dumps({"market": "0xM", "asset_id": "A", "timestamp": "5", "hash": "h",
-                      "bids": [], "asks": [{"price": "0.999", "size": "1048.19"},
-                                           {"price": "0.998", "size": "1"}],
-                      "tick_size": "0.001", "event_type": "book", "last_trade_price": ""})
-    (ds, r), = bc.normalize_frame(raw, 7)
+    raw = json.dumps(
+        {
+            "market": "0xM",
+            "asset_id": "A",
+            "timestamp": "5",
+            "hash": "h",
+            "bids": [],
+            "asks": [{"price": "0.999", "size": "1048.19"}, {"price": "0.998", "size": "1"}],
+            "tick_size": "0.001",
+            "event_type": "book",
+            "last_trade_price": "",
+        }
+    )
+    ((ds, r),) = bc.normalize_frame(raw, 7)
     assert ds == "book"
     assert r["bids_json"] == "[]"
     assert json.loads(r["asks_json"]) == [[0.999, 1048.19], [0.998, 1.0]]
@@ -121,46 +165,72 @@ def test_book_levels_compact_json_and_empty_sides():
     assert r["tick_size"] == 0.001 and r["exch_ts"] == 5 and r["recv_ts"] == 7
 
 
-@pytest.mark.parametrize("tx_key,fee_key", [("transaction_hash", "fee_rate_bps"),
-                                            ("transactionHash", "feeRateBps")])
+@pytest.mark.parametrize("tx_key,fee_key", [("transaction_hash", "fee_rate_bps"), ("transactionHash", "feeRateBps")])
 def test_last_trade_price_tolerant_keys(tx_key, fee_key):
-    raw = json.dumps({"event_type": "last_trade_price", "asset_id": "A", "market": "0xM",
-                      "price": "0.42", "size": "100", "side": "sell", fee_key: "0",
-                      "timestamp": "99", tx_key: "0xabc"})
-    (ds, r), = bc.normalize_frame(raw, 1)
+    raw = json.dumps(
+        {
+            "event_type": "last_trade_price",
+            "asset_id": "A",
+            "market": "0xM",
+            "price": "0.42",
+            "size": "100",
+            "side": "sell",
+            fee_key: "0",
+            "timestamp": "99",
+            tx_key: "0xabc",
+        }
+    )
+    ((ds, r),) = bc.normalize_frame(raw, 1)
     assert ds == "trades"
-    assert r == {"recv_ts": 1, "exch_ts": 99, "asset_id": "A", "market": "0xM", "price": 0.42,
-                 "size": 100.0, "side": "SELL", "fee_rate_bps": 0.0, "tx_hash": "0xabc"}
+    assert r == {
+        "recv_ts": 1,
+        "exch_ts": 99,
+        "asset_id": "A",
+        "market": "0xM",
+        "price": 0.42,
+        "size": 100.0,
+        "side": "SELL",
+        "fee_rate_bps": 0.0,
+        "tx_hash": "0xabc",
+    }
 
 
 def test_tick_size_change_goes_to_meta():
-    ev = {"event_type": "tick_size_change", "asset_id": "A", "market": "0xM",
-          "old_tick_size": "0.01", "new_tick_size": "0.001", "timestamp": "3"}
-    (ds, r), = bc.normalize_frame(json.dumps(ev), 9)
+    ev = {
+        "event_type": "tick_size_change",
+        "asset_id": "A",
+        "market": "0xM",
+        "old_tick_size": "0.01",
+        "new_tick_size": "0.001",
+        "timestamp": "3",
+    }
+    ((ds, r),) = bc.normalize_frame(json.dumps(ev), 9)
     assert ds == "meta" and r["kind"] == "tick_size_change" and r["recv_ts"] == 9
     assert json.loads(r["detail_json"]) == ev
 
 
-@pytest.mark.parametrize("raw,etype", [
-    (json.dumps({"event_type": "best_bid_ask", "asset_id": "A"}), "best_bid_ask"),
-    (json.dumps({"event_type": "new_market"}), "new_market"),
-    (json.dumps({"event_type": "market_resolved"}), "market_resolved"),
-    (json.dumps({"event_type": "something_new"}), "something_new"),
-    (json.dumps({"asset_id": "A"}), None),
-    ("{not json", None),
-    (json.dumps(42), None),
-    (json.dumps([1, "x"]), None),
-    (_pc(price="abc"), "price_change"),
-    (_pc(price="nan"), "price_change"),
-    (_pc(side=None), "price_change"),
-    (_pc(ts="yesterday"), "price_change"),
-    (json.dumps({"event_type": "price_change", "market": "0xM", "price_changes": "oops"}), "price_change"),
-    (json.dumps({"event_type": "book", "asset_id": "A", "bids": [{"price": "x"}], "asks": []}), "book"),
-    (json.dumps({"event_type": "book", "asset_id": "A", "bids": None, "asks": []}), "book"),
-    (json.dumps({"event_type": "last_trade_price", "asset_id": "A", "price": "", "size": "1"}),
-     "last_trade_price"),
-    (json.dumps({"event_type": ["weird"]}), None),
-])
+@pytest.mark.parametrize(
+    "raw,etype",
+    [
+        (json.dumps({"event_type": "best_bid_ask", "asset_id": "A"}), "best_bid_ask"),
+        (json.dumps({"event_type": "new_market"}), "new_market"),
+        (json.dumps({"event_type": "market_resolved"}), "market_resolved"),
+        (json.dumps({"event_type": "something_new"}), "something_new"),
+        (json.dumps({"asset_id": "A"}), None),
+        ("{not json", None),
+        (json.dumps(42), None),
+        (json.dumps([1, "x"]), None),
+        (_pc(price="abc"), "price_change"),
+        (_pc(price="nan"), "price_change"),
+        (_pc(side=None), "price_change"),
+        (_pc(ts="yesterday"), "price_change"),
+        (json.dumps({"event_type": "price_change", "market": "0xM", "price_changes": "oops"}), "price_change"),
+        (json.dumps({"event_type": "book", "asset_id": "A", "bids": [{"price": "x"}], "asks": []}), "book"),
+        (json.dumps({"event_type": "book", "asset_id": "A", "bids": None, "asks": []}), "book"),
+        (json.dumps({"event_type": "last_trade_price", "asset_id": "A", "price": "", "size": "1"}), "last_trade_price"),
+        (json.dumps({"event_type": ["weird"]}), None),
+    ],
+)
 def test_unknown_or_malformed_goes_to_quarantine(raw, etype):
     out = bc.normalize_frame(raw, 5)
     assert out, raw
@@ -192,9 +262,19 @@ def test_schemas_round_trip(tmp_path):
     rows = []
     for fr in _fixture_frames():
         rows.extend(bc.normalize_frame(fr["raw"], fr["recv_ts"]))
-    rows += bc.normalize_frame(json.dumps({"event_type": "last_trade_price", "asset_id": "A",
-                                           "price": "0.1", "size": "2", "side": "BUY",
-                                           "timestamp": "1"}), 3)
+    rows += bc.normalize_frame(
+        json.dumps(
+            {
+                "event_type": "last_trade_price",
+                "asset_id": "A",
+                "price": "0.1",
+                "size": "2",
+                "side": "BUY",
+                "timestamp": "1",
+            }
+        ),
+        3,
+    )
     rows += bc.normalize_frame(json.dumps({"event_type": "tick_size_change", "asset_id": "A"}), 3)
     rows += bc.normalize_frame("garbage", 3)
     by = _by_ds(rows)
@@ -209,6 +289,7 @@ def test_schemas_round_trip(tmp_path):
 
 
 # ---------------------------------------------------------------- Task 2: writer
+
 
 class Clock:
     def __init__(self, ms):
@@ -259,8 +340,8 @@ async def test_fixture_end_to_end_layout_and_duckdb(tmp_path):
 
 async def test_buffer_spanning_hour_boundary_splits(tmp_path):
     w = _writer(tmp_path, clock=Clock(T10 + 2 * HOUR_MS))
-    w.add_frame(_pc(asset="early"), T10 + HOUR_MS - 1)   # 10:59:59.999
-    w.add_frame(_pc(asset="late"), T10 + HOUR_MS)        # 11:00:00.000
+    w.add_frame(_pc(asset="early"), T10 + HOUR_MS - 1)  # 10:59:59.999
+    w.add_frame(_pc(asset="late"), T10 + HOUR_MS)  # 11:00:00.000
     await w.close()
     files = _files(tmp_path / "bc", "changes")
     assert [f.name for f in files] == ["10.parquet", "11.parquet"]
@@ -276,8 +357,8 @@ async def test_rotation_finalizes_past_hours_and_row_groups_per_flush(tmp_path):
     await w.flush()
     w.add_frame(_pc(), T10 + 2)
     await w.flush()
-    assert not _files(root, "changes")                        # still in progress
-    clock.ms = T10 + HOUR_MS + 5                               # hour advances
+    assert not _files(root, "changes")  # still in progress
+    clock.ms = T10 + HOUR_MS + 5  # hour advances
     w.add_frame(_pc(), T10 + HOUR_MS + 1)
     await w.flush()
     done = _files(root, "changes")
@@ -383,28 +464,27 @@ async def test_overflow_drops_oldest_one_meta_per_flush(tmp_path):
         w.add_frame(_pc(asset=f"B{i:02d}"), T10 + 100 + i)
     await w.close()
     root = tmp_path / "bc"
-    assets = duckdb.sql(f"select asset_id from read_parquet('{root}/changes/*/*.parquet') "
-                        "order by recv_ts").fetchall()
+    assets = duckdb.sql(f"select asset_id from read_parquet('{root}/changes/*/*.parquet') order by recv_ts").fetchall()
     assets = [a for (a,) in assets]
-    assert assets[:10] == [f"A{i:02d}" for i in range(5, 15)]       # oldest 5 dropped
+    assert assets[:10] == [f"A{i:02d}" for i in range(5, 15)]  # oldest 5 dropped
     assert assets[10:] == [f"B{i:02d}" for i in range(2, 12)]
-    drops = [json.loads(m["detail_json"])["dropped_rows"]
-             for m in _meta(root) if m["kind"] == "overflow_drop"]
+    drops = [json.loads(m["detail_json"])["dropped_rows"] for m in _meta(root) if m["kind"] == "overflow_drop"]
     assert drops == [5, 2]
 
 
 async def test_disk_floor_pause_and_resume(tmp_path):
     free = {"b": 100 * bc.GB}
     clock = Clock(T10)
-    w = _writer(tmp_path, clock=clock, free_bytes_fn=lambda: free["b"],
-                disk_floor_bytes=2 * bc.GB, disk_check_interval_s=0)
+    w = _writer(
+        tmp_path, clock=clock, free_bytes_fn=lambda: free["b"], disk_floor_bytes=2 * bc.GB, disk_check_interval_s=0
+    )
     w.add_frame(_pc(asset="ok1"), T10 + 1)
     free["b"] = 1 * bc.GB
     for i in range(4):
         w.add_frame(_pc(asset=f"lost{i}"), T10 + 2 + i)
     s = w.stats()
     assert s["paused"] is True and s["frames_discarded_paused"] == 4
-    free["b"] = int(2.3 * bc.GB)                 # above floor but below floor+0.5GB
+    free["b"] = int(2.3 * bc.GB)  # above floor but below floor+0.5GB
     w.add_frame(_pc(asset="lost-hyst"), T10 + 10)
     assert w.stats()["paused"] is True
     free["b"] = int(2.6 * bc.GB)
@@ -412,8 +492,12 @@ async def test_disk_floor_pause_and_resume(tmp_path):
     assert w.stats()["paused"] is False
     await w.close()
     root = tmp_path / "bc"
-    got = [a for (a,) in duckdb.sql(
-        f"select asset_id from read_parquet('{root}/changes/*/*.parquet') order by recv_ts").fetchall()]
+    got = [
+        a
+        for (a,) in duckdb.sql(
+            f"select asset_id from read_parquet('{root}/changes/*/*.parquet') order by recv_ts"
+        ).fetchall()
+    ]
     assert got == ["ok1", "ok2"]
     kinds = [m["kind"] for m in _meta(root)]
     assert kinds.count("disk_floor_pause") == 1 and kinds.count("disk_floor_resume") == 1
@@ -453,7 +537,7 @@ async def test_flush_loop_triggers_on_interval(tmp_path):
     w.add_frame(_pc(), T10)
     for _ in range(100):
         await asyncio.sleep(0.02)
-        if w.stats()["rows_written"]["changes"] == 1:   # buffer empties at swap, before the write lands
+        if w.stats()["rows_written"]["changes"] == 1:  # buffer empties at swap, before the write lands
             break
     assert w.stats()["rows_written"]["changes"] == 1
     await w.close()
@@ -493,8 +577,18 @@ async def test_close_is_idempotent_and_rejects_later_frames(tmp_path):
 async def test_perf_100k_events_under_60s(tmp_path):
     w = _writer(tmp_path, clock=Clock(T10 + HOUR_MS))
     levels = [{"price": f"{0.01 * i:.2f}", "size": f"{i * 3.5:.2f}"} for i in range(1, 21)]
-    book = json.dumps({"market": "0xM", "asset_id": "A", "timestamp": "1", "hash": "h",
-                       "bids": levels, "asks": levels, "tick_size": "0.01", "event_type": "book"})
+    book = json.dumps(
+        {
+            "market": "0xM",
+            "asset_id": "A",
+            "timestamp": "1",
+            "hash": "h",
+            "bids": levels,
+            "asks": levels,
+            "tick_size": "0.01",
+            "event_type": "book",
+        }
+    )
     t0 = time.perf_counter()
     n_changes = n_books = 0
     for i in range(100_000):
@@ -516,6 +610,7 @@ async def test_perf_100k_events_under_60s(tmp_path):
 
 
 # ---------------------------------------------------------------- spec-review fixes
+
 
 def test_recover_never_overwrites_existing_corrupt(tmp_path):
     day = tmp_path / "bc" / "changes" / "2026-10-01"
@@ -544,7 +639,7 @@ async def test_finalize_failure_never_overwrites_existing_corrupt(tmp_path, monk
     assert pre.read_bytes() == b"pre-existing"
     corrupt = sorted(pre.parent.glob("*.corrupt"))
     assert len(corrupt) == 2
-    assert w.stats()["files_corrupt"] >= 1   # the meta file also fails the patched footer check
+    assert w.stats()["files_corrupt"] >= 1  # the meta file also fails the patched footer check
 
 
 async def test_second_writer_on_same_root_is_refused(tmp_path):
@@ -555,11 +650,11 @@ async def test_second_writer_on_same_root_is_refused(tmp_path):
     assert len(live) == 1
     with pytest.raises(bc.WriterLockedError):
         _writer(tmp_path)
-    assert live[0].exists()                                   # not renamed to .corrupt
+    assert live[0].exists()  # not renamed to .corrupt
     assert not list((tmp_path / "bc").rglob("*.corrupt"))
     await w1.close()
     assert _count(tmp_path / "bc", "changes") == 1
-    w2 = _writer(tmp_path)                                    # lock released on close
+    w2 = _writer(tmp_path)  # lock released on close
     await w2.close()
 
 
@@ -573,9 +668,11 @@ async def test_add_meta_after_close_is_dropped_and_logged(tmp_path, capsys):
 
 # ---------------------------------------------------------------- quality-review fixes
 
+
 def _concurrency_probe(target, attr, delay):
     """Wrap target.attr so it sleeps `delay` and records max concurrent entries."""
     import threading
+
     state = {"cur": 0, "max": 0, "calls": 0}
     lk = threading.Lock()
     real = getattr(target, attr)
@@ -602,7 +699,7 @@ async def test_cancelled_flush_loop_never_overlaps_close(tmp_path):
     task = asyncio.create_task(w.run_flush_loop())
     for i in range(20):
         w.add_frame(_pc(asset=f"A{i}"), T10 + i)
-    for _ in range(100):                       # wait until the loop's flush is inside the thread
+    for _ in range(100):  # wait until the loop's flush is inside the thread
         await asyncio.sleep(0.01)
         if probe["cur"] == 1:
             break
@@ -621,10 +718,10 @@ async def test_cancelled_flush_loop_never_overlaps_close(tmp_path):
 def test_flush_sync_io_lock_serializes_threads(tmp_path):
     import threading
     from collections import deque
+
     w = _writer(tmp_path)
     probe = _concurrency_probe(w, "_flush_sync_unlocked", 0.2)
-    batches = [deque([("changes", bc.normalize_frame(_pc(asset=f"T{i}"), T10 + i)[0][1])])
-               for i in range(3)]
+    batches = [deque([("changes", bc.normalize_frame(_pc(asset=f"T{i}"), T10 + i)[0][1])]) for i in range(3)]
     ts = [threading.Thread(target=w._flush_sync, args=(b, [], False)) for b in batches]
     for t in ts:
         t.start()
@@ -635,11 +732,17 @@ def test_flush_sync_io_lock_serializes_threads(tmp_path):
     assert _count(tmp_path / "bc", "changes") == 3
 
 
-@pytest.mark.parametrize("ts", ["99999999999999999999999", 1e30, -5, 2 ** 63])
+@pytest.mark.parametrize("ts", ["99999999999999999999999", 1e30, -5, 2**63])
 def test_out_of_range_timestamp_quarantined(ts):
-    raw = json.dumps({"market": "0xM", "event_type": "price_change", "timestamp": ts,
-                      "price_changes": [{"asset_id": "A", "price": "0.5", "size": "1", "side": "BUY"}]})
-    (ds, r), = bc.normalize_frame(raw, 1)
+    raw = json.dumps(
+        {
+            "market": "0xM",
+            "event_type": "price_change",
+            "timestamp": ts,
+            "price_changes": [{"asset_id": "A", "price": "0.5", "size": "1", "side": "BUY"}],
+        }
+    )
+    ((ds, r),) = bc.normalize_frame(raw, 1)
     assert ds == "quarantine" and r["event_type"] == "price_change"
 
 
@@ -648,7 +751,7 @@ async def test_unconvertible_row_is_quarantined_not_batch_dropped(tmp_path):
     for i in range(1000):
         w.add_frame(_pc(asset=f"G{i}"), T10 + i)
     bad = bc.normalize_frame(_pc(asset="BAD"), T10 + 5000)[0][1]
-    bad["exch_ts"] = 10 ** 30                   # slipped past normalization somehow
+    bad["exch_ts"] = 10**30  # slipped past normalization somehow
     w._buf.append(("changes", bad))
     await w.close()
     root = tmp_path / "bc"
@@ -656,7 +759,7 @@ async def test_unconvertible_row_is_quarantined_not_batch_dropped(tmp_path):
     assert s["rows_written"]["changes"] == 1000
     assert s["rows_written"]["quarantine"] == 1
     assert s["rows_dropped_flush_error"] == 0 and s["flush_errors"] == 0
-    assert [f.name for f in _files(root, "changes")] == ["10.parquet"]      # hour file not split
+    assert [f.name for f in _files(root, "changes")] == ["10.parquet"]  # hour file not split
     q = pq.read_table(_files(root, "quarantine")[0]).to_pylist()
     assert q[0]["event_type"] == "changes" and "BAD" in q[0]["raw_json"]
 

@@ -50,6 +50,7 @@ dropped and summarized in meta "overflow_drop".
 Clocks: every row stores recv_ts (local UTC ms) and, where the exchange sends one,
 exch_ts (the event `timestamp`).
 """
+
 import asyncio
 import fcntl
 import json
@@ -65,47 +66,76 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 DEFAULT_ROOT = "storage/book_capture"
-GB = 1024 ** 3
+GB = 1024**3
 HOUR_MS = 3_600_000
 
-FLUSH_INTERVAL_S = 30.0      # flush at least this often
-FLUSH_ROWS = 50_000          # ...or as soon as this many rows are buffered
-BUFFER_CAP = 150_000         # hard cap on buffered data rows; overflow drops OLDEST.
-                             # ~814 B/row measured -> ~120 MB (~250 MB during a flush);
-                             # live rate is ~30 rows/s
-INT64_MAX = 2 ** 63
-DISK_FLOOR_BYTES = 2 * GB    # pause buffering below this much free space
-DISK_RESUME_MARGIN = GB // 2 # resume only above floor + margin (hysteresis)
+FLUSH_INTERVAL_S = 30.0  # flush at least this often
+FLUSH_ROWS = 50_000  # ...or as soon as this many rows are buffered
+BUFFER_CAP = 150_000  # hard cap on buffered data rows; overflow drops OLDEST.
+# ~814 B/row measured -> ~120 MB (~250 MB during a flush);
+# live rate is ~30 rows/s
+INT64_MAX = 2**63
+DISK_FLOOR_BYTES = 2 * GB  # pause buffering below this much free space
+DISK_RESUME_MARGIN = GB // 2  # resume only above floor + margin (hysteresis)
 DISK_CHECK_INTERVAL_S = 5.0  # free-space syscall at most this often
-LOOP_TICK_S = 1.0            # flush-loop wake-up granularity
+LOOP_TICK_S = 1.0  # flush-loop wake-up granularity
 ZSTD_LEVEL = 3
 
 _HEARTBEATS = frozenset({"PING", "PONG"})
 
-CHANGES_SCHEMA = pa.schema([
-    ("recv_ts", pa.int64()), ("exch_ts", pa.int64()),
-    ("asset_id", pa.string()), ("market", pa.string()),
-    ("price", pa.float64()), ("size", pa.float64()), ("side", pa.string()),
-    ("hash", pa.string()), ("best_bid", pa.float64()), ("best_ask", pa.float64()),
-])
-BOOK_SCHEMA = pa.schema([
-    ("recv_ts", pa.int64()), ("exch_ts", pa.int64()),
-    ("asset_id", pa.string()), ("market", pa.string()), ("hash", pa.string()),
-    ("tick_size", pa.float64()),
-    ("bids_json", pa.string()), ("asks_json", pa.string()),   # [[price, size], ...] full depth
-])
-TRADES_SCHEMA = pa.schema([
-    ("recv_ts", pa.int64()), ("exch_ts", pa.int64()),
-    ("asset_id", pa.string()), ("market", pa.string()),
-    ("price", pa.float64()), ("size", pa.float64()), ("side", pa.string()),
-    ("fee_rate_bps", pa.float64()), ("tx_hash", pa.string()),
-])
-META_SCHEMA = pa.schema([
-    ("recv_ts", pa.int64()), ("kind", pa.string()), ("detail_json", pa.string()),
-])
-QUARANTINE_SCHEMA = pa.schema([
-    ("recv_ts", pa.int64()), ("event_type", pa.string()), ("raw_json", pa.string()),
-])
+CHANGES_SCHEMA = pa.schema(
+    [
+        ("recv_ts", pa.int64()),
+        ("exch_ts", pa.int64()),
+        ("asset_id", pa.string()),
+        ("market", pa.string()),
+        ("price", pa.float64()),
+        ("size", pa.float64()),
+        ("side", pa.string()),
+        ("hash", pa.string()),
+        ("best_bid", pa.float64()),
+        ("best_ask", pa.float64()),
+    ]
+)
+BOOK_SCHEMA = pa.schema(
+    [
+        ("recv_ts", pa.int64()),
+        ("exch_ts", pa.int64()),
+        ("asset_id", pa.string()),
+        ("market", pa.string()),
+        ("hash", pa.string()),
+        ("tick_size", pa.float64()),
+        ("bids_json", pa.string()),
+        ("asks_json", pa.string()),  # [[price, size], ...] full depth
+    ]
+)
+TRADES_SCHEMA = pa.schema(
+    [
+        ("recv_ts", pa.int64()),
+        ("exch_ts", pa.int64()),
+        ("asset_id", pa.string()),
+        ("market", pa.string()),
+        ("price", pa.float64()),
+        ("size", pa.float64()),
+        ("side", pa.string()),
+        ("fee_rate_bps", pa.float64()),
+        ("tx_hash", pa.string()),
+    ]
+)
+META_SCHEMA = pa.schema(
+    [
+        ("recv_ts", pa.int64()),
+        ("kind", pa.string()),
+        ("detail_json", pa.string()),
+    ]
+)
+QUARANTINE_SCHEMA = pa.schema(
+    [
+        ("recv_ts", pa.int64()),
+        ("event_type", pa.string()),
+        ("raw_json", pa.string()),
+    ]
+)
 SCHEMAS = {
     "changes": CHANGES_SCHEMA,
     "book": BOOK_SCHEMA,
@@ -120,6 +150,7 @@ def _now_ms():
 
 
 # ---------------------------------------------------------------- normalization
+
 
 class _Malformed(ValueError):
     pass
@@ -210,48 +241,67 @@ def _norm_price_change(ev, recv_ts):
     for pc in pcs:
         if not isinstance(pc, dict):
             raise _Malformed("price_change entry not a dict")
-        rows.append(("changes", {
-            "recv_ts": recv_ts, "exch_ts": exch_ts,
-            "asset_id": _str(pc.get("asset_id"), True),
-            "market": _str(pc.get("market")) or market,
-            "price": _num(pc.get("price"), True),
-            "size": _num(pc.get("size"), True),
-            "side": _side(pc.get("side"), True),
-            "hash": _str(pc.get("hash")),
-            "best_bid": _num(pc.get("best_bid")),
-            "best_ask": _num(pc.get("best_ask")),
-        }))
+        rows.append(
+            (
+                "changes",
+                {
+                    "recv_ts": recv_ts,
+                    "exch_ts": exch_ts,
+                    "asset_id": _str(pc.get("asset_id"), True),
+                    "market": _str(pc.get("market")) or market,
+                    "price": _num(pc.get("price"), True),
+                    "size": _num(pc.get("size"), True),
+                    "side": _side(pc.get("side"), True),
+                    "hash": _str(pc.get("hash")),
+                    "best_bid": _num(pc.get("best_bid")),
+                    "best_ask": _num(pc.get("best_ask")),
+                },
+            )
+        )
     return rows
 
 
 def _norm_book(ev, recv_ts):
-    return [("book", {
-        "recv_ts": recv_ts, "exch_ts": _ts(ev.get("timestamp")),
-        "asset_id": _str(ev.get("asset_id"), True),
-        "market": _str(ev.get("market")),
-        "hash": _str(ev.get("hash")),
-        "tick_size": _num(ev.get("tick_size")),
-        "bids_json": _levels(ev.get("bids")),
-        "asks_json": _levels(ev.get("asks")),
-    })]
+    return [
+        (
+            "book",
+            {
+                "recv_ts": recv_ts,
+                "exch_ts": _ts(ev.get("timestamp")),
+                "asset_id": _str(ev.get("asset_id"), True),
+                "market": _str(ev.get("market")),
+                "hash": _str(ev.get("hash")),
+                "tick_size": _num(ev.get("tick_size")),
+                "bids_json": _levels(ev.get("bids")),
+                "asks_json": _levels(ev.get("asks")),
+            },
+        )
+    ]
 
 
 def _norm_trade(ev, recv_ts):
-    return [("trades", {
-        "recv_ts": recv_ts, "exch_ts": _ts(ev.get("timestamp")),
-        "asset_id": _str(ev.get("asset_id"), True),
-        "market": _str(ev.get("market")),
-        "price": _num(ev.get("price"), True),
-        "size": _num(ev.get("size"), True),
-        "side": _side(ev.get("side")),
-        "fee_rate_bps": _num(_first(ev, "fee_rate_bps", "feeRateBps")),
-        "tx_hash": _str(_first(ev, "transaction_hash", "transactionHash")),
-    })]
+    return [
+        (
+            "trades",
+            {
+                "recv_ts": recv_ts,
+                "exch_ts": _ts(ev.get("timestamp")),
+                "asset_id": _str(ev.get("asset_id"), True),
+                "market": _str(ev.get("market")),
+                "price": _num(ev.get("price"), True),
+                "size": _num(ev.get("size"), True),
+                "side": _side(ev.get("side")),
+                "fee_rate_bps": _num(_first(ev, "fee_rate_bps", "feeRateBps")),
+                "tx_hash": _str(_first(ev, "transaction_hash", "transactionHash")),
+            },
+        )
+    ]
 
 
 def _norm_tick_size(ev, recv_ts):
-    return [("meta", {"recv_ts": recv_ts, "kind": "tick_size_change",
-                      "detail_json": json.dumps(ev, separators=(",", ":"))})]
+    return [
+        ("meta", {"recv_ts": recv_ts, "kind": "tick_size_change", "detail_json": json.dumps(ev, separators=(",", ":"))})
+    ]
 
 
 _HANDLERS = {
@@ -270,9 +320,14 @@ def _safe_dumps(obj):
 
 
 def _quarantine(recv_ts, event_type, raw_json):
-    return ("quarantine", {"recv_ts": recv_ts,
-                           "event_type": event_type if isinstance(event_type, str) else None,
-                           "raw_json": raw_json if raw_json else "<empty>"})
+    return (
+        "quarantine",
+        {
+            "recv_ts": recv_ts,
+            "event_type": event_type if isinstance(event_type, str) else None,
+            "raw_json": raw_json if raw_json else "<empty>",
+        },
+    )
 
 
 def _norm_event(ev, recv_ts):
@@ -322,6 +377,7 @@ def normalize_frame(raw, recv_ts):
 
 # ---------------------------------------------------------------- writer
 
+
 class WriterLockedError(RuntimeError):
     """Another BookCaptureWriter already owns this root (its .writer.lock is held)."""
 
@@ -358,17 +414,21 @@ def _hour_dir_and_stem(root, dataset, bucket):
 class BookCaptureWriter:
     """Buffered, hour-partitioned parquet writer. See module docstring for the API."""
 
-    def __init__(self, root=DEFAULT_ROOT, *,
-                 flush_interval_s=FLUSH_INTERVAL_S,
-                 flush_rows=FLUSH_ROWS,
-                 buffer_cap=BUFFER_CAP,
-                 disk_floor_bytes=DISK_FLOOR_BYTES,
-                 disk_resume_margin_bytes=DISK_RESUME_MARGIN,
-                 disk_check_interval_s=DISK_CHECK_INTERVAL_S,
-                 free_bytes_fn=None,
-                 now_ms_fn=None,
-                 loop_tick_s=LOOP_TICK_S,
-                 compression_level=ZSTD_LEVEL):
+    def __init__(
+        self,
+        root=DEFAULT_ROOT,
+        *,
+        flush_interval_s=FLUSH_INTERVAL_S,
+        flush_rows=FLUSH_ROWS,
+        buffer_cap=BUFFER_CAP,
+        disk_floor_bytes=DISK_FLOOR_BYTES,
+        disk_resume_margin_bytes=DISK_RESUME_MARGIN,
+        disk_check_interval_s=DISK_CHECK_INTERVAL_S,
+        free_bytes_fn=None,
+        now_ms_fn=None,
+        loop_tick_s=LOOP_TICK_S,
+        compression_level=ZSTD_LEVEL,
+    ):
         self.root = Path(root)
         self.flush_interval_s = flush_interval_s
         self.flush_rows = flush_rows
@@ -381,12 +441,12 @@ class BookCaptureWriter:
         self._now_ms = now_ms_fn or _now_ms
         self._free_bytes = free_bytes_fn or self._default_free_bytes
 
-        self._buf = deque()           # (dataset, row) data rows, capped
-        self._meta = []               # meta rows, never dropped by the cap
-        self._open = {}               # (dataset, hour bucket) -> _OpenFile (worker thread only)
-        self._lock = None             # asyncio.Lock, created lazily inside the loop
+        self._buf = deque()  # (dataset, row) data rows, capped
+        self._meta = []  # meta rows, never dropped by the cap
+        self._open = {}  # (dataset, hour bucket) -> _OpenFile (worker thread only)
+        self._lock = None  # asyncio.Lock, created lazily inside the loop
         self._io_lock = threading.Lock()  # one _flush_sync at a time, even across cancellation
-        self._wake = None             # asyncio.Event
+        self._wake = None  # asyncio.Event
         self._closed = False
         self._paused = False
         self._last_disk_check = float("-inf")
@@ -394,16 +454,24 @@ class BookCaptureWriter:
         self._overflow_since_flush = 0
 
         self.counters = {
-            "frames_seen": 0, "frames_discarded_paused": 0, "frames_after_close": 0,
-            "rows_written": {ds: 0 for ds in SCHEMAS},
-            "rows_dropped_overflow": 0, "rows_dropped_flush_error": 0,
-            "flushes": 0, "flush_retries": 0, "flush_errors": 0,
-            "files_finalized": 0, "files_corrupt": 0, "quarantined": 0,
-            "last_flush_ms": None, "last_flush_secs": None,
+            "frames_seen": 0,
+            "frames_discarded_paused": 0,
+            "frames_after_close": 0,
+            "rows_written": dict.fromkeys(SCHEMAS, 0),
+            "rows_dropped_overflow": 0,
+            "rows_dropped_flush_error": 0,
+            "flushes": 0,
+            "flush_retries": 0,
+            "flush_errors": 0,
+            "files_finalized": 0,
+            "files_corrupt": 0,
+            "quarantined": 0,
+            "last_flush_ms": None,
+            "last_flush_secs": None,
         }
 
         self.root.mkdir(parents=True, exist_ok=True)
-        self._lock_fh = self._acquire_root_lock()   # BEFORE recovery: never touch a live writer's files
+        self._lock_fh = self._acquire_root_lock()  # BEFORE recovery: never touch a live writer's files
         self._recover_leftovers()
 
     # -- public, event-loop side -------------------------------------------------
@@ -448,8 +516,13 @@ class BookCaptureWriter:
             if self._closed:
                 print(f"[meta] dropped after close: {kind}")
                 return
-            self._meta.append({"recv_ts": _coerce_ms(recv_ts, self._now_ms),
-                               "kind": str(kind), "detail_json": _safe_dumps(detail or {})})
+            self._meta.append(
+                {
+                    "recv_ts": _coerce_ms(recv_ts, self._now_ms),
+                    "kind": str(kind),
+                    "detail_json": _safe_dumps(detail or {}),
+                }
+            )
         except Exception as e:  # pragma: no cover
             print(f"[book_capture] add_meta error {type(e).__name__}: {e}")
 
@@ -473,9 +546,11 @@ class BookCaptureWriter:
             batch, self._buf = self._buf, deque()
             meta, self._meta = self._meta, []
             if self._overflow_since_flush:
-                meta.append(self._meta_row("overflow_drop",
-                                           {"dropped_rows": self._overflow_since_flush,
-                                            "buffer_cap": self.buffer_cap}))
+                meta.append(
+                    self._meta_row(
+                        "overflow_drop", {"dropped_rows": self._overflow_since_flush, "buffer_cap": self.buffer_cap}
+                    )
+                )
                 self._overflow_since_flush = 0
             t0 = time.monotonic()
             # to_thread cannot be cancelled: if our caller is cancelled, keep holding the
@@ -494,8 +569,9 @@ class BookCaptureWriter:
                 print(f"[book_capture] flush crashed {type(e).__name__}: {e} — dropped {dropped} rows")
                 self.counters["flush_errors"] += 1
                 self.counters["rows_dropped_flush_error"] += dropped
-                new_meta = [self._meta_row("flush_error", {"error": f"{type(e).__name__}: {e}",
-                                                           "dropped_rows": dropped})]
+                new_meta = [
+                    self._meta_row("flush_error", {"error": f"{type(e).__name__}: {e}", "dropped_rows": dropped})
+                ]
             self._meta.extend(new_meta)
             self._last_flush_mono = time.monotonic()
             self.counters["flushes"] += 1
@@ -534,9 +610,11 @@ class BookCaptureWriter:
                 await self.flush(_final=True)
         finally:
             self._release_root_lock()
-        print(f"[book_capture] closed: written={self.counters['rows_written']} "
-              f"dropped_overflow={self.counters['rows_dropped_overflow']} "
-              f"flush_errors={self.counters['flush_errors']}")
+        print(
+            f"[book_capture] closed: written={self.counters['rows_written']} "
+            f"dropped_overflow={self.counters['rows_dropped_overflow']} "
+            f"flush_errors={self.counters['flush_errors']}"
+        )
 
     # -- disk floor ----------------------------------------------------------------
 
@@ -555,24 +633,32 @@ class BookCaptureWriter:
             return
         if not self._paused and free < self.disk_floor_bytes:
             self._paused = True
-            print(f"[book_capture] DISK FLOOR: {free / GB:.2f} GB free < "
-                  f"{self.disk_floor_bytes / GB:.2f} GB — pausing capture")
-            self._meta.append(self._meta_row("disk_floor_pause",
-                                             {"free_bytes": free, "floor_bytes": self.disk_floor_bytes},
-                                             recv_ts))
+            print(
+                f"[book_capture] DISK FLOOR: {free / GB:.2f} GB free < "
+                f"{self.disk_floor_bytes / GB:.2f} GB — pausing capture"
+            )
+            self._meta.append(
+                self._meta_row("disk_floor_pause", {"free_bytes": free, "floor_bytes": self.disk_floor_bytes}, recv_ts)
+            )
         elif self._paused and free > self.disk_resume_bytes:
             self._paused = False
             print(f"[book_capture] disk recovered: {free / GB:.2f} GB free — resuming capture")
-            self._meta.append(self._meta_row("disk_floor_resume",
-                                             {"free_bytes": free,
-                                              "frames_discarded_total": self.counters["frames_discarded_paused"]},
-                                             recv_ts))
+            self._meta.append(
+                self._meta_row(
+                    "disk_floor_resume",
+                    {"free_bytes": free, "frames_discarded_total": self.counters["frames_discarded_paused"]},
+                    recv_ts,
+                )
+            )
 
     # -- worker-thread side --------------------------------------------------------
 
     def _meta_row(self, kind, detail, recv_ts=None):
-        return {"recv_ts": int(recv_ts if recv_ts is not None else self._now_ms()),
-                "kind": kind, "detail_json": _safe_dumps(detail)}
+        return {
+            "recv_ts": int(recv_ts if recv_ts is not None else self._now_ms()),
+            "kind": kind,
+            "detail_json": _safe_dumps(detail),
+        }
 
     def _acquire_root_lock(self):
         path = self.root / ".writer.lock"
@@ -612,8 +698,7 @@ class BookCaptureWriter:
                 os.replace(p, dst)
                 print(f"[book_capture] crash leftover {p} -> {dst.name}")
                 self.counters["files_corrupt"] += 1
-                self._meta.append(self._meta_row("crash_leftover",
-                                                 {"path": str(p), "renamed_to": str(dst)}))
+                self._meta.append(self._meta_row("crash_leftover", {"path": str(p), "renamed_to": str(dst)}))
             except Exception as e:
                 print(f"[book_capture] could not rename leftover {p}: {type(e).__name__}: {e}")
 
@@ -635,8 +720,9 @@ class BookCaptureWriter:
         f = self._open.get(key)
         if f is None:
             tmp, final = self._pick_name(dataset, bucket)
-            w = pq.ParquetWriter(str(tmp), SCHEMAS[dataset], compression="zstd",
-                                 compression_level=self.compression_level)
+            w = pq.ParquetWriter(
+                str(tmp), SCHEMAS[dataset], compression="zstd", compression_level=self.compression_level
+            )
             f = self._open[key] = _OpenFile(w, tmp, final)
         return f
 
@@ -648,9 +734,9 @@ class BookCaptureWriter:
         try:
             f.writer.close()
             if f.rows == 0:
-                os.remove(f.tmp_path)   # never wrote a row group (failed first write)
+                os.remove(f.tmp_path)  # never wrote a row group (failed first write)
                 return []
-            pq.read_metadata(str(f.tmp_path))   # footer must be readable before publishing
+            pq.read_metadata(str(f.tmp_path))  # footer must be readable before publishing
             os.replace(f.tmp_path, f.final_path)
             self.counters["files_finalized"] += 1
             return []
@@ -661,8 +747,11 @@ class BookCaptureWriter:
                 pass
             self.counters["files_corrupt"] += 1
             print(f"[book_capture] finalize failed {f.tmp_path}: {type(e).__name__}: {e}")
-            return [self._meta_row("finalize_error", {"path": str(f.tmp_path), "rows": f.rows,
-                                                      "error": f"{type(e).__name__}: {e}"})]
+            return [
+                self._meta_row(
+                    "finalize_error", {"path": str(f.tmp_path), "rows": f.rows, "error": f"{type(e).__name__}: {e}"}
+                )
+            ]
 
     def _to_table(self, dataset, rows):
         """rows -> (table, bad_rows). A conversion error (not I/O) falls back to
@@ -703,8 +792,13 @@ class BookCaptureWriter:
             table, bad = self._to_table(ds, rows)
             tables[(ds, bucket)] = table
             for r in bad:
-                quarantined.append({"recv_ts": _coerce_ms(r.get("recv_ts"), self._now_ms),
-                                    "event_type": ds, "raw_json": _safe_dumps(r)})
+                quarantined.append(
+                    {
+                        "recv_ts": _coerce_ms(r.get("recv_ts"), self._now_ms),
+                        "event_type": ds,
+                        "raw_json": _safe_dumps(r),
+                    }
+                )
         if quarantined:
             print(f"[book_capture] {len(quarantined)} unconvertible rows -> quarantine")
             self.counters["quarantined"] += len(quarantined)
@@ -742,10 +836,12 @@ class BookCaptureWriter:
                 self.counters["flush_errors"] += 1
                 self.counters["rows_dropped_flush_error"] += n
                 msg = f"{type(err).__name__}: {err}"
-                print(f"[book_capture] flush FAILED twice {ds} hour={bucket}: {msg} "
-                      f"— dropped {n} rows")
-                new_meta.append(self._meta_row("flush_error", {
-                    "dataset": ds, "hour_bucket": bucket, "dropped_rows": n, "error": msg}))
+                print(f"[book_capture] flush FAILED twice {ds} hour={bucket}: {msg} — dropped {n} rows")
+                new_meta.append(
+                    self._meta_row(
+                        "flush_error", {"dataset": ds, "hour_bucket": bucket, "dropped_rows": n, "error": msg}
+                    )
+                )
 
         current = self._now_ms() // HOUR_MS
         for key in list(self._open):
