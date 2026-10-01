@@ -201,20 +201,24 @@ async def test_universe_reconnects_rate_limited(tmp_path):
     uni = Universe(["a"])
     async with FakeMarketServer() as srv:
         w = _writer(tmp_path)
-        cap = _capture(w, universe_fn=uni, ws_url=srv.url, universe_reconnect_min_s=0.6)
+        cap = _capture(w, universe_fn=uni, ws_url=srv.url, universe_reconnect_min_s=1.0)
         task = asyncio.create_task(cap.run(0))
         await _until(lambda: len(srv.subs) == 1)
         uni.value = ["a", "b"]                 # first universe reconnect: allowed now
         await _until(lambda: len(srv.subs) == 2)
-        uni.value = ["a", "b", "c"]            # second: must wait for the 0.6 s slot
-        await asyncio.sleep(0.3)
-        assert len(srv.subs) == 2
-        await _until(lambda: len(srv.subs) == 3, timeout=2.0)
+        uni.value = ["a", "b", "c"]            # second: must wait for the 1.0 s slot
+        t_set = time.monotonic()
+        await _until(lambda: len(srv.subs) == 3, timeout=5.0)
         cap.request_stop("test")
         await asyncio.wait_for(task, 10)
 
     assert sorted(srv.subs[2][1]) == ["a", "b", "c"]
-    assert srv.subs[2][0] - srv.subs[1][0] >= 0.55
+    # Judge the DECISION times the capture recorded (not wall-clock sleeps): load can
+    # delay a reconnect but can never make two decisions closer than the limit.
+    d0, d1 = cap.universe_reconnect_decisions
+    assert d1 - d0 >= 1.0
+    if t_set - d0 < 0.9:   # change arrived well inside the window -> it was deferred
+        assert d1 - t_set >= 1.0 - (t_set - d0) - 1e-6
     assert len(_meta(tmp_path, "universe_change")) == 2
 
 
@@ -273,12 +277,33 @@ async def test_static_tokens_never_read_universe(tmp_path):
 def test_error_backoff_doubles_caps_and_resets_after_stable(tmp_path):
     w = _writer(tmp_path)
     cap = _capture(w, backoff_base_s=1.0, backoff_max_s=60.0, jitter_s=0.0, stable_reset_s=30.0)
-    waits = [cap._error_wait(conn_lasted_s=None) for _ in range(8)]
+    waits = [cap._error_wait() for _ in range(8)]
     assert waits == [1, 2, 4, 8, 16, 32, 60, 60]
-    assert cap._error_wait(conn_lasted_s=5.0) == 60          # short-lived conn: no reset
-    assert cap._error_wait(conn_lasted_s=31.0) == 1          # stable conn: reset
-    assert cap._error_wait(conn_lasted_s=None) == 2
+    cap._note_conn_ended(5.0)                                # short-lived conn: no reset
+    assert cap._error_wait() == 60
+    cap._note_conn_ended(31.0)                               # stable conn: reset
+    assert cap._error_wait() == 1
+    assert cap._error_wait() == 2
     w._release_root_lock()
+
+
+async def test_stable_planned_reconnect_resets_backoff(tmp_path):
+    """A stable connection that ends in a PLANNED universe reconnect must still reset
+    the backoff, so the next error starts again at the base wait."""
+    uni = Universe(["a"])
+    async with FakeMarketServer() as srv:
+        w = _writer(tmp_path)
+        cap = _capture(w, universe_fn=uni, ws_url=srv.url, stable_reset_s=0.2,
+                       backoff_base_s=1.0)
+        cap._backoff = 32.0                                  # grown by earlier errors
+        task = asyncio.create_task(cap.run(0))
+        await _until(lambda: len(srv.subs) == 1)
+        await asyncio.sleep(0.3)                             # connection is now "stable"
+        uni.value = ["a", "b"]
+        await _until(lambda: len(srv.subs) == 2)
+        cap.request_stop("test")
+        await asyncio.wait_for(task, 10)
+    assert cap._backoff == 1.0
 
 
 # ---------------------------------------------------------------- shutdown
@@ -468,3 +493,114 @@ async def test_gap_open_in_status_and_capture_stop(tmp_path):
     await cap.shutdown("SIGTERM")
     stop, = _meta(tmp_path, "capture_stop")
     assert stop["detail"]["stats"]["gap_open"] is True
+
+
+# ---------------------------------------------------------------- quality-review fixes
+
+async def test_pong_only_connection_trips_data_silence_watchdog(tmp_path):
+    """Heartbeats alone must not look healthy: no DATA for data_silence_s on a
+    connection older than data_silence_min_conn_s -> reconnect via the gap path."""
+    async with FakeMarketServer() as srv:                    # answers PING with PONG only
+        w = _writer(tmp_path)
+        cap = _capture(w, tokens=["t1"], ws_url=srv.url, ping_interval_s=0.05,
+                       data_silence_s=0.4, data_silence_min_conn_s=0.2)
+        task = asyncio.create_task(cap.run(0))
+        await _until(lambda: len(srv.subs) >= 2 and cap.connected, timeout=5.0)
+        st = cap.status()
+        cap.request_stop("test")
+        await asyncio.wait_for(task, 10)
+    assert srv.pings >= 1 and cap.heartbeats >= 1 and cap.frames == 0
+    assert st["last_data_age_s"] is None
+    gs = _meta(tmp_path, "gap_start")
+    assert gs and gs[0]["detail"]["reason"] == "data silence"
+    assert _meta(tmp_path, "gap_end")
+
+
+async def test_data_frames_keep_watchdog_quiet_and_set_last_data_age(tmp_path):
+    raws = _fixture_raws()[:5]
+    async with FakeMarketServer(plan=[raws]) as srv:
+        w = _writer(tmp_path)
+        cap = _capture(w, tokens=["t1"], ws_url=srv.url, ping_interval_s=0.05,
+                       data_silence_s=5.0, data_silence_min_conn_s=0.1)
+        task = asyncio.create_task(cap.run(0))
+        await _until(lambda: cap.frames == 5 and cap.heartbeats >= 2)
+        st = cap.status()
+        cap.request_stop("test")
+        await asyncio.wait_for(task, 10)
+    assert len(srv.subs) == 1 and cap.gap_count == 0
+    assert st["last_data_age_s"] is not None and st["last_msg_age_s"] is not None
+    assert cap.last_data_ms <= cap.last_recv_ms
+
+
+async def test_memcached_timeout_drops_pooled_client(tmp_path, monkeypatch):
+    closed = []
+
+    class HangClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def get(self, key):
+            await asyncio.sleep(10)
+
+        async def close(self):
+            closed.append(True)
+
+    class FakeMC:
+        Client = HangClient
+
+    monkeypatch.setattr(bc, "aiomcache", FakeMC)
+    monkeypatch.setattr(bc, "MC_TIMEOUT_S", 0.05)
+    w = _writer(tmp_path)
+    cap = _capture(w, universe_fn=None)
+    cap.desired = {"a"}
+    await cap._refresh_universe()
+    assert cap._mc is None and closed == [True]              # suspect pooled conn dropped
+    assert cap.desired == {"a"}
+    await cap.shutdown("test")
+    missing, = _meta(tmp_path, "watchset_missing")
+    assert "TimeoutError" in missing["detail"]["error"]
+
+
+async def test_connect_params(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_connect(url, **kw):
+        seen.update(kw, url=url)
+        raise OSError("no network in tests")
+
+    monkeypatch.setattr(bc.websockets, "connect", fake_connect)
+    w = _writer(tmp_path)
+    cap = _capture(w, tokens=["t1"], ws_url="ws://example.invalid/ws")
+    with pytest.raises(OSError):
+        await cap.run_once(float("inf"))
+    assert seen == {"url": "ws://example.invalid/ws", "ping_interval": 10, "ping_timeout": 25,
+                    "max_size": 2 ** 23, "open_timeout": 15, "close_timeout": 2}
+    await cap.shutdown("test")
+
+
+def test_fresh_capture_has_connection_fields(tmp_path):
+    w = _writer(tmp_path)
+    cap = _capture(w, tokens=["t1"])
+    assert cap._established is False and cap._conn_start is None
+    assert cap._gap_start_ms is None and cap._gap_last_recv is None
+    assert cap.last_data_ms is None
+    w._release_root_lock()
+
+
+async def test_cli_exits_1_when_writer_close_times_out(tmp_path):
+    code = (
+        "import asyncio, sys\n"
+        "import services.book_capture as bc\n"
+        "async def hung_close(self):\n"
+        "    await asyncio.Event().wait()\n"
+        "bc.BookCaptureWriter.close = hung_close\n"
+        "bc.BookCapture.__init__.__kwdefaults__['close_timeout_s'] = 0.3\n"
+        "sys.exit(bc.main(sys.argv[1:]))\n")
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", code, "--seconds", "1", "--root", str(tmp_path),
+        "--tokens", "t1", "--ws-url", "ws://127.0.0.1:9",
+        cwd=str(REPO), env=dict(os.environ, POLY_CAPTURE_PORT="0"),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    out, _ = await asyncio.wait_for(proc.communicate(), 15)
+    assert proc.returncode == 1, out.decode()
+    assert b"timed out" in out

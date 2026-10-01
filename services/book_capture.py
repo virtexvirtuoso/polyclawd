@@ -801,6 +801,8 @@ class BookCaptureWriter:
 #   watchset_missing  {kept_universe_size, startup, error} — once per outage
 #   watchset_restored {outage_s, universe_size}
 #   gap_start         {last_recv_ts, reason, reconnects} — an established connection ended
+#                     (reason "universe_change", "data silence" from the watchdog, or the
+#                     connection error)
 #   gap_end           {gap_ms, tokens}          — next successful subscribe; gap_ms is
 #                     subscribe time minus last_recv_ts (last frame of ANY kind, incl.
 #                     PONG), i.e. an upper bound on the uncovered interval. The server
@@ -820,6 +822,9 @@ BACKOFF_BASE_S = 1.0             # error reconnect: 1 s doubling to 60 s + jitte
 BACKOFF_MAX_S = 60.0
 BACKOFF_JITTER_S = 0.5
 STABLE_RESET_S = 30.0            # a connection that lived longer resets the backoff
+DATA_SILENCE_S = 300.0           # no DATA frame (PONGs don't count) this long -> reconnect;
+                                 # live rate is ~20 frames/s across ~240 tokens. 0 = off
+DATA_SILENCE_MIN_CONN_S = 120.0  # ...only on a connection at least this old
 CLOSE_TIMEOUT_S = 20.0           # bound on writer.close() at shutdown (hung disk)
 TEARDOWN_TIMEOUT_S = 3.0         # bound on cancelling each group of background tasks
 CONTROL_TICK_S = 1.0             # connection control-loop wake-up granularity
@@ -855,6 +860,10 @@ class _ServerClosed(ConnectionError):
     """The server ended the stream without an error (clean close)."""
 
 
+class _DataSilence(ConnectionError):
+    """Connected and heartbeating, but no data frame for DATA_SILENCE_S."""
+
+
 class BookCapture:
     """WS lifecycle around a BookCaptureWriter. See the section comment above."""
 
@@ -866,6 +875,7 @@ class BookCapture:
                  ping_interval_s=PING_INTERVAL_S,
                  backoff_base_s=BACKOFF_BASE_S, backoff_max_s=BACKOFF_MAX_S,
                  jitter_s=BACKOFF_JITTER_S, stable_reset_s=STABLE_RESET_S,
+                 data_silence_s=DATA_SILENCE_S, data_silence_min_conn_s=DATA_SILENCE_MIN_CONN_S,
                  close_timeout_s=CLOSE_TIMEOUT_S, teardown_timeout_s=TEARDOWN_TIMEOUT_S,
                  tick_s=CONTROL_TICK_S,
                  now_ms_fn=None):
@@ -883,6 +893,8 @@ class BookCapture:
         self.backoff_max_s = backoff_max_s
         self.jitter_s = jitter_s
         self.stable_reset_s = stable_reset_s
+        self.data_silence_s = data_silence_s
+        self.data_silence_min_conn_s = data_silence_min_conn_s
         self.close_timeout_s = close_timeout_s
         self.teardown_timeout_s = teardown_timeout_s
         self.tick_s = tick_s
@@ -897,6 +909,13 @@ class BookCapture:
         self.frames = 0                   # non-heartbeat frames handed to the writer
         self.heartbeats = 0
         self.last_recv_ms = None          # last frame of ANY kind (liveness, gap bound)
+        self.last_data_ms = None          # last NON-heartbeat frame (data-silence watchdog)
+        self._established = False         # current run_once attempt reached subscribe
+        self._conn_start = None           # monotonic start of the current connection
+        self._conn_start_ms = None
+        self._gap_start_ms = None
+        self._gap_last_recv = None
+        self.universe_reconnect_decisions = []   # monotonic times of planned reconnects
         self.start_ms = self._now_ms()
         self._gap_open = False
         self._backoff = backoff_base_s
@@ -919,7 +938,18 @@ class BookCapture:
             raise RuntimeError("aiomcache not installed (use --tokens for a static universe)")
         if self._mc is None:
             self._mc = aiomcache.Client(MC_HOST, MC_PORT, pool_size=1)
-        return _parse_watchset(await asyncio.wait_for(self._mc.get(WATCHSET_KEY), MC_TIMEOUT_S))
+        try:
+            raw = await asyncio.wait_for(self._mc.get(WATCHSET_KEY), MC_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            # a get cancelled mid-read may leave an unread reply in the pooled
+            # connection; drop the whole client so the next read starts clean
+            mc, self._mc = self._mc, None
+            try:
+                await asyncio.wait_for(mc.close(), MC_TIMEOUT_S)
+            except BaseException:
+                pass
+            raise
+        return _parse_watchset(raw)
 
     async def _read_universe(self):
         """-> (tokens or None, error string or None). Never raises."""
@@ -979,11 +1009,15 @@ class BookCapture:
             print(f"[capture] stop requested: {reason}")
         self._stop.set()
 
-    def _error_wait(self, conn_lasted_s):
-        """Backoff after an error disconnect (poly_ws policy): 1 s doubling to 60 s +
-        jitter, reset when the connection that just ended was stable > 30 s."""
-        if conn_lasted_s is not None and conn_lasted_s > self.stable_reset_s:
+    def _note_conn_ended(self, lasted_s):
+        """Any established connection ending (error OR planned): a stable one (> 30 s)
+        resets the backoff so the next error starts at the base wait again."""
+        if lasted_s is not None and lasted_s > self.stable_reset_s:
             self._backoff = self.backoff_base_s
+
+    def _error_wait(self):
+        """Backoff after an error disconnect (poly_ws policy): 1 s doubling to 60 s +
+        jitter; the reset after a stable connection happens in _note_conn_ended."""
         wait = min(self.backoff_max_s, self._backoff) + random.uniform(0, self.jitter_s)
         self._backoff = min(self.backoff_max_s, self._backoff * 2)
         return wait
@@ -1007,6 +1041,7 @@ class BookCapture:
                 self.heartbeats += 1
                 continue
             add_frame(raw, recv_ts=now)
+            self.last_data_ms = now
             self.frames += 1
         raise _ServerClosed("server closed the connection")
 
@@ -1041,13 +1076,15 @@ class BookCapture:
         any connection error (incl. a clean server close). Sets self._established."""
         self._established = False
         async with websockets.connect(self.ws_url, ping_interval=10, ping_timeout=25,
-                                      max_size=2 ** 23, open_timeout=15) as ws:
+                                      max_size=2 ** 23, open_timeout=15,
+                                      close_timeout=2) as ws:
             sub = sorted(self.desired)
             await ws.send(json.dumps({"assets_ids": sub, "type": "market"}))
             self.subscribed = set(sub)
             self.connected = True
             self._established = True
             self._conn_start = time.monotonic()
+            self._conn_start_ms = self._now_ms()
             self._on_subscribed(sub)
             print(f"[sub] {len(sub)} tokens")
             ping_task = asyncio.create_task(self._app_ping(ws))
@@ -1064,17 +1101,33 @@ class BookCapture:
                         return "stop"
                     if time.time() >= deadline:
                         return "deadline"
+                    self._check_data_silence()
                     if self._universe_reconnect_due():
                         self._last_universe_reconnect = time.monotonic()
+                        self.universe_reconnect_decisions.append(self._last_universe_reconnect)
                         print(f"[universe] resubscribe via reconnect "
                               f"(desired={len(self.desired)} subscribed={len(self.subscribed)})")
                         return "universe_change"
             finally:
                 self.connected = False
+                self._note_conn_ended(time.monotonic() - self._conn_start)
                 for t in (ping_task, read_task, stop_task):
                     t.cancel()
                 await asyncio.gather(ping_task, read_task, stop_task, return_exceptions=True)
                 self._read_task = None
+
+    def _check_data_silence(self):
+        """Heartbeats prove the socket, not the feed: raise _DataSilence when a
+        connection older than data_silence_min_conn_s has had no data frame for
+        data_silence_s (measured from the later of last data and this connect)."""
+        if not self.data_silence_s or time.monotonic() - self._conn_start <= self.data_silence_min_conn_s:
+            return
+        ref = max(self.last_data_ms or 0, self._conn_start_ms)
+        silent_s = (self._now_ms() - ref) / 1000
+        if silent_s > self.data_silence_s:
+            print(f"[watchdog] no data frames for {silent_s:.0f}s "
+                  f"(heartbeats={self.heartbeats}) — reconnecting")
+            raise _DataSilence("data silence")
 
     async def _wait_for_universe(self, deadline):
         """Startup: never connect with an empty set — retry every no_universe_retry_s."""
@@ -1126,14 +1179,13 @@ class BookCapture:
                     if self._stop.is_set():
                         break
                     self.reconnects += 1
-                    lasted = None
                     if self._established:
-                        lasted = time.monotonic() - self._conn_start
-                        self._on_disconnect(f"{type(e).__name__}: {e}"[:500])
+                        self._on_disconnect(str(e) if isinstance(e, _DataSilence)
+                                            else f"{type(e).__name__}: {e}"[:500])
                     remaining = deadline - time.time()
                     if remaining <= 0:
                         break
-                    wait = self._error_wait(lasted)
+                    wait = self._error_wait()
                     print(f"[reconnect #{self.reconnects}] {type(e).__name__}: {e} -> {wait:.1f}s")
                     if await self._sleep(min(wait, remaining)):
                         break
@@ -1226,6 +1278,8 @@ class BookCapture:
             "reconnects": self.reconnects,
             "last_msg_age_s": (round((now - self.last_recv_ms) / 1000, 1)
                                if self.last_recv_ms else None),
+            "last_data_age_s": (round((now - self.last_data_ms) / 1000, 1)
+                                if self.last_data_ms else None),
             "gap_count": self.gap_count,
             "gap_open": self._gap_open,
             "universe_size": len(self.desired),
