@@ -1,0 +1,32 @@
+# /etc/systemd/system/polyclawd-capture.service
+# Polymarket order-book capture: own market-channel WS connection, full-depth books +
+# price changes + trades -> hourly zstd parquet under storage/book_capture/ (research data).
+# Reads poly_ws's memcached watchset (poly:ws:watchset) only; never writes to memcached.
+# Zero trading blast radius: stop = `systemctl stop polyclawd-capture`.
+# Status: curl 127.0.0.1:8424/status. Nightly offload to G-DRIVE from the Mac Mini
+# (~/bin/poly-book-offload, launchd com.virtuoso.poly-book-offload) prunes VPS files >14 d.
+# Git stamp: install the same drop-in as polyclawd-ws (polyclawd-capture.service.d/git-stamp.conf).
+[Unit]
+Description=Polyclawd Polymarket Order-Book Capture (parquet)
+After=network.target memcached.service polyclawd-ws.service
+
+[Service]
+Type=simple
+User=linuxuser
+Group=linuxuser
+WorkingDirectory=/var/www/virtuosocrypto.com/polyclawd
+Environment=PATH=/var/www/virtuosocrypto.com/polyclawd/venv/bin:/usr/bin:/usr/local/bin
+Environment=POLY_CAPTURE_PORT=8424
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/var/www/virtuosocrypto.com/polyclawd/venv/bin/python3 -m services.book_capture --seconds 0
+Restart=on-failure
+RestartSec=10
+# Shutdown is bounded in-process (~30 s worst case on a hung disk); exit 1 = close timed out.
+TimeoutStopSec=60
+# Shares the box with live trading services: cap memory (buffer cap ~120 MB, ~250 MB mid-flush)
+# so an OOM kills only this unit, and yield CPU to everything else.
+MemoryMax=600M
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
