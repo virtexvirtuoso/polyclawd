@@ -682,101 +682,125 @@ def _fmt_vol(v) -> str:
     return "$%.1fM" % (v / 1e6) if v >= 1e6 else "$%.0fK" % (v / 1e3)
 
 
+def _buy_lines(legs: str) -> list:
+    """'PM YES 19¢ + KAL NO 87¢' -> ['• Polymarket — buy YES @ 19¢',
+    '• Kalshi — buy NO @ 87¢'] — the alert's instruction lines."""
+    out = []
+    for leg in legs.split(" + "):
+        parts = leg.split(" ")
+        if len(parts) != 3:
+            return ["• " + legs]  # unexpected format — passthrough, never crash
+        venue, side, px = parts
+        name = {"PM": "Polymarket", "KAL": "Kalshi"}.get(venue, venue)
+        out.append("• %s — buy %s @ %s" % (name, side, px))
+    return out
+
+
 def format_alert(pair: Pair, ev: dict, espn: dict, confirmed: bool,
                  repeats: int = 0) -> str:
-    """HTML alert — send with parse_mode='HTML' (send_telegram does, with
-    plain fallback). Books are the pair's YES-side quotes on each venue, so
-    both legs are derivable: A = PM ask + (100−KAL bid); B = KAL ask + (100−PM bid).
-    ev may carry kal_vol, seen_min, pm_lvl — context stashed by run_cycle."""
-    tag = " · <i>unconfirmed</i>" if not confirmed else ""
-    books = "Books: PM YES %.0f/%.0f · KAL YES %.0f/%.0f" % (
-        pair.pm_bid, pair.pm_ask, pair.kal_bid, pair.kal_ask)
-    vol = _fmt_vol(ev.get("kal_vol"))
-    if vol:
-        books += " · KAL vol %s" % vol
-    if pair.pm_ask - pair.pm_bid >= 10.0:
-        books += " · <i>wide PM spread</i>"
-    lvl = ev.get("pm_lvl")
-    if lvl and (lvl[0] + lvl[1]) and (lvl[0] + lvl[1]) < 8:
-        books += " · <i>thin PM book</i>"
-    ctx = []
-    if repeats:
-        ctx.append("re-alert %d/hr" % repeats)
-    if ev.get("seen_min"):
-        ctx.append("seen %.0fm" % ev["seen_min"])
-    links = _venue_links(pair)
-    tail = (links + " · <i>verify depth before sizing</i>") if links \
-        else "<i>verify depth before sizing</i>"
-    state = _state_str(espn)
+    """Plain-English alert (Mr. V 2026-10-02: no decoder ring). Reads as an
+    instruction: what to buy on which site, what it costs, what it pays.
+    HTML parse_mode; sender self-heals entity 400s, falls back to plain."""
+    tag = " <i>(prices not re-checked yet)</i>" if not confirmed else ""
     lines = [
         "%s <b>ARB %s</b> · %s" % (_tier(ev["net"]), html.escape(_game_label(pair.game)),
                                    html.escape(pair_label(pair))),
-        "<b>%+.1f¢ net</b> — %s = %.0f¢ (Kal fees in)%s" % (
-            ev["net"], ev["legs"], ev["cost"], tag),
-        "",  # breathing room: headline | context | action
-        books,
+        "Buy both sides — guaranteed $1 payout for less than $1.%s" % tag,
+        "",
     ]
-    if state:
-        lines.append("⏱ %s" % html.escape(state))
-    if ctx:
-        lines.append("⏳ " + " · ".join(ctx))
+    lines += _buy_lines(ev["legs"])
+    lines.append("Cost: %.0f¢ → pays $1.00 either way → <b>%+.1f¢ profit</b> after fees"
+                 % (ev["cost"], ev["net"]))
     lines.append("")
-    lines.append(tail)
+    notes = []
+    vol = _fmt_vol(ev.get("kal_vol"))
+    if vol:
+        notes.append("Kalshi volume %s" % vol)
+    if pair.pm_ask - pair.pm_bid >= 10.0:
+        notes.append("Polymarket spread is wide")
+    lvl = ev.get("pm_lvl")
+    if lvl and (lvl[0] + lvl[1]) and (lvl[0] + lvl[1]) < 8:
+        notes.append("Polymarket book is thin")
+    if notes:
+        lines.append("⚠️ " + " · ".join(notes))
+    state = _state_str(espn)
+    if state:
+        lines.append("Game: %s" % html.escape(state))
+    hist = []
+    if repeats:
+        hist.append("%d alert%s already this hour"
+                    % (repeats, "s" if repeats != 1 else ""))
+    if ev.get("seen_min"):
+        hist.append("gap open %.0f min" % ev["seen_min"])
+    if hist:
+        lines.append("History: " + " · ".join(hist))
+    lines.append("")
+    links = _venue_links(pair)
+    lines.append(("👉 " + links + " — re-check prices before buying") if links
+                 else "<i>Re-check prices before buying</i>")
     return "\n".join(lines)
 
 
 def format_alert_batch(rows, espn) -> str:
-    """rows: [(pair, ev_eval, confirmed, repeats)] for ONE game — packed into
-    a single Telegram message, biggest net first (triage order)."""
+    """Plain-English batch: numbered gaps, biggest first, one buy line each."""
     rows = sorted(rows, key=lambda r: -r[1]["net"])
     p0 = rows[0][0]
     state = _state_str(espn)
-    head = "%s <b>ARB %s</b> — %d windows" % (
-        _tier(rows[0][1]["net"]), html.escape(_game_label(p0.game)), len(rows))
+    head = "%s <b>ARB %s</b> — %d price gap%s" % (
+        _tier(rows[0][1]["net"]), html.escape(_game_label(p0.game)), len(rows),
+        "s" if len(rows) != 1 else "")
+    out = [head]
     if state:
-        head += " · %s" % html.escape(state)
-    out = [head, ""]
-    for p, ev, conf, rep in rows:
-        tag = " · <i>unconfirmed</i>" if not conf else ""
-        ctx = []
-        if rep:
-            ctx.append("re-alert %d/hr" % rep)
-        if ev.get("seen_min"):
-            ctx.append("seen %.0fm" % ev["seen_min"])
-        ctx_s = (" · " + " · ".join(ctx)) if ctx else ""
-        out.append(
-            "%s <b>%s</b> %+.1f¢ — %s = %.0f¢%s%s\n%s" % (
-                _tier(ev["net"]), html.escape(pair_label(p)), ev["net"], ev["legs"],
-                ev["cost"], tag, ctx_s, _venue_links(p)))
+        out.append("Game: %s" % html.escape(state))
+    out.append("Buy both sides of each — costs less than $1, pays $1.00 back, guaranteed.")
     out.append("")
-    out.append("<i>Verify depth in both apps before sizing</i>")
+    for i, (p, ev, conf, rep) in enumerate(rows, 1):
+        extra = []
+        if not conf:
+            extra.append("not re-checked yet")
+        if rep:
+            extra.append("alerted %dx this hour" % rep)
+        if ev.get("seen_min"):
+            extra.append("open %.0f min" % ev["seen_min"])
+        extra_s = (" · " + " · ".join(extra)) if extra else ""
+        out.append("%d. <b>%s</b> — %+.1f¢ profit%s" % (
+            i, html.escape(pair_label(p)), ev["net"], extra_s))
+        out.append("   " + ev["legs"].replace("PM ", "Polymarket ")
+                   .replace("KAL ", "Kalshi ") + " = %.0f¢ → $1 back" % ev["cost"])
+        links = _venue_links(p)
+        if links:
+            out.append("   👉 " + links)
+    out.append("")
+    out.append("<i>Gaps close in minutes — re-check prices before buying</i>")
     return "\n".join(out)
 
 
 def format_recap(conn, game: str, espn: dict) -> str:
-    """End-of-game recap: what the sweep caught, best window first.
-    Games with zero alerted windows stay silent (no noise for a clean sweep)."""
+    """Plain-English end-of-game recap (Mr. V 2026-10-02). Best gap first;
+    games with zero alerted gaps stay silent."""
     rows = conn.execute(
         "SELECT stat, name, line, MAX(net_edge), COUNT(*) FROM pairs_log "
         "WHERE game=? AND alerted=1 GROUP BY key ORDER BY MAX(net_edge) DESC",
         (game,)).fetchall()
     if not rows:
         return ""
-    total = sum(r[4] for r in rows)
-    head = "🏁 <b>%s</b> — final" % html.escape(_game_label(game))
+    head = "🏁 <b>Final: %s</b>" % html.escape(_game_label(game))
     sc = espn.get("score") or {}
     if sc:
         head += " · " + " ".join("%s %d" % (k, v) for k, v in sorted(sc.items()))
-    lines = [head,
-             "%d alerts on %d windows · best %+.1f¢" % (total, len(rows), rows[0][3]),
-             ""]
-    for stat, name, line, mx, n in rows[:5]:
-        lines.append("· %s — best %+.1f¢ ×%d" % (
-            html.escape(_label(stat, name, line)), mx, n))
-    if len(rows) > 5:
-        lines.append("· +%d more" % (len(rows) - 5))
+    lines = [head, ""]
+    lines.append("The watcher spotted %d risk-free price gap%s during the game:"
+                 % (len(rows), "s" if len(rows) != 1 else ""))
     lines.append("")
-    lines.append("<i>Windows are transient — sizes are what the sweep saw, not fills</i>")
+    for stat, name, line, mx, n in rows[:5]:
+        seen = "spotted %d times" % n if n > 1 else "spotted once"
+        lines.append("• %s — up to %+.1f¢ profit per $1 (%s)" % (
+            html.escape(_label(stat, name, line)), mx, seen))
+    if len(rows) > 5:
+        lines.append("• +%d more" % (len(rows) - 5))
+    lines.append("")
+    lines.append("<i>Alert-only — nothing was bought. Gaps like these usually "
+                 "close within minutes.</i>")
     return "\n".join(lines)
 
 

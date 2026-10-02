@@ -384,11 +384,11 @@ def test_format_recap_orders_and_sums(tmp_path):
                        "ml", "browns", 0, 68, 68.5, 74, 75, 4.1, "A", 1))
     conn.commit()
     text = arb.format_recap(conn, "26OCT01PITCLE", {"score": {"CLE": 27, "PIT": 24}})
-    assert "🏁 <b>PIT@CLE</b>" in text and "CLE 27 PIT 24" in text
-    assert "3 alerts on 2 windows · best +4.2¢" in text  # own line now
-    assert "Browns ML — best +4.2¢ ×2" in text  # biggest first
-    assert "Deshaun Watson 250+ pass yds — best +3.2¢ ×1" in text
-    assert "transient" in text
+    assert "🏁 <b>Final: PIT@CLE</b>" in text and "CLE 27 PIT 24" in text
+    assert "spotted 2 risk-free price gaps" in text
+    assert "Browns ML — up to +4.2¢ profit per $1 (spotted 2 times)" in text  # biggest first
+    assert "Deshaun Watson 250+ pass yds — up to +3.2¢ profit per $1 (spotted once)" in text
+    assert "nothing was bought" in text
     assert arb.format_recap(conn, "26OCT02XXXXXX", {}) == ""
 
 
@@ -431,18 +431,19 @@ def test_format_alert_contents(pmus_event):
                             confirmed=True)
     assert "🔥 <b>ARB PIT@CLE</b> · Deshaun Watson 125+ pass yds" in text
     # A: PM YES 61 + KAL NO 10 = 71; fee 7*.10*.90 = 0.63 -> net +28.4
-    assert "<b>+28.4¢ net</b>" in text
-    assert "PM YES 60/61 · KAL YES 90/92" in text
+    assert "• Polymarket — buy YES @ 61¢" in text
+    assert "• Kalshi — buy NO @ 10¢" in text
+    assert "Cost: 71¢ → pays $1.00 either way → <b>+28.4¢ profit</b> after fees" in text
     assert ('href="https://polymarket.com/event/nfl-pit-cle-2026-10-01/'
             'astatc-nfl-pit-cle-2026-10-01-pyd-deswat-gte125"') in text
     assert 'href="https://kalshi.com/markets/KXNFLPASSYDS-26OCT01PITCLE"' in text
     assert "5:00 - 2nd" in text and "CLE 0 PIT 7" in text
-    assert "verify depth" in text
+    assert "re-check prices before buying" in text
     # no raw slug lines in the body (the old format's worst offender)
     assert "PM slug:" not in text and "KAL:" not in text
-    # unconfirmed tag + repeat counter render
-    assert "<i>unconfirmed</i>" in arb.format_alert(p, ev, None, confirmed=False)
-    assert "re-alert 2/hr" in arb.format_alert(p, ev, None, confirmed=True, repeats=2)
+    # unconfirmed tag + repeat counter render in plain English
+    assert "prices not re-checked yet" in arb.format_alert(p, ev, None, confirmed=False)
+    assert "2 alerts already this hour" in arb.format_alert(p, ev, None, confirmed=True, repeats=2)
 
 
 def test_format_alert_batch_packs_rows():
@@ -457,11 +458,11 @@ def test_format_alert_batch_packs_rows():
     rows = [(mk("aaron rodgers", 200), arb.eval_pair(mk("aaron rodgers", 200)), True, 0),
             (mk("deshaun watson", 200), arb.eval_pair(mk("deshaun watson", 200)), False, 1)]
     text = arb.format_alert_batch(rows, {"detail": "7:39 - 4th", "score": {"CLE": 21, "PIT": 16}})
-    assert "2 windows" in text
+    assert "2 price gaps" in text
     assert "Aaron Rodgers 200+ pass yds" in text
     assert "Deshaun Watson 200+ pass yds" in text
     assert text.count("polymarket.com/event/") == 2
-    assert "re-alert 1/hr" in text and "<i>unconfirmed</i>" in text
+    assert "not re-checked yet" in text and "alerted 1x this hour" in text
     assert "7:39 - 4th" in text
 
 
@@ -529,6 +530,6 @@ def test_run_cycle_batch_single_send(tmp_path, monkeypatch):
     s = arb.run_cycle(_cfg(str(tmp_path / "arb.db")), conn)
     assert s["alerts"] == 2
     assert len(sends) == 1, "two candidates must pack into one message"
-    assert "2 windows" in sends[0]
+    assert "2 price gaps" in sends[0]
     assert conn.execute("SELECT COUNT(*) FROM fired").fetchone()[0] == 2
     assert conn.execute("SELECT COUNT(*) FROM pairs_log WHERE alerted=1").fetchone()[0] == 2
