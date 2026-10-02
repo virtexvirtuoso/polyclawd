@@ -161,6 +161,13 @@ MLB_TEAM_TO_ABBR = {
     "colorado rockies": "COL", "san francisco giants": "SF",
     "athletics": "ATH",
 }
+# abbr -> PM-US full team name, for the PM-US search query. Kalshi MLB event
+# titles truncate nicknames ('Los Angeles D', 'New York Y', 'Chicago WS'), so
+# the ticker-suffix abbrs are the only clean team identity. MLB-only: ATL/TB/
+# CLE/... are also NFL abbrs, and NFL games keep their nickname query.
+MLB_ABBR_TO_TEAM = {ab: name.title() for name, ab in MLB_TEAM_TO_ABBR.items()}
+MLB_ABBR_TO_TEAM["CWS"] = MLB_ABBR_TO_TEAM["CHW"]  # Kalshi CWS == ESPN CHW
+MLB_ABBR_TO_TEAM["STL"] = "St. Louis Cardinals"    # .title() gives 'St. louis'
 MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
           "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
 
@@ -461,6 +468,24 @@ def _nicknames_from_event_title(title: str):
         toks = p.split()
         nicks.append(" ".join(toks[1:]).lower() if len(toks) > 1 else p.lower())
     return parts, nicks
+
+
+def pmus_queries(sport: str, abbrs, kal_game_title: str) -> list:
+    """PM-US search queries for one game, best first, deduped.
+    MLB: full team names from the ticker abbrs ('Los Angeles Dodgers vs
+    Atlanta Braves') - Kalshi titles truncate nicknames. Title-derived
+    queries stay as fallbacks (and are the only path for NFL)."""
+    out = []
+    if sport == "mlb" and len(abbrs) == 2:
+        names = [MLB_ABBR_TO_TEAM.get(ab) for ab in abbrs]
+        if all(names):
+            out.append(" vs ".join(names))
+    parts, nicks = _nicknames_from_event_title(kal_game_title)
+    out.append(" ".join(n.title() for n in nicks if n))
+    if sport == "mlb" and any(parts):
+        out.append(" ".join(parts))
+    seen = set()
+    return [q for q in out if q and not (q in seen or seen.add(q))]
 
 
 def pair_props(game: str, pm_markets: list, kal_markets: list, pm_event_slug: str = "") -> list:
@@ -1027,11 +1052,12 @@ def run_cycle(cfg: dict, conn: sqlite3.Connection) -> dict:
             if not espn or espn.get("state") != "in":
                 continue  # in-game focus
             summary["games"] += 1
-            parts, nicks = _nicknames_from_event_title(kal_events[game_series].get("title") or "")
-            query = " ".join(n.title() for n in nicks if n)
-            pm_event = pmus_search_event(query, date, abbrs)
-            if not pm_event and sport == "mlb" and any(parts):
-                pm_event = pmus_search_event(" ".join(parts), date, abbrs)
+            pm_event = None
+            for query in pmus_queries(sport, abbrs,
+                                      kal_events[game_series].get("title") or ""):
+                pm_event = pmus_search_event(query, date, abbrs)
+                if pm_event:
+                    break
             time.sleep(1.2)
             if not pm_event:
                 continue

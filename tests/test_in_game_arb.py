@@ -651,3 +651,68 @@ def test_run_cycle_batch_single_send(tmp_path, monkeypatch):
     assert "2 price gaps" in sends[0]
     assert conn.execute("SELECT COUNT(*) FROM fired").fetchone()[0] == 2
     assert conn.execute("SELECT COUNT(*) FROM pairs_log WHERE alerted=1").fetchone()[0] == 2
+
+# ---------------------------------------------------------------- abbr-based PM search
+# Real Kalshi KXMLBGAME titles (live probe 2026-10-02 13:40 ET): nicknames are
+# truncated to a letter or two, so nickname-derived PM-US queries are garbage
+# ("Angeles D Atlanta", "York Y Bay"). The ticker suffix carries clean abbrs.
+
+@pytest.mark.parametrize("title,abbrs,want", [
+    ("Game 3: Los Angeles D vs Atlanta", ("LAD", "ATL"),
+     "Los Angeles Dodgers vs Atlanta Braves"),
+    ("Game 3: Tampa Bay vs New York Y", ("TB", "NYY"),
+     "Tampa Bay Rays vs New York Yankees"),
+    ("Game 3: Cleveland vs Chicago WS", ("CLE", "CWS"),
+     "Cleveland Guardians vs Chicago White Sox"),
+    ("Game 3: Milwaukee vs San Diego", ("MIL", "SD"),
+     "Milwaukee Brewers vs San Diego Padres"),
+])
+def test_pmus_queries_mlb_truncated_titles_use_abbrs(title, abbrs, want):
+    qs = arb.pmus_queries("mlb", abbrs, title)
+    assert qs[0] == want
+    assert len(qs) == len(set(qs)), "no duplicate queries"
+
+
+def test_pmus_queries_nfl_never_gets_mlb_names():
+    """NFL/MLB collision guard: ATL/TB are both NFL and MLB abbrs — an NFL
+    game must never be searched as Braves/Rays."""
+    qs = arb.pmus_queries("nfl", ("ATL", "TB"), "ATL Falcons vs TB Buccaneers")
+    assert qs[0] == "Falcons Buccaneers"
+    assert not any("Braves" in q or "Rays" in q for q in qs)
+
+
+def test_pmus_queries_mlb_unknown_abbr_falls_back_to_title():
+    qs = arb.pmus_queries("mlb", ("XXX", "ATL"), "Game 1: Nowhere vs Atlanta")
+    assert qs and all("Braves" not in q for q in qs)
+
+
+def test_run_cycle_mlb_truncated_title_finds_pm_event(tmp_path, monkeypatch):
+    """End to end with the real truncated Kalshi title 'Chicago WS': PM-US
+    search only matches on the real team name, as the live search does."""
+    pm = load("pmus_mlb_cwscle_slim.json")["event"]
+    espn = load("espn_mlb_cwscle.json")
+    queries = []
+    monkeypatch.setattr(arb.time, "sleep", lambda s: None)
+    monkeypatch.setattr(arb, "espn_scoreboard",
+                        lambda sport="nfl": espn if sport == "mlb" else {"events": []})
+    evs = {"KXMLBGAME": load("kalshi_mlbgame_slim.json")["event"],
+           "KXMLBKS": load("kalshi_mlbks_slim.json")["event"],
+           "KXMLBTOTAL": load("kalshi_mlbtotal_slim.json")["event"]}
+    assert evs["KXMLBGAME"]["title"] == "Game 1: Chicago WS vs Cleveland"
+    monkeypatch.setattr(arb, "kalshi_series_events",
+                        lambda s: {evs[s]["ticker"]: evs[s]} if s in evs else {})
+
+    def fake_search(q, d, a):
+        queries.append(q)
+        return pm if "White Sox" in q else None
+
+    monkeypatch.setattr(arb, "pmus_search_event", fake_search)
+    monkeypatch.setattr(arb, "pmus_bbo", lambda slug: None)
+    monkeypatch.setattr(arb, "send_telegram", lambda text, enabled: True)
+    conn = arb.db_init(str(tmp_path / "arb.db"))
+    cfg = _cfg(str(tmp_path / "arb.db"),
+               series=["KXMLBGAME", "KXMLBKS", "KXMLBTOTAL"], kal_min_volume_mlb=50)
+    s = arb.run_cycle(cfg, conn)
+    assert s["games"] == 1
+    assert s["pairs"] == 4, "queries tried: %r" % queries
+    assert queries[0] == "Chicago White Sox vs Cleveland Guardians"
