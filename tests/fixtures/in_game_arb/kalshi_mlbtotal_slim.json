@@ -1,0 +1,10 @@
+{
+  "event": {
+    "ticker": "KXMLBTOTAL-26OCT031300CWSCLE",
+    "title": "Chicago WS vs Cleveland: Total Runs",
+    "markets": [
+      {"title": "Over 6.5 runs scored", "yes_bid": 53, "yes_ask": 54, "volume": 8313, "status": "active"},
+      {"title": "Over 7.5 runs scored", "yes_bid": 41, "yes_ask": 42, "volume": 4911, "status": "active"}
+    ]
+  }
+}

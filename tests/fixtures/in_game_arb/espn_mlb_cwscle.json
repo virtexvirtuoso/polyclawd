@@ -1,0 +1,12 @@
+{
+  "events": [
+    {"id": "401907974",
+     "status": {"type": {"state": "in", "period": 5, "detail": "Top 5th", "shortDetail": "Top 5th"}},
+     "competitions": [
+       {"competitors": [
+         {"team": {"abbreviation": "CHW"}, "score": "2"},
+         {"team": {"abbreviation": "CLE"}, "score": "3"}
+       ]}
+     ]}
+  ]
+}

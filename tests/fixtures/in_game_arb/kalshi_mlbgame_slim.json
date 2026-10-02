@@ -1,0 +1,10 @@
+{
+  "event": {
+    "ticker": "KXMLBGAME-26OCT031300CWSCLE",
+    "title": "Game 1: Chicago WS vs Cleveland",
+    "markets": [
+      {"title": "Chicago WS wins", "yes_bid": 41, "yes_ask": 42, "volume": 112060, "status": "active"},
+      {"title": "Cleveland wins", "yes_bid": 58, "yes_ask": 59, "volume": 147482, "status": "active"}
+    ]
+  }
+}

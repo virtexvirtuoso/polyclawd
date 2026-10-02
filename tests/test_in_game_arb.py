@@ -96,15 +96,15 @@ def test_espn_live_games_aliases():
         "status": {"type": {"state": "in"}, "period": 1,
                    "shortDetail": "5:00 - 1st"}}]}
     live = arb.espn_live_games(sb)
-    # sorted-tuple keys; NO registers under both itself and its NOLA alias
-    assert ("LV", "NOLA") in live
-    assert ("LV", "NO") in live
-    assert live[("LV", "NO")]["score"] == {"NO": 7, "LV": 3}
+    # sorted-tuple keys, sport-namespaced; NO registers under itself + NOLA alias
+    assert ("nfl", "LV", "NOLA") in live
+    assert ("nfl", "LV", "NO") in live
+    assert live[("nfl", "LV", "NO")]["score"] == {"NO": 7, "LV": 3}
 
 
 def test_espn_live_games_fixture():
     live = arb.espn_live_games(load("espn_pitcle.json"))
-    info = live[("CLE", "PIT")]
+    info = live[("nfl", "CLE", "PIT")]
     assert info["state"] == "in"
     assert info["score"] == {"CLE": 0, "PIT": 7}
 
@@ -187,7 +187,7 @@ def _cfg(db_path: str, **over) -> dict:
 def _wire(monkeypatch, pmus_event, *, bbo=(60.0, 61.0), espn=None, kal_tweak=None):
     monkeypatch.setattr(arb.time, "sleep", lambda s: None)
     sb = espn if espn is not None else load("espn_pitcle.json")
-    monkeypatch.setattr(arb, "espn_scoreboard", lambda: sb)
+    monkeypatch.setattr(arb, "espn_scoreboard", lambda sport="nfl": sb)
 
     def fake_series(series):
         ev = json.loads(json.dumps(kalshi_event(series)))  # deep copy
@@ -356,7 +356,7 @@ def test_run_cycle_ml_confirm_corruption_regression(tmp_path, monkeypatch):
                      "volume": 500000, "status": "active"},
                 ]}
     monkeypatch.setattr(arb.time, "sleep", lambda s: None)
-    monkeypatch.setattr(arb, "espn_scoreboard", lambda: load("espn_pitcle.json"))
+    monkeypatch.setattr(arb, "espn_scoreboard", lambda sport="nfl": load("espn_pitcle.json"))
     monkeypatch.setattr(arb, "kalshi_series_events",
                         lambda s: {"KXNFLGAME-26OCT01PITCLE": kal_game} if s == "KXNFLGAME" else {})
     monkeypatch.setattr(arb, "pmus_search_event", lambda q, d, a: pm_event)
@@ -403,8 +403,8 @@ def test_recap_pending_games_idempotent(tmp_path, monkeypatch):
     conn.commit()
     sends = []
     monkeypatch.setattr(arb, "send_telegram", lambda text, enabled: sends.append(text) or True)
-    live = {("CLE", "PIT"): {"state": "post", "detail": "Final",
-                              "score": {"CLE": 27, "PIT": 24}}}
+    live = {("nfl", "CLE", "PIT"): {"state": "post", "detail": "Final",
+                                     "score": {"CLE": 27, "PIT": 24}}}
     cfg = {"telegram": False}
     assert arb.recap_pending_games(conn, live, cfg, now) == 1
     assert len(sends) == 1 and "PIT@CLE" in sends[0]
@@ -414,8 +414,126 @@ def test_recap_pending_games_idempotent(tmp_path, monkeypatch):
     conn2.execute(ins, (now, "26OCT01PITCLE", "26OCT01PITCLE|ml|browns",
                         "ml", "browns", 0, 68, 68.5, 74, 75, 4.2, "A", 1))
     conn2.commit()
-    live2 = {("CLE", "PIT"): {"state": "in", "detail": "2:00 - 4th", "score": {}}}
+    live2 = {("nfl", "CLE", "PIT"): {"state": "in", "detail": "2:00 - 4th", "score": {}}}
     assert arb.recap_pending_games(conn2, live2, cfg, now) == 0
+
+
+def test_parse_pmus_prop_mlb():
+    """PM-US MLB prop questions (scanner-proven shapes, probed 2026-10-02)."""
+    assert arb.parse_pmus_prop("Will Parker Messick record at least 6 pitching "
+                               "strikeouts in Game 1: CHI White Sox vs. CLE Guardians?") == \
+        ("parker messick", 6, "ks")
+    assert arb.parse_pmus_prop("Will Jo Adell record at least 1 home run in Game 1: X?") == \
+        ("jo adell", 1, "hr")
+    assert arb.parse_pmus_prop("Will X record at least 2 RBIs in Game 1: X?") == ("x", 2, "rbi")
+    assert arb.parse_pmus_prop("Will X record at least 5 total bases in Game 1: X?") == ("x", 5, "tb")
+    # NFL regex still parses
+    assert arb.parse_pmus_prop("Will Deshaun Watson record 125+ passing yards?") == \
+        ("deshaun watson", 125, "pass_yds")
+
+
+def test_parse_kalshi_prop_mlb():
+    assert arb.parse_kalshi_prop("Parker Messick: 6+ strikeouts?") == ("parker messick", 6, "ks")
+    assert arb.parse_kalshi_prop("Brayan Rocchio: 1+ home runs?") == ("brayan rocchio", 1, "hr")
+    assert arb.parse_kalshi_prop("Munetaka Murakami: 3+ hits?") == ("munetaka murakami", 3, "hits")
+    assert arb.parse_kalshi_prop("X: 2+ RBIs?") == ("x", 2, "rbi")
+    assert arb.parse_kalshi_prop("X: 5+ total bases?") == ("x", 5, "tb")
+
+
+def test_parse_game_suffix_mlb_time():
+    """MLB tickers carry a game time: 26OCT031300CWSCLE."""
+    assert arb.parse_game_suffix("26OCT031300CWSCLE") == ("2026-10-03", ("CWS", "CLE"))
+    assert arb.parse_game_suffix("26OCT01PITCLE") == ("2026-10-01", ("PIT", "CLE"))
+    assert arb._game_label("26OCT031300CWSCLE") == "CWS@CLE"
+
+
+def test_parse_kalshi_total_mlb():
+    assert arb.parse_kalshi_total("Over 6.5 runs scored") == 6.5
+    assert arb.parse_kalshi_total("Full Game: over 38.5 points scored?") == 38.5
+
+
+def test_build_pairs_mlb_fixture():
+    """ML + totals + K props all pair from the captured CWS@CLE fixtures."""
+    pm = load("pmus_mlb_cwscle_slim.json")["event"]
+    kal = {"KXMLBGAME": load("kalshi_mlbgame_slim.json")["event"],
+           "KXMLBKS": load("kalshi_mlbks_slim.json")["event"],
+           "KXMLBTOTAL": load("kalshi_mlbtotal_slim.json")["event"]}
+    pairs = arb.build_pairs("26OCT031300CWSCLE", pm, kal, sport="mlb",
+                            game_series="KXMLBGAME")
+    mls = [p for p in pairs if p.stat == "ml"]
+    assert len(mls) == 2
+    chw = next(p for p in mls if p.name == "chicago white sox")
+    cle = next(p for p in mls if p.name == "cleveland guardians")
+    assert (chw.pm_bid, chw.pm_ask) == (41.5, 42.0)      # outcomes[0] direct
+    assert chw.pm_inverted is False
+    assert (cle.pm_bid, cle.pm_ask) == (58.0, 58.5)      # inverted complement of (41.5, 42.0)
+    assert cle.pm_inverted is True
+    assert (cle.kal_bid, cle.kal_ask) == (58.0, 59.0)
+    tots = [p for p in pairs if p.stat == "total"]
+    assert len(tots) == 1 and tots[0].line == 6.5   # slim fixture: one shared rung
+    t65 = tots[0]
+    assert (t65.pm_bid, t65.pm_ask) == pytest.approx((54.0, 54.5))
+    assert (t65.kal_bid, t65.kal_ask) == pytest.approx((53.0, 54.0))
+    ks = [p for p in pairs if p.stat == "ks"]
+    assert len(ks) == 1 and ks[0].name == "parker messick" and ks[0].line == 6
+    assert (ks[0].pm_bid, ks[0].pm_ask) == (62.0, 64.0)
+    assert (ks[0].kal_bid, ks[0].kal_ask) == (61.0, 64.0)
+    assert len(pairs) == 4  # 2 ML + 1 total + 1 K prop
+
+
+def test_run_cycle_mlb_end_to_end(tmp_path, monkeypatch):
+    """Live MLB game -> ML+total+K pair; tweaked Kalshi rung fires one alert."""
+    pm = load("pmus_mlb_cwscle_slim.json")["event"]
+    espn = load("espn_mlb_cwscle.json")
+    sends = []
+    monkeypatch.setattr(arb.time, "sleep", lambda s: None)
+    monkeypatch.setattr(arb, "espn_scoreboard",
+                        lambda sport="nfl": espn if sport == "mlb" else {"events": []})
+
+    def fake_series(s):
+        evs = {"KXMLBGAME": load("kalshi_mlbgame_slim.json")["event"],
+               "KXMLBKS": load("kalshi_mlbks_slim.json")["event"],
+               "KXMLBTOTAL": load("kalshi_mlbtotal_slim.json")["event"]}
+        ev = evs.get(s)
+        if ev and s == "KXMLBKS":  # make the Messick 6+ rung an arb: PM 62/64
+            ev = json.loads(json.dumps(ev))
+            for m in ev["markets"]:
+                if m["title"] == "Parker Messick: 6+ strikeouts?":
+                    m["yes_bid"], m["yes_ask"] = 71, 73
+        return {ev["ticker"]: ev} if ev else {}
+
+    monkeypatch.setattr(arb, "kalshi_series_events", fake_series)
+    monkeypatch.setattr(arb, "pmus_search_event", lambda q, d, a: pm)
+    monkeypatch.setattr(arb, "pmus_bbo", lambda slug: (62.0, 64.0, 5, 9))
+    monkeypatch.setattr(arb, "send_telegram", lambda text, enabled: sends.append(text) or True)
+    conn = arb.db_init(str(tmp_path / "arb.db"))
+    cfg = _cfg(str(tmp_path / "arb.db"),
+               series=["KXMLBGAME", "KXMLBKS", "KXMLBTOTAL"], kal_min_volume_mlb=50)
+    s = arb.run_cycle(cfg, conn)
+    assert s["games"] == 1
+    assert s["pairs"] == 4  # 2 ML + 1 total + 1 K prop
+    assert s["alerts"] == 1
+    # A: PM YES 64 + KAL NO 29 = 93; fee 7*.29*.71 = 1.44 -> +5.6
+    assert "Parker Messick 6+ Ks" in sends[0]
+    assert "• Polymarket — buy YES @ 64¢" in sends[0]
+    assert "• Kalshi — buy NO @ 29¢" in sends[0]
+    row = conn.execute("SELECT stat, name, line FROM pairs_log WHERE alerted=1").fetchone()
+    assert row == ("ks", "parker messick", 6.0)
+
+
+def test_nfl_mlb_same_abbr_namespaced():
+    """TB plays both sports — sport-namespaced keys keep the games apart."""
+    sb_nfl = {"events": [{"status": {"type": {"state": "in"}}, "competitions": [
+        {"competitors": [{"team": {"abbreviation": "TB"}, "score": "7"},
+                          {"team": {"abbreviation": "NO"}, "score": "0"}]}]}]}
+    sb_mlb = {"events": [{"status": {"type": {"state": "in"}}, "competitions": [
+        {"competitors": [{"team": {"abbreviation": "TB"}, "score": "2"},
+                          {"team": {"abbreviation": "CLE"}, "score": "1"}]}]}]}
+    live = {}
+    live.update(arb.espn_live_games(sb_nfl, sport="nfl"))
+    live.update(arb.espn_live_games(sb_mlb, sport="mlb"))
+    assert ("nfl", "NO", "TB") in live and ("mlb", "CLE", "TB") in live
+    assert live[("nfl", "NO", "TB")]["score"] != live[("mlb", "CLE", "TB")]["score"]
 
 
 def test_format_alert_contents(pmus_event):
@@ -518,7 +636,7 @@ def test_run_cycle_batch_single_send(tmp_path, monkeypatch):
                 "markets": []}
     sends = []
     monkeypatch.setattr(arb.time, "sleep", lambda s: None)
-    monkeypatch.setattr(arb, "espn_scoreboard", lambda: load("espn_pitcle.json"))
+    monkeypatch.setattr(arb, "espn_scoreboard", lambda sport="nfl": load("espn_pitcle.json"))
     monkeypatch.setattr(arb, "kalshi_series_events",
                         lambda s: {"KXNFLPASSYDS-26OCT01PITCLE": kal_pass}
                         if s == "KXNFLPASSYDS" else

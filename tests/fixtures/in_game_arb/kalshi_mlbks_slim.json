@@ -1,0 +1,13 @@
+{
+  "event": {
+    "ticker": "KXMLBKS-26OCT031300CWSCLE",
+    "title": "Chicago WS vs Cleveland: Strikeouts",
+    "markets": [
+      {"title": "Parker Messick: 4+ strikeouts?", "yes_bid": 86, "yes_ask": 88, "volume": 107, "status": "active"},
+      {"title": "Parker Messick: 5+ strikeouts?", "yes_bid": 73, "yes_ask": 77, "volume": 2, "status": "active"},
+      {"title": "Parker Messick: 6+ strikeouts?", "yes_bid": 61, "yes_ask": 64, "volume": 321, "status": "active"},
+      {"title": "Parker Messick: 7+ strikeouts?", "yes_bid": 47, "yes_ask": 50, "volume": 48, "status": "active"},
+      {"title": "Parker Messick: 8+ strikeouts?", "yes_bid": 31, "yes_ask": 35, "volume": 32, "status": "active"}
+    ]
+  }
+}
