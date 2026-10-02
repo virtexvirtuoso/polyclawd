@@ -385,7 +385,7 @@ def test_format_recap_orders_and_sums(tmp_path):
     conn.commit()
     text = arb.format_recap(conn, "26OCT01PITCLE", {"score": {"CLE": 27, "PIT": 24}})
     assert "🏁 <b>PIT@CLE</b>" in text and "CLE 27 PIT 24" in text
-    assert "3 alerts on 2 windows, best +4.2¢" in text
+    assert "3 alerts on 2 windows · best +4.2¢" in text  # own line now
     assert "Browns ML — best +4.2¢ ×2" in text  # biggest first
     assert "Deshaun Watson 250+ pass yds — best +3.2¢ ×1" in text
     assert "transient" in text
