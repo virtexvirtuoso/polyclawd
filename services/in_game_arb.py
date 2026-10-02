@@ -579,6 +579,7 @@ CREATE TABLE IF NOT EXISTS pairs_log (ts REAL, game TEXT, key TEXT, stat TEXT,
     net_edge REAL, direction TEXT, alerted INT);
 CREATE TABLE IF NOT EXISTS fired (pair_key TEXT, direction TEXT, last_ts REAL,
                                   PRIMARY KEY (pair_key, direction));
+CREATE TABLE IF NOT EXISTS recaps (game TEXT PRIMARY KEY, ts REAL);
 """)
     conn.commit()
     return conn
@@ -617,12 +618,16 @@ def mark_fired(conn: sqlite3.Connection, pair_key: str, direction: str, now: flo
 
 # ---------------------------------------------------------------- alerting
 
+def _label(stat: str, name: str, line: float) -> str:
+    if stat == "ml":
+        return "%s ML" % name.title()
+    if stat == "total":
+        return "game total o%g" % line
+    return "%s %g+ %s" % (name.title(), line, STAT_UNITS.get(stat, stat))
+
+
 def pair_label(pair: Pair) -> str:
-    if pair.stat == "ml":
-        return "%s ML" % pair.name.title()
-    if pair.stat == "total":
-        return "game total o%g" % pair.line
-    return "%s %g+ %s" % (pair.name.title(), pair.line, STAT_UNITS.get(pair.stat, pair.stat))
+    return _label(pair.stat, pair.name, pair.line)
 
 
 def _game_label(game: str) -> str:
@@ -745,6 +750,56 @@ def format_alert_batch(rows, espn) -> str:
     return "\n".join(out)
 
 
+def format_recap(conn, game: str, espn: dict) -> str:
+    """End-of-game recap: what the sweep caught, best window first.
+    Games with zero alerted windows stay silent (no noise for a clean sweep)."""
+    rows = conn.execute(
+        "SELECT stat, name, line, MAX(net_edge), COUNT(*) FROM pairs_log "
+        "WHERE game=? AND alerted=1 GROUP BY key ORDER BY MAX(net_edge) DESC",
+        (game,)).fetchall()
+    if not rows:
+        return ""
+    total = sum(r[4] for r in rows)
+    head = "🏁 <b>%s</b> — final" % html.escape(_game_label(game))
+    sc = espn.get("score") or {}
+    if sc:
+        head += " · " + " ".join("%s %d" % (k, v) for k, v in sorted(sc.items()))
+    head += " — %d alerts on %d windows, best %+.1f¢" % (total, len(rows), rows[0][3])
+    lines = [head]
+    for stat, name, line, mx, n in rows[:5]:
+        lines.append("· %s — best %+.1f¢ ×%d" % (
+            html.escape(_label(stat, name, line)), mx, n))
+    if len(rows) > 5:
+        lines.append("· +%d more" % (len(rows) - 5))
+    lines.append("<i>Windows are transient — sizes are what the sweep saw, not fills</i>")
+    return "\n".join(lines)
+
+
+def recap_pending_games(conn, live: dict, cfg: dict, now: float) -> int:
+    """One recap per finished game that fired alerts and hasn't recapped.
+    Durable via the recaps table — survives restarts, fires at most once."""
+    sent = 0
+    cutoff = now - 12 * 3600
+    done = {r[0] for r in conn.execute("SELECT game FROM recaps WHERE ts>?", (cutoff,))}
+    fired_games = [r[0] for r in conn.execute(
+        "SELECT DISTINCT game FROM pairs_log WHERE ts>? AND alerted=1", (cutoff,))]
+    for game in fired_games:
+        if game in done:
+            continue
+        _, abbrs = parse_game_suffix(game)
+        espn = live.get(tuple(sorted(abbrs))) if abbrs else None
+        if not espn or espn.get("state") != "post":
+            continue
+        text = format_recap(conn, game, espn)
+        if not text:
+            continue
+        if send_telegram(text, cfg["telegram"]):
+            conn.execute("INSERT OR IGNORE INTO recaps (game, ts) VALUES (?,?)", (game, now))
+            conn.commit()
+            sent += 1
+    return sent
+
+
 def send_telegram(text: str, enabled: bool) -> bool:
     """HTML parse mode (links render); the sender self-heals entity 400s and
     falls back to plain rather than dropping. Every send is ledger-logged."""
@@ -769,7 +824,7 @@ def run_cycle(cfg: dict, conn: sqlite3.Connection) -> dict:
     """One sweep. cfg keys: series, interval, net_edge, kal_min_volume,
     cooldown_min, max_confirms, pm_fee, telegram."""
     now = time.time()
-    summary = {"games": 0, "pairs": 0, "cands": 0, "alerts": 0}
+    summary = {"games": 0, "pairs": 0, "cands": 0, "alerts": 0, "recaps": 0}
     try:
         live = {}
         try:
@@ -900,6 +955,7 @@ def run_cycle(cfg: dict, conn: sqlite3.Connection) -> dict:
                      p.kal_bid, p.kal_ask, ev_eval["net"], ev_eval["direction"], 0))
             conn.execute("DELETE FROM pairs_log WHERE ts < ?", (now - 7 * 86400,))
             conn.commit()
+        summary["recaps"] = recap_pending_games(conn, live, cfg, now)
     except Exception as e:
         log.exception("cycle error: %s", e)
         summary["err"] = repr(e)[:200]
@@ -907,7 +963,8 @@ def run_cycle(cfg: dict, conn: sqlite3.Connection) -> dict:
                  (now, summary["games"], summary["pairs"], summary["cands"],
                   summary["alerts"], summary.get("err")))
     conn.commit()
-    log.info("cycle: %(games)s games, %(pairs)s pairs, %(cands)s cands, %(alerts)s alerts", summary)
+    log.info("cycle: %(games)s games, %(pairs)s pairs, %(cands)s cands, %(alerts)s alerts, %(recaps)s recaps",
+             summary)
     return summary
 
 
