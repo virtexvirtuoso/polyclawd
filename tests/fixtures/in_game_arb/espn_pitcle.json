@@ -1,0 +1,630 @@
+{
+ "source": "espn_scoreboard",
+ "captured": "2026-10-01T20:55Z",
+ "events": [
+  {
+   "id": "401872964",
+   "uid": "s:20~l:28~e:401872964",
+   "date": "2026-10-02T00:15Z",
+   "name": "Pittsburgh Steelers at Cleveland Browns",
+   "shortName": "PIT @ CLE",
+   "season": {
+    "year": 2026,
+    "type": 2,
+    "slug": "regular-season"
+   },
+   "week": {
+    "number": 4
+   },
+   "competitions": [
+    {
+     "id": "401872964",
+     "uid": "s:20~l:28~e:401872964~c:401872964",
+     "date": "2026-10-02T00:15Z",
+     "attendance": 0,
+     "type": {
+      "id": "1",
+      "abbreviation": "STD"
+     },
+     "timeValid": true,
+     "neutralSite": false,
+     "conferenceCompetition": false,
+     "playByPlayAvailable": true,
+     "recent": true,
+     "venue": {
+      "id": "3679",
+      "fullName": "Huntington Bank Field",
+      "address": {
+       "city": "Cleveland",
+       "state": "OH",
+       "country": "USA"
+      },
+      "indoor": false
+     },
+     "competitors": [
+      {
+       "id": "5",
+       "uid": "s:20~l:28~t:5",
+       "type": "team",
+       "order": 0,
+       "homeAway": "home",
+       "team": {
+        "id": "5",
+        "uid": "s:20~l:28~t:5",
+        "location": "Cleveland",
+        "name": "Browns",
+        "abbreviation": "CLE",
+        "displayName": "Cleveland Browns",
+        "shortDisplayName": "Browns",
+        "color": "472a08",
+        "alternateColor": "ff3c00",
+        "isActive": true,
+        "venue": {
+         "id": "3679"
+        },
+        "links": [
+         {
+          "rel": [
+           "clubhouse",
+           "desktop",
+           "team"
+          ],
+          "href": "https://www.espn.com/nfl/team/_/name/cle/cleveland-browns",
+          "text": "Clubhouse",
+          "isExternal": false,
+          "isPremium": false
+         },
+         {
+          "rel": [
+           "roster",
+           "desktop",
+           "team"
+          ],
+          "href": "https://www.espn.com/nfl/team/roster/_/name/cle/cleveland-browns",
+          "text": "Roster",
+          "isExternal": false,
+          "isPremium": false
+         },
+         {
+          "rel": [
+           "roster",
+           "sportscenter",
+           "app",
+           "team"
+          ],
+          "href": "sportscenter://x-callback-url/showClubhouse?uid=s:20~l:28~t:5&section=roster",
+          "text": "Roster",
+          "isExternal": false,
+          "isPremium": false
+         },
+         {
+          "rel": [
+           "stats",
+           "desktop",
+           "team"
+          ],
+          "href": "https://www.espn.com/nfl/team/stats/_/name/cle/cleveland-browns",
+          "text": "Statistics",
+          "isExternal": false,
+          "isPremium": false
+         },
+         {
+          "rel": [
+           "stats",
+           "sportscenter",
+           "app",
+           "team"
+          ],
+          "href": "sportscenter://x-callback-url/showClubhouse?uid=s:20~l:28~t:5&section=stats",
+          "text": "Statistics",
+          "isExternal": false,
+          "isPremium": false
+         },
+         {
+          "rel": [
+           "schedule",
+           "desktop",
+           "team"
+          ],
+          "href": "https://www.espn.com/nfl/team/schedule/_/name/cle",
+          "text": "Schedule",
+          "isExternal": false,
+          "isPremium": false
+         },
+         {
+          "rel": [
+           "schedule",
+           "sportscenter",
+           "app",
+           "team"
+          ],
+          "href": "sportscenter://x-callback-url/showClubhouse?uid=s:20~l:28~t:5&section=scores",
+          "text": "Schedule",
+          "isExternal": false,
+          "isPremium": false
+         }
+        ],
+        "logo": "https://a.espncdn.com/i/teamlogos/nfl/500/scoreboard/cle.png"
+       },
+       "score": "0",
+       "linescores": [
+        {
+         "value": 0.0,
+         "displayValue": "0",
+         "period": 1
+        },
+        {
+         "value": 0.0,
+         "displayValue": "0",
+         "period": 2
+        }
+       ],
+       "statistics": [],
+       "curatedRank": {
+        "current": 99
+       },
+       "records": [
+        {
+         "name": "overall",
+         "abbreviation": "Any",
+         "type": "total",
+         "summary": "2-1"
+        },
+        {
+         "name": "Home",
+         "type": "home",
+         "summary": "1-0"
+        },
+        {
+         "name": "Road",
+         "type": "road",
+         "summary": "1-1"
+        }
+       ]
+      },
+      {
+       "id": "23",
+       "uid": "s:20~l:28~t:23",
+       "type": "team",
+       "order": 1,
+       "homeAway": "away",
+       "team": {
+        "id": "23",
+        "uid": "s:20~l:28~t:23",
+        "location": "Pittsburgh",
+        "name": "Steelers",
+        "abbreviation": "PIT",
+        "displayName": "Pittsburgh Steelers",
+        "shortDisplayName": "Steelers",
+        "color": "000000",
+        "alternateColor": "ffb612",
+        "isActive": true,
+        "venue": {
+         "id": "3752"
+        },
+        "links": [
+         {
+          "rel": [
+           "clubhouse",
+           "desktop",
+           "team"
+          ],
+          "href": "https://www.espn.com/nfl/team/_/name/pit/pittsburgh-steelers",
+          "text": "Clubhouse",
+          "isExternal": false,
+          "isPremium": false
+         },
+         {
+          "rel": [
+           "roster",
+           "desktop",
+           "team"
+          ],
+          "href": "https://www.espn.com/nfl/team/roster/_/name/pit/pittsburgh-steelers",
+          "text": "Roster",
+          "isExternal": false,
+          "isPremium": false
+         },
+         {
+          "rel": [
+           "roster",
+           "sportscenter",
+           "app",
+           "team"
+          ],
+          "href": "sportscenter://x-callback-url/showClubhouse?uid=s:20~l:28~t:23&section=roster",
+          "text": "Roster",
+          "isExternal": false,
+          "isPremium": false
+         },
+         {
+          "rel": [
+           "stats",
+           "desktop",
+           "team"
+          ],
+          "href": "https://www.espn.com/nfl/team/stats/_/name/pit/pittsburgh-steelers",
+          "text": "Statistics",
+          "isExternal": false,
+          "isPremium": false
+         },
+         {
+          "rel": [
+           "stats",
+           "sportscenter",
+           "app",
+           "team"
+          ],
+          "href": "sportscenter://x-callback-url/showClubhouse?uid=s:20~l:28~t:23&section=stats",
+          "text": "Statistics",
+          "isExternal": false,
+          "isPremium": false
+         },
+         {
+          "rel": [
+           "schedule",
+           "desktop",
+           "team"
+          ],
+          "href": "https://www.espn.com/nfl/team/schedule/_/name/pit",
+          "text": "Schedule",
+          "isExternal": false,
+          "isPremium": false
+         },
+         {
+          "rel": [
+           "schedule",
+           "sportscenter",
+           "app",
+           "team"
+          ],
+          "href": "sportscenter://x-callback-url/showClubhouse?uid=s:20~l:28~t:23&section=scores",
+          "text": "Schedule",
+          "isExternal": false,
+          "isPremium": false
+         }
+        ],
+        "logo": "https://a.espncdn.com/i/teamlogos/nfl/500/scoreboard/pit.png"
+       },
+       "score": "7",
+       "linescores": [
+        {
+         "value": 7.0,
+         "displayValue": "7",
+         "period": 1
+        },
+        {
+         "value": 0.0,
+         "displayValue": "0",
+         "period": 2
+        }
+       ],
+       "statistics": [],
+       "curatedRank": {
+        "current": 99
+       },
+       "records": [
+        {
+         "name": "overall",
+         "abbreviation": "Any",
+         "type": "total",
+         "summary": "2-1"
+        },
+        {
+         "name": "Home",
+         "type": "home",
+         "summary": "2-0"
+        },
+        {
+         "name": "Road",
+         "type": "road",
+         "summary": "0-1"
+        }
+       ]
+      }
+     ],
+     "notes": [],
+     "situation": {
+      "lastPlay": {
+       "id": "401872964939",
+       "type": {
+        "id": "2",
+        "text": "End Period",
+        "abbreviation": "EP"
+       },
+       "text": "END QUARTER 1",
+       "scoreValue": 0,
+       "team": {
+        "id": "23"
+       },
+       "probability": {
+        "tiePercentage": 0.0,
+        "homeWinPercentage": 0.2521,
+        "awayWinPercentage": 0.7479,
+        "secondsLeft": 0
+       },
+       "statYardage": 0,
+       "drive": {
+        "description": "2 plays, 22 yards, 1:21",
+        "start": {
+         "yardLine": 99,
+         "text": "PIT 1"
+        },
+        "timeElapsed": {
+         "displayValue": "1:21"
+        }
+       },
+       "start": {
+        "yardLine": 77,
+        "team": {
+         "id": "23"
+        }
+       },
+       "end": {
+        "yardLine": 77,
+        "team": {
+         "id": "23"
+        }
+       }
+      },
+      "down": 2,
+      "yardLine": 77,
+      "distance": 1,
+      "downDistanceText": "2nd & 1 at PIT 23",
+      "shortDownDistanceText": "2nd & 1",
+      "possessionText": "PIT 23",
+      "isRedZone": false,
+      "homeTimeouts": 3,
+      "awayTimeouts": 3,
+      "possession": "23"
+     },
+     "status": {
+      "clock": 900.0,
+      "displayClock": "15:00",
+      "period": 2,
+      "type": {
+       "id": "2",
+       "name": "STATUS_IN_PROGRESS",
+       "state": "in",
+       "completed": false,
+       "description": "In Progress",
+       "detail": "15:00 - 2nd Quarter",
+       "shortDetail": "15:00 - 2nd"
+      },
+      "isTBDFlex": false
+     },
+     "broadcasts": [
+      {
+       "market": "national",
+       "names": [
+        "Prime Video"
+       ]
+      }
+     ],
+     "leaders": [
+      {
+       "name": "passingYards",
+       "displayName": "Passing Leader",
+       "shortDisplayName": "PASS",
+       "abbreviation": "PYDS",
+       "leaders": [
+        {
+         "displayValue": "7/9, 69 YDS, 1 TD",
+         "value": 69.0,
+         "athlete": {
+          "id": "8439",
+          "fullName": "Aaron Rodgers",
+          "displayName": "Aaron Rodgers",
+          "shortName": "A. Rodgers",
+          "links": [
+           {
+            "rel": [
+             "playercard",
+             "desktop",
+             "athlete"
+            ],
+            "href": "https://www.espn.com/nfl/player/_/id/8439/aaron-rodgers"
+           }
+          ],
+          "headshot": "https://a.espncdn.com/i/headshots/nfl/players/full/8439.png",
+          "jersey": "8",
+          "position": {
+           "abbreviation": "QB"
+          },
+          "team": {
+           "id": "23"
+          },
+          "active": true
+         },
+         "team": {
+          "id": "23"
+         }
+        }
+       ]
+      },
+      {
+       "name": "rushingYards",
+       "displayName": "Rushing Leader",
+       "shortDisplayName": "RUSH",
+       "abbreviation": "RYDS",
+       "leaders": [
+        {
+         "displayValue": "7 CAR, 29 YDS",
+         "value": 29.0,
+         "athlete": {
+          "id": "4569987",
+          "fullName": "Jaylen Warren",
+          "displayName": "Jaylen Warren",
+          "shortName": "J. Warren",
+          "links": [
+           {
+            "rel": [
+             "playercard",
+             "desktop",
+             "athlete"
+            ],
+            "href": "https://www.espn.com/nfl/player/_/id/4569987/jaylen-warren"
+           }
+          ],
+          "headshot": "https://a.espncdn.com/i/headshots/nfl/players/full/4569987.png",
+          "jersey": "30",
+          "position": {
+           "abbreviation": "RB"
+          },
+          "team": {
+           "id": "23"
+          },
+          "active": true
+         },
+         "team": {
+          "id": "23"
+         }
+        }
+       ]
+      },
+      {
+       "name": "receivingYards",
+       "displayName": "Receiving Leader",
+       "shortDisplayName": "REC",
+       "abbreviation": "RECYDS",
+       "leaders": [
+        {
+         "displayValue": "2 REC, 22 YDS",
+         "value": 22.0,
+         "athlete": {
+          "id": "4047650",
+          "fullName": "DK Metcalf",
+          "displayName": "DK Metcalf",
+          "shortName": "D. Metcalf",
+          "links": [
+           {
+            "rel": [
+             "playercard",
+             "desktop",
+             "athlete"
+            ],
+            "href": "https://www.espn.com/nfl/player/_/id/4047650/dk-metcalf"
+           }
+          ],
+          "headshot": "https://a.espncdn.com/i/headshots/nfl/players/full/4047650.png",
+          "jersey": "4",
+          "position": {
+           "abbreviation": "WR"
+          },
+          "team": {
+           "id": "23"
+          },
+          "active": true
+         },
+         "team": {
+          "id": "23"
+         }
+        }
+       ]
+      }
+     ],
+     "format": {
+      "regulation": {
+       "periods": 4
+      },
+      "overtime": {
+       "periods": 1
+      }
+     },
+     "startDate": "2026-10-02T00:15Z",
+     "broadcast": "Prime Video",
+     "geoBroadcasts": [
+      {
+       "type": {
+        "id": "4",
+        "shortName": "Streaming"
+       },
+       "market": {
+        "id": "1",
+        "type": "National"
+       },
+       "media": {
+        "shortName": "Prime Video"
+       },
+       "lang": "en",
+       "region": "us"
+      }
+     ],
+     "highlights": []
+    }
+   ],
+   "links": [
+    {
+     "language": "en-US",
+     "rel": [
+      "live",
+      "desktop",
+      "event"
+     ],
+     "href": "https://www.espn.com/nfl/game?gameId=401872964",
+     "text": "Gamecast",
+     "shortText": "Gamecast",
+     "isExternal": false,
+     "isPremium": false
+    },
+    {
+     "language": "en-US",
+     "rel": [
+      "boxscore",
+      "desktop",
+      "event"
+     ],
+     "href": "https://www.espn.com/nfl/boxscore/_/gameId/401872964",
+     "text": "Box Score",
+     "shortText": "Box Score",
+     "isExternal": false,
+     "isPremium": false
+    },
+    {
+     "language": "en-US",
+     "rel": [
+      "pbp",
+      "desktop",
+      "event"
+     ],
+     "href": "https://www.espn.com/nfl/playbyplay/_/gameId/401872964",
+     "text": "Play-by-Play",
+     "shortText": "Play-by-Play",
+     "isExternal": false,
+     "isPremium": false
+    }
+   ],
+   "weather": {
+    "displayValue": "38",
+    "temperature": 81,
+    "highTemperature": 81,
+    "conditionId": "Mostly cloudy",
+    "link": {
+     "language": "en-US",
+     "rel": [
+      "44114"
+     ],
+     "href": "http://www.accuweather.com/en/us/huntington-bank-field-oh/44113/current-weather/41494_poi?lang=en-us",
+     "text": "Weather",
+     "shortText": "Weather",
+     "isExternal": true,
+     "isPremium": false
+    }
+   },
+   "status": {
+    "clock": 900.0,
+    "displayClock": "15:00",
+    "period": 2,
+    "type": {
+     "id": "2",
+     "name": "STATUS_IN_PROGRESS",
+     "state": "in",
+     "completed": false,
+     "description": "In Progress",
+     "detail": "15:00 - 2nd Quarter",
+     "shortDetail": "15:00 - 2nd"
+    }
+   }
+  }
+ ]
+}
