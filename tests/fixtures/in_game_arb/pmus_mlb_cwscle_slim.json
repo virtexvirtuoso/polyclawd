@@ -1,0 +1,23 @@
+{
+  "event": {
+    "slug": "mlb-cws-cle-2026-10-03",
+    "title": "Game 1: CHI White Sox vs. CLE Guardians",
+    "markets": [
+      {"slug": "aec-mlb-cws-cle-2026-10-03",
+       "question": "Who will win in the upcoming baseball event Chicago White Sox vs Cleveland Guardians scheduled for October 3, 2026 at 5:00 PM UTC?",
+       "sportsMarketType": "baseball_team_full_game_winner", "line": null,
+       "outcomes": "[\"Chicago White Sox\",\"Cleveland Guardians\"]",
+       "outcomePrices": "[\"0.4150\",\"0.4200\"]"},
+      {"slug": "tsc-mlb-cws-cle-2026-10-03-6pt5",
+       "question": "Will the total in Game 1: CHI White Sox vs. CLE Guardians be more than 6.5?",
+       "sportsMarketType": "baseball_team_full_game_total", "line": 6.5,
+       "outcomes": "[\"Over\",\"Under\"]",
+       "outcomePrices": "[\"0.5400\",\"0.5450\"]"},
+      {"slug": "pp-mlb-cws-cle-2026-10-03-pmessick-strikeouts-6",
+       "question": "Will Parker Messick record at least 6 pitching strikeouts in Game 1: CHI White Sox vs. CLE Guardians?",
+       "sportsMarketType": "baseball_player_strikeouts", "line": 6,
+       "outcomes": "[\"Yes\",\"No\"]",
+       "outcomePrices": "[\"0.6200\",\"0.6400\"]"}
+    ]
+  }
+}

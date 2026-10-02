@@ -25,6 +25,12 @@ Design facts probed 2026-10-01 (fixtures: tests/fixtures/in_game_arb/):
 - Kalshi INT series does not exist -> PM INT props stay unpaired.
 - Kalshi taker fee ~ 7% * p * (1-p) per $1 contract (cents = 7*p*(1-p)).
   PM-US taker fee currently treated as 0 (POLY_ARB_PM_FEE_CENTS to change).
+- 2026-10-02: MLB playoffs added (KXMLB* series, probed live): ML (PM full-name
+  outcomes <-> Kalshi '<City> wins' titles, both directions valid — no ties),
+  game totals ('Over X.5 runs scored'), Ks/HR/hits/RBI/TB ladders. ESPN keys
+  and Kalshi game grouping are sport-namespaced (TB/ATL/CLE exist in BOTH
+  sports); MLB tickers carry a game time (26OCT031300CWSCLE); MLB volume
+  floor 100 (POLY_ARB_KAL_MIN_VOLUME_MLB) vs NFL's 10K.
 - The 2026-10-01 20:40 ET catch that motivated this service: Watson 125+
   pass yds, PM YES 71c + KAL NO 25c = 96c, window lasted ~5-7 minutes.
 - The ML market's BBO/search quotes describe outcomes[0] only; the opposite
@@ -62,10 +68,18 @@ import requests
 log = logging.getLogger("in_game_arb")
 
 KALSHI_API = "https://api.elections.kalshi.com/v1"
-ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
+ESPN_SCOREBOARDS = {
+    "nfl": "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
+    "mlb": "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard",
+}
 ESPN_HEADERS = {"User-Agent": "Polyclawd/1.0"}
 
-DEFAULT_SERIES = "KXNFLGAME,KXNFLPASSYDS,KXNFLTD,KXNFLRECYDS,KXNFLRUSHYDS,KXNFLRECEPTIONS,KXNFLCOMPLETIONS"
+DEFAULT_SERIES = ("KXNFLGAME,KXNFLPASSYDS,KXNFLTD,KXNFLRECYDS,KXNFLRUSHYDS,"
+                  "KXNFLRECEPTIONS,KXNFLCOMPLETIONS,"
+                  "KXMLBGAME,KXMLBKS,KXMLBHR,KXMLBHIT,KXMLBRBI,KXMLBTB,KXMLBTOTAL")
+# series prefix (first 5 chars) -> sport — games group per sport so a shared
+# abbreviation (TB plays both) can never merge an NFL game with an MLB game.
+SERIES_SPORT = {"KXNFL": "nfl", "KXMLB": "mlb"}
 
 # stat string (from question/title text) -> canonical key
 STAT_MAP = {
@@ -75,6 +89,15 @@ STAT_MAP = {
     "touchdowns": "td",
     "receptions": "rec",
     "completions": "comp",
+    # MLB (Kalshi ladder titles + PM-US prop questions, probed 2026-10-02)
+    "strikeouts": "ks",
+    "pitching strikeouts": "ks",
+    "home runs": "hr",
+    "home run": "hr",
+    "hits": "hits",
+    "rbis": "rbi",
+    "rbi": "rbi",
+    "total bases": "tb",
 }
 PAIRABLE = set(STAT_MAP.values()) | {"total", "ml"}
 
@@ -94,6 +117,8 @@ TEAM_ABBRS = {
     "GB", "HOU", "IND", "JAX", "KC", "LV", "LA", "LAC", "LAR", "MIA", "MIN",
     "NE", "NO", "NOLA", "NYG", "NYJ", "PHI", "PIT", "SF", "SEA", "TB", "TEN",
     "WSH", "WAS",
+    # MLB (Kalshi suffixes + ESPN; CHW/CWS are the same club)
+    "CHW", "CWS", "LAD", "NYY", "SD", "MIL", "CHC", "NYM", "LAA",
 }
 # Venue abbreviation variants (Kalshi uses NOLA/LA; ESPN uses NO/LAR/LAC/WSH).
 # Each ESPN game registers under every alias variant so Kalshi suffixes match.
@@ -101,12 +126,48 @@ ABBR_ALIASES = {
     "NOLA": {"NO"}, "NO": {"NOLA"},
     "WAS": {"WSH"}, "WSH": {"WAS"},
     "LA": {"LAR", "LAC"}, "LAR": {"LA"}, "LAC": {"LA"},
+    "CHW": {"CWS"}, "CWS": {"CHW"},
+}
+
+# Kalshi MLB ML titles: "<City/Truncated Nick> wins" (playoff field observed
+# 2026-10-02; unknown cities simply produce no ML pair — props still pair).
+MLB_CITY_TO_ABBR = {
+    "chicago ws": "CHW", "chicago cubs": "CHC", "cleveland": "CLE",
+    "atlanta": "ATL", "los angeles d": "LAD", "los angeles a": "LAA",
+    "new york y": "NYY", "new york m": "NYM", "tampa bay": "TB",
+    "san diego": "SD", "milwaukee": "MIL", "baltimore": "BAL",
+    "boston": "BOS", "detroit": "DET", "houston": "HOU", "kansas city": "KC",
+    "minnesota": "MIN", "seattle": "SEA", "texas": "TEX", "toronto": "TOR",
+    "cincinnati": "CIN", "miami": "MIA", "philadelphia": "PHI",
+    "pittsburgh": "PIT", "st. louis": "STL", "arizona": "ARI",
+    "colorado": "COL", "san francisco": "SF", "athletics": "ATH",
+}
+# PM-US MLB winner outcomes use full team names (probed 2026-10-02:
+# ["Chicago White Sox","Cleveland Guardians"]).
+MLB_TEAM_TO_ABBR = {
+    "chicago white sox": "CHW", "chicago cubs": "CHC",
+    "cleveland guardians": "CLE", "atlanta braves": "ATL",
+    "los angeles dodgers": "LAD", "los angeles angels": "LAA",
+    "new york yankees": "NYY", "new york mets": "NYM",
+    "tampa bay rays": "TB", "san diego padres": "SD",
+    "milwaukee brewers": "MIL", "baltimore orioles": "BAL",
+    "boston red sox": "BOS", "detroit tigers": "DET",
+    "houston astros": "HOU", "kansas city royals": "KC",
+    "minnesota twins": "MIN", "seattle mariners": "SEA",
+    "texas rangers": "TEX", "toronto blue jays": "TOR",
+    "cincinnati reds": "CIN", "miami marlins": "MIA",
+    "philadelphia phillies": "PHI", "pittsburgh pirates": "PIT",
+    "st. louis cardinals": "STL", "arizona diamondbacks": "ARI",
+    "colorado rockies": "COL", "san francisco giants": "SF",
+    "athletics": "ATH",
 }
 MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
           "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
 
 STAT_UNITS = {"pass_yds": "pass yds", "rec_yds": "rec yds", "rush_yds": "rush yds",
-              "td": "TD", "rec": "receptions", "comp": "completions"}
+              "td": "TD", "rec": "receptions", "comp": "completions",
+              "ks": "Ks", "hr": "HR", "hits": "hits", "rbi": "RBIs",
+              "tb": "total bases"}
 
 Pair = namedtuple("Pair", "key game stat name line pm_bid pm_ask kal_bid kal_ask "
                           "pm_slug kal_title pm_inverted pm_event_slug kal_event_ticker",
@@ -115,6 +176,14 @@ Pair = namedtuple("Pair", "key game stat name line pm_bid pm_ask kal_bid kal_ask
 RE_PM_PROP = re.compile(r"^Will (.+?) (?:record|throw) (\d+)\+ (.+?)\?$")
 RE_KAL_PROP = re.compile(r"^(.+?):\s*(\d+)\+\s*(.+?)$")
 RE_KAL_TOTAL = re.compile(r"^Full Game:\s*over\s*([0-9.]+)\s+points", re.I)
+# MLB: PM 'Will P Messick record at least 4 pitching strikeouts in Game 1: ...?'
+# (scanner-proven K_RE/HR_RE shapes generalized; singular/plural tolerated).
+RE_PM_PROP_MLB = re.compile(
+    r"Will (.+?) record at least (\d+) (?:pitching )?"
+    r"(strikeouts|home runs?|hits|rbis?|total bases|runs)", re.I)
+RE_PM_PROP_MLB_K = re.compile(r"Will (.+?) strike out at least (\d+)", re.I)
+# MLB Kalshi totals: 'Over 6.5 runs scored'
+RE_KAL_TOTAL_MLB = re.compile(r"^Over\s+([0-9.]+)\s+runs", re.I)
 
 
 # ---------------------------------------------------------------- fees / math
@@ -154,26 +223,36 @@ def norm_stat(s: str) -> str:
 
 
 def parse_pmus_prop(question: str):
-    """'Will Deshaun Watson record 125+ passing yards?' -> (name, line, stat)."""
-    m = RE_PM_PROP.match((question or "").strip())
-    if not m:
-        return None
-    name, line, stat = m.group(1).strip().lower(), float(m.group(2)), norm_stat(m.group(3))
-    return (name, line, stat) if stat in PAIRABLE else None
+    """NFL: 'Will D Watson record 125+ passing yards?' MLB: 'Will P Messick
+    record at least 4 pitching strikeouts in Game 1: ...?' or '... strike out
+    at least 4 ...' -> (name, line, stat)."""
+    q = (question or "").strip()
+    m = RE_PM_PROP.match(q) or RE_PM_PROP_MLB.match(q)
+    if m:
+        name, line, stat = m.group(1).strip().lower(), float(m.group(2)), norm_stat(m.group(3))
+        return (name, line, stat) if stat in PAIRABLE else None
+    m = RE_PM_PROP_MLB_K.match(q)
+    if m:
+        name, line = m.group(1).strip().lower(), float(m.group(2))
+        return (name, line, "ks") if "ks" in PAIRABLE else None
+    return None
 
 
 def parse_kalshi_prop(title: str):
-    """'Deshaun Watson: 125+ passing yards' -> (name, line, stat)."""
+    """NFL 'D Watson: 125+ passing yards' / MLB 'P Messick: 6+ strikeouts?'
+    (MLB titles carry a trailing '?' — stripped before the stat lookup)."""
     m = RE_KAL_PROP.match((title or "").strip())
     if not m:
         return None
-    name, line, stat = m.group(1).strip().lower(), float(m.group(2)), norm_stat(m.group(3))
+    name, line, stat = m.group(1).strip().lower(), float(m.group(2)), \
+        norm_stat(m.group(3).rstrip("?").strip())
     return (name, line, stat) if stat in PAIRABLE else None
 
 
 def parse_kalshi_total(title: str):
-    """'Full Game: over 17.5 points scored?' -> 17.5 (else None)."""
-    m = RE_KAL_TOTAL.match((title or "").strip())
+    """NFL 'Full Game: over 17.5 points scored?' / MLB 'Over 6.5 runs scored'."""
+    t = (title or "").strip()
+    m = RE_KAL_TOTAL.match(t) or RE_KAL_TOTAL_MLB.match(t)
     return float(m.group(1)) if m else None
 
 
@@ -192,7 +271,7 @@ def parse_game_suffix(suffix: str):
     if not m or m.group(2) not in MONTHS:
         return None, ()
     yy, mon, dd, rest = m.groups()
-    abbrs = split_team_abbrs(rest)
+    abbrs = split_team_abbrs(re.sub(r"^\d+", "", rest))  # MLB tickers: 26OCT031300CWSCLE
     if len(abbrs) != 2:
         return None, ()
     return "20%s-%02d-%s" % (yy, MONTHS[mon], dd), abbrs
@@ -202,8 +281,10 @@ def kalshi_event_suffix(ticker: str) -> str:
     return ticker.split("-", 1)[1] if ticker and "-" in ticker else ""
 
 
-def espn_live_games(scoreboard: dict) -> dict:
-    """{('CLE','PIT'): {'state','detail','period','score':{abbr:pts}}}"""
+def espn_live_games(scoreboard: dict, sport: str = "nfl") -> dict:
+    """{(sport, 'CLE','PIT'): {'state','detail','period','score':{abbr:pts}}}.
+    Sport-namespaced: TB/ATL/CLE exist in BOTH NFL and MLB — a bare pair
+    tuple can collide when both sports play the same abbreviations same day."""
     out = {}
     for ev in scoreboard.get("events") or []:
         for comp in ev.get("competitions") or []:
@@ -231,7 +312,7 @@ def espn_live_games(scoreboard: dict) -> dict:
             vb = {b} | ABBR_ALIASES.get(b, set())
             for x in va:
                 for y in vb:
-                    out[tuple(sorted((x, y)))] = info
+                    out[(sport,) + tuple(sorted((x, y)))] = info
     return out
 
 
@@ -266,8 +347,8 @@ def kalshi_series_events(series: str, timeout: int = 20) -> dict:
     return out
 
 
-def espn_scoreboard(timeout: int = 15) -> dict:
-    r = requests.get(ESPN_SCOREBOARD, headers=ESPN_HEADERS, timeout=timeout)
+def espn_scoreboard(sport: str = "nfl", timeout: int = 15) -> dict:
+    r = requests.get(ESPN_SCOREBOARDS[sport], headers=ESPN_HEADERS, timeout=timeout)
     r.raise_for_status()
     return r.json()
 
@@ -371,8 +452,10 @@ def _kal_quote(m) -> tuple:
 
 
 def _nicknames_from_event_title(title: str):
-    """'PIT Steelers vs CLE Browns' -> ['steelers','browns'] (or shorter)."""
-    parts = [p.split(":")[0].strip() for p in (title or "").split(" vs ")]
+    """'PIT Steelers vs CLE Browns' -> (parts, ['steelers','browns']).
+    MLB playoff titles carry a 'Game N:' prefix — stripped first."""
+    title = re.sub(r"^Game \d+\s*:\s*", "", title or "", flags=re.I)
+    parts = [p.split(":")[0].strip() for p in title.split(" vs ")]
     nicks = []
     for p in parts:
         toks = p.split()
@@ -424,10 +507,11 @@ def pair_totals(game: str, pm_markets: list, kal_markets: list, pm_event_slug: s
             kal_idx.setdefault(line, m)
     out = []
     for m in pm_markets:
-        # GAME totals only. football_team_points_full_game_total markets are
-        # TEAM totals (slug tt-<team>-<line>): pairing them against Kalshi's
-        # game-total ladder produced 5 false alerts in cycle 1 (2026-10-01).
-        if (m.get("sportsMarketType") or "") != "football_team_full_game_total":
+        # GAME totals only, either sport. football_team_points_full_game_total
+        # markets are TEAM totals (slug tt-<team>-<line>): pairing them against
+        # Kalshi's game-total ladder produced 5 false alerts in cycle 1.
+        if (m.get("sportsMarketType") or "") not in (
+                "football_team_full_game_total", "baseball_team_full_game_total"):
             continue
         if "-tt-" in (m.get("slug") or ""):
             continue
@@ -450,15 +534,64 @@ def pair_totals(game: str, pm_markets: list, kal_markets: list, pm_event_slug: s
     return out
 
 
-def pair_ml(game: str, pm_event: dict, kal_game_event: dict) -> list:
+def _pair_ml_mlb(game: str, pm_event: dict, kal_game_event: dict,
+                 pm_ml: dict, outcomes: list, prices: tuple) -> list:
+    """MLB moneyline: PM outcomes are FULL team names ('Chicago White Sox'),
+    Kalshi titles are '<City/Truncated Nick> wins' ('Chicago WS wins').
+    Both map to abbrs; sides match by abbr (probed 2026-10-02)."""
+    ab0 = MLB_TEAM_TO_ABBR.get((outcomes[0] or "").strip().lower())
+    if ab0 is None:
+        log.info("mlb ml: unknown PM outcome %r", outcomes[0])
+        return []
+    kal_side = {}
+    for m in kal_game_event.get("markets") or []:
+        t = (m.get("title") or "").strip()
+        if not t.lower().endswith(" wins"):
+            continue
+        ab = MLB_CITY_TO_ABBR.get(t[: -len(" wins")].strip().lower())
+        if ab:
+            kal_side[ab] = m
+    others = [ab for ab in kal_side if ab != ab0]
+    if ab0 not in kal_side or len(kal_side) < 2 or len(others) != 1:
+        return []
+    ab1 = others[0]
+    out = []
+    for idx, ab, inv in ((0, ab0, False), (1, ab1, True)):
+        km = kal_side[ab]
+        kalq = _kal_quote(km)
+        if not kalq:
+            continue
+        if inv:
+            pm_bid, pm_ask = 100.0 - prices[1], 100.0 - prices[0]
+        else:
+            pm_bid, pm_ask = prices
+        name = (outcomes[idx] or ab).strip().lower()
+        out.append(Pair(key="%s|ml|%s" % (game, ab.lower()), game=game,
+                        stat="ml", name=name, line=0.0,
+                        pm_bid=pm_bid, pm_ask=pm_ask, kal_bid=kalq[0], kal_ask=kalq[1],
+                        pm_slug=pm_ml.get("slug") or "", kal_title=km.get("title") or "",
+                        pm_inverted=inv,
+                        pm_event_slug=pm_event.get("slug") or "",
+                        kal_event_ticker=kal_game_event.get("ticker") or ""))
+    return out
+
+
+def pair_ml(game: str, pm_event: dict, kal_game_event: dict, sport: str = "nfl") -> list:
     pm_ml = next((m for m in pm_event.get("markets") or []
-                  if (m.get("slug") or "").startswith("aec-")), None)
+                  if (m.get("sportsMarketType") or "") in (
+                      "football_team_full_game_winner", "baseball_team_full_game_winner")),
+                 None)
+    if not pm_ml:  # NFL legacy fallback: winner market is the aec- slug
+        pm_ml = next((m for m in pm_event.get("markets") or []
+                      if (m.get("slug") or "").startswith("aec-")), None)
     if not pm_ml:
         return []
     outcomes = _as_list(pm_ml.get("outcomes"))
     prices = _pm_prices(pm_ml)
     if len(outcomes) != 2 or not prices:
         return []
+    if sport == "mlb":
+        return _pair_ml_mlb(game, pm_event, kal_game_event, pm_ml, outcomes, prices)
     parts, nicks = _nicknames_from_event_title(kal_game_event.get("title") or "")
     if len(parts) != 2:
         return []
@@ -509,15 +642,16 @@ def pair_ml(game: str, pm_event: dict, kal_game_event: dict) -> list:
     return out
 
 
-def build_pairs(game: str, pm_event: dict, kal_events: dict) -> list:
+def build_pairs(game: str, pm_event: dict, kal_events: dict,
+                sport: str = "nfl", game_series: str = None) -> list:
     """All v1-pairable markets for one game. kal_events: {series: event}.
     Deduped by pair key (PM-US has two total market types that can collide)."""
     pm_markets = pm_event.get("markets") or []
     pm_event_slug = pm_event.get("slug") or ""
     pairs = []
-    kal_game = kal_events.get("KXNFLGAME")
+    kal_game = kal_events.get(game_series or "KXNFLGAME")
     if kal_game:
-        pairs += pair_ml(game, pm_event, kal_game)
+        pairs += pair_ml(game, pm_event, kal_game, sport=sport)
     kal_all = []
     for series, ev in kal_events.items():
         for m in ev.get("markets") or []:
@@ -525,7 +659,8 @@ def build_pairs(game: str, pm_event: dict, kal_events: dict) -> list:
             mm["_evt"] = ev.get("ticker") or ""
             kal_all.append(mm)
     pairs += pair_props(game, pm_markets, kal_all, pm_event_slug=pm_event_slug)
-    tot = kal_events.get("KXNFLTOTAL") or {}
+    tot_series = next((s for s in kal_events if s.endswith("TOTAL")), None)
+    tot = kal_events.get(tot_series) or {}
     kal_tot = [dict(m, _evt=tot.get("ticker") or "") for m in tot.get("markets") or []]
     pairs += pair_totals(game, pm_markets, kal_tot, pm_event_slug=pm_event_slug)
     seen, deduped = set(), []
@@ -635,7 +770,7 @@ def _game_label(game: str) -> str:
     m = re.match(r"^(\d{2})([A-Z]{3})(\d{2})(.+)$", game)
     if not m:
         return game
-    abbrs = split_team_abbrs(m.group(4))
+    abbrs = split_team_abbrs(re.sub(r"^\d+", "", m.group(4)))  # MLB: 1300CWSCLE
     return "%s@%s" % (abbrs[0], abbrs[1]) if len(abbrs) == 2 else game
 
 
@@ -679,6 +814,8 @@ def _tier(net: float) -> str:
 def _fmt_vol(v) -> str:
     if not v:
         return ""
+    if v < 1000:
+        return "$%d" % round(v)  # MLB prop ladders run in the $100s
     return "$%.1fM" % (v / 1e6) if v >= 1e6 else "$%.0fK" % (v / 1e3)
 
 
@@ -816,7 +953,11 @@ def recap_pending_games(conn, live: dict, cfg: dict, now: float) -> int:
         if game in done:
             continue
         _, abbrs = parse_game_suffix(game)
-        espn = live.get(tuple(sorted(abbrs))) if abbrs else None
+        espn = None
+        for sport in ("nfl", "mlb"):
+            espn = live.get((sport,) + tuple(sorted(abbrs))) if abbrs else None
+            if espn:
+                break
         if not espn or espn.get("state") != "post":
             continue
         text = format_recap(conn, game, espn)
@@ -856,10 +997,11 @@ def run_cycle(cfg: dict, conn: sqlite3.Connection) -> dict:
     summary = {"games": 0, "pairs": 0, "cands": 0, "alerts": 0, "recaps": 0}
     try:
         live = {}
-        try:
-            live = espn_live_games(espn_scoreboard())
-        except Exception as e:
-            log.warning("espn scoreboard: %s", e)
+        for sport in ("nfl", "mlb"):
+            try:
+                live.update(espn_live_games(espn_scoreboard(sport), sport=sport))
+            except Exception as e:
+                log.warning("espn scoreboard %s: %s", sport, e)
 
         events_by_series = {}
         for i, series in enumerate(cfg["series"]):
@@ -868,28 +1010,33 @@ def run_cycle(cfg: dict, conn: sqlite3.Connection) -> dict:
             events_by_series[series] = kalshi_series_events(series)
         games = {}
         for series, evs in events_by_series.items():
+            sport = SERIES_SPORT.get(series[:5], "nfl")
             for ticker, e in evs.items():
                 suffix = kalshi_event_suffix(ticker)
                 if suffix:
-                    games.setdefault(suffix, {})[series] = e
+                    games.setdefault((sport, suffix), {})[series] = e
 
-        for suffix, kal_events in sorted(games.items()):
-            if "KXNFLGAME" not in kal_events:
+        for (sport, suffix), kal_events in sorted(games.items()):
+            game_series = next((s for s in kal_events if s.endswith("GAME")), None)
+            if not game_series:
                 continue
             date, abbrs = parse_game_suffix(suffix)
             if not date:
                 continue
-            espn = live.get(tuple(sorted(abbrs)))
+            espn = live.get((sport,) + tuple(sorted(abbrs)))
             if not espn or espn.get("state") != "in":
                 continue  # in-game focus
             summary["games"] += 1
-            parts, nicks = _nicknames_from_event_title(kal_events["KXNFLGAME"].get("title") or "")
+            parts, nicks = _nicknames_from_event_title(kal_events[game_series].get("title") or "")
             query = " ".join(n.title() for n in nicks if n)
             pm_event = pmus_search_event(query, date, abbrs)
+            if not pm_event and sport == "mlb" and any(parts):
+                pm_event = pmus_search_event(" ".join(parts), date, abbrs)
             time.sleep(1.2)
             if not pm_event:
                 continue
-            pairs = build_pairs(suffix, pm_event, kal_events)
+            pairs = build_pairs(suffix, pm_event, kal_events, sport=sport,
+                                game_series=game_series)
             summary["pairs"] += len(pairs)
 
             vol_by_title = {}
@@ -906,12 +1053,15 @@ def run_cycle(cfg: dict, conn: sqlite3.Connection) -> dict:
                 if not sanity_gap_ok(p, cfg["sanity_gap"]):
                     continue
                 vol = vol_by_title.get(p.kal_title)
-                if vol is not None and cfg["kal_min_volume"] and float(vol) < cfg["kal_min_volume"]:
+                vol_floor = (cfg.get("kal_min_volume_mlb", 100.0) if sport == "mlb"
+                             else cfg["kal_min_volume"])
+                if vol is not None and vol_floor and float(vol) < vol_floor:
                     continue
                 ev_eval = eval_pair(p, cfg["pm_fee"])
-                # ML direction B (KAL YES + PM NO) loses on the rare NFL tie:
+                # NFL ML direction B (KAL YES + PM NO) loses on the rare tie:
                 # PM NO settles 50¢, KAL YES settles 0. Direction A is tie-safe.
-                if p.stat == "ml" and ev_eval["direction"] == "B":
+                # MLB has no ties — both directions valid.
+                if sport == "nfl" and p.stat == "ml" and ev_eval["direction"] == "B":
                     continue
                 if ev_eval["net"] >= cfg["net_edge"]:
                     candidates.append((p, ev_eval))
@@ -1011,6 +1161,7 @@ def load_cfg() -> dict:
         "interval": float(os.environ.get("POLY_ARB_INTERVAL", "45")),
         "net_edge": float(os.environ.get("POLY_ARB_NET_EDGE_CENTS", "2.0")),
         "kal_min_volume": float(os.environ.get("POLY_ARB_KAL_MIN_VOLUME", "10000")),
+        "kal_min_volume_mlb": float(os.environ.get("POLY_ARB_KAL_MIN_VOLUME_MLB", "100")),
         "cooldown_min": float(os.environ.get("POLY_ARB_COOLDOWN_MIN", "10")),
         "max_confirms": int(os.environ.get("POLY_ARB_MAX_CONFIRMS", "5")),
         "sanity_gap": float(os.environ.get("POLY_ARB_SANITY_GAP", "20")),
