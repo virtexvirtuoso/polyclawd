@@ -16,8 +16,12 @@ Design facts probed 2026-10-01 (fixtures: tests/fixtures/in_game_arb/):
   resolve tickers via the per-event endpoint).
 - Kalshi spread ladder ("wins by over X") has different push semantics than
   PM spread covers -> spreads are NOT paired (false-arb risk). v1 pairs:
-  moneyline, pass/rec/rush yards, receptions/completions, touchdowns,
-  full-game totals (over/under, .5 lines only -> no push ambiguity).
+  moneyline, pass/rec/rush yards, receptions/completions, touchdowns
+  (QB TD excluded — Kalshi 1+TD excludes passing TDs). EXCLUDED after live
+  cycle-1 evidence: spreads (push semantics differ), ALL totals (PM-US total
+  markets priced 38-41pp off Kalshi's live game-total ladder across the whole
+  rung set — different event class, not staleness; revisit with a pre-game
+  baseline probe), INTs (no Kalshi series).
 - Kalshi INT series does not exist -> PM INT props stay unpaired.
 - Kalshi taker fee ~ 7% * p * (1-p) per $1 contract (cents = 7*p*(1-p)).
   PM-US taker fee currently treated as 0 (POLY_ARB_PM_FEE_CENTS to change).
@@ -56,7 +60,7 @@ KALSHI_API = "https://api.elections.kalshi.com/v1"
 ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
 ESPN_HEADERS = {"User-Agent": "Polyclawd/1.0"}
 
-DEFAULT_SERIES = "KXNFLGAME,KXNFLPASSYDS,KXNFLTD,KXNFLRECYDS,KXNFLRUSHYDS,KXNFLRECEPTIONS,KXNFLCOMPLETIONS,KXNFLTOTAL"
+DEFAULT_SERIES = "KXNFLGAME,KXNFLPASSYDS,KXNFLTD,KXNFLRECYDS,KXNFLRUSHYDS,KXNFLRECEPTIONS,KXNFLCOMPLETIONS"
 
 # stat string (from question/title text) -> canonical key
 STAT_MAP = {
@@ -407,8 +411,12 @@ def pair_totals(game: str, pm_markets: list, kal_markets: list) -> list:
             kal_idx.setdefault(line, m)
     out = []
     for m in pm_markets:
-        if (m.get("sportsMarketType") or "") not in (
-                "football_team_full_game_total", "football_team_points_full_game_total"):
+        # GAME totals only. football_team_points_full_game_total markets are
+        # TEAM totals (slug tt-<team>-<line>): pairing them against Kalshi's
+        # game-total ladder produced 5 false alerts in cycle 1 (2026-10-01).
+        if (m.get("sportsMarketType") or "") != "football_team_full_game_total":
+            continue
+        if "-tt-" in (m.get("slug") or ""):
             continue
         line = m.get("line")
         try:
@@ -506,6 +514,22 @@ def build_pairs(game: str, pm_event: dict, kal_events: dict) -> list:
     return deduped
 
 
+def degenerate_pm(p: Pair) -> bool:
+    """Settled/one-sided PM book signature (bid 100 / ask 0): not executable."""
+    return p.pm_ask <= 0.0 or p.pm_bid >= 100.0
+
+
+def sanity_gap_ok(p: Pair, max_gap: float) -> bool:
+    """Venues pricing the SAME event sit within a few pp of each other even
+    when an arb exists (complementary quotes). A mid gap beyond ~20pp means
+    the pair is almost certainly two different events (scope mismatch) or a
+    stale/settled book — cycle 1's false alerts sat at 38-80pp; the real
+    Watson arb at ~7pp. Default 20 (POLY_ARB_SANITY_GAP)."""
+    pm_mid = (p.pm_bid + p.pm_ask) / 2.0
+    kal_mid = (p.kal_bid + p.kal_ask) / 2.0
+    return abs(pm_mid - kal_mid) <= max_gap
+
+
 # ---------------------------------------------------------------- persistence
 
 def db_init(path: str) -> sqlite3.Connection:
@@ -568,10 +592,11 @@ def format_alert(pair: Pair, ev: dict, espn: dict, confirmed: bool) -> str:
         "💰 ARB %s · %s\n"
         "Legs: %s = %.0f¢ → net %+.1f¢ after Kal fees%s\n"
         "Books: PM %.0f/%.0f · KAL %.0f/%.0f%s\n"
-        "polymarket.com/event/%s · verify depth in both apps before sizing"
+        "PM slug: %s\nKAL: %s\n"
+        "Verify depth in both apps before sizing"
     ) % (label, pair_label(pair), ev["legs"], ev["cost"], ev["net"], tag,
          pair.pm_bid, pair.pm_ask, pair.kal_bid, pair.kal_ask, state,
-         pair.pm_slug)
+         pair.pm_slug, pair.kal_title)
 
 
 def send_telegram(text: str, enabled: bool) -> bool:
@@ -642,6 +667,10 @@ def run_cycle(cfg: dict, conn: sqlite3.Connection) -> dict:
             candidates = []
             for p in pairs:
                 if (p.kal_bid + p.kal_ask) <= 1.0:  # degenerate Kalshi quote
+                    continue
+                if degenerate_pm(p):
+                    continue
+                if not sanity_gap_ok(p, cfg["sanity_gap"]):
                     continue
                 vol = vol_by_title.get(p.kal_title)
                 if vol is not None and cfg["kal_min_volume"] and float(vol) < cfg["kal_min_volume"]:
@@ -729,6 +758,7 @@ def load_cfg() -> dict:
         "kal_min_volume": float(os.environ.get("POLY_ARB_KAL_MIN_VOLUME", "10000")),
         "cooldown_min": float(os.environ.get("POLY_ARB_COOLDOWN_MIN", "10")),
         "max_confirms": int(os.environ.get("POLY_ARB_MAX_CONFIRMS", "5")),
+        "sanity_gap": float(os.environ.get("POLY_ARB_SANITY_GAP", "20")),
         "pm_fee": float(os.environ.get("POLY_ARB_PM_FEE_CENTS", "0")),
         "telegram": os.environ.get("POLY_ARB_TELEGRAM", "1") != "0",
         "db": os.environ.get("POLY_ARB_DB", "storage/in_game_arb.db"),

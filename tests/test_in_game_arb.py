@@ -177,8 +177,8 @@ def test_build_pairs_fixture(pmus_event):
 
 def _cfg(db_path: str, **over) -> dict:
     cfg = dict(interval=45, net_edge=2.0, kal_min_volume=10000, cooldown_min=10,
-               max_confirms=5, pm_fee=0.0, telegram=False, db=db_path,
-               series=["KXNFLGAME", "KXNFLPASSYDS", "KXNFLTD", "KXNFLTOTAL"])
+               max_confirms=5, sanity_gap=20.0, pm_fee=0.0, telegram=False, db=db_path,
+               series=["KXNFLGAME", "KXNFLPASSYDS", "KXNFLTD"])
     cfg.update(over)
     return cfg
 
@@ -254,6 +254,45 @@ def test_run_cycle_skips_pregame(tmp_path, pmus_event, monkeypatch):
     assert s["games"] == 0 and s["alerts"] == 0
 
 
+def test_team_totals_never_pair(pmus_event):
+    """Regression for cycle-1 false alerts: PM-US team totals (tt- slugs,
+    football_team_points_full_game_total) must never pair vs Kalshi game totals."""
+    kal_total = kalshi_event("KXNFLTOTAL")["markets"]
+    pairs = arb.pair_totals("26OCT01PITCLE", pmus_event["markets"], kal_total)
+    assert pairs, "game totals should still pair"
+    for p in pairs:
+        assert "-tt-" not in p.pm_slug, "team total leaked into pairing: %s" % p.pm_slug
+
+
+def test_degenerate_pm_rejected():
+    """Regression for the Judkins false alert: settled PM book (bid 100/ask 0)."""
+    p = arb.Pair(key="k", game="g", stat="td", name="q", line=1,
+                 pm_bid=100.0, pm_ask=0.0, kal_bid=99, kal_ask=100,
+                 pm_slug="s", kal_title="t")
+    assert arb.degenerate_pm(p)
+    good = arb.Pair(key="k2", game="g", stat="td", name="q", line=1,
+                    pm_bid=29, pm_ask=31, kal_bid=28, kal_ask=29,
+                    pm_slug="s", kal_title="t")
+    assert not arb.degenerate_pm(good)
+
+
+def test_sanity_gap_blocks_scope_mismatch():
+    """Cycle-1 false alerts sat at 38-80pp mid gaps; the real Watson arb at ~7pp.
+    Default gate is 20pp."""
+    false_tot = arb.Pair(key="k", game="g", stat="total", name="game", line=38.5,
+                         pm_bid=2.0, pm_ask=3.0, kal_bid=81, kal_ask=84,
+                         pm_slug="s", kal_title="t")
+    assert not arb.sanity_gap_ok(false_tot, 20.0)
+    false_tot2 = arb.Pair(key="k3", game="g", stat="total", name="game", line=36.5,
+                          pm_bid=88.5, pm_ask=89.0, kal_bid=50, kal_ask=51,
+                          pm_slug="s", kal_title="t")
+    assert not arb.sanity_gap_ok(false_tot2, 20.0)
+    real_arb = arb.Pair(key="k2", game="g", stat="pass_yds", name="w", line=125,
+                        pm_bid=70, pm_ask=71, kal_bid=83, kal_ask=87,
+                        pm_slug="s", kal_title="t")
+    assert arb.sanity_gap_ok(real_arb, 20.0)
+
+
 def test_format_alert_contents(pmus_event):
     p = arb.Pair(key="26OCT01PITCLE|pass_yds|deshaun watson|125", game="26OCT01PITCLE",
                  stat="pass_yds", name="deshaun watson", line=125,
@@ -266,4 +305,5 @@ def test_format_alert_contents(pmus_event):
     assert "PIT@CLE" in text
     # A: PM YES 61 + KAL NO 10 = 71; fee 7*.10*.90 = 0.63 -> net +28.4
     assert "net +28.4" in text
-    assert "polymarket.com/event/" in text
+    assert "PM slug: astatc-nfl-pit-cle-2026-10-01-pyd-deswat-gte125" in text
+    assert "KAL: Deshaun Watson: 125+ passing yards" in text
