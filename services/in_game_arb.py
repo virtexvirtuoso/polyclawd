@@ -621,16 +621,17 @@ def _game_label(game: str) -> str:
 
 
 def _state_str(espn: dict) -> str:
+    """'7:39 - 4th · CLE 21 PIT 16' — no leading separator; '' if no espn."""
     if not espn:
         return ""
-    s = ""
+    parts = []
     d = espn.get("detail")
     if d:
-        s = " · " + d
+        parts.append(d)
     sc = espn.get("score") or {}
     if sc:
-        s += " " + " ".join("%s %d" % (k, v) for k, v in sorted(sc.items()))
-    return s
+        parts.append(" ".join("%s %d" % (k, v) for k, v in sorted(sc.items())))
+    return " · ".join(parts)
 
 
 def _venue_links(pair: Pair) -> str:
@@ -661,23 +662,31 @@ def format_alert(pair: Pair, ev: dict, espn: dict, confirmed: bool,
     links = _venue_links(pair)
     tail = (links + " · <i>verify depth before sizing</i>") if links \
         else "<i>verify depth before sizing</i>"
-    return (
-        "💰 <b>ARB %s</b> · %s\n"
-        "<b>%+.1f¢ net</b> — %s = %.0f¢ (Kal fees in)%s%s\n"
-        "Books: PM YES %.0f/%.0f · KAL YES %.0f/%.0f%s\n"
-        "%s"
-    ) % (html.escape(_game_label(pair.game)), html.escape(pair_label(pair)),
-         ev["net"], ev["legs"], ev["cost"], tag, rep,
-         pair.pm_bid, pair.pm_ask, pair.kal_bid, pair.kal_ask,
-         html.escape(_state_str(espn)), tail)
+    state = _state_str(espn)
+    lines = [
+        "💰 <b>ARB %s</b> · %s" % (html.escape(_game_label(pair.game)),
+                                   html.escape(pair_label(pair))),
+        "<b>%+.1f¢ net</b> — %s = %.0f¢ (Kal fees in)%s%s" % (
+            ev["net"], ev["legs"], ev["cost"], tag, rep),
+        "Books: PM YES %.0f/%.0f · KAL YES %.0f/%.0f" % (
+            pair.pm_bid, pair.pm_ask, pair.kal_bid, pair.kal_ask),
+    ]
+    if state:
+        lines.append("⏱ %s" % html.escape(state))
+    lines.append(tail)
+    return "\n".join(lines)
 
 
 def format_alert_batch(rows, espn) -> str:
     """rows: [(pair, ev_eval, confirmed, repeats)] for ONE game — packed into
     a single Telegram message (same-cycle triples used to be 3 pings)."""
     p0 = rows[0][0]
-    out = ["💰 <b>ARB %s</b> — %d windows%s" % (
-        html.escape(_game_label(p0.game)), len(rows), html.escape(_state_str(espn)))]
+    state = _state_str(espn)
+    head = "💰 <b>ARB %s</b> — %d windows" % (
+        html.escape(_game_label(p0.game)), len(rows))
+    if state:
+        head += " · %s" % html.escape(state)
+    out = [head]
     for p, ev, conf, rep in rows:
         tag = " · <i>unconfirmed</i>" if not conf else ""
         rep_s = " · re-alert %d/hr" % rep if rep else ""
