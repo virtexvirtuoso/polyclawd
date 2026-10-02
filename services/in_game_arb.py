@@ -322,14 +322,19 @@ def pmus_search_event(query: str, date: str, abbrs, timeout: int = 25):
     return best[0] if best else None
 
 
+BBO = namedtuple("BBO", "bid ask bid_depth ask_depth")
+
+
 def pmus_bbo(slug: str):
-    """(bid_cents, ask_cents) or None."""
+    """BBO(bid_cents, ask_cents, bid_levels, ask_levels) or None. Level counts
+    come free in the same payload — alert context for book thinness."""
     try:
         md = pmus_client().markets.bbo(slug).get("marketData") or {}
         bb, ba = (md.get("bestBid") or {}).get("value"), (md.get("bestAsk") or {}).get("value")
         if bb is None or ba is None:
             return None
-        return float(bb) * 100.0, float(ba) * 100.0
+        return BBO(float(bb) * 100.0, float(ba) * 100.0,
+                   int(md.get("bidDepth") or 0), int(md.get("askDepth") or 0))
     except Exception as e:
         log.warning("pmus bbo %s: %s", slug, e)
         return None
@@ -594,6 +599,15 @@ def prior_alert_count(conn: sqlite3.Connection, pair_key: str, direction: str,
         (pair_key, direction, now - window_s)).fetchone()[0]
 
 
+def first_seen_min(conn: sqlite3.Connection, pair_key: str, now: float) -> float:
+    """Minutes since this pair first appeared in pairs_log (any direction,
+    alerted or not) — the window-age context line. 0 = brand new."""
+    row = conn.execute("SELECT MIN(ts) FROM pairs_log WHERE key=?", (pair_key,)).fetchone()
+    if not row or row[0] is None:
+        return 0.0
+    return max(0.0, (now - row[0]) / 60.0)
+
+
 def mark_fired(conn: sqlite3.Connection, pair_key: str, direction: str, now: float):
     conn.execute("INSERT INTO fired (pair_key, direction, last_ts) VALUES (?,?,?) "
                  "ON CONFLICT(pair_key, direction) DO UPDATE SET last_ts=excluded.last_ts",
@@ -652,61 +666,95 @@ def _venue_links(pair: Pair) -> str:
     return " · ".join(links)
 
 
+def _tier(net: float) -> str:
+    """Size tier at a glance: 🔥 ≥5¢, 💰 3–5¢, 👀 2–3¢ (tonight: 13/6/14)."""
+    return "🔥" if net >= 5.0 else ("💰" if net >= 3.0 else "👀")
+
+
+def _fmt_vol(v) -> str:
+    if not v:
+        return ""
+    return "$%.1fM" % (v / 1e6) if v >= 1e6 else "$%.0fK" % (v / 1e3)
+
+
 def format_alert(pair: Pair, ev: dict, espn: dict, confirmed: bool,
                  repeats: int = 0) -> str:
     """HTML alert — send with parse_mode='HTML' (send_telegram does, with
     plain fallback). Books are the pair's YES-side quotes on each venue, so
-    both legs are derivable: A = PM ask + (100−KAL bid); B = KAL ask + (100−PM bid)."""
+    both legs are derivable: A = PM ask + (100−KAL bid); B = KAL ask + (100−PM bid).
+    ev may carry kal_vol, seen_min, pm_lvl — context stashed by run_cycle."""
     tag = " · <i>unconfirmed</i>" if not confirmed else ""
-    rep = " · re-alert %d/hr" % repeats if repeats else ""
+    books = "Books: PM YES %.0f/%.0f · KAL YES %.0f/%.0f" % (
+        pair.pm_bid, pair.pm_ask, pair.kal_bid, pair.kal_ask)
+    vol = _fmt_vol(ev.get("kal_vol"))
+    if vol:
+        books += " · KAL vol %s" % vol
+    if pair.pm_ask - pair.pm_bid >= 10.0:
+        books += " · <i>wide PM spread</i>"
+    lvl = ev.get("pm_lvl")
+    if lvl and (lvl[0] + lvl[1]) and (lvl[0] + lvl[1]) < 8:
+        books += " · <i>thin PM book</i>"
+    ctx = []
+    if repeats:
+        ctx.append("re-alert %d/hr" % repeats)
+    if ev.get("seen_min"):
+        ctx.append("seen %.0fm" % ev["seen_min"])
     links = _venue_links(pair)
     tail = (links + " · <i>verify depth before sizing</i>") if links \
         else "<i>verify depth before sizing</i>"
     state = _state_str(espn)
     lines = [
-        "💰 <b>ARB %s</b> · %s" % (html.escape(_game_label(pair.game)),
+        "%s <b>ARB %s</b> · %s" % (_tier(ev["net"]), html.escape(_game_label(pair.game)),
                                    html.escape(pair_label(pair))),
-        "<b>%+.1f¢ net</b> — %s = %.0f¢ (Kal fees in)%s%s" % (
-            ev["net"], ev["legs"], ev["cost"], tag, rep),
-        "Books: PM YES %.0f/%.0f · KAL YES %.0f/%.0f" % (
-            pair.pm_bid, pair.pm_ask, pair.kal_bid, pair.kal_ask),
+        "<b>%+.1f¢ net</b> — %s = %.0f¢ (Kal fees in)%s" % (
+            ev["net"], ev["legs"], ev["cost"], tag),
+        books,
     ]
     if state:
         lines.append("⏱ %s" % html.escape(state))
+    if ctx:
+        lines.append("⏳ " + " · ".join(ctx))
     lines.append(tail)
     return "\n".join(lines)
 
 
 def format_alert_batch(rows, espn) -> str:
     """rows: [(pair, ev_eval, confirmed, repeats)] for ONE game — packed into
-    a single Telegram message (same-cycle triples used to be 3 pings)."""
+    a single Telegram message, biggest net first (triage order)."""
+    rows = sorted(rows, key=lambda r: -r[1]["net"])
     p0 = rows[0][0]
     state = _state_str(espn)
-    head = "💰 <b>ARB %s</b> — %d windows" % (
-        html.escape(_game_label(p0.game)), len(rows))
+    head = "%s <b>ARB %s</b> — %d windows" % (
+        _tier(rows[0][1]["net"]), html.escape(_game_label(p0.game)), len(rows))
     if state:
         head += " · %s" % html.escape(state)
     out = [head]
     for p, ev, conf, rep in rows:
         tag = " · <i>unconfirmed</i>" if not conf else ""
-        rep_s = " · re-alert %d/hr" % rep if rep else ""
+        ctx = []
+        if rep:
+            ctx.append("re-alert %d/hr" % rep)
+        if ev.get("seen_min"):
+            ctx.append("seen %.0fm" % ev["seen_min"])
+        ctx_s = (" · " + " · ".join(ctx)) if ctx else ""
         out.append(
-            "<b>%s</b> %+.1f¢ — %s = %.0f¢%s%s\n%s" % (
-                html.escape(pair_label(p)), ev["net"], ev["legs"], ev["cost"],
-                tag, rep_s, _venue_links(p)))
+            "%s <b>%s</b> %+.1f¢ — %s = %.0f¢%s%s\n%s" % (
+                _tier(ev["net"]), html.escape(pair_label(p)), ev["net"], ev["legs"],
+                ev["cost"], tag, ctx_s, _venue_links(p)))
     out.append("<i>Verify depth in both apps before sizing</i>")
     return "\n".join(out)
 
 
 def send_telegram(text: str, enabled: bool) -> bool:
     """HTML parse mode (links render); the sender self-heals entity 400s and
-    falls back to plain rather than dropping."""
+    falls back to plain rather than dropping. Every send is ledger-logged."""
     if not enabled:
         print(text)
         return True
     try:
-        from scripts.openclaw_alerts import _telegram_http_send
+        from scripts.openclaw_alerts import _telegram_http_send, _ledger_log
         ok, err = _telegram_http_send(text, parse_mode="HTML")
+        _ledger_log(ok, "telegram", "HTML", len(text), err=err)
         if not ok:
             log.warning("telegram send failed: %s", err)
         return ok
@@ -798,6 +846,8 @@ def run_cycle(cfg: dict, conn: sqlite3.Connection) -> dict:
                         continue
                     ev2 = eval_pair(p2, cfg["pm_fee"])
                     if ev2["net"] >= cfg["net_edge"]:
+                        if len(fresh) >= 4:  # BBO namedtuple carries level counts
+                            ev2["pm_lvl"] = (fresh[2], fresh[3])
                         confirmed.append((p2, ev2))
                         confirmed_keys.add(p.key)
                     else:
@@ -812,6 +862,10 @@ def run_cycle(cfg: dict, conn: sqlite3.Connection) -> dict:
                 if not cooldown_ok(conn, p.key, ev_eval["direction"], cfg["cooldown_min"], now):
                     continue
                 rep = prior_alert_count(conn, p.key, ev_eval["direction"], now)
+                ev_eval["kal_vol"] = vol_by_title.get(p.kal_title)
+                seen = first_seen_min(conn, p.key, now)
+                if seen:
+                    ev_eval["seen_min"] = seen
                 to_alert.append((p, ev_eval, bool(p.key in confirmed_keys), rep))
             if to_alert:
                 if len(to_alert) == 1:
