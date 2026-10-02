@@ -381,7 +381,7 @@ def test_format_alert_contents(pmus_event):
     ev = arb.eval_pair(p)
     text = arb.format_alert(p, ev, {"detail": "5:00 - 2nd", "score": {"CLE": 0, "PIT": 7}},
                             confirmed=True)
-    assert "💰 <b>ARB PIT@CLE</b> · Deshaun Watson 125+ pass yds" in text
+    assert "🔥 <b>ARB PIT@CLE</b> · Deshaun Watson 125+ pass yds" in text
     # A: PM YES 61 + KAL NO 10 = 71; fee 7*.10*.90 = 0.63 -> net +28.4
     assert "<b>+28.4¢ net</b>" in text
     assert "PM YES 60/61 · KAL YES 90/92" in text
