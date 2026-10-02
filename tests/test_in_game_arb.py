@@ -4,6 +4,7 @@ Fixtures captured live 2026-10-01 ~20:55 ET from PIT@CLE (see module docstring
 of services/in_game_arb.py for the probe facts they pin).
 """
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -374,12 +375,112 @@ def test_format_alert_contents(pmus_event):
                  stat="pass_yds", name="deshaun watson", line=125,
                  pm_bid=60, pm_ask=61, kal_bid=90, kal_ask=92,
                  pm_slug="astatc-nfl-pit-cle-2026-10-01-pyd-deswat-gte125",
-                 kal_title="Deshaun Watson: 125+ passing yards")
+                 kal_title="Deshaun Watson: 125+ passing yards",
+                 pm_event_slug="nfl-pit-cle-2026-10-01",
+                 kal_event_ticker="KXNFLPASSYDS-26OCT01PITCLE")
     ev = arb.eval_pair(p)
     text = arb.format_alert(p, ev, {"detail": "5:00 - 2nd", "score": {"CLE": 0, "PIT": 7}},
                             confirmed=True)
-    assert "PIT@CLE" in text
+    assert "💰 <b>ARB PIT@CLE</b> · Deshaun Watson 125+ pass yds" in text
     # A: PM YES 61 + KAL NO 10 = 71; fee 7*.10*.90 = 0.63 -> net +28.4
-    assert "net +28.4" in text
-    assert "PM slug: astatc-nfl-pit-cle-2026-10-01-pyd-deswat-gte125" in text
-    assert "KAL: Deshaun Watson: 125+ passing yards" in text
+    assert "<b>+28.4¢ net</b>" in text
+    assert "PM YES 60/61 · KAL YES 90/92" in text
+    assert ('href="https://polymarket.com/event/nfl-pit-cle-2026-10-01/'
+            'astatc-nfl-pit-cle-2026-10-01-pyd-deswat-gte125"') in text
+    assert 'href="https://kalshi.com/markets/KXNFLPASSYDS-26OCT01PITCLE"' in text
+    assert "5:00 - 2nd" in text and "CLE 0 PIT 7" in text
+    assert "verify depth" in text
+    # no raw slug lines in the body (the old format's worst offender)
+    assert "PM slug:" not in text and "KAL:" not in text
+    # unconfirmed tag + repeat counter render
+    assert "<i>unconfirmed</i>" in arb.format_alert(p, ev, None, confirmed=False)
+    assert "re-alert 2/hr" in arb.format_alert(p, ev, None, confirmed=True, repeats=2)
+
+
+def test_format_alert_batch_packs_rows():
+    """Same-cycle candidates pack into ONE message with per-row links."""
+    def mk(name, line):
+        return arb.Pair(key="g|pass_yds|%s|%g" % (name, line), game="26OCT01PITCLE",
+                        stat="pass_yds", name=name, line=line,
+                        pm_bid=60, pm_ask=61, kal_bid=74, kal_ask=75,
+                        pm_slug="astatc-x-%s" % name.replace(" ", "-"), kal_title="t",
+                        pm_event_slug="nfl-pit-cle-2026-10-01",
+                        kal_event_ticker="KXNFLPASSYDS-26OCT01PITCLE")
+    rows = [(mk("aaron rodgers", 200), arb.eval_pair(mk("aaron rodgers", 200)), True, 0),
+            (mk("deshaun watson", 200), arb.eval_pair(mk("deshaun watson", 200)), False, 1)]
+    text = arb.format_alert_batch(rows, {"detail": "7:39 - 4th", "score": {"CLE": 21, "PIT": 16}})
+    assert "2 windows" in text
+    assert "Aaron Rodgers 200+ pass yds" in text
+    assert "Deshaun Watson 200+ pass yds" in text
+    assert text.count("polymarket.com/event/") == 2
+    assert "re-alert 1/hr" in text and "<i>unconfirmed</i>" in text
+    assert "7:39 - 4th" in text
+
+
+def test_venue_links_forms():
+    p_full = arb.Pair(key="k", game="g", stat="pass_yds", name="w", line=125,
+                      pm_bid=1, pm_ask=2, kal_bid=3, kal_ask=4, pm_slug="ps", kal_title="t",
+                      pm_event_slug="es", kal_event_ticker="KXNFLPASSYDS-26OCT01PITCLE")
+    links = arb._venue_links(p_full)
+    assert 'href="https://polymarket.com/event/es/ps"' in links
+    assert 'href="https://kalshi.com/markets/KXNFLPASSYDS-26OCT01PITCLE"' in links
+    p_event_only = p_full._replace(pm_slug="")
+    assert 'href="https://polymarket.com/event/es"' in arb._venue_links(p_event_only)
+    p_none = p_full._replace(pm_event_slug="", kal_event_ticker="")
+    assert arb._venue_links(p_none) == ""
+
+
+def test_prior_alert_count(tmp_path):
+    conn = arb.db_init(str(tmp_path / "arb.db"))
+    now = time.time()
+    ins = ("INSERT INTO pairs_log (ts, game, key, stat, name, line, pm_bid, pm_ask,"
+           " kal_bid, kal_ask, net_edge, direction, alerted) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    for i in range(3):  # three alerted rows in the last hour
+        conn.execute(ins, (now - 60 * i, "g", "k", "pass_yds", "w", 125, 1, 2, 3, 4, 5, "A", 1))
+    conn.execute(ins, (now - 7200, "g", "k", "pass_yds", "w", 125, 1, 2, 3, 4, 5, "A", 1))  # 2h old
+    conn.commit()
+    assert arb.prior_alert_count(conn, "k", "A", now) == 3
+    assert arb.prior_alert_count(conn, "k", "B", now) == 0
+
+
+def test_run_cycle_batch_single_send(tmp_path, monkeypatch):
+    """Two candidates in one cycle -> ONE packed message; both fired+logged."""
+    pm_event = {"slug": "nfl-pit-cle-2026-10-01", "title": "Pittsburgh vs. Cleveland",
+                "markets": [
+                    {"slug": "astatc-nfl-pit-cle-2026-10-01-pyd-aarrod-gte200",
+                     "question": "Will Aaron Rodgers record 200+ passing yards?",
+                     "sportsMarketType": "football_player_passing_yards", "line": 200,
+                     "outcomes": "[\"Yes\",\"No\"]",
+                     "outcomePrices": "[\"0.6000\",\"0.6100\"]"},
+                    {"slug": "astatc-nfl-pit-cle-2026-10-01-pyd-deswat-gte200",
+                     "question": "Will Deshaun Watson record 200+ passing yards?",
+                     "sportsMarketType": "football_player_passing_yards", "line": 200,
+                     "outcomes": "[\"Yes\",\"No\"]",
+                     "outcomePrices": "[\"0.6000\",\"0.6100\"]"},
+                ]}
+    kal_pass = {"ticker": "KXNFLPASSYDS-26OCT01PITCLE", "title": "Passing yards",
+                "markets": [
+                    {"title": "Aaron Rodgers: 200+ passing yards", "yes_bid": 74,
+                     "yes_ask": 75, "volume": 500000, "status": "active"},
+                    {"title": "Deshaun Watson: 200+ passing yards", "yes_bid": 74,
+                     "yes_ask": 75, "volume": 500000, "status": "active"},
+                ]}
+    kal_game = {"ticker": "KXNFLGAME-26OCT01PITCLE", "title": "PIT Steelers vs CLE Browns",
+                "markets": []}
+    sends = []
+    monkeypatch.setattr(arb.time, "sleep", lambda s: None)
+    monkeypatch.setattr(arb, "espn_scoreboard", lambda: load("espn_pitcle.json"))
+    monkeypatch.setattr(arb, "kalshi_series_events",
+                        lambda s: {"KXNFLPASSYDS-26OCT01PITCLE": kal_pass}
+                        if s == "KXNFLPASSYDS" else
+                        ({"KXNFLGAME-26OCT01PITCLE": kal_game} if s == "KXNFLGAME" else {}))
+    monkeypatch.setattr(arb, "pmus_search_event", lambda q, d, a: pm_event)
+    monkeypatch.setattr(arb, "pmus_bbo", lambda slug: (60.0, 61.0))
+    monkeypatch.setattr(arb, "send_telegram", lambda text, enabled: sends.append(text) or True)
+    conn = arb.db_init(str(tmp_path / "arb.db"))
+    s = arb.run_cycle(_cfg(str(tmp_path / "arb.db")), conn)
+    assert s["alerts"] == 2
+    assert len(sends) == 1, "two candidates must pack into one message"
+    assert "2 windows" in sends[0]
+    assert conn.execute("SELECT COUNT(*) FROM fired").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM pairs_log WHERE alerted=1").fetchone()[0] == 2

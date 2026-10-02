@@ -45,6 +45,7 @@ Env:
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -108,7 +109,8 @@ STAT_UNITS = {"pass_yds": "pass yds", "rec_yds": "rec yds", "rush_yds": "rush yd
               "td": "TD", "rec": "receptions", "comp": "completions"}
 
 Pair = namedtuple("Pair", "key game stat name line pm_bid pm_ask kal_bid kal_ask "
-                          "pm_slug kal_title pm_inverted", defaults=(False,))
+                          "pm_slug kal_title pm_inverted pm_event_slug kal_event_ticker",
+                  defaults=(False, "", ""))
 
 RE_PM_PROP = re.compile(r"^Will (.+?) (?:record|throw) (\d+)\+ (.+?)\?$")
 RE_KAL_PROP = re.compile(r"^(.+?):\s*(\d+)\+\s*(.+?)$")
@@ -373,7 +375,7 @@ def _nicknames_from_event_title(title: str):
     return parts, nicks
 
 
-def pair_props(game: str, pm_markets: list, kal_markets: list) -> list:
+def pair_props(game: str, pm_markets: list, kal_markets: list, pm_event_slug: str = "") -> list:
     kal_idx = {}
     qbs = set()  # players with a passing-yards market = QBs
     for m in kal_markets:
@@ -404,11 +406,12 @@ def pair_props(game: str, pm_markets: list, kal_markets: list) -> list:
         out.append(Pair(key="%s|%s|%s|%g" % (game, p[2], p[0], p[1]), game=game,
                         stat=p[2], name=p[0], line=p[1],
                         pm_bid=pmq[0], pm_ask=pmq[1], kal_bid=kalq[0], kal_ask=kalq[1],
-                        pm_slug=m.get("slug") or "", kal_title=km.get("title") or ""))
+                        pm_slug=m.get("slug") or "", kal_title=km.get("title") or "",
+                        pm_event_slug=pm_event_slug, kal_event_ticker=km.get("_evt") or ""))
     return out
 
 
-def pair_totals(game: str, pm_markets: list, kal_markets: list) -> list:
+def pair_totals(game: str, pm_markets: list, kal_markets: list, pm_event_slug: str = "") -> list:
     kal_idx = {}
     for m in kal_markets:
         line = parse_kalshi_total(m.get("title") or "")
@@ -437,7 +440,8 @@ def pair_totals(game: str, pm_markets: list, kal_markets: list) -> list:
         out.append(Pair(key="%s|total|game|%g" % (game, line), game=game,
                         stat="total", name="game", line=line,
                         pm_bid=pmq[0], pm_ask=pmq[1], kal_bid=kalq[0], kal_ask=kalq[1],
-                        pm_slug=m.get("slug") or "", kal_title=km.get("title") or ""))
+                        pm_slug=m.get("slug") or "", kal_title=km.get("title") or "",
+                        pm_event_slug=pm_event_slug, kal_event_ticker=km.get("_evt") or ""))
     return out
 
 
@@ -494,7 +498,9 @@ def pair_ml(game: str, pm_event: dict, kal_game_event: dict) -> list:
                         stat="ml", name=nick, line=0.0,
                         pm_bid=pm_bid, pm_ask=pm_ask, kal_bid=kalq[0], kal_ask=kalq[1],
                         pm_slug=pm_ml.get("slug") or "", kal_title=km.get("title") or "",
-                        pm_inverted=(i != i0)))
+                        pm_inverted=(i != i0),
+                        pm_event_slug=pm_event.get("slug") or "",
+                        kal_event_ticker=kal_game_event.get("ticker") or ""))
     return out
 
 
@@ -502,15 +508,21 @@ def build_pairs(game: str, pm_event: dict, kal_events: dict) -> list:
     """All v1-pairable markets for one game. kal_events: {series: event}.
     Deduped by pair key (PM-US has two total market types that can collide)."""
     pm_markets = pm_event.get("markets") or []
+    pm_event_slug = pm_event.get("slug") or ""
     pairs = []
     kal_game = kal_events.get("KXNFLGAME")
     if kal_game:
         pairs += pair_ml(game, pm_event, kal_game)
     kal_all = []
     for series, ev in kal_events.items():
-        kal_all += ev.get("markets") or []
-    pairs += pair_props(game, pm_markets, kal_all)
-    pairs += pair_totals(game, pm_markets, kal_events.get("KXNFLTOTAL", {}).get("markets") or [])
+        for m in ev.get("markets") or []:
+            mm = dict(m)
+            mm["_evt"] = ev.get("ticker") or ""
+            kal_all.append(mm)
+    pairs += pair_props(game, pm_markets, kal_all, pm_event_slug=pm_event_slug)
+    tot = kal_events.get("KXNFLTOTAL") or {}
+    kal_tot = [dict(m, _evt=tot.get("ticker") or "") for m in tot.get("markets") or []]
+    pairs += pair_totals(game, pm_markets, kal_tot, pm_event_slug=pm_event_slug)
     seen, deduped = set(), []
     for p in pairs:
         if p.key in seen:
@@ -574,6 +586,14 @@ def cooldown_ok(conn: sqlite3.Connection, pair_key: str, direction: str,
     return row is None or (now - row[0]) >= cooldown_min * 60.0
 
 
+def prior_alert_count(conn: sqlite3.Connection, pair_key: str, direction: str,
+                      now: float, window_s: float = 3600.0) -> int:
+    """Alerted rows for this pair+direction in the last hour — the repeat counter."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM pairs_log WHERE key=? AND direction=? AND alerted=1 AND ts>?",
+        (pair_key, direction, now - window_s)).fetchone()[0]
+
+
 def mark_fired(conn: sqlite3.Connection, pair_key: str, direction: str, now: float):
     conn.execute("INSERT INTO fired (pair_key, direction, last_ts) VALUES (?,?,?) "
                  "ON CONFLICT(pair_key, direction) DO UPDATE SET last_ts=excluded.last_ts",
@@ -591,39 +611,93 @@ def pair_label(pair: Pair) -> str:
     return "%s %g+ %s" % (pair.name.title(), pair.line, STAT_UNITS.get(pair.stat, pair.stat))
 
 
-def format_alert(pair: Pair, ev: dict, espn: dict, confirmed: bool) -> str:
-    game_label = pair.game  # suffix e.g. 26OCT01PITCLE
-    m = re.match(r"^(\d{2})([A-Z]{3})(\d{2})(.+)$", game_label)
-    label = game_label
-    if m:
-        abbrs = split_team_abbrs(m.group(4))
-        if len(abbrs) == 2:
-            label = "%s@%s" % (abbrs[0], abbrs[1])
-    state = ""
-    if espn:
-        state = " · %s" % espn.get("detail") if espn.get("detail") else ""
-        sc = espn.get("score") or {}
-        if sc:
-            state += " " + " ".join("%s %d" % (k, v) for k, v in sorted(sc.items()))
-    tag = "" if confirmed else " (unconfirmed — BBO failed)"
+def _game_label(game: str) -> str:
+    """26OCT01PITCLE -> PIT@CLE (passthrough if unparseable)."""
+    m = re.match(r"^(\d{2})([A-Z]{3})(\d{2})(.+)$", game)
+    if not m:
+        return game
+    abbrs = split_team_abbrs(m.group(4))
+    return "%s@%s" % (abbrs[0], abbrs[1]) if len(abbrs) == 2 else game
+
+
+def _state_str(espn: dict) -> str:
+    if not espn:
+        return ""
+    s = ""
+    d = espn.get("detail")
+    if d:
+        s = " · " + d
+    sc = espn.get("score") or {}
+    if sc:
+        s += " " + " ".join("%s %d" % (k, v) for k, v in sorted(sc.items()))
+    return s
+
+
+def _venue_links(pair: Pair) -> str:
+    """HTML links to both venues. PM: market-level deep link (verified 200,
+    renders that market). Kalshi: short /markets/<event-ticker> form — the
+    form five production scripts already ship; the marketing site 429s bots
+    so direct verification is impossible."""
+    links = []
+    if pair.pm_event_slug and pair.pm_slug:
+        links.append('<a href="https://polymarket.com/event/%s/%s">Polymarket</a>'
+                     % (pair.pm_event_slug, pair.pm_slug))
+    elif pair.pm_event_slug:
+        links.append('<a href="https://polymarket.com/event/%s">Polymarket</a>'
+                     % pair.pm_event_slug)
+    if pair.kal_event_ticker:
+        links.append('<a href="https://kalshi.com/markets/%s">Kalshi</a>'
+                     % pair.kal_event_ticker)
+    return " · ".join(links)
+
+
+def format_alert(pair: Pair, ev: dict, espn: dict, confirmed: bool,
+                 repeats: int = 0) -> str:
+    """HTML alert — send with parse_mode='HTML' (send_telegram does, with
+    plain fallback). Books are the pair's YES-side quotes on each venue, so
+    both legs are derivable: A = PM ask + (100−KAL bid); B = KAL ask + (100−PM bid)."""
+    tag = " · <i>unconfirmed</i>" if not confirmed else ""
+    rep = " · re-alert %d/hr" % repeats if repeats else ""
+    links = _venue_links(pair)
+    tail = (links + " · <i>verify depth before sizing</i>") if links \
+        else "<i>verify depth before sizing</i>"
     return (
-        "💰 ARB %s · %s\n"
-        "Legs: %s = %.0f¢ → net %+.1f¢ after Kal fees%s\n"
-        "Books: PM %.0f/%.0f · KAL %.0f/%.0f%s\n"
-        "PM slug: %s\nKAL: %s\n"
-        "Verify depth in both apps before sizing"
-    ) % (label, pair_label(pair), ev["legs"], ev["cost"], ev["net"], tag,
-         pair.pm_bid, pair.pm_ask, pair.kal_bid, pair.kal_ask, state,
-         pair.pm_slug, pair.kal_title)
+        "💰 <b>ARB %s</b> · %s\n"
+        "<b>%+.1f¢ net</b> — %s = %.0f¢ (Kal fees in)%s%s\n"
+        "Books: PM YES %.0f/%.0f · KAL YES %.0f/%.0f%s\n"
+        "%s"
+    ) % (html.escape(_game_label(pair.game)), html.escape(pair_label(pair)),
+         ev["net"], ev["legs"], ev["cost"], tag, rep,
+         pair.pm_bid, pair.pm_ask, pair.kal_bid, pair.kal_ask,
+         html.escape(_state_str(espn)), tail)
+
+
+def format_alert_batch(rows, espn) -> str:
+    """rows: [(pair, ev_eval, confirmed, repeats)] for ONE game — packed into
+    a single Telegram message (same-cycle triples used to be 3 pings)."""
+    p0 = rows[0][0]
+    out = ["💰 <b>ARB %s</b> — %d windows%s" % (
+        html.escape(_game_label(p0.game)), len(rows), html.escape(_state_str(espn)))]
+    for p, ev, conf, rep in rows:
+        tag = " · <i>unconfirmed</i>" if not conf else ""
+        rep_s = " · re-alert %d/hr" % rep if rep else ""
+        out.append(
+            "<b>%s</b> %+.1f¢ — %s = %.0f¢%s%s\n%s" % (
+                html.escape(pair_label(p)), ev["net"], ev["legs"], ev["cost"],
+                tag, rep_s, _venue_links(p)))
+    out.append("<i>Verify depth in both apps before sizing</i>")
+    return "\n".join(out)
 
 
 def send_telegram(text: str, enabled: bool) -> bool:
+    """HTML parse mode (links render); the sender self-heals entity 400s and
+    falls back to plain rather than dropping."""
     if not enabled:
         print(text)
         return True
     try:
         from scripts.openclaw_alerts import _telegram_http_send
-        ok, err = _telegram_http_send(text)
+        ok, err = _telegram_http_send(text, parse_mode="HTML")
         if not ok:
             log.warning("telegram send failed: %s", err)
         return ok
@@ -724,20 +798,30 @@ def run_cycle(cfg: dict, conn: sqlite3.Connection) -> dict:
                     unconfirmed.append((p, ev_eval))
 
             alerted_keys = set()
+            to_alert = []
             for p, ev_eval in confirmed + unconfirmed:
                 if not cooldown_ok(conn, p.key, ev_eval["direction"], cfg["cooldown_min"], now):
                     continue
-                text = format_alert(p, ev_eval, espn, confirmed=bool(p.key in confirmed_keys))
+                rep = prior_alert_count(conn, p.key, ev_eval["direction"], now)
+                to_alert.append((p, ev_eval, bool(p.key in confirmed_keys), rep))
+            if to_alert:
+                if len(to_alert) == 1:
+                    p, ev_eval, conf, rep = to_alert[0]
+                    text = format_alert(p, ev_eval, espn, conf, rep)
+                else:
+                    text = format_alert_batch(to_alert, espn)
                 ok = send_telegram(text, cfg["telegram"])
                 if ok:
-                    mark_fired(conn, p.key, ev_eval["direction"], now)
-                    summary["alerts"] += 1
-                    alerted_keys.add(p.key)
-                conn.execute(
-                    "INSERT INTO pairs_log (ts, game, key, stat, name, line, pm_bid, pm_ask,"
-                    " kal_bid, kal_ask, net_edge, direction, alerted) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (now, p.game, p.key, p.stat, p.name, p.line, p.pm_bid, p.pm_ask,
-                     p.kal_bid, p.kal_ask, ev_eval["net"], ev_eval["direction"], 1 if ok else 0))
+                    for p, ev_eval, _, _ in to_alert:
+                        mark_fired(conn, p.key, ev_eval["direction"], now)
+                    summary["alerts"] += len(to_alert)
+                    alerted_keys.update(p.key for p, _, _, _ in to_alert)
+                for p, ev_eval, _, _ in to_alert:
+                    conn.execute(
+                        "INSERT INTO pairs_log (ts, game, key, stat, name, line, pm_bid, pm_ask,"
+                        " kal_bid, kal_ask, net_edge, direction, alerted) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (now, p.game, p.key, p.stat, p.name, p.line, p.pm_bid, p.pm_ask,
+                         p.kal_bid, p.kal_ask, ev_eval["net"], ev_eval["direction"], 1 if ok else 0))
             # log near-arb pairs only (calibration: how often gaps appear);
             # full raw sweeps stay in memcached-land, not sqlite
             for p in pairs:
