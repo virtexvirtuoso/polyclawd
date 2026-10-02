@@ -370,6 +370,54 @@ def test_run_cycle_ml_confirm_corruption_regression(tmp_path, monkeypatch):
     assert row is not None and row[1] == "A" and row[0] >= 2.0
 
 
+def test_format_recap_orders_and_sums(tmp_path):
+    """Recap: best window first, alert count summed, empty game silent."""
+    conn = arb.db_init(str(tmp_path / "arb.db"))
+    ins = ("INSERT INTO pairs_log (ts, game, key, stat, name, line, pm_bid, pm_ask,"
+           " kal_bid, kal_ask, net_edge, direction, alerted) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    now = time.time()
+    conn.execute(ins, (now, "26OCT01PITCLE", "26OCT01PITCLE|pass_yds|deshaun watson|250",
+                       "pass_yds", "deshaun watson", 250, 18, 19, 13, 14, 3.2, "B", 1))
+    conn.execute(ins, (now, "26OCT01PITCLE", "26OCT01PITCLE|ml|browns",
+                       "ml", "browns", 0, 68, 68.5, 74, 75, 4.2, "A", 1))
+    conn.execute(ins, (now, "26OCT01PITCLE", "26OCT01PITCLE|ml|browns",
+                       "ml", "browns", 0, 68, 68.5, 74, 75, 4.1, "A", 1))
+    conn.commit()
+    text = arb.format_recap(conn, "26OCT01PITCLE", {"score": {"CLE": 27, "PIT": 24}})
+    assert "🏁 <b>PIT@CLE</b>" in text and "CLE 27 PIT 24" in text
+    assert "3 alerts on 2 windows, best +4.2¢" in text
+    assert "Browns ML — best +4.2¢ ×2" in text  # biggest first
+    assert "Deshaun Watson 250+ pass yds — best +3.2¢ ×1" in text
+    assert "transient" in text
+    assert arb.format_recap(conn, "26OCT02XXXXXX", {}) == ""
+
+
+def test_recap_pending_games_idempotent(tmp_path, monkeypatch):
+    """One recap per finished game — second call sends nothing."""
+    conn = arb.db_init(str(tmp_path / "arb.db"))
+    ins = ("INSERT INTO pairs_log (ts, game, key, stat, name, line, pm_bid, pm_ask,"
+           " kal_bid, kal_ask, net_edge, direction, alerted) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    now = time.time()
+    conn.execute(ins, (now, "26OCT01PITCLE", "26OCT01PITCLE|ml|browns",
+                       "ml", "browns", 0, 68, 68.5, 74, 75, 4.2, "A", 1))
+    conn.commit()
+    sends = []
+    monkeypatch.setattr(arb, "send_telegram", lambda text, enabled: sends.append(text) or True)
+    live = {("CLE", "PIT"): {"state": "post", "detail": "Final",
+                              "score": {"CLE": 27, "PIT": 24}}}
+    cfg = {"telegram": False}
+    assert arb.recap_pending_games(conn, live, cfg, now) == 1
+    assert len(sends) == 1 and "PIT@CLE" in sends[0]
+    assert arb.recap_pending_games(conn, live, cfg, now) == 0  # durable dedupe
+    # in-game (not post) -> not yet
+    conn2 = arb.db_init(str(tmp_path / "b.db"))
+    conn2.execute(ins, (now, "26OCT01PITCLE", "26OCT01PITCLE|ml|browns",
+                        "ml", "browns", 0, 68, 68.5, 74, 75, 4.2, "A", 1))
+    conn2.commit()
+    live2 = {("CLE", "PIT"): {"state": "in", "detail": "2:00 - 4th", "score": {}}}
+    assert arb.recap_pending_games(conn2, live2, cfg, now) == 0
+
+
 def test_format_alert_contents(pmus_event):
     p = arb.Pair(key="26OCT01PITCLE|pass_yds|deshaun watson|125", game="26OCT01PITCLE",
                  stat="pass_yds", name="deshaun watson", line=125,
