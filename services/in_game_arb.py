@@ -713,12 +713,14 @@ def format_alert(pair: Pair, ev: dict, espn: dict, confirmed: bool,
                                    html.escape(pair_label(pair))),
         "<b>%+.1f¢ net</b> — %s = %.0f¢ (Kal fees in)%s" % (
             ev["net"], ev["legs"], ev["cost"], tag),
+        "",  # breathing room: headline | context | action
         books,
     ]
     if state:
         lines.append("⏱ %s" % html.escape(state))
     if ctx:
         lines.append("⏳ " + " · ".join(ctx))
+    lines.append("")
     lines.append(tail)
     return "\n".join(lines)
 
@@ -733,7 +735,7 @@ def format_alert_batch(rows, espn) -> str:
         _tier(rows[0][1]["net"]), html.escape(_game_label(p0.game)), len(rows))
     if state:
         head += " · %s" % html.escape(state)
-    out = [head]
+    out = [head, ""]
     for p, ev, conf, rep in rows:
         tag = " · <i>unconfirmed</i>" if not conf else ""
         ctx = []
@@ -746,6 +748,7 @@ def format_alert_batch(rows, espn) -> str:
             "%s <b>%s</b> %+.1f¢ — %s = %.0f¢%s%s\n%s" % (
                 _tier(ev["net"]), html.escape(pair_label(p)), ev["net"], ev["legs"],
                 ev["cost"], tag, ctx_s, _venue_links(p)))
+    out.append("")
     out.append("<i>Verify depth in both apps before sizing</i>")
     return "\n".join(out)
 
@@ -764,13 +767,15 @@ def format_recap(conn, game: str, espn: dict) -> str:
     sc = espn.get("score") or {}
     if sc:
         head += " · " + " ".join("%s %d" % (k, v) for k, v in sorted(sc.items()))
-    head += " — %d alerts on %d windows, best %+.1f¢" % (total, len(rows), rows[0][3])
-    lines = [head]
+    lines = [head,
+             "%d alerts on %d windows · best %+.1f¢" % (total, len(rows), rows[0][3]),
+             ""]
     for stat, name, line, mx, n in rows[:5]:
         lines.append("· %s — best %+.1f¢ ×%d" % (
             html.escape(_label(stat, name, line)), mx, n))
     if len(rows) > 5:
         lines.append("· +%d more" % (len(rows) - 5))
+    lines.append("")
     lines.append("<i>Windows are transient — sizes are what the sweep saw, not fills</i>")
     return "\n".join(lines)
 
