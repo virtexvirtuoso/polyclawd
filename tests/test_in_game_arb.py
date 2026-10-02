@@ -1,0 +1,269 @@
+"""Offline tests for services/in_game_arb.py — fixture-driven, zero network.
+
+Fixtures captured live 2026-10-01 ~20:55 ET from PIT@CLE (see module docstring
+of services/in_game_arb.py for the probe facts they pin).
+"""
+import json
+from pathlib import Path
+
+import pytest
+
+import services.in_game_arb as arb
+
+FIX = Path(__file__).parent / "fixtures" / "in_game_arb"
+
+
+def load(name: str) -> dict:
+    return json.loads((FIX / name).read_text())
+
+
+@pytest.fixture(scope="module")
+def pmus_event() -> dict:
+    return load("pmus_slim.json")["event"]
+
+
+def kalshi_event(series: str) -> dict:
+    return load("kalshi_%s_slim.json" % series)["event"]
+
+
+# ---------------------------------------------------------------- parsers
+
+def test_parse_pmus_prop():
+    assert arb.parse_pmus_prop("Will Deshaun Watson record 125+ passing yards?") == \
+        ("deshaun watson", 125.0, "pass_yds")
+
+
+def test_parse_pmus_prop_int_unpairable():
+    # Kalshi has no INT series — INTs must never pair
+    assert arb.parse_pmus_prop("Will Aaron Rodgers throw 2+ interceptions?") is None
+
+
+def test_parse_kalshi_prop():
+    assert arb.parse_kalshi_prop("Deshaun Watson: 125+ passing yards") == \
+        ("deshaun watson", 125.0, "pass_yds")
+
+
+def test_parse_kalshi_total():
+    assert arb.parse_kalshi_total("Full Game: over 17.5 points scored?") == 17.5
+    assert arb.parse_kalshi_total("PIT Steelers wins by over 20.5 points?") is None
+
+
+def test_split_team_abbrs():
+    assert arb.split_team_abbrs("PITCLE") == ("PIT", "CLE")
+    assert arb.split_team_abbrs("NOLAPHI") == ("NOLA", "PHI")
+    assert arb.split_team_abbrs("XXYZ") == ()
+
+
+def test_parse_game_suffix():
+    assert arb.parse_game_suffix("26OCT01PITCLE") == ("2026-10-01", ("PIT", "CLE"))
+    assert arb.parse_game_suffix("garbage") == (None, ())
+
+
+# ---------------------------------------------------------------- fees / math
+
+def test_kalshi_fee_cents():
+    assert arb.kalshi_fee_cents(0.5) == pytest.approx(1.75)
+    assert arb.kalshi_fee_cents(0.0) == 0.0
+    assert arb.kalshi_fee_cents(1.0) == 0.0
+
+
+def test_eval_pair_direction_a():
+    p = arb.Pair(key="k", game="g", stat="pass_yds", name="w", line=125,
+                 pm_bid=70, pm_ask=71, kal_bid=75, kal_ask=80, pm_slug="s", kal_title="t")
+    ev = arb.eval_pair(p)
+    # A: PM YES 71 + KAL NO 25 = 96; fee 7*.25*.75 = 1.3125
+    assert ev["direction"] == "A"
+    assert ev["cost"] == pytest.approx(96.0)
+    assert ev["net"] == pytest.approx(100 - 96 - 1.3125)
+
+
+def test_eval_pair_direction_b():
+    p = arb.Pair(key="k", game="g", stat="pass_yds", name="w", line=125,
+                 pm_bid=90, pm_ask=91, kal_bid=60, kal_ask=62, pm_slug="s", kal_title="t")
+    ev = arb.eval_pair(p)
+    # B: KAL YES 62 + PM NO 10 = 72; fee 7*.62*.38 = 1.6492
+    assert ev["direction"] == "B"
+    assert ev["net"] == pytest.approx(100 - 72 - 1.6492)
+
+
+# ---------------------------------------------------------------- espn
+
+def test_espn_live_games_aliases():
+    sb = {"events": [{"competitions": [{"competitors": [
+        {"team": {"abbreviation": "NO"}, "score": "7"},
+        {"team": {"abbreviation": "LV"}, "score": "3"}]}],
+        "status": {"type": {"state": "in"}, "period": 1,
+                   "shortDetail": "5:00 - 1st"}}]}
+    live = arb.espn_live_games(sb)
+    # sorted-tuple keys; NO registers under both itself and its NOLA alias
+    assert ("LV", "NOLA") in live
+    assert ("LV", "NO") in live
+    assert live[("LV", "NO")]["score"] == {"NO": 7, "LV": 3}
+
+
+def test_espn_live_games_fixture():
+    live = arb.espn_live_games(load("espn_pitcle.json"))
+    info = live[("CLE", "PIT")]
+    assert info["state"] == "in"
+    assert info["score"] == {"CLE": 0, "PIT": 7}
+
+
+# ---------------------------------------------------------------- pairing (fixtures)
+
+def test_pair_props_fixture(pmus_event):
+    kal = []
+    for s in ("KXNFLPASSYDS", "KXNFLTD", "KXNFLRECYDS"):
+        kal += kalshi_event(s)["markets"]
+    pairs = arb.pair_props("26OCT01PITCLE", pmus_event["markets"], kal)
+    # Watson 125+ pairs, with prices taken from the fixture rows themselves
+    # (fixture is a live-game snapshot — absolute cents move, pairing must not)
+    w = [p for p in pairs if p.name == "deshaun watson" and p.stat == "pass_yds" and p.line == 125]
+    assert w, "Watson 125+ should pair"
+    src = next(m for m in pmus_event["markets"] if (m.get("slug") or "").endswith("pyd-deswat-gte125"))
+    assert (w[0].pm_bid, w[0].pm_ask) == pytest.approx(arb._pm_prices(src))
+    ksrc = next(m for m in kal if m["title"] == "Deshaun Watson: 125+ passing yards")
+    assert (w[0].kal_bid, w[0].kal_ask) == (float(ksrc["yes_bid"]), float(ksrc["yes_ask"]))
+    # QB TD exclusion: Watson/Rodgers TD markets must never pair
+    assert not any(p.stat == "td" and p.name in ("deshaun watson", "aaron rodgers") for p in pairs)
+    # non-QB TD pairs do exist
+    tds = [p for p in pairs if p.stat == "td"]
+    assert tds, "expected non-QB TD pairs"
+    assert all("watson" not in p.name and "rodgers" not in p.name for p in tds)
+
+
+def test_pair_totals_fixture(pmus_event):
+    kal_total = kalshi_event("KXNFLTOTAL")["markets"]
+    # Inject a Kalshi total row guaranteed to match a PM line (ladders may not
+    # coincide in a given snapshot; the pairing logic is what's under test)
+    pm_lines = [float(m["line"]) for m in pmus_event["markets"]
+                if (m.get("sportsMarketType") or "") == "football_team_full_game_total"]
+    assert pm_lines, "fixture should contain PM totals"
+    target = pm_lines[0]
+    kal_total = kal_total + [{"title": "Full Game: over %g points scored?" % target,
+                              "yes_bid": 40, "yes_ask": 42, "volume": 50000,
+                              "status": "active", "ticker": "KXNFLTOTAL-26OCT01PITCLE-TST"}]
+    pairs = arb.pair_totals("26OCT01PITCLE", pmus_event["markets"], kal_total)
+    matched = [p for p in pairs if p.line == target]
+    assert matched, "injected total line must pair"
+    assert (matched[0].kal_bid, matched[0].kal_ask) == (40.0, 42.0)
+
+
+def test_pair_ml_fixture(pmus_event):
+    kal_game = kalshi_event("KXNFLGAME")
+    pairs = arb.pair_ml("26OCT01PITCLE", pmus_event, kal_game)
+    assert len(pairs) == 2
+    by_name = {p.name: p for p in pairs}
+    assert set(by_name) == {"steelers", "browns"}
+    ml = next(m for m in pmus_event["markets"] if (m.get("slug") or "").startswith("aec-"))
+    pm0 = arb._pm_prices(ml)  # outcomes[0] = Steelers
+    st, br = by_name["steelers"], by_name["browns"]
+    assert (st.pm_bid, st.pm_ask) == pytest.approx(pm0)
+    assert (br.pm_bid, br.pm_ask) == pytest.approx((100.0 - pm0[1], 100.0 - pm0[0]))
+    kal_by_title = {m["title"]: m for m in kal_game["markets"]}
+    assert (st.kal_bid, st.kal_ask) == (float(kal_by_title["Pittsburgh wins"]["yes_bid"]),
+                                        float(kal_by_title["Pittsburgh wins"]["yes_ask"]))
+    assert (br.kal_bid, br.kal_ask) == (float(kal_by_title["Cleveland wins"]["yes_bid"]),
+                                        float(kal_by_title["Cleveland wins"]["yes_ask"]))
+
+
+def test_build_pairs_fixture(pmus_event):
+    kal_events = {s: kalshi_event(s) for s in ("KXNFLGAME", "KXNFLPASSYDS", "KXNFLTD", "KXNFLTOTAL")}
+    pairs = arb.build_pairs("26OCT01PITCLE", pmus_event, kal_events)
+    stats = {p.stat for p in pairs}
+    assert "ml" in stats and "pass_yds" in stats and "total" in stats
+
+
+# ---------------------------------------------------------------- alert loop (mocked transports)
+
+def _cfg(db_path: str, **over) -> dict:
+    cfg = dict(interval=45, net_edge=2.0, kal_min_volume=10000, cooldown_min=10,
+               max_confirms=5, pm_fee=0.0, telegram=False, db=db_path,
+               series=["KXNFLGAME", "KXNFLPASSYDS", "KXNFLTD", "KXNFLTOTAL"])
+    cfg.update(over)
+    return cfg
+
+
+def _wire(monkeypatch, pmus_event, *, bbo=(60.0, 61.0), espn=None, kal_tweak=None):
+    monkeypatch.setattr(arb.time, "sleep", lambda s: None)
+    sb = espn if espn is not None else load("espn_pitcle.json")
+    monkeypatch.setattr(arb, "espn_scoreboard", lambda: sb)
+
+    def fake_series(series):
+        ev = json.loads(json.dumps(kalshi_event(series)))  # deep copy
+        if kal_tweak:
+            kal_tweak(series, ev)
+        return {ev["ticker"]: ev}
+
+    monkeypatch.setattr(arb, "kalshi_series_events", fake_series)
+    monkeypatch.setattr(arb, "pmus_search_event", lambda q, d, a: pmus_event)
+    monkeypatch.setattr(arb, "pmus_bbo", lambda slug: bbo)
+
+
+def _juicy(series, ev):
+    """Make Watson 125+ and the PIT ML Kalshi quotes arb-rich at sweep prices.
+    ev is the event dict (already unwrapped from the fixture envelope)."""
+    if series == "KXNFLPASSYDS":
+        for m in ev["markets"]:
+            if m["title"] == "Deshaun Watson: 125+ passing yards":
+                m["yes_bid"], m["yes_ask"] = 90, 92
+    if series == "KXNFLGAME":
+        for m in ev["markets"]:
+            if m["title"] == "Pittsburgh wins":
+                m["yes_bid"], m["yes_ask"] = 95, 97
+
+
+def test_run_cycle_alert_and_cooldown(tmp_path, pmus_event, monkeypatch):
+    _wire(monkeypatch, pmus_event, kal_tweak=_juicy)
+    conn = arb.db_init(str(tmp_path / "arb.db"))
+    cfg = _cfg(str(tmp_path / "arb.db"))
+    s1 = arb.run_cycle(cfg, conn)
+    assert s1["games"] == 1
+    assert s1["pairs"] > 0
+    assert s1["alerts"] >= 2  # Watson 125+ (A) + PIT ML (A)
+    # cooldown suppresses the identical second cycle
+    s2 = arb.run_cycle(cfg, conn)
+    assert s2["alerts"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM cycles").fetchone()[0] == 2
+    fired = conn.execute("SELECT COUNT(*) FROM fired").fetchone()[0]
+    assert fired >= 2
+
+
+def test_run_cycle_unconfirmed_still_alerts(tmp_path, pmus_event, monkeypatch):
+    _wire(monkeypatch, pmus_event, bbo=None, kal_tweak=_juicy)
+    conn = arb.db_init(str(tmp_path / "arb.db"))
+    s = arb.run_cycle(_cfg(str(tmp_path / "arb.db")), conn)
+    assert s["alerts"] >= 1
+    row = conn.execute("SELECT key FROM pairs_log WHERE alerted=1 LIMIT 1").fetchone()
+    assert row is not None
+
+
+def test_run_cycle_high_edge_no_alerts(tmp_path, pmus_event, monkeypatch):
+    _wire(monkeypatch, pmus_event, kal_tweak=_juicy)
+    conn = arb.db_init(str(tmp_path / "arb.db"))
+    s = arb.run_cycle(_cfg(str(tmp_path / "arb.db"), net_edge=999), conn)
+    assert s["alerts"] == 0
+    assert s["pairs"] > 0
+
+
+def test_run_cycle_skips_pregame(tmp_path, pmus_event, monkeypatch):
+    sb = load("espn_pitcle.json")
+    sb["events"][0]["status"]["type"]["state"] = "pre"
+    _wire(monkeypatch, pmus_event, espn=sb, kal_tweak=_juicy)
+    conn = arb.db_init(str(tmp_path / "arb.db"))
+    s = arb.run_cycle(_cfg(str(tmp_path / "arb.db")), conn)
+    assert s["games"] == 0 and s["alerts"] == 0
+
+
+def test_format_alert_contents(pmus_event):
+    p = arb.Pair(key="26OCT01PITCLE|pass_yds|deshaun watson|125", game="26OCT01PITCLE",
+                 stat="pass_yds", name="deshaun watson", line=125,
+                 pm_bid=60, pm_ask=61, kal_bid=90, kal_ask=92,
+                 pm_slug="astatc-nfl-pit-cle-2026-10-01-pyd-deswat-gte125",
+                 kal_title="Deshaun Watson: 125+ passing yards")
+    ev = arb.eval_pair(p)
+    text = arb.format_alert(p, ev, {"detail": "5:00 - 2nd", "score": {"CLE": 0, "PIT": 7}},
+                            confirmed=True)
+    assert "PIT@CLE" in text
+    # A: PM YES 61 + KAL NO 10 = 71; fee 7*.10*.90 = 0.63 -> net +28.4
+    assert "net +28.4" in text
+    assert "polymarket.com/event/" in text
