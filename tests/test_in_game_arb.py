@@ -200,8 +200,9 @@ def _wire(monkeypatch, pmus_event, *, bbo=(60.0, 61.0), espn=None, kal_tweak=Non
 
 
 def _juicy(series, ev):
-    """Make Watson 125+ and the PIT ML Kalshi quotes arb-rich at sweep prices.
-    ev is the event dict (already unwrapped from the fixture envelope)."""
+    """Sweep-time candidates that must NOT alert: Watson 125+ direction-B
+    nets 1.85c (under threshold), PIT ML at 95/97 trips the sanity gate
+    (64pp mid gap). Exercises the sweep-gate paths."""
     if series == "KXNFLPASSYDS":
         for m in ev["markets"]:
             if m["title"] == "Deshaun Watson: 125+ passing yards":
@@ -213,19 +214,24 @@ def _juicy(series, ev):
 
 
 def test_run_cycle_alert_and_cooldown(tmp_path, pmus_event, monkeypatch):
+    """The frozen fixture contains one live arb snapshot (Rodgers 200+ pass
+    yds: PM 60/61 vs KAL 74/75 — a PM-US lag window caught at recapture).
+    _juicy's Watson/PIT tweaks are sweep-time candidates the BBO-confirm
+    sanity re-check must kill (the mock BBO diverges from the juiced Kal
+    quote — exactly the stale-confirm case the re-check exists for)."""
     _wire(monkeypatch, pmus_event, kal_tweak=_juicy)
     conn = arb.db_init(str(tmp_path / "arb.db"))
     cfg = _cfg(str(tmp_path / "arb.db"))
     s1 = arb.run_cycle(cfg, conn)
     assert s1["games"] == 1
     assert s1["pairs"] > 0
-    assert s1["alerts"] >= 2  # Watson 125+ (A) + PIT ML (A)
+    assert s1["alerts"] == 1
+    rows = conn.execute("SELECT pair_key FROM fired").fetchall()
+    assert rows == [("26OCT01PITCLE|pass_yds|aaron rodgers|200",)]
     # cooldown suppresses the identical second cycle
     s2 = arb.run_cycle(cfg, conn)
     assert s2["alerts"] == 0
     assert conn.execute("SELECT COUNT(*) FROM cycles").fetchone()[0] == 2
-    fired = conn.execute("SELECT COUNT(*) FROM fired").fetchone()[0]
-    assert fired >= 2
 
 
 def test_run_cycle_unconfirmed_still_alerts(tmp_path, pmus_event, monkeypatch):
@@ -291,6 +297,76 @@ def test_sanity_gap_blocks_scope_mismatch():
                         pm_bid=70, pm_ask=71, kal_bid=83, kal_ask=87,
                         pm_slug="s", kal_title="t")
     assert arb.sanity_gap_ok(real_arb, 20.0)
+
+
+def test_apply_bbo_inverts_ml_browns_side():
+    """Regression for the 2026-10-02 01:28 ET corrupted alert: the ML market's
+    BBO describes outcomes[0] (Steelers); the Browns pair must re-invert it."""
+    browns = arb.Pair(key="26OCT01PITCLE|ml|browns", game="26OCT01PITCLE", stat="ml",
+                      name="browns", line=0.0, pm_bid=68.0, pm_ask=68.5,
+                      kal_bid=74, kal_ask=75,
+                      pm_slug="aec-nfl-pit-cle-2026-10-01",
+                      kal_title="Cleveland wins", pm_inverted=True)
+    fixed = arb.apply_bbo(browns, (25.5, 26.0))  # raw Steelers book
+    assert (fixed.pm_bid, fixed.pm_ask) == (74.0, 74.5)
+    # honest eval: PM YES 74.5 + KAL NO 26 = 100.5 -> no arb
+    assert arb.eval_pair(fixed)["net"] < 0
+
+
+def test_apply_bbo_passthrough_direct_side():
+    steel = arb.Pair(key="g|ml|steelers", game="g", stat="ml", name="steelers",
+                     line=0.0, pm_bid=31.5, pm_ask=32.0, kal_bid=25, kal_ask=26,
+                     pm_slug="aec-x", kal_title="Pittsburgh wins", pm_inverted=False)
+    fixed = arb.apply_bbo(steel, (30.0, 31.0))
+    assert (fixed.pm_bid, fixed.pm_ask) == (30.0, 31.0)
+
+
+def test_apply_bbo_none_keeps_sweep_prices():
+    p = arb.Pair(key="k", game="g", stat="td", name="q", line=1,
+                 pm_bid=29, pm_ask=31, kal_bid=28, kal_ask=29,
+                 pm_slug="s", kal_title="t")
+    assert arb.apply_bbo(p, None) is p
+
+
+def test_run_cycle_ml_confirm_corruption_regression(tmp_path, monkeypatch):
+    """Full-loop regression for the 01:28 ET corrupted Browns ML alert.
+
+    Live sequence: PM-US had collapsed to Browns-favored (Steelers book
+    31.5/32 -> Browns side 68/68.5 via inversion) while Kalshi still quoted
+    Browns 74/75 — a real ~+4c direction-A window at sweep. The BBO confirm
+    returns the RAW outcomes[0] (Steelers) book; the old code copied it into
+    the Browns pair un-inverted and alerted a nonsense +46.7c arb. Fixed
+    code re-inverts (apply_bbo), the re-evaluated net goes negative, and no
+    alert fires. Minimal synthetic event so fixture-native prop snapshots
+    can't mask the path."""
+    pm_event = {"slug": "nfl-pit-cle-2026-10-01", "title": "Pittsburgh vs. Cleveland",
+                "markets": [{
+                    "slug": "aec-nfl-pit-cle-2026-10-01",
+                    "question": "Who will win in the upcoming football event?",
+                    "sportsMarketType": "football_team_full_game_winner",
+                    "outcomes": "[\"Steelers\",\"Browns\"]",
+                    "outcomePrices": "[\"0.3150\",\"0.3200\"]",
+                }]}
+    kal_game = {"ticker": "KXNFLGAME-26OCT01PITCLE", "title": "PIT Steelers vs CLE Browns",
+                "markets": [
+                    {"title": "Pittsburgh wins", "yes_bid": 25, "yes_ask": 26,
+                     "volume": 500000, "status": "active"},
+                    {"title": "Cleveland wins", "yes_bid": 74, "yes_ask": 75,
+                     "volume": 500000, "status": "active"},
+                ]}
+    monkeypatch.setattr(arb.time, "sleep", lambda s: None)
+    monkeypatch.setattr(arb, "espn_scoreboard", lambda: load("espn_pitcle.json"))
+    monkeypatch.setattr(arb, "kalshi_series_events",
+                        lambda s: {"KXNFLGAME-26OCT01PITCLE": kal_game} if s == "KXNFLGAME" else {})
+    monkeypatch.setattr(arb, "pmus_search_event", lambda q, d, a: pm_event)
+    monkeypatch.setattr(arb, "pmus_bbo", lambda slug: (25.5, 26.0))  # raw Steelers book
+    conn = arb.db_init(str(tmp_path / "arb.db"))
+    s = arb.run_cycle(_cfg(str(tmp_path / "arb.db")), conn)
+    assert s["alerts"] == 0
+    # non-vacuous: the Browns side WAS a sweep-time candidate (~+4c), logged unalerted
+    row = conn.execute("SELECT net_edge, direction FROM pairs_log WHERE key=? AND alerted=0",
+                       ("26OCT01PITCLE|ml|browns",)).fetchone()
+    assert row is not None and row[1] == "A" and row[0] >= 2.0
 
 
 def test_format_alert_contents(pmus_event):

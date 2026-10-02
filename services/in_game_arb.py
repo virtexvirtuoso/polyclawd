@@ -27,6 +27,10 @@ Design facts probed 2026-10-01 (fixtures: tests/fixtures/in_game_arb/):
   PM-US taker fee currently treated as 0 (POLY_ARB_PM_FEE_CENTS to change).
 - The 2026-10-01 20:40 ET catch that motivated this service: Watson 125+
   pass yds, PM YES 71c + KAL NO 25c = 96c, window lasted ~5-7 minutes.
+- The ML market's BBO/search quotes describe outcomes[0] only; the opposite
+  side is the complement (100 - ask / 100 - bid). apply_bbo() re-inverts for
+  the inverted side — confirmed 2026-10-02 01:28 ET when skipping this
+  corrupted an alert (Browns side priced with the Steelers book).
 
 Env:
   POLY_ARB_INTERVAL        seconds between cycles (default 30)
@@ -103,7 +107,8 @@ MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
 STAT_UNITS = {"pass_yds": "pass yds", "rec_yds": "rec yds", "rush_yds": "rush yds",
               "td": "TD", "rec": "receptions", "comp": "completions"}
 
-Pair = namedtuple("Pair", "key game stat name line pm_bid pm_ask kal_bid kal_ask pm_slug kal_title")
+Pair = namedtuple("Pair", "key game stat name line pm_bid pm_ask kal_bid kal_ask "
+                          "pm_slug kal_title pm_inverted", defaults=(False,))
 
 RE_PM_PROP = re.compile(r"^Will (.+?) (?:record|throw) (\d+)\+ (.+?)\?$")
 RE_KAL_PROP = re.compile(r"^(.+?):\s*(\d+)\+\s*(.+?)$")
@@ -488,7 +493,8 @@ def pair_ml(game: str, pm_event: dict, kal_game_event: dict) -> list:
         out.append(Pair(key="%s|ml|%s" % (game, nick), game=game,
                         stat="ml", name=nick, line=0.0,
                         pm_bid=pm_bid, pm_ask=pm_ask, kal_bid=kalq[0], kal_ask=kalq[1],
-                        pm_slug=pm_ml.get("slug") or "", kal_title=km.get("title") or ""))
+                        pm_slug=pm_ml.get("slug") or "", kal_title=km.get("title") or "",
+                        pm_inverted=(i != i0)))
     return out
 
 
@@ -512,6 +518,18 @@ def build_pairs(game: str, pm_event: dict, kal_events: dict) -> list:
         seen.add(p.key)
         deduped.append(p)
     return deduped
+
+
+def apply_bbo(p: Pair, fresh) -> Pair:
+    """Fold a fresh PM-US BBO into a pair. The BBO endpoint reports the
+    outcomes[0] book; for the inverted ML side (pm_inverted=True) the fresh
+    quote must be re-inverted, else the confirm step corrupts the pair
+    (2026-10-02 01:28 ET bug: Browns ML alerted with the Steelers book)."""
+    if fresh is None:
+        return p
+    if p.pm_inverted:
+        return p._replace(pm_bid=100.0 - fresh[1], pm_ask=100.0 - fresh[0])
+    return p._replace(pm_bid=fresh[0], pm_ask=fresh[1])
 
 
 def degenerate_pm(p: Pair) -> bool:
@@ -690,7 +708,11 @@ def run_cycle(cfg: dict, conn: sqlite3.Connection) -> dict:
                 fresh = pmus_bbo(p.pm_slug)
                 time.sleep(2.0)
                 if fresh:
-                    p2 = p._replace(pm_bid=fresh[0], pm_ask=fresh[1])
+                    p2 = apply_bbo(p, fresh)
+                    if not sanity_gap_ok(p2, cfg["sanity_gap"]):
+                        log.info("confirm failed sanity: %s pm %.1f/%.1f kal %.1f/%.1f",
+                                 p.key, p2.pm_bid, p2.pm_ask, p2.kal_bid, p2.kal_ask)
+                        continue
                     ev2 = eval_pair(p2, cfg["pm_fee"])
                     if ev2["net"] >= cfg["net_edge"]:
                         confirmed.append((p2, ev2))
