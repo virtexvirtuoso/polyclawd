@@ -432,6 +432,22 @@ def test_parse_pmus_prop_mlb():
         ("deshaun watson", 125, "pass_yds")
 
 
+def test_parse_pmus_prop_mlb_rejects_combo_and_allowed_stats():
+    """Live CWS@CLE wording 2026-10-03: 'hits + runs + RBIs' (slug hrr) and
+    pitcher 'hits allowed' (slug ha) are different events from Kalshi batter
+    hits — they parsed as 'hits' and produced false arbs up to +15.9c."""
+    assert arb.parse_pmus_prop("Will David Fry record at least 4 hits + runs + RBIs "
+                               "in Game 1: CHI White Sox vs. CLE Guardians?") is None
+    assert arb.parse_pmus_prop("Will Hagen Smith record at least 2 hits allowed "
+                               "in Game 1: CHI White Sox vs. CLE Guardians?") is None
+    # plain batter hits / HR (live wording) still pair
+    assert arb.parse_pmus_prop("Will Braden Montgomery record at least 1 hits "
+                               "in Game 1: CHI White Sox vs. CLE Guardians?") == \
+        ("braden montgomery", 1, "hits")
+    assert arb.parse_pmus_prop("Will Brenton Doyle record at least 1 home runs "
+                               "in CWS vs CLE?") == ("brenton doyle", 1, "hr")
+
+
 def test_parse_kalshi_prop_mlb():
     assert arb.parse_kalshi_prop("Parker Messick: 6+ strikeouts?") == ("parker messick", 6, "ks")
     assert arb.parse_kalshi_prop("Brayan Rocchio: 1+ home runs?") == ("brayan rocchio", 1, "hr")

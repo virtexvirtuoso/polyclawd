@@ -185,9 +185,13 @@ RE_KAL_PROP = re.compile(r"^(.+?):\s*(\d+)\+\s*(.+?)$")
 RE_KAL_TOTAL = re.compile(r"^Full Game:\s*over\s*([0-9.]+)\s+points", re.I)
 # MLB: PM 'Will P Messick record at least 4 pitching strikeouts in Game 1: ...?'
 # (scanner-proven K_RE/HR_RE shapes generalized; singular/plural tolerated).
+# The stat must END at ' in ...' / '?' — PM-US also lists 'hits + runs + RBIs'
+# (slug hrr) and pitcher 'hits allowed' (slug ha); an unanchored match read
+# both as 'hits' and paired them with Kalshi batter hits ladders (different
+# events -> both legs can lose; CWS@CLE 2026-10-03 false arbs up to +15.9c).
 RE_PM_PROP_MLB = re.compile(
     r"Will (.+?) record at least (\d+) (?:pitching )?"
-    r"(strikeouts|home runs?|hits|rbis?|total bases|runs)", re.I)
+    r"(strikeouts|home runs?|hits|rbis?|total bases|runs)(?=\s+in\b|\s*\?|\s*$)", re.I)
 RE_PM_PROP_MLB_K = re.compile(r"Will (.+?) strike out at least (\d+)", re.I)
 # MLB Kalshi totals: 'Over 6.5 runs scored'
 RE_KAL_TOTAL_MLB = re.compile(r"^Over\s+([0-9.]+)\s+runs", re.I)
