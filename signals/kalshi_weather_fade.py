@@ -102,6 +102,7 @@ MAX_SPREAD = 0.05  # on the traded side
 MIN_DEPTH = 50  # contracts at the executable level
 BET_NO = 100.0
 BET_YES = 50.0  # second-confidence tier: half size
+ENABLE_FAVORITE_YES = False  # killed 2026-10-05 per Mr. V: 30 trades, -8.47 USD, no edge
 DATE_EXPOSURE_CAP = 400.0  # across ALL cities, per event calendar date
 MAX_PER_CITY_DATE = 2
 WINDOW_START = (19, 30)  # local
@@ -321,7 +322,7 @@ def evaluate_market(m: dict, city: str, series: str, event_date: date) -> dict:
     if mid < LONGSHOT_MAX_YES and mid > 0:
         side, tier, budget = "NO", STRATEGY_NO, BET_NO
         exec_price, spread = q["no_ask"], (q["no_ask"] - q["no_bid"]) if q["no_bid"] is not None else None
-    elif FAVORITE_MIN <= mid <= FAVORITE_MAX:
+    elif ENABLE_FAVORITE_YES and FAVORITE_MIN <= mid <= FAVORITE_MAX:
         side, tier, budget = "YES", STRATEGY_YES, BET_YES
         exec_price, spread = q["yes_ask"], q["yes_ask"] - q["yes_bid"]
     else:
