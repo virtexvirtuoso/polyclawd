@@ -91,16 +91,25 @@ def _load_breaker() -> dict:
                 data = json.load(f)
                 if isinstance(data, dict):
                     return data
-    except Exception:
-        pass
+    except Exception as e:
+        if BREAKER_FILE.exists():
+            logger.warning(
+                f"breaker state file unreadable ({e}) — treating as untripped"
+            )
     return {"tripped": False}
 
 
 def _save_breaker(state: dict) -> None:
     try:
         BREAKER_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(BREAKER_FILE, "w") as f:
+        # Atomic replace: scheduler + 2 api workers read/write this file
+        # concurrently; a partial write could be read as corrupt JSON, which
+        # _load_breaker treats as "untripped" — silently resetting the breaker
+        # mid-incident (suspected cause of the 4 re-trips on 2026-10-05).
+        tmp = BREAKER_FILE.with_name(f"{BREAKER_FILE.name}.{os.getpid()}.tmp")
+        with open(tmp, "w") as f:
             json.dump(state, f, indent=2)
+        os.replace(tmp, BREAKER_FILE)
     except Exception as e:  # pragma: no cover — never let breaker IO break a fetch
         logger.debug(f"_save_breaker failed: {e}")
 
@@ -111,16 +120,13 @@ def read_breaker() -> dict:
     return _load_breaker()
 
 
-def _breaker_alert(text: str) -> None:
-    """Best-effort Telegram notify. Imported lazily so rate_limiter keeps no
-    hard dependency on the alerting stack (it is imported by standalone
-    scripts that do not ship scripts/openclaw_alerts.py)."""
-    try:
-        from scripts.openclaw_alerts import alert_openclaw
-
-        alert_openclaw(text, channel="telegram")
-    except Exception as e:  # pragma: no cover
-        logger.warning(f"breaker alert not delivered ({e}): {text}")
+# Telegram pages for breaker trip/clear were removed 2026-10-05 at Mr. V's
+# request: the Oct 5 billing lapse re-tripped the breaker 4x in one day and
+# a two-process race doubled every page. The breaker itself is UNCHANGED:
+# it still halts every odds fetch path on 401/403, still releases one
+# half-open probe every BREAKER_PROBE_INTERVAL_S, and still self-clears on
+# the first good response. Trips/clears remain visible in the service
+# journal and via read_breaker() / cache/odds_api_key_breaker.json.
 
 
 def note_auth_failure(status: int, body: str = "", key_prefix: str = "") -> bool:
@@ -157,28 +163,15 @@ def note_auth_failure(status: int, body: str = "", key_prefix: str = "") -> bool
 
     if not already:
         logger.error(
-            f"ODDS API AUTH BREAKER TRIPPED — HTTP {status} {error_code or ''} — "
-            f"all odds fetches halted until a probe succeeds"
-        )
-        reason = {
-            "DEACTIVATED_KEY": "key deactivated — cancellation or failed payment",
-            "MISSING_KEY": "no API key sent — check the service EnvironmentFile",
-            "INVALID_KEY": "key rejected as invalid",
-        }.get(error_code, f"HTTP {status}")
-        _breaker_alert(
-            f"\U0001f6d1 Odds API auth breaker TRIPPED\n"
-            f"key {key_prefix or '?'}… · HTTP {status} {error_code}\n"
-            f"{reason}\n\n"
-            f"All odds fetches are now halted (no retry storm). One probe every "
-            f"{BREAKER_PROBE_INTERVAL_S // 60}min will auto-clear it once the key works.\n"
-            f"Fix: check billing at the-odds-api.com, then the fleet self-heals."
+            f"ODDS API AUTH BREAKER TRIPPED — HTTP {status} {error_code or ''} "
+            f"key {key_prefix or '?'}… — all odds fetches halted until a probe succeeds"
         )
     return not already
 
 
 def note_auth_success() -> None:
-    """Record a successful authenticated call. Clears a tripped breaker and
-    announces recovery once."""
+    """Record a successful authenticated call. Clears a tripped breaker
+    (self-heal); the Telegram recovery page was removed 2026-10-05."""
     state = _load_breaker()
     if not state.get("tripped"):
         return
@@ -191,11 +184,9 @@ def note_auth_success() -> None:
         pass
     _save_breaker({"tripped": False, "recovered_at": datetime.now().isoformat(),
                    "previous_fail_count": int(state.get("fail_count", 0))})
-    logger.info(f"Odds API auth breaker CLEARED{downtime}")
-    _breaker_alert(
-        f"✅ Odds API auth breaker CLEARED{downtime}\n"
-        f"Key is answering again — odds fetches resumed."
-    )
+    # warning, not info: a clear un-halts the whole fleet and must be visible
+    # in the service journal (INFO is filtered from stderr there).
+    logger.warning(f"Odds API auth breaker CLEARED{downtime} — odds fetches resumed")
 
 
 def clear_key_breaker(reason: str = "manual") -> dict:

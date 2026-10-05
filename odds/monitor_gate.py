@@ -103,7 +103,12 @@ def gated_fetch_json(base_url: str, params: Optional[dict] = None,
 
     if rl is not None:
         try:
-            rl.note_auth_success()  # clears a tripped breaker on a good probe
+            # Only a genuine authenticated Odds API response may clear the auth
+            # breaker — gated_fetch_json also serves non-Odds hosts, and a
+            # successful non-Odds fetch used to un-trip it (4 re-trips on
+            # 2026-10-05 while the key was deactivated).
+            if "the-odds-api.com" in base_url:
+                rl.note_auth_success()  # clears a tripped breaker on a good probe
         except Exception:
             pass
         try:

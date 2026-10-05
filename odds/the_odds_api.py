@@ -232,13 +232,31 @@ def _record_credits(remaining, used) -> None:
         pass
 
 
+def _response_is_authed_odds(resp) -> bool:
+    """True only for a successful, authenticated Odds API response — the only
+    thing that may clear the auth breaker. A 401 from the Odds API itself
+    (betfair_edge/pitcher_profile pass the raw requests response here without
+    raising) and a 200 from any other host (statsapi, Kalshi) carry no
+    x-requests-remaining header. Added 2026-10-05: unguarded clears un-tripped
+    the breaker within minutes and it re-tripped 4x in one day (Oct 5 billing
+    lapse)."""
+    try:
+        status = getattr(resp, "status_code", None)
+        if status is None:
+            status = getattr(resp, "status", None)
+        return int(status) == 200 and resp.headers.get("x-requests-remaining") is not None
+    except Exception:
+        return False
+
+
 def _track_credits_from_response(resp) -> None:
     """Extract credit usage from response headers if present."""
     try:
         _record_credits(resp.headers.get("x-requests-remaining"), resp.headers.get("x-requests-used"))
     except (AttributeError, TypeError):
         pass
-    _note_auth_ok()
+    if _response_is_authed_odds(resp):
+        _note_auth_ok()
 
 
 def _note_auth_exc(e: Exception) -> None:
@@ -686,7 +704,8 @@ def health_probe(timeout: int = 5) -> Tuple[bool, str]:
         req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
-            _note_auth_ok()
+            if _response_is_authed_odds(resp):
+                _note_auth_ok()
             return True, f"{len(data) if isinstance(data, list) else 0} sports"
     except Exception as e:
         _note_auth_exc(e)
