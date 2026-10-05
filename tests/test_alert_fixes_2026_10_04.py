@@ -254,8 +254,9 @@ def test_send_digest(monkeypatch):
     monkeypatch.setattr(tg, "save_state", lambda s: state.update(s))
     monkeypatch.setattr(tg, "load_clob_fired", lambda: set())
     monkeypatch.setattr(tg, "get_top_alerts", lambda: [
+        # flow must clear the Kalshi no-wallet fallback (>= $25K) to be actionable
         {"market": "KXB", "platform": "kalshi", "title": "B wins", "score": 7,
-         "flow_dollars": 8000},
+         "flow_dollars": 30000},
         {"market": "KXA", "platform": "kalshi", "title": "A wins", "score": 9,
          "flow_dollars": 50000},
     ])
@@ -294,5 +295,5 @@ def test_recap_renders_shadow_and_paper_rows(monkeypatch):
     strat = [f for f in fields if f["name"] == "By Strategy"][0]["value"]
     assert "MLB Props (shadow)" in strat and "40% WR" in strat
     assert "$0" not in strat, "shadow rows must not render a fake $0 P&L"
-    assert "Whale KX (paper)" in strat and "-$500" in strat
+    assert "Whale KX (paper)" in strat and "$-500" in strat  # renderer sign convention
     assert "Whale PM (paper)" in strat and "+$2500" in strat
