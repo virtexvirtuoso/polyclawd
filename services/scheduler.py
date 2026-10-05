@@ -1831,7 +1831,44 @@ def task_weekly_recap():
     worst_d = {"pnl": worst["pnl"], "market_title": worst["market_title"]} if worst else None
 
     start_bankroll = bankroll - pnl
-    alert_weekly_recap(bankroll, start_bankroll, len(closed), wins, pnl, best_d, worst_d, open_count)
+
+    # 2026-10-04 audit: the recap must carry the alert scoreboard — paper
+    # whale-follower P&L (whale_meta.db, maintained by whale_outcomes) and
+    # the MLB prop shadow record. Read-only, best-effort; never blocks the recap.
+    strategies = {}
+    try:
+        wmeta = sqlite3.connect(str(PROJECT_ROOT / "storage" / "whale_meta.db"), timeout=10)
+        wmeta.row_factory = sqlite3.Row
+        week_ago_ts = time.time() - 7 * 86400
+        for prow in wmeta.execute(
+            "SELECT platform, COUNT(*) n, SUM(pnl_net) pnl, "
+            "SUM(CASE WHEN pnl_net>0 THEN 1 ELSE 0 END) w "
+            "FROM whale_follows WHERE pnl_net IS NOT NULL AND ts_entry >= ? "
+            "GROUP BY platform", (week_ago_ts,)).fetchall():
+            if prow["n"]:
+                strategies[f"whale_{prow['platform']}"] = {
+                    "pnl": prow["pnl"] or 0.0,
+                    "wr": (prow["w"] or 0) / prow["n"] * 100.0,
+                    "n": prow["n"],
+                }
+        wmeta.close()
+    except Exception as e:
+        logger.debug("weekly recap whale attribution skipped: %s", e)
+    try:
+        prow = conn.execute(
+            "SELECT COUNT(*) n, SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) w "
+            "FROM mlb_prop_shadow WHERE resolved_at >= ?", (week_ago,)).fetchone()
+        if prow and prow["n"]:
+            strategies["mlb_props"] = {
+                "pnl": None,  # shadow record: win-rate evidence only, no $ sizing
+                "wr": (prow["w"] or 0) / prow["n"] * 100.0,
+                "n": prow["n"],
+            }
+    except Exception as e:
+        logger.debug("weekly recap prop record skipped: %s", e)
+
+    alert_weekly_recap(bankroll, start_bankroll, len(closed), wins, pnl, best_d, worst_d, open_count,
+                       strategies=strategies)
     conn.close()
 
     # Scorecard

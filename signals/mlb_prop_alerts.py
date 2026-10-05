@@ -49,9 +49,20 @@ STATS_API_11 = "https://statsapi.mlb.com/api/v1.1"
 
 # ── Tunables (mirror the plan) ───────────────────────────────────────────────
 MIN_GAMES = 7                   # SCAN floor — keeps the control sample broad
-ALERT_MIN_GAMES = 15            # ALERT floor (audit 2026-07-07: n=7 hit rates
-#                                 predicted 75% vs 44% realized; at n=7 one 6/7
-#                                 streak inflates the estimate ~14pp vs ~7pp at n=15)
+ALERT_MIN_GAMES = 20            # ALERT floor. 2026-10-04: raised 15→20 — every
+#                                 alert is an L20-window rate, so a 15-game
+#                                 sample lets one hot streak inflate it ~7pp.
+#                                 (audit 2026-07-07: n=7 inflated ~14pp vs ~7pp at n=15)
+
+# ── Playoff gate (audit 2026-10-04: 3/3 alerts lost — all postseason games
+# priced off regular-season form; short hooks + bullpen games are a different
+# regime. See vault Research/Sports-Props/MLB-Prop-Playoff-Gate-Research-2026-10-04.md)
+# statsapi gameType: R=regular, A=all-star, S=spring; anything else (F/D/L/W)
+# is postseason. Shadow rows still log (alerted=0 in the scan log) so the
+# control sample and any future playoff-calibration study keep their data.
+POSTSEASON_EXEMPT = frozenset({"R", "A", "S"})
+MID_MOVE_BLOCK_PP = 3.0         # skip alert if Kalshi fair already moved this far toward the pick
+KALSHI_CARRIED_MARKETS = ("pitcher_strikeouts", "batter_hits", "batter_home_runs")
 
 # ── Calibration: Capped Hit Rate (replaces flat discount 2026-07-13) ────────
 # Audit showed scout overconfidence grows nonlinearly: at 80%+ predicted,
@@ -102,6 +113,29 @@ def calibrated_edge_pct(hit_rate_pct: float, book_over_pct: float) -> float:
     raw_hr = hit_rate_pct / 100.0
     adj_hr = calibrated_hit_rate(raw_hr)
     return round((adj_hr - book_over_pct / 100.0) * 100, 1)
+
+
+def is_postseason(game_type: Optional[str]) -> bool:
+    """True when the statsapi gameType is not a regular-season code."""
+    return (game_type or "R") not in POSTSEASON_EXEMPT
+
+
+def mid_moved_toward_pick(fair: float, book_over_pct: float, hit_rate_pct: float,
+                          tol_pp: float = MID_MOVE_BLOCK_PP) -> bool:
+    """True when the Kalshi fair prob has already moved >= tol_pp toward the
+    pick the alert would make — the market got there first, the 'edge' is gone.
+    (The 2026-10-04 audit: avg CLV -4.76pp = we systematically buy the move.)"""
+    book = book_over_pct / 100.0
+    lean = (hit_rate_pct / 100.0) - book
+    if lean == 0:
+        return False
+    move = fair - book
+    return abs(move) >= tol_pp / 100.0 and (move > 0) == (lean > 0)
+
+
+def taker_fee_pp(price: float) -> float:
+    """Kalshi taker fee in percentage points at probability `price` (0-1)."""
+    return 0.07 * price * (1.0 - price) * 100.0
 
 
 # ============================================================================
@@ -240,6 +274,7 @@ def build_scan_windows(date_str: Optional[str] = None) -> List[Dict]:
                 "window_start": gt - timedelta(hours=WINDOW_OPEN_H),
                 "window_end": gt - timedelta(hours=WINDOW_CLOSE_H),
                 "status": g.get("status", {}).get("abstractGameState", ""),
+                "game_type": g.get("gameType", "R"),
             }
         )
     return windows
@@ -454,6 +489,7 @@ async def run_prop_alert_scan(now: Optional[datetime] = None) -> Dict:
 
     scanned = 0
     to_alert: List[Dict] = []
+    kalshi_rows: Optional[List[Dict]] = None   # lazy cache for the mid-move guard
     ts = time.time()
 
     for row in results:
@@ -464,6 +500,7 @@ async def run_prop_alert_scan(now: Optional[datetime] = None) -> Dict:
             continue
         w = win_by_pk.get(game_pk, {})
         wk = _window_kind(now, w) if w else "unknown"
+        playoff = is_postseason(w.get("game_type") if w else None)
 
         player = row.get("player", "")
         pid = _lookup_player_id(player)  # warm from the scout run
@@ -489,6 +526,27 @@ async def run_prop_alert_scan(now: Optional[datetime] = None) -> Dict:
             qualifies = False
         else:
             qualifies = calibrated_edge >= CALIBRATION_MIN_EDGE_PP and confirmed and (row.get("games_sampled", 0) >= ALERT_MIN_GAMES)
+        if qualifies and playoff:
+            # Postseason gate: keep the shadow (paper) record so playoff
+            # calibration stays measurable, but never alert these.
+            qualifies = False
+            row["_playoff_blocked"] = True
+        if qualifies and market in KALSHI_CARRIED_MARKETS:
+            # Mid-move guard: skip when Kalshi fair already moved >=3pp toward
+            # the pick — alerting it just buys the move that already happened.
+            if kalshi_rows is None:
+                try:
+                    from odds.kalshi_props import get_kalshi_prop_scan
+                    kalshi_rows = (await get_kalshi_prop_scan(min_edge_pct=0.0)).get("results", [])
+                except Exception as e:  # pragma: no cover
+                    logger.debug(f"kalshi mid-move guard unavailable: {e}")
+                    kalshi_rows = []
+            if kalshi_rows:
+                from odds.kalshi_props import kalshi_fair_lookup
+                fair = kalshi_fair_lookup(kalshi_rows, player, market, float(row.get("prop_line", 0.5)))
+                if fair is not None and mid_moved_toward_pick(fair, book, hr):
+                    qualifies = False
+                    row["_mid_moved"] = True
 
         # Dedup / cooldown (mirror task_edge_alerts).
         will_alert = False
@@ -612,6 +670,7 @@ def _push_alerts(rows: List[Dict]) -> None:
         for r in rows[:8]:
             player = r.get('player', '?')
             stat = r.get('stat_label', '?')
+            market = r.get('market', '')
             line = r.get('prop_line', '?')
             hr = r.get('hit_rate_pct', 0) or 0
             book = r.get('book_over_pct', 0) or 0
@@ -659,6 +718,12 @@ def _push_alerts(rows: List[Dict]) -> None:
                 f"   Hit {hr:.0f}% (L{games}) vs book {book:.0f}% → "
                 f"<b>+{cal_edge:.1f}pp</b> edge"
             )
+            if market in KALSHI_CARRIED_MARKETS:
+                fee_pp = taker_fee_pp(book / 100.0)
+                lines.append(
+                    f"   After Kalshi taker fee ≈ +{max(cal_edge - fee_pp, 0):.1f}pp "
+                    f"(fee ≈ {fee_pp:.1f}pp at {book:.0f}¢)"
+                )
             if adj_hr is not None and abs(adj_hr - hr) > 1:
                 lines.append(
                     f"   Adj: {adj_hr:.0f}% (park+platoon+statcast)"

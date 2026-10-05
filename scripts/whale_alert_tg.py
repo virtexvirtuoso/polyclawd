@@ -48,6 +48,18 @@ CLOB_FUSION_WINDOW = 15 * 60   # 15 min — CLOB×scanner fusion window
 PM_ANON_FLOW_FLOOR = 75_000   # PM anon flow above this bypasses smart-wallet gate
 PM_FUTURES_HTR_MAX = 720      # 30 days — WC futures have HTR 336-672h
 
+# ── Precision gate + digest mode (2026-10-04 audit) ─────────────────
+# whale_outcomes.py measures every alert's direction-precision; fingerprints
+# (platform, market) that resolved against the whale's direction are noise.
+PRECISION_MIN = 0.50          # suppress below coin-flip resolution precision
+PRECISION_LOOKBACK_DAYS = 90
+PRECISION_MIN_N = 10          # need this many graded alerts before suppressing
+DIGEST_TOP_N = 10
+DASHBOARD_URL = "https://virtuosocrypto.com/polyclawd/whale-flow.html"
+PRECISION_DB_PATH = _Path(_ROOT) / "storage" / "whale_meta.db"
+_PRECISION_CACHE = {"ts": 0.0, "map": {}}
+_PRECISION_TTL_S = 600        # 10 min — the outcomes task refreshes every 30
+
 
 def load_state():
     """State: {market: {ts, score}} — tracks last send time + score."""
@@ -97,6 +109,49 @@ def get_top_alerts():
     return alerts
 
 
+def _load_precision_map() -> dict:
+    """(platform, market) -> (avg precision, n) with a 10-min cache.
+
+    is_actionable() runs per alert; whale_outcomes is a multi-million-row
+    table, so the GROUP BY must not run per call. Fails open (empty map) on
+    any failure — attribution gaps never break delivery.
+    """
+    now = time.time()
+    if now - _PRECISION_CACHE["ts"] < _PRECISION_TTL_S:
+        return _PRECISION_CACHE["map"]
+    import sqlite3 as _sq
+    out = {}
+    if PRECISION_DB_PATH.exists():
+        try:
+            conn = _sq.connect(str(PRECISION_DB_PATH), timeout=10)
+            cut = now - PRECISION_LOOKBACK_DAYS * 86400
+            rows = conn.execute(
+                "SELECT platform, market, AVG(correct_res) p, COUNT(*) n "
+                "FROM whale_outcomes WHERE correct_res IS NOT NULL AND ts >= ? "
+                "GROUP BY platform, market", (cut,)).fetchall()
+            conn.close()
+            out = {(p, m): (avg, n) for p, m, avg, n in rows}
+        except Exception:
+            out = {}
+    _PRECISION_CACHE["ts"] = now
+    _PRECISION_CACHE["map"] = out
+    return out
+
+
+def _precision_ok(platform: str, market: str, pmap: dict = None) -> bool:
+    """False only when this exact market has >= PRECISION_MIN_N graded alerts
+    in the lookback AND precision < PRECISION_MIN. Fails open otherwise."""
+    if pmap is None:
+        pmap = _load_precision_map()
+    hit = pmap.get((platform, market))
+    if not hit:
+        return True
+    avg, n = hit
+    if n is None or n < PRECISION_MIN_N:
+        return True
+    return (avg or 0) >= PRECISION_MIN
+
+
 def is_actionable(alert):
     score = alert.get("score", 0)
     htr = alert.get("hours_to_resolve")
@@ -119,6 +174,11 @@ def is_actionable(alert):
     if wr is not None and wallet_n is not None and wallet_n >= MIN_WALLET_N:
         if wr < MIN_WALLET_WR:
             return False
+    # ── Precision gate (2026-10-04): suppress fingerprints the outcome
+    # tracker measures as worse than a coin flip. Fails open when attribution
+    # has no data for this market yet.
+    if not _precision_ok(alert.get("platform", ""), alert.get("market", "")):
+        return False
     # ── Close-time guard: skip resolved markets ──────────────────────
     close_iso = alert.get("close_time", "")
     if close_iso:
@@ -1053,6 +1113,50 @@ def send_single(alert: dict) -> bool:
     return ok
 
 
+def send_digest() -> bool:
+    """Ranked top-10 digest (WHALE_DIGEST_MODE=1 / --digest), 3x/day.
+    Replaces the per-alert drip; live CRITICALs keep their instant path via
+    whale_scanner._fire_alert_live. Marks sent-state so the drip path and
+    the next digest both dedup against these markets."""
+    state = load_state()
+    now = time.time()
+    alerts = [a for a in get_top_alerts() if is_actionable(a)]
+    # Dedup against markets already sent (by a previous digest or the live
+    # CRITICAL path) inside the standard window — the digest must not re-ping
+    # what an earlier send already covered.
+    alerts = [a for a in alerts if should_send(a, state, now)[0]]
+    if not alerts:
+        print("NO_NEW_WHALE_ALERTS")
+        return True
+    # Rank: CLOB double-confirmation first, then score, then flow size.
+    clob_fired = load_clob_fired()
+    alerts.sort(key=lambda a: (
+        a.get("market", "") in clob_fired,
+        a.get("score", 0),
+        a.get("flow_dollars", 0) or 0,
+    ), reverse=True)
+    top = alerts[:DIGEST_TOP_N]
+
+    lines = [f"🦈 <b>Whale Digest</b> — top {len(top)} of {len(alerts)} actionable\n"]
+    for i, a in enumerate(top, 1):
+        mkt = a.get("market", "")
+        title = _esc((a.get("title") or mkt)[:60])
+        plat = "K" if a.get("platform") == "kalshi" else "PM"
+        flow = a.get("flow_dollars", 0) or 0
+        htr = a.get("hours_to_resolve")
+        htr_s = f", closes {htr:.0f}h" if isinstance(htr, (int, float)) else ""
+        dbl = " ✕2" if mkt in clob_fired else ""
+        lines.append(f"{i}. [{plat}]{dbl} <b>{title}</b> — ${flow:,.0f} flow, score {a.get('score', 0)}{htr_s}")
+    lines.append(f"\n<a href='{DASHBOARD_URL}'>Full tape</a>")
+
+    ok = send_tg("\n".join(lines))
+    if ok:
+        for a in top:
+            state[a.get("market", "")] = {"ts": now, "score": a.get("score", 0)}
+        save_state(state)
+    return ok
+
+
 def main():
     import sys as _sys
     if "--single" in _sys.argv:
@@ -1060,6 +1164,13 @@ def main():
         alert = json.loads(_sys.stdin.read())
         ok = send_single(alert)
         print(f"Sent: {ok}")
+        return
+
+    # 2026-10-04: digest is the DEFAULT (48h audit — unranked drip, zero
+    # attribution). --drip restores the legacy per-alert behavior.
+    if "--drip" not in _sys.argv:
+        ok = send_digest()
+        print(f"Digest sent: {ok}")
         return
 
     state = load_state()

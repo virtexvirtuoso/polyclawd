@@ -147,6 +147,9 @@ def _strategy_label(strategy: str) -> str:
         "weather": "Weather",
         "weather_ensemble": "Weather",
         "whale_wall": "Whale Wall",
+        "whale_polymarket": "Whale PM (paper)",
+        "whale_kalshi": "Whale KX (paper)",
+        "mlb_props": "MLB Props (shadow)",
         "category_mispricing": "Category",
         "hf_latency_divergence": "HF Latency",
         "hf_virtuoso_trigger": "HF Trigger",
@@ -161,6 +164,9 @@ def _strategy_emoji(strategy: str) -> str:
         "weather": "🌡️",
         "weather_ensemble": "🌡️",
         "whale_wall": "🐋",
+        "whale_polymarket": "🐋",
+        "whale_kalshi": "🐋",
+        "mlb_props": "⚾",
         "category_mispricing": "📊",
         "hf_latency_divergence": "⚡",
         "hf_virtuoso_trigger": "⚡",
@@ -558,13 +564,17 @@ def alert_weekly_recap(bankroll: float, start_bankroll: float,
     # Strategy breakdown
     if strategies:
         lines = []
-        for strat, stats in sorted(strategies.items(), key=lambda x: abs(x[1].get("pnl", 0)), reverse=True):
+        for strat, stats in sorted(strategies.items(), key=lambda x: abs(x[1].get("pnl") or 0), reverse=True):
             label = _strategy_label(strat)
             emoji = _strategy_emoji(strat)
             s_pnl = stats.get("pnl", 0)
             s_wr = stats.get("wr", 0)
             s_n = stats.get("n", 0)
-            lines.append(f"{emoji} **{label}**: {'+'if s_pnl>=0 else ''}${s_pnl:.0f} ({s_wr:.0f}%, {s_n} trades)")
+            if s_pnl is None:
+                # Shadow record: win-rate evidence only — never render a fake $0.
+                lines.append(f"{emoji} **{label}**: {s_wr:.0f}% WR ({s_n} shadow)")
+            else:
+                lines.append(f"{emoji} **{label}**: {'+'if s_pnl>=0 else ''}${s_pnl:.0f} ({s_wr:.0f}%, {s_n} trades)")
         if lines:
             fields.append({"name": "By Strategy", "value": "\n".join(lines[:6]), "inline": False})
 
