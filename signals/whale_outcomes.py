@@ -300,7 +300,7 @@ def backfill(meta: sqlite3.Connection, only_directional: bool = False,
     fresh = meta.execute(
         "SELECT * FROM whale_outcomes WHERE done=0"
         " AND price_1h IS NULL AND COALESCE(price_1h_missed,0)=0"
-        " AND ts <= ? AND ts > ?" + directional + plat_sql +
+        " AND ts <= ? AND ts > ?" + plat_sql +
         " ORDER BY ts LIMIT ?",
         (now - H1, now - H1 - H1_TOL, *plat_args, FRESH_CAP)).fetchall()
     due = meta.execute(

@@ -254,8 +254,8 @@ def test_send_digest(monkeypatch):
     monkeypatch.setattr(tg, "save_state", lambda s: state.update(s))
     monkeypatch.setattr(tg, "load_clob_fired", lambda: set())
     monkeypatch.setattr(tg, "get_top_alerts", lambda: [
-        # flow must clear the Kalshi no-wallet fallback (>= $25K) to be actionable
-        {"market": "KXB", "platform": "kalshi", "title": "B wins", "score": 7,
+        # both must clear the Kalshi no-wallet fallback (flow >= $25K AND score >= 9)
+        {"market": "KXB", "platform": "kalshi", "title": "B wins", "score": 9,
          "flow_dollars": 30000},
         {"market": "KXA", "platform": "kalshi", "title": "A wins", "score": 9,
          "flow_dollars": 50000},
