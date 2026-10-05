@@ -56,6 +56,11 @@ H1, H6 = 3600, 6 * 3600
 # rather than a wrong number.
 H1_TOL, H6_TOL = 3 * 3600, 12 * 3600
 BACKFILL_CAP = 500     # price lookups per run (batched, so cheap)
+# Priority lane (2026-10-04): rows inside the 1h sampling window must be
+# sampled THIS pass or the horizon is lost forever (price_1h_missed). The
+# age-ordered backlog (1.9M rows) otherwise starves them — measured:
+# 0 of 2.98M rows ever got a 1h price.
+FRESH_CAP = 200
 GIVE_UP_AFTER = 35 * 24 * 3600   # stop chasing resolution after 35 days
 
 
@@ -289,6 +294,15 @@ def backfill(meta: sqlite3.Connection, only_directional: bool = False,
     # Batch is ORDER BY ts across BOTH platforms, so the platform with the older
     # tail starves the other. Scope it when one platform must actually finish.
     plat_sql, plat_args = (" AND platform = ?", [platform]) if platform else ("", [])
+    # Priority lane: alerts whose 1h horizon is OPEN RIGHT NOW (ts within
+    # [now-H1-H1_TOL, now-H1]). They jump the age-ordered queue — a missed
+    # tolerance is unrecoverable, an old row can wait a pass.
+    fresh = meta.execute(
+        "SELECT * FROM whale_outcomes WHERE done=0"
+        " AND price_1h IS NULL AND COALESCE(price_1h_missed,0)=0"
+        " AND ts <= ? AND ts > ?" + plat_sql +
+        " ORDER BY ts LIMIT ?",
+        (now - H1, now - H1 - H1_TOL, *plat_args, FRESH_CAP)).fetchall()
     due = meta.execute(
         "SELECT * FROM whale_outcomes WHERE done=0 AND ("
         " (price_1h IS NULL AND COALESCE(price_1h_missed,0)=0 AND ts <= ?) OR"
@@ -297,8 +311,15 @@ def backfill(meta: sqlite3.Connection, only_directional: bool = False,
         + directional + plat_sql +
         " AND ts <= ? ORDER BY ts LIMIT ?",
         (now - H1, now - H6, *plat_args, now - H1, BACKFILL_CAP)).fetchall()
+    seen, merged = set(), []
+    for r in list(fresh) + list(due):
+        if r["alert_id"] in seen:
+            continue
+        seen.add(r["alert_id"])
+        merged.append(r)
+    due = merged
     if not due:
-        return {"due": 0}
+        return {"due": 0, "fresh_lane": len(fresh)}
 
     k_tickers = sorted({r["market"] for r in due if r["platform"] == "kalshi"})
     p_slugs = sorted({r["market"] for r in due if r["platform"] == "polymarket"})
