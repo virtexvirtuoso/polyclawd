@@ -6,7 +6,18 @@ fire with any runway. New floor reserves 5% (250K) for critical crons.
 
 Run: venv/bin/python -m pytest tests/test_rate_limiter_5m_plan.py -v --noconftest
 """
+import pytest
+
 from odds import rate_limiter as rl
+
+
+@pytest.fixture(autouse=True)
+def _isolate_breaker(tmp_path, monkeypatch):
+    """Hermetic breaker state. Without this the suite reads the PROD
+    cache/odds_api_key_breaker.json and fails whenever the real breaker is
+    tripped (observed 2026-10-04/05: can_make_call returned the breaker
+    reason instead of the floor reason)."""
+    monkeypatch.setattr(rl, "BREAKER_FILE", tmp_path / "breaker.json")
 
 
 def test_constants_match_5m_plan():
