@@ -7,6 +7,11 @@ Source of truth: odds/rate_limiter.py (BREAKER_* block + can_make_call).
 Provenance: the original copy of this file died with the ~/Desktop/polyclawd
 tree on 2026-09-14 and was never committed; this rewrite was recovered from
 the stale .pyc test-name list plus the live VPS implementation.
+
+2026-10-05: Telegram trip/clear pages removed at Mr. V's request (the Oct 5
+billing lapse re-tripped 4x and a two-process race doubled every page).
+Tests now assert the breaker trips/clears WITHOUT paging; the halt + probe
+self-heal behaviour is unchanged.
 """
 
 import sys
@@ -68,22 +73,21 @@ def test_untripped_by_default_and_gate_open(isolate):
     assert rl.can_make_call("critical") == (True, "OK")
 
 
-def test_401_deactivated_trips_and_alerts_once(isolate):
+def test_401_deactivated_trips_without_paging(isolate):
     assert _trip() is True
     state = rl.read_breaker()
     assert state["tripped"] is True
     assert state["status"] == 401
     assert state["error_code"] == "DEACTIVATED_KEY"
     assert state["fail_count"] == 1
-    assert len(isolate.alerts) == 1
-    assert "TRIPPED" in isolate.alerts[0]
-    assert "DEACTIVATED_KEY" in isolate.alerts[0]
+    # Telegram pages removed 2026-10-05 (Mr. V request): tripping must NOT page.
+    assert isolate.alerts == []
 
     # A failure on an already-tripped breaker updates the count but must NOT
-    # re-alert — one page per incident, not one per retry.
+    # re-alert — one journal line per incident, never a page.
     assert _trip() is False
     assert rl.read_breaker()["fail_count"] == 2
-    assert len(isolate.alerts) == 1
+    assert isolate.alerts == []
 
 
 def test_tripped_breaker_blocks_every_priority_including_critical(isolate):
@@ -127,21 +131,20 @@ def test_half_open_releases_exactly_one_probe_per_interval(isolate, shift_clock)
     assert rl.breaker_blocks()[0] is True
 
 
-def test_success_clears_breaker_and_announces_recovery(isolate):
+def test_success_clears_breaker_silently(isolate):
     _trip()
-    assert len(isolate.alerts) == 1  # the TRIPPED page
+    assert isolate.alerts == []  # no TRIPPED page anymore
 
     rl.note_auth_success()
     state = rl.read_breaker()
     assert state["tripped"] is False
     assert "recovered_at" in state
-    assert len(isolate.alerts) == 2
-    assert "CLEARED" in isolate.alerts[-1]
+    assert isolate.alerts == []  # no CLEARED page either
     assert rl.breaker_blocks() == (False, "OK")
 
-    # Recovery announces once; a success on an already-clear breaker is a no-op.
+    # Recovery is a no-op on an already-clear breaker.
     rl.note_auth_success()
-    assert len(isolate.alerts) == 2
+    assert isolate.alerts == []
 
 
 def test_corrupt_breaker_file_fails_open(isolate):
@@ -158,3 +161,49 @@ def test_clear_key_breaker_escape_hatch(isolate):
     assert prior["tripped"] is True
     assert rl.read_breaker()["tripped"] is False
     assert rl.breaker_blocks() == (False, "OK")
+
+
+def test_track_credits_only_clears_on_authed_odds_response(isolate):
+    """Regression 2026-10-05: betfair_edge/pitcher_profile hand the raw
+    requests response to _track_credits_from_response — a 401 used to clear
+    the tripped breaker (4 re-trips in one day). Only a 200 carrying
+    x-requests-remaining may clear."""
+    from odds import the_odds_api as toa
+
+    _trip()
+    toa._track_credits_from_response(SimpleNamespace(status_code=401, headers={}))
+    toa._track_credits_from_response(SimpleNamespace(status_code=200, headers={}))
+    assert rl.read_breaker()["tripped"] is True
+
+    toa._track_credits_from_response(
+        SimpleNamespace(status_code=200, headers={"x-requests-remaining": "4999999"})
+    )
+    assert rl.read_breaker()["tripped"] is False
+
+
+def test_monitor_gate_non_odds_success_does_not_clear(isolate, shift_clock, monkeypatch):
+    """While tripped, the half-open probe slot can be consumed by a non-Odds
+    gated fetch (whale_alert_tg etc.); its success must NOT clear the breaker."""
+    import odds.monitor_gate as mg
+
+    _trip()
+    shift_clock(rl.BREAKER_PROBE_INTERVAL_S + 1)  # release exactly one probe
+
+    class FakeResp:
+        headers = {"x-requests-remaining": "4999999"}
+
+        def read(self):
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        mg.urllib.request, "urlopen", lambda req, timeout=10: FakeResp()
+    )
+    data = mg.gated_fetch_json("https://api.elections.kalshi.com/trade-api/v2", {"limit": 1})
+    assert data == {}
+    assert rl.read_breaker()["tripped"] is True
