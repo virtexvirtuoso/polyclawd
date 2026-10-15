@@ -240,6 +240,35 @@ def test_concurrent_cache_writes_never_expose_a_partial_file(tmp_path, monkeypat
     assert bad == []
 
 
+def test_cached_tool_without_path_is_not_trusted(tmp_path, monkeypatch):
+    _fresh_registry(monkeypatch, tmp_path)
+    no_path = [{k: v for k, v in _SAMPLE[0].items() if k != "_path"}]
+    server.CACHE_PATH.write_text(json.dumps({"fingerprint": server._CODE_FINGERPRINT, "tools": no_path}))
+    import threading
+
+    callers = []
+
+    def discover(base_url=None):
+        callers.append(threading.current_thread() is threading.main_thread())
+        return [dict(_SAMPLE[0], name="polyclawd_fresh")]
+
+    monkeypatch.setattr(server, "discover_tools", discover)
+    server.get_tools()
+    assert callers and callers[0] is True  # untrusted cache -> synchronous fetch, not a background refresh
+
+
+def test_tool_call_exception_returns_error_and_server_keeps_serving(monkeypatch, capsys):
+    def boom(name, arguments):
+        raise KeyError("_path")
+
+    monkeypatch.setattr(server, "handle_tool_call", boom)
+    server._handle_request({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "x", "arguments": {}}})
+    server._handle_request({"jsonrpc": "2.0", "id": 8, "method": "initialize", "params": {}})
+    out = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert out[0]["id"] == 7 and out[0]["error"]["code"] == -32603
+    assert out[1]["id"] == 8 and "result" in out[1]
+
+
 SERVER = os.path.join(os.path.dirname(__file__), "server.py")
 
 

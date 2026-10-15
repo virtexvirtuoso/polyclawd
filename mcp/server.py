@@ -299,7 +299,9 @@ def _read_cache() -> tuple[Optional[str], Optional[list[dict]]]:
     if isinstance(data, dict):
         fingerprint, tools = data.get("fingerprint"), data.get("tools")
     # any shape this module would not have written is treated as no cache, never as a crash
-    if not isinstance(tools, list) or not all(isinstance(t, dict) and isinstance(t.get("name"), str) for t in tools):
+    if not isinstance(tools, list) or not all(
+        isinstance(t, dict) and isinstance(t.get("name"), str) and isinstance(t.get("_path"), str) for t in tools
+    ):
         return None, None
     return fingerprint, tools
 
@@ -434,35 +436,44 @@ def main():
             request = json.loads(line)
         except json.JSONDecodeError:
             continue
+        _handle_request(request)
 
-        id = request.get("id")
-        method = request.get("method")
-        params = request.get("params", {})
 
-        if method == "initialize":
-            send_response(
-                id,
-                {
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "serverInfo": {"name": "polyclawd", "version": "2.1.0"},
-                    "capabilities": {"tools": {}},
-                },
-            )
+def _handle_request(request: dict) -> None:
+    """Answer one JSON-RPC request; a failure becomes an error reply instead of ending the stdio session."""
+    id = request.get("id")
+    try:
+        _dispatch(id, request.get("method"), request.get("params", {}))
+    except Exception as e:
+        logger.exception("request %s failed", request.get("method"))
+        send_error(id, -32603, f"Internal error: {type(e).__name__}: {e}")
 
-        elif method == "notifications/initialized":
-            pass
 
-        elif method == "tools/list":
-            send_response(id, {"tools": get_tools()})
+def _dispatch(id, method, params) -> None:
+    if method == "initialize":
+        send_response(
+            id,
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "serverInfo": {"name": "polyclawd", "version": "2.1.0"},
+                "capabilities": {"tools": {}},
+            },
+        )
 
-        elif method == "tools/call":
-            tool_name = params.get("name")
-            arguments = params.get("arguments", {})
-            result = handle_tool_call(tool_name, arguments)
-            send_response(id, {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]})
+    elif method == "notifications/initialized":
+        pass
 
-        else:
-            send_error(id, -32601, f"Method not found: {method}")
+    elif method == "tools/list":
+        send_response(id, {"tools": get_tools()})
+
+    elif method == "tools/call":
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {})
+        result = handle_tool_call(tool_name, arguments)
+        send_response(id, {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]})
+
+    else:
+        send_error(id, -32601, f"Method not found: {method}")
 
 
 if __name__ == "__main__":
