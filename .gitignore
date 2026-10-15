@@ -56,6 +56,7 @@ docs/screenshots/
 
 # MCP tool-discovery cache (machine state, not source)
 mcp/.tool_cache.json
+mcp/.tool_cache.json.*.tmp
 
 # --- prod additions 2026-09-16 (Repo Sync Contract rebuild) ---
 venv/

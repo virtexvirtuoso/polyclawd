@@ -201,6 +201,45 @@ def test_legacy_list_cache_still_serves_as_fetch_fallback(tmp_path, monkeypatch)
     assert [t["name"] for t in tools] == ["polyclawd_signals"]
 
 
+@pytest.mark.parametrize("content", ["null", "42", '"x"', "[1, 2]", '{"fingerprint": "f", "tools": "nope"}', '{"tools": [{"x": 1}]}'])
+def test_malformed_cache_shapes_never_crash_and_fall_back_to_fetch(tmp_path, monkeypatch, content):
+    _fresh_registry(monkeypatch, tmp_path)
+    content = content.replace('"f"', '"%s"' % server._CODE_FINGERPRINT)
+    server.CACHE_PATH.write_text(content)
+    monkeypatch.setattr(server, "discover_tools", lambda base_url=None: [dict(_SAMPLE[0], name="polyclawd_fresh")])
+    assert [t["name"] for t in server.get_tools()] == ["polyclawd_fresh"]
+    assert server._load_cached_tools() == []
+
+
+def test_concurrent_cache_writes_never_expose_a_partial_file(tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.setattr(server, "CACHE_PATH", tmp_path / ".tool_cache.json")
+    big = [dict(_SAMPLE[0], name="polyclawd_%d" % i, description="d" * 400) for i in range(200)]
+    server._save_cached_tools(big)
+    stop = threading.Event()
+    bad = []
+
+    def writer():
+        while not stop.is_set():
+            server._save_cached_tools(big)
+
+    def reader():
+        while not stop.is_set():
+            _, tools = server._read_cache()
+            if tools is None or len(tools) != 200:
+                bad.append(1)
+
+    threads = [threading.Thread(target=writer) for _ in range(8)] + [threading.Thread(target=reader) for _ in range(2)]
+    for t in threads:
+        t.start()
+    stop.wait(3)
+    stop.set()
+    for t in threads:
+        t.join()
+    assert bad == []
+
+
 SERVER = os.path.join(os.path.dirname(__file__), "server.py")
 
 

@@ -275,12 +275,17 @@ def build_tools(spec: dict) -> list[dict]:
 def _save_cached_tools(tools: list[dict]) -> None:
     """Atomically persist the discovered manifest (tmp + os.replace; iCloud-safe)."""
     try:
-        tmp = str(CACHE_PATH) + ".tmp"
+        # per-process/thread temp name: concurrent starts must not swap in each other's half-written file
+        tmp = f"{CACHE_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
         with open(tmp, "w") as f:
             json.dump({"fingerprint": _CODE_FINGERPRINT, "tools": tools}, f)
         os.replace(tmp, CACHE_PATH)
     except Exception as e:
         logger.warning("tool cache write failed: %s", e)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def _read_cache() -> tuple[Optional[str], Optional[list[dict]]]:
@@ -290,9 +295,13 @@ def _read_cache() -> tuple[Optional[str], Optional[list[dict]]]:
             data = json.load(f)
     except Exception:
         return None, None
-    if isinstance(data, list):
-        return None, data
-    return data.get("fingerprint"), data.get("tools")
+    fingerprint, tools = (None, data) if isinstance(data, list) else (None, None)
+    if isinstance(data, dict):
+        fingerprint, tools = data.get("fingerprint"), data.get("tools")
+    # any shape this module would not have written is treated as no cache, never as a crash
+    if not isinstance(tools, list) or not all(isinstance(t, dict) and isinstance(t.get("name"), str) for t in tools):
+        return None, None
+    return fingerprint, tools
 
 
 def _load_cached_tools() -> list[dict]:
