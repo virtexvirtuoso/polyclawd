@@ -137,6 +137,70 @@ def test_discover_falls_back_to_cache_on_fetch_failure(tmp_path, monkeypatch):
     assert [t["name"] for t in tools] == ["polyclawd_signals"]
 
 
+_SAMPLE = [
+    {
+        "name": "polyclawd_signals",
+        "_path": "/api/signals",
+        "_method": "get",
+        "description": "d",
+        "inputSchema": {"properties": {}},
+    }
+]
+
+
+def _fresh_registry(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "CACHE_PATH", tmp_path / ".tool_cache.json")
+    monkeypatch.setattr(server, "TOOLS", [])
+    monkeypatch.setattr(server, "_TOOL_MAP", {})
+
+
+def test_ensure_tools_serves_current_cache_without_waiting_on_network(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    _fresh_registry(monkeypatch, tmp_path)
+    server._save_cached_tools(_SAMPLE)
+    gate = threading.Event()
+    calls = []
+
+    def slow_discover(base_url=None):
+        calls.append(1)
+        gate.wait(5)
+        return [dict(_SAMPLE[0], name="polyclawd_refreshed")]
+
+    monkeypatch.setattr(server, "discover_tools", slow_discover)
+    t0 = time.time()
+    names = [t["name"] for t in server.get_tools()]
+    assert time.time() - t0 < 1.0  # answered from cache, not blocked on the fetch
+    assert names == ["polyclawd_signals"]
+    gate.set()
+    server._REFRESH_THREAD.join(5)
+    assert calls == [1]  # exactly one background refresh
+    assert [t["name"] for t in server.TOOLS] == ["polyclawd_refreshed"]
+    assert "polyclawd_refreshed" in server._TOOL_MAP
+
+
+def test_ensure_tools_fetches_synchronously_when_cache_is_from_other_code(tmp_path, monkeypatch):
+    _fresh_registry(monkeypatch, tmp_path)
+    server.CACHE_PATH.write_text(json.dumps({"fingerprint": "older-code", "tools": _SAMPLE}))
+    monkeypatch.setattr(server, "discover_tools", lambda base_url=None: [dict(_SAMPLE[0], name="polyclawd_fresh")])
+    assert [t["name"] for t in server.get_tools()] == ["polyclawd_fresh"]
+
+
+def test_ensure_tools_fetches_synchronously_when_no_cache(tmp_path, monkeypatch):
+    _fresh_registry(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "discover_tools", lambda base_url=None: [dict(_SAMPLE[0], name="polyclawd_fresh")])
+    assert [t["name"] for t in server.get_tools()] == ["polyclawd_fresh"]
+
+
+def test_legacy_list_cache_still_serves_as_fetch_fallback(tmp_path, monkeypatch):
+    _fresh_registry(monkeypatch, tmp_path)
+    server.CACHE_PATH.write_text(json.dumps(_SAMPLE))  # pre-fingerprint format
+    assert server._load_cached_tools() == _SAMPLE
+    tools = server.discover_tools(base_url="https://127.0.0.1:0")
+    assert [t["name"] for t in tools] == ["polyclawd_signals"]
+
+
 SERVER = os.path.join(os.path.dirname(__file__), "server.py")
 
 

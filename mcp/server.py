@@ -9,14 +9,16 @@ Stdio transport:  python server.py
 HTTP transport:   imported by http_server.py (FastMCP wrapper)
 """
 
+import hashlib
 import json
 import logging
 import os
 import re
 import sys
+import threading
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,9 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://virtuosocrypto.com/polyclawd"
 PROTOCOL_VERSION = "2024-11-05"
 CACHE_PATH = Path(__file__).parent / ".tool_cache.json"
+# The cached manifest is only trusted for a fast start when it was built by this exact source,
+# so an edit to TOOL_META or the tool builder can never be served from a stale cache.
+_CODE_FINGERPRINT = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
 
 # ── curated allowlist (read-only, GET-only) ──────────────────────────────
 # path: (curated_tool_name, curated_description)
@@ -272,22 +277,32 @@ def _save_cached_tools(tools: list[dict]) -> None:
     try:
         tmp = str(CACHE_PATH) + ".tmp"
         with open(tmp, "w") as f:
-            json.dump(tools, f)
+            json.dump({"fingerprint": _CODE_FINGERPRINT, "tools": tools}, f)
         os.replace(tmp, CACHE_PATH)
     except Exception as e:
         logger.warning("tool cache write failed: %s", e)
 
 
-def _load_cached_tools() -> list[dict]:
-    """Serve cached manifest when OpenAPI fetch fails; never silently expose zero tools."""
+def _read_cache() -> tuple[Optional[str], Optional[list[dict]]]:
+    """(fingerprint, tools) from the cache file; the legacy plain-list format has no fingerprint."""
     try:
         with open(CACHE_PATH) as f:
-            tools = json.load(f)
-        logger.warning("OpenAPI fetch failed — serving cached manifest (%d tools)", len(tools))
-        return tools
+            data = json.load(f)
     except Exception:
+        return None, None
+    if isinstance(data, list):
+        return None, data
+    return data.get("fingerprint"), data.get("tools")
+
+
+def _load_cached_tools() -> list[dict]:
+    """Serve cached manifest when OpenAPI fetch fails; never silently expose zero tools."""
+    _, tools = _read_cache()
+    if tools is None:
         logger.error("OpenAPI fetch failed and no tool cache present — 0 tools")
         return []
+    logger.warning("OpenAPI fetch failed — serving cached manifest (%d tools)", len(tools))
+    return tools
 
 
 def discover_tools(base_url: str = None) -> list[dict]:
@@ -310,15 +325,43 @@ def discover_tools(base_url: str = None) -> list[dict]:
 
 TOOLS: list[dict] = []
 _TOOL_MAP: dict[str, dict] = {}
+_REFRESH_THREAD: Optional[threading.Thread] = None
+
+
+def _set_tools(tools: list[dict]) -> None:
+    global TOOLS, _TOOL_MAP
+    TOOLS = tools
+    _TOOL_MAP = {t["name"]: t for t in tools}
+
+
+def _refresh_tools() -> None:
+    """Re-fetch the manifest after a cache-served start; keep the cached set if the fetch fails."""
+    try:
+        tools = discover_tools()
+    except Exception as e:
+        logger.warning("background tool refresh failed: %s", e)
+        return
+    if tools:
+        _set_tools(tools)
 
 
 def _ensure_tools():
-    """Lazy-load tools on first access."""
-    global TOOLS, _TOOL_MAP
+    """Lazy-load tools on first access.
+
+    A cache written by this same source answers immediately and the OpenAPI fetch runs in the
+    background: every fresh stdio session (one per OpenClaw heartbeat) otherwise waits on a
+    ~2 s round trip to the VPS, and a stalled fetch blocks it far longer.
+    """
+    global _REFRESH_THREAD
     if TOOLS:
         return
-    TOOLS = discover_tools()
-    _TOOL_MAP = {t["name"]: t for t in TOOLS}
+    fingerprint, cached = _read_cache()
+    if cached and fingerprint == _CODE_FINGERPRINT:
+        _set_tools(cached)
+        _REFRESH_THREAD = threading.Thread(target=_refresh_tools, name="polyclawd-tool-refresh", daemon=True)
+        _REFRESH_THREAD.start()
+        return
+    _set_tools(discover_tools())
 
 
 def get_tools() -> list[dict]:
