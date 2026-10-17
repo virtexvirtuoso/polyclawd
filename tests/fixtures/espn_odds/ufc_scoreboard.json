@@ -1,0 +1,522 @@
+{
+ "leagues": [
+  {
+   "id": "3321",
+   "uid": "s:3301~l:3321",
+   "name": "Ultimate Fighting Championship",
+   "displayName": "UFC",
+   "abbreviation": "UFC",
+   "shortName": "UFC",
+   "slug": "ufc",
+   "season": {
+    "year": 2026,
+    "startDate": "2026-01-01T08:00Z",
+    "endDate": "2026-12-31T08:00Z",
+    "displayName": "2026",
+    "type": {
+     "id": "2",
+     "type": 2,
+     "name": "Regular Season",
+     "abbreviation": "reg"
+    }
+   },
+   "logos": [
+    {
+     "href": "https://a.espncdn.com/i/teamlogos/leagues/500/ufc.png",
+     "width": 500,
+     "height": 500,
+     "alt": "",
+     "rel": [
+      "full",
+      "default"
+     ],
+     "lastUpdated": "2018-12-21T18:30Z"
+    },
+    {
+     "href": "https://a.espncdn.com/i/teamlogos/leagues/500/ufc.png",
+     "width": 500,
+     "height": 500,
+     "alt": "",
+     "rel": [
+      "full",
+      "dark"
+     ],
+     "lastUpdated": "2018-12-21T18:30Z"
+    }
+   ],
+   "calendarType": "list",
+   "calendarIsWhitelist": true,
+   "calendarStartDate": "2026-01-01T08:00Z",
+   "calendarEndDate": "2026-12-31T08:00Z",
+   "calendar": [
+    {
+     "label": "UFC 324: Gaethje vs. Pimblett",
+     "startDate": "2026-01-25T01:30Z",
+     "endDate": "2026-01-25T07:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600057024?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC 325: Volkanovski vs. Lopes 2",
+     "startDate": "2026-02-01T01:00Z",
+     "endDate": "2026-02-01T07:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600057025?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Bautista vs. Oliveira",
+     "startDate": "2026-02-08T01:00Z",
+     "endDate": "2026-02-08T07:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600057328?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Strickland vs. Hernandez",
+     "startDate": "2026-02-22T01:00Z",
+     "endDate": "2026-02-22T07:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600057329?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Moreno vs. Kavanagh",
+     "startDate": "2026-03-01T01:00Z",
+     "endDate": "2026-03-01T07:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600057330?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC 326: Holloway vs. Oliveira 2",
+     "startDate": "2026-03-08T01:30Z",
+     "endDate": "2026-03-08T07:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600057326?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Emmett vs. Vallejos",
+     "startDate": "2026-03-15T00:00Z",
+     "endDate": "2026-03-15T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600057364?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Evloev vs. Murphy",
+     "startDate": "2026-03-21T20:00Z",
+     "endDate": "2026-03-22T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600057365?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Adesanya vs. Pyfer",
+     "startDate": "2026-03-29T00:00Z",
+     "endDate": "2026-03-29T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600057366?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Moicano vs. Duncan",
+     "startDate": "2026-04-05T00:00Z",
+     "endDate": "2026-04-05T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600058693?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC 327: Proch\u00e1zka vs. Ulberg",
+     "startDate": "2026-04-12T00:30Z",
+     "endDate": "2026-04-12T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600058745?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Burns vs. Malott",
+     "startDate": "2026-04-19T00:00Z",
+     "endDate": "2026-04-19T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600058725?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Sterling vs. Zalal",
+     "startDate": "2026-04-26T00:00Z",
+     "endDate": "2026-04-26T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600058746?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Della Maddalena vs. Prates",
+     "startDate": "2026-05-02T11:00Z",
+     "endDate": "2026-05-03T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600058807?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC 328: Chimaev vs. Strickland",
+     "startDate": "2026-05-10T00:00Z",
+     "endDate": "2026-05-10T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600058947?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Allen vs. Costa",
+     "startDate": "2026-05-17T00:00Z",
+     "endDate": "2026-05-17T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600058948?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Song vs. Figueiredo",
+     "startDate": "2026-05-30T11:00Z",
+     "endDate": "2026-05-31T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600058517?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Muhammad vs. Bonfim",
+     "startDate": "2026-06-07T00:00Z",
+     "endDate": "2026-06-07T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600058949?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Freedom 250: Topuria vs. Gaethje",
+     "startDate": "2026-06-15T03:00Z",
+     "endDate": "2026-06-15T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600058854?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Kape vs. Horiguchi 2",
+     "startDate": "2026-06-21T00:00Z",
+     "endDate": "2026-06-21T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600059467?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Fiziev vs. Torres",
+     "startDate": "2026-06-27T16:00Z",
+     "endDate": "2026-06-28T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600059254?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC 329: McGregor vs. Holloway 2",
+     "startDate": "2026-07-12T00:00Z",
+     "endDate": "2026-07-12T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600059148?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Du Plessis vs. Usman",
+     "startDate": "2026-07-19T00:00Z",
+     "endDate": "2026-07-19T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600059599?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Ankalaev vs. Guskov",
+     "startDate": "2026-07-25T16:00Z",
+     "endDate": "2026-07-26T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600059667?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Medi\u0107 vs. Rodriguez",
+     "startDate": "2026-08-01T17:00Z",
+     "endDate": "2026-08-02T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600059339?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Gamrot vs Salkilld",
+     "startDate": "2026-08-09T00:00Z",
+     "endDate": "2026-08-09T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060621?lang=en&region=us"
+     }
+    },
+    {
+     "label": "Dana White's Contender Series: Season 10, Week 1",
+     "startDate": "2026-08-12T02:00Z",
+     "endDate": "2026-08-12T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060732?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC 330: Makhachev vs. Machado Garry",
+     "startDate": "2026-08-16T00:30Z",
+     "endDate": "2026-08-16T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600059185?lang=en&region=us"
+     }
+    },
+    {
+     "label": "Dana White's Contender Series: Season 10, Week 2",
+     "startDate": "2026-08-19T02:00Z",
+     "endDate": "2026-08-19T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060733?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Hernandez vs. Rodrigues",
+     "startDate": "2026-08-23T00:00Z",
+     "endDate": "2026-08-23T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060493?lang=en&region=us"
+     }
+    },
+    {
+     "label": "Dana White's Contender Series: Season 10, Week 3",
+     "startDate": "2026-08-26T02:00Z",
+     "endDate": "2026-08-26T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060734?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Nurmagomedov vs. Song",
+     "startDate": "2026-08-29T10:00Z",
+     "endDate": "2026-08-30T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060620?lang=en&region=us"
+     }
+    },
+    {
+     "label": "Dana White's Contender Series: Season 10, Week 4",
+     "startDate": "2026-09-02T02:00Z",
+     "endDate": "2026-09-02T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060735?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Hooker vs. Parnasse",
+     "startDate": "2026-09-05T19:00Z",
+     "endDate": "2026-09-06T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600059993?lang=en&region=us"
+     }
+    },
+    {
+     "label": "Dana White's Contender Series: Season 10, Week 5",
+     "startDate": "2026-09-09T02:00Z",
+     "endDate": "2026-09-09T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060736?lang=en&region=us"
+     }
+    },
+    {
+     "label": "Noche UFC: Silva vs. Delgado",
+     "startDate": "2026-09-12T21:00Z",
+     "endDate": "2026-09-13T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060772?lang=en&region=us"
+     }
+    },
+    {
+     "label": "Dana White's Contender Series: Season 10, Week 6",
+     "startDate": "2026-09-16T02:00Z",
+     "endDate": "2026-09-16T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060737?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC 331: Van vs. Pantoja 2",
+     "startDate": "2026-09-20T00:00Z",
+     "endDate": "2026-09-20T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060963?lang=en&region=us"
+     }
+    },
+    {
+     "label": "Dana White's Contender Series: Season 10, Week 7",
+     "startDate": "2026-09-23T02:00Z",
+     "endDate": "2026-09-23T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060738?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Rosas Jr. vs. Barcelos",
+     "startDate": "2026-09-27T00:00Z",
+     "endDate": "2026-09-27T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600061266?lang=en&region=us"
+     }
+    },
+    {
+     "label": "Dana White's Contender Series: Season 10, Week 8",
+     "startDate": "2026-09-30T02:00Z",
+     "endDate": "2026-09-30T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060739?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC 332: Silva vs. Wang",
+     "startDate": "2026-10-03T23:00Z",
+     "endDate": "2026-10-04T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600061182?lang=en&region=us"
+     }
+    },
+    {
+     "label": "Dana White's Contender Series: Season 10, Week 9",
+     "startDate": "2026-10-07T02:00Z",
+     "endDate": "2026-10-07T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060740?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Allen vs. Duncan",
+     "startDate": "2026-10-11T00:00Z",
+     "endDate": "2026-10-11T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600061541?lang=en&region=us"
+     }
+    },
+    {
+     "label": "Dana White's Contender Series: Season 10, Week 10",
+     "startDate": "2026-10-14T02:00Z",
+     "endDate": "2026-10-14T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060741?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Buckley vs. Malott",
+     "startDate": "2026-10-18T00:00Z",
+     "endDate": "2026-10-18T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600060773?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC 333: Volkanovski vs. Evloev",
+     "startDate": "2026-10-24T17:00Z",
+     "endDate": "2026-10-25T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600061267?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Moicano vs. Nolan",
+     "startDate": "2026-11-01T00:00Z",
+     "endDate": "2026-11-01T06:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600061420?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Bonfim vs. Brady",
+     "startDate": "2026-11-08T01:00Z",
+     "endDate": "2026-11-08T07:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600061268?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC 334: Gane vs. Hokit",
+     "startDate": "2026-11-15T01:00Z",
+     "endDate": "2026-11-15T07:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600061400?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC Fight Night: Proch\u00e1zka vs. Stirling",
+     "startDate": "2026-11-21T18:00Z",
+     "endDate": "2026-11-22T07:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600061665?lang=en&region=us"
+     }
+    },
+    {
+     "label": "UFC 335: Oliveira vs. Lopes",
+     "startDate": "2026-12-13T01:00Z",
+     "endDate": "2026-12-13T07:59Z",
+     "event": {
+      "$ref": "http://sports.core.api.espn.pvt/v2/sports/mma/leagues/ufc/events/600061401?lang=en&region=us"
+     }
+    }
+   ]
+  }
+ ],
+ "season": {
+  "type": 2,
+  "year": 2026
+ },
+ "events": [
+  {
+   "id": "600060773",
+   "date": "2026-10-17T21:00Z",
+   "name": "UFC Fight Night: Buckley vs. Malott",
+   "season": {
+    "year": 2026,
+    "type": 2,
+    "slug": "regular-season"
+   },
+   "competitions": [
+    {
+     "competitors": [
+      {
+       "homeAway": null,
+       "team": {
+        "displayName": null,
+        "abbreviation": null
+       }
+      },
+      {
+       "homeAway": null,
+       "team": {
+        "displayName": null,
+        "abbreviation": null
+       }
+      }
+     ],
+     "odds": [],
+     "status": {
+      "clock": 0.0,
+      "displayClock": "-",
+      "period": 0,
+      "type": {
+       "id": "1",
+       "name": "STATUS_SCHEDULED",
+       "state": "pre",
+       "completed": false,
+       "description": "Scheduled",
+       "detail": "Sat, October 17th at 5:00 PM EDT",
+       "shortDetail": "10/17 - 5:00 PM EDT"
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

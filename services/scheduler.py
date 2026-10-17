@@ -256,8 +256,12 @@ TICK_TASKS = {
         "mlb_props_resolve", "baseball_resolve", "ufc_resolve", "nfl_resolve",
         # scorer_clv_snapshot DISABLED 2026-09-13 (Mr. V approved): Odds API key
         # returns DEACTIVATED_KEY (billing lapse 2026-08-30) — task failed 27x/48h.
-        # Re-enable on billing restore, or rewire to a free anchor (see
-        # QA-Session-2026-09-13 follow-up #5). Task def retained at :1558.
+        # RE-ENABLE for the ESPN/DK lane (feat/espn-dk-clv-source, 2026-10-17):
+        # scorer_paper_logger now skips cleanly under CLV_ODDS_SOURCE=espn_dk
+        # (player props are not priced on ESPN) — re-adding it here is safe but
+        # collects nothing; the game-level prop_clv NFL lane is the one that
+        # collects under espn_dk. See PR "Migrate game-level CLV lane to ESPN/DK".
+        # Task def retained at :1558.
         "kalshi_fade_scan",
         "pm_maker_shadow", "ensemble_recorder", "arb_scan",
         "resolution_edge_scan",

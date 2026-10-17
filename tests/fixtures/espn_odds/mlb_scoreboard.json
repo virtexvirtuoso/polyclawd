@@ -1,0 +1,199 @@
+{
+ "leagues": [
+  {
+   "id": "10",
+   "uid": "s:1~l:10",
+   "name": "Major League Baseball",
+   "abbreviation": "MLB",
+   "midsizeName": "MLB",
+   "slug": "mlb",
+   "season": {
+    "year": 2026,
+    "startDate": "2026-02-19T08:00Z",
+    "endDate": "2026-11-12T07:59Z",
+    "displayName": "2026",
+    "type": {
+     "id": "3",
+     "type": 3,
+     "name": "Postseason",
+     "abbreviation": "post"
+    }
+   },
+   "logos": [
+    {
+     "href": "https://a.espncdn.com/i/teamlogos/leagues/500/mlb.png",
+     "width": 500,
+     "height": 500,
+     "alt": "",
+     "rel": [
+      "full",
+      "default"
+     ],
+     "lastUpdated": "2023-03-29T12:34Z"
+    },
+    {
+     "href": "https://a.espncdn.com/combiner/i?img=/i/teamlogos/leagues/500-dark/mlb.png&w=500&h=500&transparent=true",
+     "width": 500,
+     "height": 500,
+     "alt": "",
+     "rel": [
+      "full",
+      "dark"
+     ],
+     "lastUpdated": "2026-10-17T06:42Z"
+    }
+   ],
+   "calendarType": "day",
+   "calendarIsWhitelist": false,
+   "calendarStartDate": "2026-02-19T08:00Z",
+   "calendarEndDate": "2026-11-12T07:59Z",
+   "calendar": [
+    "2026-02-19T08:00Z",
+    "2026-07-13T07:00Z",
+    "2026-07-15T07:00Z",
+    "2026-09-28T07:00Z",
+    "2026-10-02T07:00Z",
+    "2026-10-09T07:00Z",
+    "2026-10-21T07:00Z",
+    "2026-10-22T07:00Z",
+    "2026-10-25T07:00Z",
+    "2026-10-29T07:00Z",
+    "2026-11-01T07:00Z",
+    "2026-11-02T08:00Z",
+    "2026-11-03T08:00Z",
+    "2026-11-04T08:00Z",
+    "2026-11-05T08:00Z",
+    "2026-11-06T08:00Z",
+    "2026-11-07T08:00Z",
+    "2026-11-08T08:00Z",
+    "2026-11-09T08:00Z",
+    "2026-11-10T08:00Z",
+    "2026-11-11T08:00Z"
+   ]
+  }
+ ],
+ "season": {
+  "type": 3,
+  "year": 2026
+ },
+ "events": [
+  {
+   "id": "401908027",
+   "date": "2026-10-18T00:00Z",
+   "name": "Tampa Bay Rays at Cleveland Guardians",
+   "season": {
+    "year": 2026,
+    "type": 3,
+    "slug": "post-season"
+   },
+   "competitions": [
+    {
+     "competitors": [
+      {
+       "homeAway": "home",
+       "team": {
+        "displayName": "Cleveland Guardians",
+        "abbreviation": "CLE"
+       }
+      },
+      {
+       "homeAway": "away",
+       "team": {
+        "displayName": "Tampa Bay Rays",
+        "abbreviation": "TB"
+       }
+      }
+     ],
+     "odds": [
+      {
+       "provider": {
+        "id": "100",
+        "name": "DraftKings",
+        "priority": 1
+       },
+       "details": "TB -114",
+       "spread": 1.5,
+       "overUnder": 6.5,
+       "moneyline": {
+        "home": {
+         "open": {
+          "odds": "-105"
+         },
+         "close": {
+          "odds": "-106"
+         }
+        },
+        "away": {
+         "open": {
+          "odds": "-114"
+         },
+         "close": {
+          "odds": "-114"
+         }
+        }
+       },
+       "pointSpread": {
+        "home": {
+         "open": {
+          "odds": "-208",
+          "line": "+1.5"
+         },
+         "close": {
+          "odds": "-193",
+          "line": "+1.5"
+         }
+        },
+        "away": {
+         "open": {
+          "odds": "+170",
+          "line": "-1.5"
+         },
+         "close": {
+          "odds": "+158",
+          "line": "-1.5"
+         }
+        }
+       },
+       "total": {
+        "over": {
+         "open": {
+          "odds": "-118",
+          "line": "o6.5"
+         },
+         "close": {
+          "odds": "-112",
+          "line": "o6.5"
+         }
+        },
+        "under": {
+         "open": {
+          "odds": "-102",
+          "line": "u6.5"
+         },
+         "close": {
+          "odds": "-108",
+          "line": "u6.5"
+         }
+        }
+       }
+      }
+     ],
+     "status": {
+      "clock": 0.0,
+      "displayClock": "0:00",
+      "period": 1,
+      "type": {
+       "id": "1",
+       "name": "STATUS_SCHEDULED",
+       "state": "pre",
+       "completed": false,
+       "description": "Scheduled",
+       "detail": "Scheduled",
+       "shortDetail": "10/17 - 8:00 PM EDT"
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

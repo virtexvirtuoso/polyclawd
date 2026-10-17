@@ -28,6 +28,47 @@ import phase0_prop_falsification as P  # noqa: E402  (fetch + iso parse helpers)
 from prop_clv_config import CONFIGS  # noqa: E402
 from prop_clv_shapes import extract_bets  # noqa: E402
 
+# ── Odds source switch ────────────────────────────────────────────────────────
+# CLV_ODDS_SOURCE=espn_dk (default since 2026-10-17: the Odds API key was
+# permanently deactivated) | the_odds_api (rollback path, needs ODDS_API_KEY).
+# espn_dk needs NO key and NO odds.env — ESPN's free scoreboard carries
+# DraftKings prices, reshaped into the same event/odds JSON the loggers parse.
+CLV_ODDS_SOURCE = os.getenv("CLV_ODDS_SOURCE", "espn_dk").strip().lower()
+
+
+def _odds_api_key():
+    """Odds API key for the the_odds_api rollback path (never for espn_dk)."""
+    key = os.getenv("ODDS_API_KEY")
+    if not key:
+        sys.exit("ODDS_API_KEY not set — required when CLV_ODDS_SOURCE=the_odds_api.")
+    return key
+
+
+def _fetch_events(sport_key: str):
+    """Upcoming events in The Odds API /events shape, from the active source."""
+    if CLV_ODDS_SOURCE == "espn_dk":
+        from odds.espn_odds import fetch_espn_events
+        return fetch_espn_events(sport_key)
+    return P._get(f"{P.ODDS_API_BASE}/sports/{sport_key}/events?apiKey={_odds_api_key()}")
+
+
+def _fetch_event_odds(sport_key: str, event_id: str, books_param: str, markets_param: str):
+    """One event's odds in The Odds API /events/{id}/odds shape, active source.
+
+    the_odds_api path bills credits per call; espn_dk serves from the cached
+    ESPN scoreboard and ignores books_param/markets_param (single DK book,
+    h2h+totals only). Raises on the_odds_api failures so the caller's existing
+    [skip] handling applies; returns None on espn_dk clean skips.
+    """
+    if CLV_ODDS_SOURCE == "espn_dk":
+        from odds.espn_odds import fetch_event_odds
+        return fetch_event_odds(sport_key, event_id)
+    url = (
+        f"{P.ODDS_API_BASE}/sports/{sport_key}/events/{event_id}/odds?apiKey={_odds_api_key()}"
+        f"&regions=us,uk,eu&markets={markets_param}&oddsFormat=american&bookmakers={books_param}"
+    )
+    return P._get(url)
+
 
 def send_telegram(text: str):
     """Direct Bot API send (no LLM). Reads TELEGRAM_BOT_TOKEN/CHAT_ID from env
@@ -94,19 +135,34 @@ def credits_remaining(key):
 
 
 def live_snapshot(con, config, window_hours, max_events, min_credits=1000):
-    key = os.getenv("ODDS_API_KEY")
-    if not key:
-        sys.exit("ODDS_API_KEY not set — cannot snapshot live.")
-    rem = credits_remaining(key)
-    if rem is not None and rem < min_credits:
-        print(f"[abort] credits remaining {rem} < floor {min_credits} — skipping snapshot")
-        return
-    if rem is not None:
-        print(f"[credits] {rem} remaining (floor {min_credits})")
+    if CLV_ODDS_SOURCE == "espn_dk":
+        # Free lane: no key, no credit floor.
+        from odds.espn_odds import ESPN_DK_MARKETS, espn_dk_available
+        if not espn_dk_available(config.sport_key):
+            # Uncovered competition (e.g. UFC: ESPN ships zero odds) or an
+            # empty slate — skip cleanly, NOT an error.
+            print(f"[skip] {config.name}: no ESPN/DK odds coverage for {config.sport_key} — skipping snapshot")
+            return
+        uncovered = [m for m in config.market_keys if m not in ESPN_DK_MARKETS]
+        if len(uncovered) == len(config.market_keys):
+            # e.g. player_goal_scorer_anytime: ESPN's free scoreboard prices
+            # game lines (h2h/totals) only, never player props.
+            print(f"[skip] {config.name}: markets {uncovered} not priced on ESPN/DK — skipping snapshot")
+            return
+    else:
+        key = os.getenv("ODDS_API_KEY")
+        if not key:
+            sys.exit("ODDS_API_KEY not set — cannot snapshot live.")
+        rem = credits_remaining(key)
+        if rem is not None and rem < min_credits:
+            print(f"[abort] credits remaining {rem} < floor {min_credits} — skipping snapshot")
+            return
+        if rem is not None:
+            print(f"[credits] {rem} remaining (floor {min_credits})")
     books = ",".join([b for b, _ in config.sharp_books] + sorted(config.soft_books))
     markets = ",".join(config.market_keys)
     now = datetime.now(timezone.utc)
-    events = P._get(f"{P.ODDS_API_BASE}/sports/{config.sport_key}/events?apiKey={key}")
+    events = _fetch_events(config.sport_key)
     snap_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     # in-window, soonest first; cap to bound credit spend
     windowed = []
@@ -123,15 +179,13 @@ def live_snapshot(con, config, window_hours, max_events, min_credits=1000):
     n_rows = n_ev = 0
     for mins, ev in windowed:
         eid = ev["id"]
-        url = (
-            f"{P.ODDS_API_BASE}/sports/{config.sport_key}/events/{eid}/odds?apiKey={key}"
-            f"&regions=us,uk,eu&markets={markets}&oddsFormat=american&bookmakers={books}"
-        )
         try:
-            od = P._get(url)
+            od = _fetch_event_odds(config.sport_key, eid, books, markets)
         except Exception as e:
             print(f"  [skip] {eid}: {e}")
             continue
+        if od is None:
+            continue  # espn_dk: DK hasn't priced this event yet — clean skip
         title = f"{od.get('home_team')} vs {od.get('away_team')}"
         got = 0
         for b in extract_bets(od, config):

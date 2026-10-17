@@ -93,6 +93,40 @@ ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 
 DB_DEFAULT = "storage/path2_btts_totals.db"
 
+# ── Odds source switch (shared convention with prop_clv_logger) ──────────────
+# CLV_ODDS_SOURCE=espn_dk (default since 2026-10-17: the Odds API key was
+# permanently deactivated) | the_odds_api (rollback path, needs ODDS_API_KEY).
+# espn_dk needs NO key and NO odds.env. CAVEAT: ESPN/DK prices h2h + totals
+# only — there is NO btts market on the free scoreboard, so under espn_dk
+# this logger collects totals rows only (btts collection pauses until a
+# btts-capable source returns).
+CLV_ODDS_SOURCE = os.getenv("CLV_ODDS_SOURCE", "espn_dk").strip().lower()
+
+
+def _fetch_events(sport: str):
+    """Upcoming events in The Odds API /events shape, from the active source."""
+    if CLV_ODDS_SOURCE == "espn_dk":
+        from odds.espn_odds import fetch_espn_events
+        return fetch_espn_events(sport)
+    return _get(f"{ODDS_API_BASE}/sports/{sport}/events?apiKey={_key()}")
+
+
+def _fetch_event_odds(sport: str, event_id: str):
+    """One event's odds in The Odds API /events/{id}/odds shape, active source.
+
+    espn_dk serves from the cached ESPN scoreboard (no per-event HTTP call);
+    returns None on clean skips (unpriced event). the_odds_api raises on
+    failure so the caller's existing [skip] handling applies.
+    """
+    if CLV_ODDS_SOURCE == "espn_dk":
+        from odds.espn_odds import fetch_event_odds
+        return fetch_event_odds(sport, event_id)
+    url = (
+        f"{ODDS_API_BASE}/sports/{sport}/events/{event_id}/odds?apiKey={_key()}"
+        f"&regions=us,uk,eu&markets={','.join(MARKETS)}&oddsFormat=american&bookmakers={_books_param()}"
+    )
+    return _get(url)
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 def _parse_iso(s):
@@ -304,9 +338,17 @@ def _n_sharp(ev, market, weights):
 # ── live snapshot (cron this) ────────────────────────────────────────────────
 def live_snapshot(con, sport, window_hours, min_edge=5.0):
     """Snapshot live BTTS + totals odds for upcoming matches; persist to SQLite."""
-    key = _key()
+    if CLV_ODDS_SOURCE == "espn_dk":
+        # ESPN/DK prices h2h + totals only — NO btts market, and its single DK
+        # book cannot feed the multi-book sharp consensus this logger's metric
+        # requires. Clean skip (one line, not an error); the_odds_api rollback
+        # keeps btts collection alive.
+        print(f"[skip] {sport}: btts needs multi-book sharp consensus + a btts market — "
+              f"neither exists on ESPN/DK; skipping snapshot (CLV_ODDS_SOURCE={CLV_ODDS_SOURCE})")
+        return []
+    _key()
     now = datetime.now(timezone.utc)
-    events = _get(f"{ODDS_API_BASE}/sports/{sport}/events?apiKey={key}")
+    events = _fetch_events(sport)
     snap_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     n_rows = n_ev = 0
     new_edges = []  # (event_id, market, line, soft_book, soft_implied, sharp, edge, n_sharp, title, mins)
@@ -319,15 +361,13 @@ def live_snapshot(con, sport, window_hours, min_edge=5.0):
         if mins <= 0 or mins > window_hours * 60:
             continue
         eid = ev["id"]
-        url = (
-            f"{ODDS_API_BASE}/sports/{sport}/events/{eid}/odds?apiKey={key}"
-            f"&regions=us,uk,eu&markets={','.join(MARKETS)}&oddsFormat=american&bookmakers={_books_param()}"
-        )
         try:
-            od = _get(url)
+            od = _fetch_event_odds(sport, eid)
         except Exception as e:
             print(f"  [skip] {eid}: {e}")
             continue
+        if od is None:
+            continue  # espn_dk: DK hasn't priced this event yet — clean skip
         title = f"{od.get('home_team')} vs {od.get('away_team')}"
         got = 0
 
