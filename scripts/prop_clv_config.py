@@ -130,6 +130,10 @@ CONFIGS = {
     # UFC/MMA — no player props exist; h2h moneyline (two_way) + rounds totals.
     # Control unit = card: a fight's two h2h sides are zero-sum, so the opposite
     # side is NOT a valid control; other fights on the card are.
+    # ODDS SOURCE (2026-10-17): ESPN/DK carries NO odds for mma/ufc (verified:
+    # scoreboard ships zero odds entries), so under CLV_ODDS_SOURCE=espn_dk this
+    # config is SKIPPED cleanly by the loggers (one-line log, no error). It stays
+    # active for a CLV_ODDS_SOURCE=the_odds_api rollback.
     "ufc": PropConfig(
         name="ufc",
         sport_key="mma_mixed_martial_arts",

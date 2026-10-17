@@ -121,7 +121,20 @@ def _sharp_fair(books: dict, sharp_books: tuple) -> dict:
         for side, p in _book_devig(sides).items():
             num[side] += w * p
             den[side] += w
-    return {s: num[s] / den[s] for s in num if den[s] > 0}
+    fair = {s: num[s] / den[s] for s in num if den[s] > 0}
+    if not fair:
+        # PROVISIONAL single-book anchor (2026-10-17): the Odds API key was
+        # permanently deactivated, so under CLV_ODDS_SOURCE=espn_dk the only
+        # book on game lines is DraftKings. A DK-anchored "sharp" fair is
+        # circular for CLV-vs-sharp (DK is also the soft book) — rows collect
+        # with n_sharp=1 and edge_pct≈0, keeping the raw record complete, and
+        # the gate stays honest because MIN_SHARP_FOR_GATE=1 rows with zero
+        # spread can never manufacture a beat. Revisit when a second anchor
+        # source returns.
+        only = books.get("draftkings")
+        if only:
+            fair = _book_devig(only)
+    return fair
 
 
 def _soft_best(books: dict, soft_books: frozenset) -> dict:

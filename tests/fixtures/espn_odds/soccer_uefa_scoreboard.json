@@ -1,0 +1,466 @@
+{
+ "leagues": [
+  {
+   "id": "775",
+   "uid": "s:600~l:775",
+   "name": "UEFA Champions League",
+   "abbreviation": "UEFA Champions League",
+   "midsizeName": "UEFA.CHAMPIONS",
+   "slug": "uefa.champions",
+   "season": {
+    "year": 2026,
+    "startDate": "2026-07-01T04:00Z",
+    "endDate": "2027-07-01T03:59Z",
+    "displayName": "2026-27 UEFA Champions League",
+    "type": {
+     "id": "1",
+     "type": 14534,
+     "name": "League Phase",
+     "abbreviation": "League Phase"
+    }
+   },
+   "logos": [
+    {
+     "href": "https://a.espncdn.com/i/leaguelogos/soccer/500/2.png",
+     "width": 500,
+     "height": 500,
+     "alt": "",
+     "rel": [
+      "full",
+      "default"
+     ],
+     "lastUpdated": "2019-05-08T16:07Z"
+    },
+    {
+     "href": "https://a.espncdn.com/i/leaguelogos/soccer/500-dark/2.png",
+     "width": 500,
+     "height": 500,
+     "alt": "",
+     "rel": [
+      "full",
+      "dark"
+     ],
+     "lastUpdated": "2019-05-08T16:07Z"
+    }
+   ],
+   "calendarType": "list",
+   "calendarIsWhitelist": true,
+   "calendarStartDate": "2026-07-01T04:00Z",
+   "calendarEndDate": "2027-07-01T03:59Z",
+   "calendar": [
+    {
+     "label": "UEFA Champions League",
+     "startDate": "2026-07-01T04:00Z",
+     "endDate": "2027-07-01T03:59Z",
+     "entries": [
+      {
+       "label": "League Phase",
+       "detail": "Sep 8-Jan 27",
+       "value": "1",
+       "startDate": "2026-08-27T07:00Z",
+       "endDate": "2027-02-15T07:59Z"
+      },
+      {
+       "label": "Knockout Round Playoffs",
+       "detail": "Feb 15-Mar 7",
+       "value": "2",
+       "startDate": "2027-02-15T08:00Z",
+       "endDate": "2027-03-08T07:59Z"
+      },
+      {
+       "label": "Rd of 16",
+       "detail": "Mar 8-Apr 4",
+       "value": "3",
+       "startDate": "2027-03-08T08:00Z",
+       "endDate": "2027-04-05T06:59Z"
+      },
+      {
+       "label": "Quarterfinals",
+       "detail": "Apr 5-25",
+       "value": "4",
+       "startDate": "2027-04-05T07:00Z",
+       "endDate": "2027-04-26T06:59Z"
+      },
+      {
+       "label": "Semifinals",
+       "detail": "Apr 26-May 31",
+       "value": "5",
+       "startDate": "2027-04-26T07:00Z",
+       "endDate": "2027-06-01T06:59Z"
+      },
+      {
+       "label": "Final",
+       "detail": "Jun 1-30",
+       "value": "6",
+       "startDate": "2027-06-01T07:00Z",
+       "endDate": "2027-07-01T06:59Z"
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "season": {
+  "type": 14534,
+  "year": 2026
+ },
+ "events": [
+  {
+   "id": "401915403",
+   "date": "2026-10-20T16:45Z",
+   "name": "Slavia Prague at Fenerbahce",
+   "season": {
+    "year": 2026,
+    "type": 14534,
+    "slug": "league-phase"
+   },
+   "competitions": [
+    {
+     "competitors": [
+      {
+       "homeAway": "home",
+       "team": {
+        "displayName": "Fenerbahce",
+        "abbreviation": "FEN"
+       }
+      },
+      {
+       "homeAway": "away",
+       "team": {
+        "displayName": "Slavia Prague",
+        "abbreviation": "SLP"
+       }
+      }
+     ],
+     "odds": [
+      {
+       "provider": {
+        "id": "100",
+        "name": "DraftKings",
+        "priority": 1
+       },
+       "details": "FEN -150",
+       "overUnder": 2.5,
+       "moneyline": {
+        "home": {
+         "open": {
+          "odds": "-155"
+         },
+         "close": {
+          "odds": "-150"
+         }
+        },
+        "away": {
+         "open": {
+          "odds": "+400"
+         },
+         "close": {
+          "odds": "+370"
+         }
+        }
+       },
+       "pointSpread": {
+        "home": {
+         "open": {
+          "odds": "-175",
+          "line": "-0.5"
+         },
+         "close": {
+          "odds": "-170",
+          "line": "-0.5"
+         }
+        },
+        "away": {
+         "open": {
+          "odds": "+120",
+          "line": "+0.5"
+         },
+         "close": {
+          "odds": "+115",
+          "line": "+0.5"
+         }
+        }
+       },
+       "total": {
+        "over": {
+         "open": {
+          "odds": "-160",
+          "line": "o2.5"
+         },
+         "close": {
+          "odds": "-165",
+          "line": "o2.5"
+         }
+        },
+        "under": {
+         "open": {
+          "odds": "+120",
+          "line": "u2.5"
+         },
+         "close": {
+          "odds": "+125",
+          "line": "u2.5"
+         }
+        }
+       },
+       "drawOdds": {
+        "moneyLine": 310
+       }
+      }
+     ],
+     "status": {
+      "clock": 0.0,
+      "displayClock": "0'",
+      "type": {
+       "id": "1",
+       "name": "STATUS_SCHEDULED",
+       "state": "pre",
+       "completed": false,
+       "description": "Scheduled",
+       "detail": "Tue, October 20th at 12:45 PM EDT",
+       "shortDetail": "Scheduled"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "401915404",
+   "date": "2026-10-20T16:45Z",
+   "name": "Borussia Dortmund at Sabah FK",
+   "season": {
+    "year": 2026,
+    "type": 14534,
+    "slug": "league-phase"
+   },
+   "competitions": [
+    {
+     "competitors": [
+      {
+       "homeAway": "home",
+       "team": {
+        "displayName": "Sabah FK",
+        "abbreviation": "SAB"
+       }
+      },
+      {
+       "homeAway": "away",
+       "team": {
+        "displayName": "Borussia Dortmund",
+        "abbreviation": "DOR"
+       }
+      }
+     ],
+     "odds": [
+      {
+       "provider": {
+        "id": "100",
+        "name": "DraftKings",
+        "priority": 1
+       },
+       "details": "DOR -340",
+       "overUnder": 3.5,
+       "moneyline": {
+        "home": {
+         "open": {
+          "odds": "+650"
+         },
+         "close": {
+          "odds": "+750"
+         }
+        },
+        "away": {
+         "open": {
+          "odds": "-285"
+         },
+         "close": {
+          "odds": "-340"
+         }
+        }
+       },
+       "pointSpread": {
+        "home": {
+         "open": {
+          "odds": "-120",
+          "line": "+1.5"
+         },
+         "close": {
+          "odds": "-105",
+          "line": "+1.5"
+         }
+        },
+        "away": {
+         "open": {
+          "odds": "-120",
+          "line": "-1.5"
+         },
+         "close": {
+          "odds": "-140",
+          "line": "-1.5"
+         }
+        }
+       },
+       "total": {
+        "over": {
+         "open": {
+          "odds": "+105",
+          "line": "o3.5"
+         },
+         "close": {
+          "odds": "-105",
+          "line": "o3.5"
+         }
+        },
+        "under": {
+         "open": {
+          "odds": "-140",
+          "line": "u3.5"
+         },
+         "close": {
+          "odds": "-125",
+          "line": "u3.5"
+         }
+        }
+       },
+       "drawOdds": {
+        "moneyLine": 500
+       }
+      }
+     ],
+     "status": {
+      "clock": 0.0,
+      "displayClock": "0'",
+      "type": {
+       "id": "1",
+       "name": "STATUS_SCHEDULED",
+       "state": "pre",
+       "completed": false,
+       "description": "Scheduled",
+       "detail": "Tue, October 20th at 12:45 PM EDT",
+       "shortDetail": "Scheduled"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "401915402",
+   "date": "2026-10-20T19:00Z",
+   "name": "Slovan Bratislava at AS Roma",
+   "season": {
+    "year": 2026,
+    "type": 14534,
+    "slug": "league-phase"
+   },
+   "competitions": [
+    {
+     "competitors": [
+      {
+       "homeAway": "home",
+       "team": {
+        "displayName": "AS Roma",
+        "abbreviation": "ROMA"
+       }
+      },
+      {
+       "homeAway": "away",
+       "team": {
+        "displayName": "Slovan Bratislava",
+        "abbreviation": "SLB"
+       }
+      }
+     ],
+     "odds": [
+      {
+       "provider": {
+        "id": "100",
+        "name": "DraftKings",
+        "priority": 1
+       },
+       "details": "ROMA -500",
+       "overUnder": 3.5,
+       "moneyline": {
+        "home": {
+         "open": {
+          "odds": "-800"
+         },
+         "close": {
+          "odds": "-500"
+         }
+        },
+        "away": {
+         "open": {
+          "odds": "+1600"
+         },
+         "close": {
+          "odds": "+1500"
+         }
+        }
+       },
+       "pointSpread": {
+        "home": {
+         "open": {
+          "odds": "-115",
+          "line": "-2.5"
+         },
+         "close": {
+          "odds": "+105",
+          "line": "-2.5"
+         }
+        },
+        "away": {
+         "open": {
+          "odds": "-125",
+          "line": "+2.5"
+         },
+         "close": {
+          "odds": "-150",
+          "line": "+2.5"
+         }
+        }
+       },
+       "total": {
+        "over": {
+         "open": {
+          "odds": "-135",
+          "line": "o3.5"
+         },
+         "close": {
+          "odds": "-125",
+          "line": "o3.5"
+         }
+        },
+        "under": {
+         "open": {
+          "odds": "+105",
+          "line": "u3.5"
+         },
+         "close": {
+          "odds": "-105",
+          "line": "u3.5"
+         }
+        }
+       },
+       "drawOdds": {
+        "moneyLine": 550
+       }
+      }
+     ],
+     "status": {
+      "clock": 0.0,
+      "displayClock": "0'",
+      "type": {
+       "id": "1",
+       "name": "STATUS_SCHEDULED",
+       "state": "pre",
+       "completed": false,
+       "description": "Scheduled",
+       "detail": "Tue, October 20th at 3:00 PM EDT",
+       "shortDetail": "Scheduled"
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

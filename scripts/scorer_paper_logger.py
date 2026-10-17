@@ -184,8 +184,15 @@ def live_snapshot(con, sport, window_hours, min_edge=5.0, bankroll=10_000.0):
     Sizing: half-Kelly × 1/√n match-cluster haircut, capped at $200 and 3% bankroll.
     """
     key = os.getenv("ODDS_API_KEY")
-    if not key:
+    if not key and os.getenv("CLV_ODDS_SOURCE", "espn_dk").strip().lower() != "espn_dk":
         sys.exit("ODDS_API_KEY not set — cannot snapshot live.")
+    if not key:
+        # CLV_ODDS_SOURCE=espn_dk (default since 2026-10-17 — the Odds API key
+        # was permanently deactivated): ESPN/DK's free scoreboard prices game
+        # lines only, never player_goal_scorer_anytime props, so this scorer
+        # lane has no source until a props-capable anchor returns. Clean skip.
+        print(f"[skip] {sport}: player props not priced on ESPN/DK — skipping snapshot (CLV_ODDS_SOURCE=espn_dk)")
+        return
     now = datetime.now(timezone.utc)
     books = ",".join(list(P.SOCCER_PROP_SHARP_WEIGHTS) + sorted(P.SOFT_BOOKS))
     events = P._get(f"{P.ODDS_API_BASE}/sports/{sport}/events?apiKey={key}")

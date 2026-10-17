@@ -7,10 +7,11 @@ from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 
 import json
 import re
+import time
 import urllib.request
 
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 from loguru import logger
@@ -25,6 +26,33 @@ SPORTS = {
     "ncaaf": ("football", "college-football"),
     "ncaab": ("basketball", "mens-college-basketball"),
 }
+
+# League slugs for competitions the CLV loggers track (soccer/UFC). Mirrors
+# odds/soccer_stats.py LEAGUE_SLUGS — kept as a separate map so espn_odds stays
+# self-contained (the VPS scorer dir copies this file standalone).
+ESPN_LEAGUES = {
+    "soccer_fifa_world_cup": ("soccer", "fifa.world"),
+    "soccer_epl": ("soccer", "eng.1"),
+    "soccer_uefa_champs_league": ("soccer", "uefa.champions"),
+    "soccer_spain_la_liga": ("soccer", "esp.1"),
+    "soccer_germany_bundesliga": ("soccer", "ger.1"),
+    "soccer_italy_serie_a": ("soccer", "ita.1"),
+    "soccer_france_ligue_one": ("soccer", "fra.1"),
+    "mma_mixed_martial_arts": ("mma", "ufc"),
+}
+
+# Competitions where ESPN/DK carries NO odds at all (verified 2026-10-17:
+# mma/ufc scoreboard ships zero odds entries). Callers must skip these
+# cleanly instead of treating an empty slate as an outage.
+ESPN_NO_ODDS = {"mma_mixed_martial_arts"}
+
+# Modest politeness: ESPN is free but rate-limited. One scoreboard fetch per
+# sport per TTL is plenty — lines move on minutes, not seconds, and the CLV
+# loggers snapshot every 30min.
+_CACHE_TTL_SECONDS = 300
+_scoreboard_cache: Dict[str, tuple] = {}  # sport -> (fetched_at_monotonic, data)
+_ESPN_BACKOFF_SECONDS = 20
+_backoff_until: Dict[str, float] = {}  # sport -> monotonic time to not retry before
 
 
 @dataclass
@@ -163,6 +191,252 @@ def fetch_all_odds() -> Dict[str, List[GameOdds]]:
             logger.error(f"Error fetching {sport}: {e}")
             all_odds[sport] = []
     return all_odds
+
+
+# ── ESPN/DK backend for the CLV loggers (Odds API retired 2026-10-17) ─────────
+#
+# The Odds API game-level lane is dead (key 51ef… permanently deactivated).
+# These helpers produce the SAME event/odds shapes the loggers already parse
+# (The Odds API /events + /events/{id}/odds JSON), sourced from ESPN's free
+# scoreboard API, which carries DraftKings prices. Only ONE book exists here,
+# so every consumer sees bookmaker key "draftkings" — sharp consensus fields
+# collapse to that single book (n_sharp=1), which the loggers' MIN_SHARP gates
+# already handle.
+
+# The Odds API sport key → ESPN (sport_path, league) for CLV consumers.
+# prop_clv_config.CONFIGS uses the Odds API keys (americanfootball_nfl,
+# baseball_mlb, soccer_*, mma_*); the ESPN short keys stay for fetch_odds users.
+CLV_SPORT_MAP = {
+    "americanfootball_nfl": ("football", "nfl"),
+    "baseball_mlb": ("baseball", "mlb"),
+    "americanfootball_ncaaf": ("football", "college-football"),
+    "basketball_nba": ("basketball", "nba"),
+    "basketball_ncaab": ("basketball", "mens-college-basketball"),
+    "hockey_nhl": ("hockey", "nhl"),
+}
+CLV_SPORT_MAP.update(ESPN_LEAGUES)
+CLV_SPORT_MAP.update(SPORTS)
+
+# The single book label every ESPN/DK row carries.
+ESPN_DK_BOOK = "draftkings"
+
+# Markets the ESPN/DK backend emits (the loggers' game-level set). Player
+# props are NOT priced on ESPN's free scoreboard.
+ESPN_DK_MARKETS = frozenset({"h2h", "totals"})
+
+
+def _espn_scoreboard(sport_key: str) -> Optional[dict]:
+    """Raw ESPN scoreboard JSON for a CLV sport key (cached + backoff).
+
+    Returns None for uncovered sports (ESPN_NO_ODDS) or on fetch failure —
+    callers must treat None as "skip this config cleanly", not an error.
+    """
+    if sport_key in ESPN_NO_ODDS:
+        return None
+    now = time.monotonic()
+    hit = _scoreboard_cache.get(sport_key)
+    if hit and now - hit[0] < _CACHE_TTL_SECONDS:
+        return hit[1]
+    if now < _backoff_until.get(sport_key, 0.0):
+        return hit[1] if hit else None  # recent failure: serve stale, else skip
+    mapped = CLV_SPORT_MAP.get(sport_key)
+    if not mapped:
+        return None
+    sport_path, league = mapped
+    url = f"{ESPN_API}/{sport_path}/{league}/scoreboard"
+    try:
+        # requests, not urllib: ESPN's edge 403s Python's urllib TLS fingerprint
+        resp = requests.get(url, headers={"User-Agent": "Polyclawd/1.0"}, timeout=15)
+        if resp.status_code in (429, 503):
+            _backoff_until[sport_key] = now + _ESPN_BACKOFF_SECONDS
+            logger.warning(f"ESPN scoreboard {sport_key}: HTTP {resp.status_code} — backing off {_ESPN_BACKOFF_SECONDS}s")
+            return hit[1] if hit else None
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        _backoff_until[sport_key] = now + _ESPN_BACKOFF_SECONDS
+        logger.warning(f"ESPN scoreboard {sport_key} fetch failed: {e}")
+        return hit[1] if hit else None
+    _scoreboard_cache[sport_key] = (now, data)
+    return data
+
+
+def _ml_from_odds(odds: dict, side: str) -> Optional[int]:
+    """American moneyline int from odds.moneyline.{side}.close.odds ('-148')."""
+    try:
+        raw = ((odds.get("moneyline") or {}).get(side) or {}).get("close", {}).get("odds")
+        if raw is None:
+            return None
+        return int(str(raw).replace("+", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _espn_event_to_oddsapi(ev: dict, home_team: str, away_team: str) -> dict:
+    """One ESPN competition → The Odds API /events/{id}/odds event shape.
+
+    Produces bookmakers=[{key: 'draftkings', markets: [...]}] with:
+      h2h     — one outcome per side (home/away; + draw for soccer 3-ways)
+      totals  — over/under at the DK main line (point = overUnder)
+    Spread markets are NOT emitted: the CLV consumers parse h2h/totals/props
+    only, and a spread outcome would need a team-name label ESPN doesn't give
+    us unambiguously.
+    """
+    odds_list = [o for o in ((ev.get("competitions") or [{}])[0].get("odds") or []) if o]
+    if not odds_list:
+        return {}
+    o = odds_list[0]
+    markets = []
+
+    h2h = []
+    home_ml = _ml_from_odds(o, "home")
+    away_ml = _ml_from_odds(o, "away")
+    if home_ml is not None:
+        h2h.append({"name": home_team, "price": home_ml})
+    if away_ml is not None:
+        h2h.append({"name": away_team, "price": away_ml})
+    draw = o.get("drawOdds") or {}
+    draw_ml = draw.get("moneyLine")
+    if draw_ml is not None and home_ml is not None:
+        try:
+            h2h.append({"name": "Draw", "price": int(str(draw_ml).replace("+", ""))})
+        except (TypeError, ValueError):
+            pass
+    if len(h2h) >= 2:
+        markets.append({"key": "h2h", "outcomes": h2h})
+
+    total = o.get("total") or {}
+    ou = o.get("overUnder")
+    over_px = ((total.get("over") or {}).get("close") or {}).get("odds")
+    under_px = ((total.get("under") or {}).get("close") or {}).get("odds")
+    if ou is not None and over_px is not None and under_px is not None:
+        try:
+            point = float(ou)
+            markets.append({
+                "key": "totals",
+                "outcomes": [
+                    {"name": "Over", "price": int(str(over_px).replace("+", "")), "point": point},
+                    {"name": "Under", "price": int(str(under_px).replace("+", "")), "point": point},
+                ],
+            })
+        except (TypeError, ValueError):
+            pass
+
+    if not markets:
+        return {}
+    return {
+        "id": ev.get("id", ""),
+        "sport_key": "",
+        "commence_time": ev.get("date", ""),
+        "home_team": home_team,
+        "away_team": away_team,
+        "bookmakers": [{"key": ESPN_DK_BOOK, "title": "DraftKings", "markets": markets}],
+    }
+
+
+def fetch_espn_events(sport_key: str, within_hours: Optional[float] = None,
+                      now: Optional[datetime] = None) -> list:
+    """Upcoming events for a CLV sport key in The Odds API /events shape.
+
+    Returns [{id, commence_time, home_team, away_team}] sorted by commence
+    time. within_hours filters to games kicking off in (0, within_hours] —
+    the loggers' snapshot window. Empty list for uncovered sports or when the
+    slate has no games; callers must NOT treat that as an error.
+    """
+    data = _espn_scoreboard(sport_key)
+    if data is None:
+        return []
+    if now is None:
+        now = datetime.now(timezone.utc)
+    out = []
+    for ev in data.get("events", []):
+        comp = (ev.get("competitions") or [{}])[0]
+        competitors = comp.get("competitors", [])
+        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+        if not home or not away:
+            continue
+        home_team = (home.get("team") or {}).get("displayName", "")
+        away_team = (away.get("team") or {}).get("displayName", "")
+        if not home_team or not away_team:
+            continue
+        ct = _parse_espn_date(ev.get("date"))
+        if ct is None:
+            continue
+        if within_hours is not None:
+            mins = (ct - now).total_seconds() / 60.0
+            if mins <= 0 or mins > within_hours * 60:
+                continue
+        out.append({
+            "id": ev.get("id", ""),
+            "commence_time": ct.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "home_team": home_team,
+            "away_team": away_team,
+        })
+    out.sort(key=lambda e: e["commence_time"])
+    return out
+
+
+def _parse_espn_date(s: Optional[str]) -> Optional[datetime]:
+    """ESPN date ('2026-10-17T14:00Z', no seconds) → aware UTC datetime."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def fetch_event_odds(sport_key: str, event_id: str, within_hours: Optional[float] = None,
+                     now: Optional[datetime] = None) -> Optional[dict]:
+    """One event's odds in The Odds API /events/{id}/odds shape (DK book only).
+
+    Serves from the cached scoreboard — no per-event HTTP call, unlike the
+    Odds API. Returns None when the event is unknown, not yet priced by DK,
+    or outside within_hours. Callers must treat None as a clean skip.
+    """
+    data = _espn_scoreboard(sport_key)
+    if data is None:
+        return None
+    if now is None:
+        now = datetime.now(timezone.utc)
+    for ev in data.get("events", []):
+        if str(ev.get("id", "")) != str(event_id):
+            continue
+        comp = (ev.get("competitions") or [{}])[0]
+        competitors = comp.get("competitors", [])
+        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+        if not home or not away:
+            return None
+        home_team = (home.get("team") or {}).get("displayName", "")
+        away_team = (away.get("team") or {}).get("displayName", "")
+        ct = _parse_espn_date(ev.get("date"))
+        if ct is None:
+            return None
+        if within_hours is not None:
+            mins = (ct - now).total_seconds() / 60.0
+            if mins <= 0 or mins > within_hours * 60:
+                return None
+        shaped = _espn_event_to_oddsapi(ev, home_team, away_team)
+        if not shaped:
+            return None  # DK hasn't priced this event yet — clean skip
+        shaped["sport_key"] = sport_key
+        return shaped
+    return None
+
+
+def espn_dk_available(sport_key: str) -> bool:
+    """True when ESPN/DK covers this sport key with odds. One scoreboard fetch
+    (cached); False for uncovered sports (UFC) or a slate with no DK prices."""
+    data = _espn_scoreboard(sport_key)
+    if data is None:
+        return False
+    for ev in data.get("events", []):
+        comp = (ev.get("competitions") or [{}])[0]
+        if any(o for o in comp.get("odds", []) if o):
+            return True
+    return False
 
 
 def american_to_prob(odds: int) -> float:

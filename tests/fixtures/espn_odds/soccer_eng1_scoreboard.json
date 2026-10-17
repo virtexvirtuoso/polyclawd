@@ -1,0 +1,537 @@
+{
+ "leagues": [
+  {
+   "id": "700",
+   "uid": "s:600~l:700",
+   "name": "English Premier League",
+   "abbreviation": "Premier League",
+   "midsizeName": "ENG.1",
+   "slug": "eng.1",
+   "season": {
+    "year": 2026,
+    "startDate": "2026-06-01T04:00Z",
+    "endDate": "2027-06-01T03:59Z",
+    "displayName": "2026-27 English Premier League",
+    "type": {
+     "id": "1",
+     "type": 14308,
+     "name": "2026-27 English Premier League",
+     "abbreviation": "2026-27 English Premier League"
+    }
+   },
+   "logos": [
+    {
+     "href": "https://a.espncdn.com/i/leaguelogos/soccer/500/23.png",
+     "width": 500,
+     "height": 500,
+     "alt": "",
+     "rel": [
+      "full",
+      "default"
+     ],
+     "lastUpdated": "2019-05-08T16:07Z"
+    },
+    {
+     "href": "https://a.espncdn.com/i/leaguelogos/soccer/500-dark/23.png",
+     "width": 500,
+     "height": 500,
+     "alt": "",
+     "rel": [
+      "full",
+      "dark"
+     ],
+     "lastUpdated": "2021-08-10T20:43Z"
+    }
+   ],
+   "calendarType": "day",
+   "calendarIsWhitelist": true,
+   "calendarStartDate": "2026-06-01T04:00Z",
+   "calendarEndDate": "2027-06-01T03:59Z",
+   "calendar": [
+    "2026-08-21T07:00Z",
+    "2026-08-22T07:00Z",
+    "2026-08-23T07:00Z",
+    "2026-08-24T07:00Z",
+    "2026-08-28T07:00Z",
+    "2026-08-29T07:00Z",
+    "2026-08-30T07:00Z",
+    "2026-08-31T07:00Z",
+    "2026-09-04T07:00Z",
+    "2026-09-05T07:00Z",
+    "2026-09-06T07:00Z",
+    "2026-09-12T07:00Z",
+    "2026-09-13T07:00Z",
+    "2026-09-14T07:00Z",
+    "2026-09-18T07:00Z",
+    "2026-09-19T07:00Z",
+    "2026-09-20T07:00Z",
+    "2026-10-10T07:00Z",
+    "2026-10-11T07:00Z",
+    "2026-10-12T07:00Z",
+    "2026-10-17T07:00Z",
+    "2026-10-18T07:00Z",
+    "2026-10-19T07:00Z",
+    "2026-10-23T07:00Z",
+    "2026-10-24T07:00Z",
+    "2026-10-25T07:00Z",
+    "2026-10-31T07:00Z",
+    "2026-11-01T07:00Z",
+    "2026-11-02T08:00Z",
+    "2026-11-06T08:00Z",
+    "2026-11-07T08:00Z",
+    "2026-11-08T08:00Z",
+    "2026-11-21T08:00Z",
+    "2026-11-22T08:00Z",
+    "2026-11-23T08:00Z",
+    "2026-11-27T08:00Z",
+    "2026-11-28T08:00Z",
+    "2026-11-29T08:00Z",
+    "2026-12-02T08:00Z",
+    "2026-12-05T08:00Z",
+    "2026-12-12T08:00Z",
+    "2026-12-19T08:00Z",
+    "2026-12-26T08:00Z",
+    "2026-12-27T08:00Z",
+    "2026-12-29T08:00Z",
+    "2026-12-30T08:00Z",
+    "2027-01-01T08:00Z",
+    "2027-01-02T08:00Z",
+    "2027-01-03T08:00Z",
+    "2027-01-05T08:00Z",
+    "2027-01-06T08:00Z",
+    "2027-01-07T08:00Z",
+    "2027-01-16T08:00Z",
+    "2027-01-23T08:00Z",
+    "2027-01-30T08:00Z",
+    "2027-02-06T08:00Z",
+    "2027-02-10T08:00Z",
+    "2027-02-20T08:00Z",
+    "2027-02-27T08:00Z",
+    "2027-03-03T08:00Z",
+    "2027-03-13T08:00Z",
+    "2027-03-20T07:00Z",
+    "2027-04-10T07:00Z",
+    "2027-04-17T07:00Z",
+    "2027-04-24T07:00Z",
+    "2027-05-01T07:00Z",
+    "2027-05-08T07:00Z",
+    "2027-05-15T07:00Z",
+    "2027-05-23T07:00Z",
+    "2027-05-30T07:00Z"
+   ]
+  }
+ ],
+ "season": {
+  "type": 14308,
+  "year": 2026
+ },
+ "events": [
+  {
+   "id": "401878771",
+   "date": "2026-10-17T11:30Z",
+   "name": "Chelsea at Everton",
+   "season": {
+    "year": 2026,
+    "type": 14308,
+    "slug": "2026-27-english-premier-league"
+   },
+   "competitions": [
+    {
+     "competitors": [
+      {
+       "homeAway": "home",
+       "team": {
+        "displayName": "Everton",
+        "abbreviation": "EVE"
+       }
+      },
+      {
+       "homeAway": "away",
+       "team": {
+        "displayName": "Chelsea",
+        "abbreviation": "CHE"
+       }
+      }
+     ],
+     "odds": [
+      null
+     ],
+     "status": {
+      "clock": 5400.0,
+      "displayClock": "90'+14'",
+      "period": 2,
+      "type": {
+       "id": "28",
+       "name": "STATUS_FULL_TIME",
+       "state": "post",
+       "completed": true,
+       "description": "Full Time",
+       "detail": "FT",
+       "shortDetail": "FT"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "401879262",
+   "date": "2026-10-17T14:00Z",
+   "name": "Liverpool at Brentford",
+   "season": {
+    "year": 2026,
+    "type": 14308,
+    "slug": "2026-27-english-premier-league"
+   },
+   "competitions": [
+    {
+     "competitors": [
+      {
+       "homeAway": "home",
+       "team": {
+        "displayName": "Brentford",
+        "abbreviation": "BRE"
+       }
+      },
+      {
+       "homeAway": "away",
+       "team": {
+        "displayName": "Liverpool",
+        "abbreviation": "LIV"
+       }
+      }
+     ],
+     "odds": [
+      {
+       "provider": {
+        "id": "100",
+        "name": "DraftKings",
+        "priority": 1
+       },
+       "details": "LIV +150",
+       "overUnder": 3.5,
+       "moneyline": {
+        "home": {
+         "open": {
+          "odds": "+175"
+         },
+         "close": {
+          "odds": "+175"
+         }
+        },
+        "away": {
+         "open": {
+          "odds": "+135"
+         },
+         "close": {
+          "odds": "+150"
+         }
+        }
+       },
+       "pointSpread": {
+        "home": {
+         "open": {
+          "odds": "-185",
+          "line": "+0.5"
+         },
+         "close": {
+          "odds": "-185",
+          "line": "+0.5"
+         }
+        },
+        "away": {
+         "open": {
+          "odds": "+120",
+          "line": "-0.5"
+         },
+         "close": {
+          "odds": "+130",
+          "line": "-0.5"
+         }
+        }
+       },
+       "total": {
+        "over": {
+         "open": {
+          "odds": "+130",
+          "line": "o3.5"
+         },
+         "close": {
+          "odds": "+135",
+          "line": "o3.5"
+         }
+        },
+        "under": {
+         "open": {
+          "odds": "-175",
+          "line": "u3.5"
+         },
+         "close": {
+          "odds": "-170",
+          "line": "u3.5"
+         }
+        }
+       },
+       "drawOdds": {
+        "moneyLine": 260
+       }
+      }
+     ],
+     "status": {
+      "clock": 3660.0,
+      "displayClock": "61'",
+      "period": 2,
+      "type": {
+       "id": "26",
+       "name": "STATUS_SECOND_HALF",
+       "state": "in",
+       "completed": false,
+       "description": "Second Half",
+       "detail": "61'",
+       "shortDetail": "61'"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "401878770",
+   "date": "2026-10-17T14:00Z",
+   "name": "Hull City at Fulham",
+   "season": {
+    "year": 2026,
+    "type": 14308,
+    "slug": "2026-27-english-premier-league"
+   },
+   "competitions": [
+    {
+     "competitors": [
+      {
+       "homeAway": "home",
+       "team": {
+        "displayName": "Fulham",
+        "abbreviation": "FUL"
+       }
+      },
+      {
+       "homeAway": "away",
+       "team": {
+        "displayName": "Hull City",
+        "abbreviation": "HUL"
+       }
+      }
+     ],
+     "odds": [
+      {
+       "provider": {
+        "id": "100",
+        "name": "DraftKings",
+        "priority": 1
+       },
+       "details": "FUL -155",
+       "overUnder": 2.5,
+       "moneyline": {
+        "home": {
+         "open": {
+          "odds": "-155"
+         },
+         "close": {
+          "odds": "-155"
+         }
+        },
+        "away": {
+         "open": {
+          "odds": "+370"
+         },
+         "close": {
+          "odds": "+425"
+         }
+        }
+       },
+       "pointSpread": {
+        "home": {
+         "open": {
+          "odds": "-170",
+          "line": "-0.5"
+         },
+         "close": {
+          "odds": "-175",
+          "line": "-0.5"
+         }
+        },
+        "away": {
+         "open": {
+          "odds": "+110",
+          "line": "+0.5"
+         },
+         "close": {
+          "odds": "+125",
+          "line": "+0.5"
+         }
+        }
+       },
+       "total": {
+        "over": {
+         "open": {
+          "odds": "-155",
+          "line": "o2.5"
+         },
+         "close": {
+          "odds": "-135",
+          "line": "o2.5"
+         }
+        },
+        "under": {
+         "open": {
+          "odds": "+115",
+          "line": "u2.5"
+         },
+         "close": {
+          "odds": "+110",
+          "line": "u2.5"
+         }
+        }
+       },
+       "drawOdds": {
+        "moneyLine": 300
+       }
+      }
+     ],
+     "status": {
+      "clock": 4260.0,
+      "displayClock": "71'",
+      "period": 2,
+      "type": {
+       "id": "26",
+       "name": "STATUS_SECOND_HALF",
+       "state": "in",
+       "completed": false,
+       "description": "Second Half",
+       "detail": "71'",
+       "shortDetail": "71'"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "401879259",
+   "date": "2026-10-17T14:00Z",
+   "name": "Ipswich Town at Manchester City",
+   "season": {
+    "year": 2026,
+    "type": 14308,
+    "slug": "2026-27-english-premier-league"
+   },
+   "competitions": [
+    {
+     "competitors": [
+      {
+       "homeAway": "home",
+       "team": {
+        "displayName": "Manchester City",
+        "abbreviation": "MNC"
+       }
+      },
+      {
+       "homeAway": "away",
+       "team": {
+        "displayName": "Ipswich Town",
+        "abbreviation": "IPS"
+       }
+      }
+     ],
+     "odds": [
+      {
+       "provider": {
+        "id": "100",
+        "name": "DraftKings",
+        "priority": 1
+       },
+       "details": "MNC -425",
+       "overUnder": 3.5,
+       "moneyline": {
+        "home": {
+         "open": {
+          "odds": "-475"
+         },
+         "close": {
+          "odds": "-425"
+         }
+        },
+        "away": {
+         "open": {
+          "odds": "+900"
+         },
+         "close": {
+          "odds": "+950"
+         }
+        }
+       },
+       "pointSpread": {
+        "home": {
+         "open": {
+          "odds": "-175",
+          "line": "-1.5"
+         },
+         "close": {
+          "odds": "-155",
+          "line": "-1.5"
+         }
+        },
+        "away": {
+         "open": {
+          "odds": "+115",
+          "line": "+1.5"
+         },
+         "close": {
+          "odds": "+115",
+          "line": "+1.5"
+         }
+        }
+       },
+       "total": {
+        "over": {
+         "open": {
+          "odds": "-110",
+          "line": "o3.5"
+         },
+         "close": {
+          "odds": "-120",
+          "line": "o3.5"
+         }
+        },
+        "under": {
+         "open": {
+          "odds": "-120",
+          "line": "u3.5"
+         },
+         "close": {
+          "odds": "-105",
+          "line": "u3.5"
+         }
+        }
+       },
+       "drawOdds": {
+        "moneyLine": 600
+       }
+      }
+     ],
+     "status": {
+      "clock": 4080.0,
+      "displayClock": "68'",
+      "period": 2,
+      "type": {
+       "id": "26",
+       "name": "STATUS_SECOND_HALF",
+       "state": "in",
+       "completed": false,
+       "description": "Second Half",
+       "detail": "68'",
+       "shortDetail": "68'"
+      }
+     }
+    }
+   ]
+  }
+ ]
+}
