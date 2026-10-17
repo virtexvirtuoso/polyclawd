@@ -2463,6 +2463,13 @@ async def main():
         asyncio.create_task(_delayed_start(18, tick_nfl_edge_scan)),
     ]
 
+    # One-cycle memory diagnostic (self-removing — see services/memdiag.py).
+    # Armed for a single 8h window via /tmp/polyclawd_memdiag.deadline; INERT
+    # on any start after the window. Remove this block in the targeted-fix PR.
+    from services.memdiag import arm_and_start, run_diag_loop
+    if arm_and_start(logger):
+        tasks.append(asyncio.create_task(run_diag_loop(logger)))
+
     await asyncio.gather(*tasks)
 
 
