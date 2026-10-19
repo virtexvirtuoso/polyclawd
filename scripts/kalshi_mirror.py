@@ -55,7 +55,10 @@ def log(msg):
         f.write(line + "\n")
 
 def http_json(url):
-    req = Request(url, headers={"Accept": "application/json"})
+    # Cloudflare (error 1010) on clob.polymarket.com rejects the default
+    # Python-urllib User-Agent; use the repo-wide agent string.
+    req = Request(url, headers={"Accept": "application/json",
+                                "User-Agent": "Polyclawd/2.0"})
     with urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode())
 
