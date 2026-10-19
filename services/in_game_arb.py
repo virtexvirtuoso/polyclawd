@@ -62,6 +62,8 @@ import sys
 import threading
 import time
 from collections import namedtuple
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -292,6 +294,16 @@ def kalshi_event_suffix(ticker: str) -> str:
     return ticker.split("-", 1)[1] if ticker and "-" in ticker else ""
 
 
+def _et_date(iso: str) -> str:
+    """UTC ISO timestamp -> US/Eastern calendar date ('2026-10-01').
+    Kalshi game tickers use the ET date; ESPN 'date' fields are UTC."""
+    try:
+        dt = datetime.fromisoformat((iso or "").replace("Z", "+00:00"))
+        return dt.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
 def espn_live_games(scoreboard: dict, sport: str = "nfl") -> dict:
     """{(sport, 'CLE','PIT'): {'state','detail','period','score':{abbr:pts}}}.
     Sport-namespaced: TB/ATL/CLE exist in BOTH NFL and MLB — a bare pair
@@ -317,6 +329,7 @@ def espn_live_games(scoreboard: dict, sport: str = "nfl") -> dict:
                 "detail": typ.get("shortDetail"),
                 "period": st.get("period"),
                 "score": scores,
+                "date": _et_date(ev.get("date") or comp.get("date") or ""),
             }
             a, b = abbrs
             va = {a} | ABBR_ALIASES.get(a, set())
@@ -975,7 +988,10 @@ def recap_pending_games(conn, live: dict, cfg: dict, now: float) -> int:
     Durable via the recaps table — survives restarts, fires at most once."""
     sent = 0
     cutoff = now - 12 * 3600
-    done = {r[0] for r in conn.execute("SELECT game FROM recaps WHERE ts>?", (cutoff,))}
+    # Game keys carry their date (26OCT17...) so they never repeat: one
+    # recap per key, EVER. (A 12h expiry here let a stale marker resend the
+    # recap every cycle - 338 duplicates on 2026-10-18/19.)
+    done = {r[0] for r in conn.execute("SELECT game FROM recaps")}
     fired_games = [r[0] for r in conn.execute(
         "SELECT DISTINCT game FROM pairs_log WHERE ts>? AND alerted=1", (cutoff,))]
     for game in fired_games:
@@ -993,7 +1009,8 @@ def recap_pending_games(conn, live: dict, cfg: dict, now: float) -> int:
         if not text:
             continue
         if send_telegram(text, cfg["telegram"]):
-            conn.execute("INSERT OR IGNORE INTO recaps (game, ts) VALUES (?,?)", (game, now))
+            conn.execute("INSERT INTO recaps (game, ts) VALUES (?,?) "
+                         "ON CONFLICT(game) DO UPDATE SET ts=excluded.ts", (game, now))
             conn.commit()
             sent += 1
     return sent
@@ -1055,6 +1072,14 @@ def run_cycle(cfg: dict, conn: sqlite3.Connection) -> dict:
             espn = live.get((sport,) + tuple(sorted(abbrs)))
             if not espn or espn.get("state") != "in":
                 continue  # in-game focus
+            if espn.get("date") and espn["date"] != date:
+                # Stale Kalshi event: same teams, earlier date, still open
+                # awaiting settlement. Pairing it with today's live game
+                # logged alerts under the OLD game key (2026-10-19 recap
+                # spam: G3 alerts under 26OCT172000TBCLE). Skip it.
+                log.info("date mismatch: kalshi %s (%s) vs live espn %s - skip",
+                         suffix, date, espn["date"])
+                continue
             summary["games"] += 1
             pm_event = None
             for query in pmus_queries(sport, abbrs,

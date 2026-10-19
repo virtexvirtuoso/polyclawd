@@ -732,3 +732,76 @@ def test_run_cycle_mlb_truncated_title_finds_pm_event(tmp_path, monkeypatch):
     assert s["games"] == 1
     assert s["pairs"] == 4, "queries tried: %r" % queries
     assert queries[0] == "Chicago White Sox vs Cleveland Guardians"
+
+
+def test_recap_stale_marker_never_resends(tmp_path, monkeypatch):
+    """Regression 2026-10-19 recap spam: a recap marker older than the 12h
+    window + fresh alerted rows under the same game key re-sent the recap
+    every ~45s cycle (338 copies). Game keys carry their date, so a sent
+    recap is permanent - the marker must suppress it regardless of age."""
+    conn = arb.db_init(str(tmp_path / "arb.db"))
+    ins = ("INSERT INTO pairs_log (ts, game, key, stat, name, line, pm_bid, pm_ask,"
+           " kal_bid, kal_ask, net_edge, direction, alerted) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    now = time.time()
+    conn.execute(ins, (now, "26OCT172000TBCLE", "26OCT172000TBCLE|ml|guards",
+                       "ml", "guards", 0, 60, 61, 55, 56, 3.0, "A", 1))
+    conn.execute("INSERT INTO recaps (game, ts) VALUES (?,?)",
+                 ("26OCT172000TBCLE", now - 20 * 3600))
+    conn.commit()
+    sends = []
+    monkeypatch.setattr(arb, "send_telegram", lambda text, enabled: sends.append(text) or True)
+    live = {("mlb", "CLE", "TB"): {"state": "post", "detail": "Final",
+                                   "score": {"CLE": 3, "TB": 1}}}
+    assert arb.recap_pending_games(conn, live, {"telegram": False}, now) == 0
+    assert sends == []
+
+
+def test_recap_marker_upsert_refreshes_ts(tmp_path):
+    """The marker write must UPDATE an existing row (INSERT OR IGNORE left a
+    stale ts forever, which combined with the old 12h expiry into the spam)."""
+    conn = arb.db_init(str(tmp_path / "arb.db"))
+    conn.execute("INSERT INTO recaps (game, ts) VALUES (?,?)", ("g", 1000.0))
+    conn.execute("INSERT INTO recaps (game, ts) VALUES (?,?) "
+                 "ON CONFLICT(game) DO UPDATE SET ts=excluded.ts", ("g", 2000.0))
+    conn.commit()
+    assert conn.execute("SELECT ts FROM recaps WHERE game='g'").fetchone() == (2000.0,)
+    assert conn.execute("SELECT COUNT(*) FROM recaps").fetchone()[0] == 1
+
+
+def test_run_cycle_skips_date_mismatched_kalshi_event(tmp_path, monkeypatch):
+    """Regression 2026-10-19: yesterday's Kalshi event (same teams, still
+    open awaiting settlement) paired with today's live ESPN game - G3 alerts
+    logged under G2's key. The date gate must skip the stale event."""
+    pm_event = {"slug": "nfl-pit-cle-2026-10-01", "title": "Pittsburgh vs. Cleveland",
+                "markets": [{
+                    "slug": "aec-nfl-pit-cle-2026-10-01",
+                    "question": "Who will win in the upcoming football event?",
+                    "sportsMarketType": "football_team_full_game_winner",
+                    "outcomes": "[\"Steelers\",\"Browns\"]",
+                    "outcomePrices": "[\"0.3150\",\"0.3200\"]",
+                }]}
+    kal_game = {"ticker": "KXNFLGAME-26OCT30PITCLE", "title": "PIT Steelers vs CLE Browns",
+                "markets": [
+                    {"title": "Pittsburgh wins", "yes_bid": 25, "yes_ask": 26,
+                     "volume": 500000, "status": "active"},
+                    {"title": "Cleveland wins", "yes_bid": 74, "yes_ask": 75,
+                     "volume": 500000, "status": "active"},
+                ]}
+    monkeypatch.setattr(arb.time, "sleep", lambda s: None)
+    monkeypatch.setattr(arb, "espn_scoreboard", lambda sport="nfl": load("espn_pitcle.json"))
+    monkeypatch.setattr(arb, "kalshi_series_events",
+                        lambda s: {"KXNFLGAME-26OCT30PITCLE": kal_game} if s == "KXNFLGAME" else {})
+    monkeypatch.setattr(arb, "pmus_search_event", lambda q, d, a: pm_event)
+    monkeypatch.setattr(arb, "pmus_bbo", lambda slug: (25.5, 26.0))
+    conn = arb.db_init(str(tmp_path / "arb.db"))
+    s = arb.run_cycle(_cfg(str(tmp_path / "arb.db")), conn)
+    assert s["games"] == 0 and s["alerts"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM pairs_log").fetchone()[0] == 0
+
+
+def test_et_date_helper():
+    """ESPN UTC dates convert to the ET date Kalshi tickers use."""
+    assert arb._et_date("2026-10-02T00:15Z") == "2026-10-01"  # 8:15 PM ET Oct 1
+    assert arb._et_date("2026-10-18T23:10Z") == "2026-10-18"  # 7:10 PM ET Oct 18
+    assert arb._et_date("") == ""
+    assert arb._et_date("garbage") == ""
