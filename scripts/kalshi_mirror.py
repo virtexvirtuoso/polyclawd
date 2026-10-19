@@ -162,36 +162,46 @@ def blanket_entry_alerts():
 
 # ---------------------------------------------------------------- cache
 def cmd_cache():
+    """Cache only the series cmd_match can match (CACHE_SERIES). An unfiltered
+    pull is ~99.5% KXMVE* user-built parlays: 10.8M rows / 14.5 GB in 3 days,
+    and a pass never finished (2026-10-19)."""
     db = mirror_db()
     now = int(time.time())
     lo = now - CACHE_WINDOW_DAYS[0] * 86400
     hi = now + CACHE_WINDOW_DAYS[1] * 86400
-    url = f"{KALSHI}/markets?min_close_ts={lo}&max_close_ts={hi}&limit=1000"
     n = pages = 0
-    while url:
-        data = http_json(url)
-        rows = []
-        for m in data.get("markets", []):
-            rows.append(
-                (m["ticker"], m.get("event_ticker"), m["ticker"].split("-")[0],
-                 m.get("title"), m.get("yes_sub_title"), m.get("no_sub_title"),
-                 (m.get("rules_primary") or "")[:2000], m.get("close_time"),
-                 m.get("status"), m.get("result"), now))
-        # Batch commit per page: a kill mid-run must not roll back the whole load
-        # (2026-10-16: single-transaction version lost 400MB of inserts to timeout).
-        db.executemany(
-            "INSERT OR REPLACE INTO kalshi_markets_cache VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            rows)
-        db.commit()
-        n += len(rows)
-        pages += 1
-        if pages % 25 == 0:
-            log(f"cache: {pages} pages, {n} rows so far")
-        cur = data.get("cursor")
-        url = f"{KALSHI}/markets?min_close_ts={lo}&max_close_ts={hi}&limit=1000&cursor={cur}" if cur else None
+    for series in CACHE_SERIES:
+        base = f"{KALSHI}/markets?series_ticker={series}&min_close_ts={lo}&max_close_ts={hi}&limit=1000"
+        url = base
+        while url:
+            data = http_json(url)
+            rows = []
+            for m in data.get("markets", []):
+                rows.append(
+                    (m["ticker"], m.get("event_ticker"), m["ticker"].split("-")[0],
+                     m.get("title"), m.get("yes_sub_title"), m.get("no_sub_title"),
+                     (m.get("rules_primary") or "")[:2000], m.get("close_time"),
+                     m.get("status"), m.get("result"), now))
+            # Batch commit per page: a kill mid-run must not roll back the whole load
+            # (2026-10-16: single-transaction version lost 400MB of inserts to timeout).
+            db.executemany(
+                "INSERT OR REPLACE INTO kalshi_markets_cache VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                rows)
+            db.commit()
+            n += len(rows)
+            pages += 1
+            cur = data.get("cursor")
+            url = f"{base}&cursor={cur}" if cur and rows else None
+    # Full pass done: drop rows this pass did not refresh (out of window or series),
+    # keeping any an unresolved trade still needs for settlement.
+    pruned = db.execute(
+        "DELETE FROM kalshi_markets_cache WHERE fetched_at < ? AND ticker NOT IN "
+        "(SELECT kalshi_ticker FROM mirror_trades WHERE kalshi_ticker IS NOT NULL AND resolved=0)",
+        (now,)).rowcount
+    db.commit()
     total = db.execute("SELECT COUNT(*) FROM kalshi_markets_cache").fetchone()[0]
-    log(f"cache: fetched {n} rows over {pages} pages, cache total {total}")
-    print(f"cache: fetched {n}, total {total}")
+    log(f"cache: fetched {n} rows over {pages} pages, pruned {pruned}, cache total {total}")
+    print(f"cache: fetched {n}, pruned {pruned}, total {total}")
 
 # ---------------------------------------------------------------- match
 NFL_NICKS = ("ravens|cowboys|vikings|buccaneers|eagles|bears|packers|chiefs|bills|dolphins|jets|"
@@ -210,6 +220,8 @@ SOCCER_SERIES = ["KXESOCCERGAME", "KXISRNLGAME", "KXLIGAPROMATCH", "KXBUNDESLIGA
                  "KXLIIGAGAME", "KXELHGAME", "KXSESBLGAME", "KXABAGAME", "KXSKLGAME",
                  "KXBUNDESLIGA2GAME", "KXBUNDESLIGAWGAME", "KXAUTBSLGAME", "KXQSTARSGAME",
                  "KXEBASKETBALLGAME", "KXEUROLEAGUEGAME", "KXKHLGAME"]
+# Every series series_for() can return — the only markets cmd_match can use.
+CACHE_SERIES = sorted(MATCH_SERIES | set(SOCCER_SERIES) | {"KXCS2MAP", "KXDOTA2MAP", "KXLOLMAP"})
 
 def series_for(title):
     l = title.lower()
