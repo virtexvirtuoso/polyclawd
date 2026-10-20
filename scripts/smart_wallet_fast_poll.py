@@ -89,6 +89,13 @@ _SW_LIVE_FRACTION = 0.10  # 10% of bankroll per trade
 _SW_LIVE_MIN_USD = 2.0  # floor — must stay <= 0.11 * bankroll (deadlock-free to $18.18)
 _SW_LIVE_MAX_USD = 15.0  # cap — safety limit per trade
 
+
+def _sw_live_size_usd(bankroll: float) -> float:
+    """USD size of every live smart_wallet order at this bankroll. Also read by the
+    scheduler's startup live-gate check, so the two cannot disagree."""
+    return max(_SW_LIVE_MIN_USD, min(_SW_LIVE_MAX_USD, bankroll * _SW_LIVE_FRACTION))
+
+
 # Category gate — only follow smart wallets into approved market verticals.
 # Gamma sometimes returns category=None (e.g. entertainment/pop-culture markets).
 # In that case we require a positive slug/question keyword match to proceed.
@@ -687,7 +694,7 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
         _ldb.close()
     except Exception:
         bankroll = 0.0
-    size_usd = max(_SW_LIVE_MIN_USD, min(_SW_LIVE_MAX_USD, bankroll * _SW_LIVE_FRACTION))
+    size_usd = _sw_live_size_usd(bankroll)
     logger.info(
         "sw_live: bankroll=$%.2f → size=$%.2f (frac=%.0f%% floor=$%.0f cap=$%.0f)",
         bankroll,

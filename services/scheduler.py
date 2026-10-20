@@ -2378,6 +2378,25 @@ async def tick_scheduled():
         await asyncio.sleep(600)
 
 
+def _live_min_action_by_strategy(bankroll: float) -> dict:
+    """Smallest order each live executor sends at this bankroll, keyed by the intent
+    category it puts on the governor check. A category missing here has no live executor.
+
+    The old check used the edge-tier size for every strategy, so on 2026-10-20 it reported
+    every intent rejected while smart_wallet ($2.24) fit under the cap ($2.47)."""
+    from execution import live_config as _lc
+    from scripts.smart_wallet_fast_poll import _sw_live_size_usd
+
+    tiers = [_lc.tiered_size_usd(e) for e in (0.03, 0.05, 0.08, 0.15)]
+    tier_min = min((x for x in tiers if x and x > 0), default=0.0)
+    return {
+        "smart_wallet": _sw_live_size_usd(bankroll),
+        # soccer and weather executors size by edge tier; book depth can only shrink it
+        "soccer_match_3way": tier_min,
+        "weather_resolution": tier_min,
+    }
+
+
 def _assert_live_cap_fits_min_action() -> None:
     """Startup assertion prescribed by the fleet ledger (2026-08-19):
 
@@ -2405,21 +2424,33 @@ def _assert_live_cap_fits_min_action() -> None:
             return
         bankroll = float(row[0] or 0.0)
         eff = min(_lc.per_trade_cap(), bankroll * _lc.per_trade_frac())
-        sizes = [_lc.tiered_size_usd(e) for e in (0.03, 0.05, 0.08, 0.15)]
-        sizes = [x for x in sizes if x and x > 0]
-        min_action = min(sizes) if sizes else 0.0
-        if min_action and eff < min_action:
+        sizes = _live_min_action_by_strategy(bankroll)
+
+        def fmt(names):
+            return ", ".join(f"{s} ${sizes[s]:.2f}" for s in names) or "none"
+
+        inert = [s for s in allow if sizes.get(s) and eff < sizes[s]]
+        trading = [s for s in allow if sizes.get(s) and eff >= sizes[s]]
+        no_exec = [s for s in allow if not sizes.get(s)]
+        if inert and not trading:
             logger.error(
-                "LIVE GATE INERT: effective per-trade cap $%.2f < smallest legal action $%.2f "
-                "(bankroll $%.2f x frac %.2f, allowlist=%s). Every intent will be rejected and "
-                "the rejections are logged at INFO — this is indistinguishable from 'no signal'. "
-                "Raise POLYCLAWD_PER_TRADE_FRAC, lower the tier base, or empty the allowlist "
-                "so the halt is explicit.",
-                eff, min_action, bankroll, _lc.per_trade_frac(), allow,
+                "LIVE GATE INERT: effective per-trade cap $%.2f is below the smallest order of "
+                "every live strategy (%s; bankroll $%.2f x frac %.2f). Every intent will be "
+                "rejected and the rejections are logged at INFO — this is indistinguishable from "
+                "'no signal'. Raise POLYCLAWD_PER_TRADE_FRAC, lower the order sizes, or empty the "
+                "allowlist so the halt is explicit.",
+                eff, fmt(inert), bankroll, _lc.per_trade_frac(),
             )
-        else:
-            logger.info("LIVE GATE OK: cap $%.2f >= min action $%.2f (allowlist=%s)",
-                        eff, min_action, allow)
+        elif inert:
+            logger.warning(
+                "LIVE GATE PARTIAL: per-trade cap $%.2f (bankroll $%.2f x frac %.2f) blocks %s; "
+                "trading: %s",
+                eff, bankroll, _lc.per_trade_frac(), fmt(inert), fmt(trading),
+            )
+        elif trading:
+            logger.info("LIVE GATE OK: cap $%.2f fits %s", eff, fmt(trading))
+        if no_exec:
+            logger.info("LIVE GATE: allowlisted with no live executor: %s", no_exec)
     except Exception as exc:  # noqa: BLE001 — never let the assertion break startup
         logger.warning("live-cap assertion failed to evaluate: %s", exc)
 
