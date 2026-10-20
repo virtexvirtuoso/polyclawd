@@ -19,6 +19,7 @@ import asyncio
 import html
 import logging
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -2262,10 +2263,17 @@ def task_state_cleanup():
         logger.info("State cleanup: pruned %d stale entries", pruned)
 
 
+# VACUUM rewrites the whole file (a copy plus its WAL), so it needs about twice the
+# DB size free; below that it is skipped rather than filling the disk (2026-10-19).
+VACUUM_FREE_MARGIN_BYTES = 1 << 30
+
+
 def task_db_maintenance():
     """Archive old forecast_log rows and run VACUUM to reclaim space."""
     conn = _db()
     try:
+        # The VPS SQLite is compiled with SECURE_DELETE, which journals every freed page.
+        conn.execute("PRAGMA secure_delete=OFF")
         # Delete forecast_log rows older than 7 days
         cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         cursor = conn.execute(
@@ -2282,7 +2290,13 @@ def task_db_maintenance():
 
     # VACUUM in separate connection (can't run inside transaction)
     try:
+        need = 2 * DB_PATH.stat().st_size + VACUUM_FREE_MARGIN_BYTES
+        free = shutil.disk_usage(DB_PATH.parent).free
+        if free < need:
+            logger.warning("VACUUM skipped: %.1f GB free, needs %.1f GB", free / 1e9, need / 1e9)
+            return
         conn2 = db_connect(str(DB_PATH))
+        conn2.execute("PRAGMA secure_delete=OFF")
         conn2.execute("VACUUM")
         conn2.close()
         logger.info("DB maintenance: VACUUM complete")
