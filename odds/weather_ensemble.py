@@ -21,6 +21,7 @@ import urllib.request
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 from loguru import logger
+from log_redact import redact, safe_url
 
 
 # ── API Keys (from env) ─────────────────────────────────────────────────
@@ -192,7 +193,7 @@ def _fetch_json(url: str, timeout: int = 12, headers: dict = None) -> Optional[d
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
-        logger.debug("fetch failed {}: {}", url, e)
+        logger.debug("fetch failed {}: {}", safe_url(url), redact(e))
         return None
 
 
@@ -663,8 +664,8 @@ def _fetch_twc_actuals(city: str, date: str) -> Optional[dict]:
         return result
 
     except Exception as e:
-        logger.debug("TWC actuals fetch failed for {}/{}: {}", icao, date, e)
-        _record_weather_fetch("twc_actuals", False, (time.time() - _t0) * 1000.0, error=str(e)[:200])
+        logger.debug("TWC actuals fetch failed for {}/{}: {}", icao, date, redact(e))
+        _record_weather_fetch("twc_actuals", False, (time.time() - _t0) * 1000.0, error=redact(e)[:200])
         return None
 
 

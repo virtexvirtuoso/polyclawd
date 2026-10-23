@@ -633,8 +633,8 @@ def _fetch_twc_actuals(city: str, date: str) -> Optional[dict]:
         return result
 
     except Exception as e:
-        logger.debug("TWC actuals fetch failed for {}/{}: {}", icao, date, e)
-        _record_weather_fetch("twc_actuals", False, (time.time() - _t0) * 1000.0, error=str(e)[:200])
+        logger.debug("TWC actuals fetch failed for {}/{}: {}", icao, date, redact(e))
+        _record_weather_fetch("twc_actuals", False, (time.time() - _t0) * 1000.0, error=redact(e)[:200])
         return None
 
 

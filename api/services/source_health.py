@@ -6,6 +6,7 @@ Stores last_success, last_error, consecutive_failures, avg_latency in SQLite.
 
 import logging
 from db import connect as db_connect
+from log_redact import redact
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -142,6 +143,7 @@ def touch_source(source: str):
 
 def record_failure(source: str, error_msg: str):
     """Record a failed fetch for a source."""
+    error_msg = redact(error_msg)
     logger.debug("source_health: %s FAILURE error=%s", source, error_msg[:100])
     try:
         conn = _get_db()
