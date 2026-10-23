@@ -26,6 +26,8 @@ import urllib.parse
 import urllib.request
 from typing import Optional
 
+from log_redact import redact, safe_url
+
 # Up to 10 bookmakers bill as 1 the-odds-api credit (vs regions=us,uk,eu = 3).
 # This list spans us/uk/eu sharp + liquid books so the monitors' frozen-book
 # staleness filter still has multiple LIVE books to compare — preserving the
@@ -95,10 +97,10 @@ def gated_fetch_json(base_url: str, params: Optional[dict] = None,
                 rl.note_auth_failure(e.code, body)
             except Exception:
                 pass
-        print(f"[monitor_gate] GET {url[:70]} -> HTTP {e.code} {body[:120]}", flush=True)
+        print(f"[monitor_gate] GET {safe_url(url)} -> HTTP {e.code} {redact(body[:120])}", flush=True)
         return hit[1] if hit else None
     except Exception as e:
-        print(f"[monitor_gate] GET {url[:70]} -> {e}", flush=True)
+        print(f"[monitor_gate] GET {safe_url(url)} -> {redact(e)}", flush=True)
         return hit[1] if hit else None
 
     if rl is not None:

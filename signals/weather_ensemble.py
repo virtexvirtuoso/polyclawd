@@ -21,6 +21,7 @@ import urllib.request
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 from loguru import logger
+from log_redact import redact, safe_url
 
 
 # ── API Keys (from env) ─────────────────────────────────────────────────
@@ -161,7 +162,7 @@ def _fetch_json(url: str, timeout: int = 12, headers: dict = None) -> Optional[d
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
-        logger.debug("fetch failed {}: {}", url, e)
+        logger.debug("fetch failed {}: {}", safe_url(url), redact(e))
         return None
 
 
