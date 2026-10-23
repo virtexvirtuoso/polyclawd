@@ -1,4 +1,5 @@
 """Call sites must never write a credential to a log or to source_health (2026-10-23)."""
+import http.client
 import io
 import logging
 import urllib.error
@@ -31,6 +32,20 @@ def test_weather_fetch_json_failure_logs_no_key(monkeypatch, captured, modname):
     assert "fetch failed" in out and SENTINEL not in out
 
 
+@pytest.mark.parametrize("modname", ["signals.weather_ensemble", "odds.weather_ensemble"])
+def test_weather_fetch_json_invalid_url_exception_text_logs_no_key(monkeypatch, captured, modname):
+    """InvalidURL carries the full keyed URL in its message: exercises the redact(e) branch."""
+    mod = __import__(modname, fromlist=["_fetch_json"])
+
+    def _raise_invalid(*a, **k):
+        raise http.client.InvalidURL(f"URL can't contain control characters. {URL!r}")
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", _raise_invalid)
+    assert mod._fetch_json(URL) is None
+    out = captured.getvalue()
+    assert "fetch failed" in out and SENTINEL[:4] not in out
+
+
 def test_monitor_gate_failure_prints_no_key(monkeypatch, capsys):
     import odds.monitor_gate as mg
     from odds import rate_limiter as rl
@@ -42,17 +57,20 @@ def test_monitor_gate_failure_prints_no_key(monkeypatch, capsys):
     url = f"https://api.the-odds-api.com/v4/sports/soccer_epl/odds/?apiKey={SENTINEL}&regions=us"
     mg.gated_fetch_json(url)
     out = capsys.readouterr().out
-    assert "[monitor_gate] GET" in out and SENTINEL not in out
+    # url[:70] used to cut the key to a fragment; a partial key is still a leak
+    assert "[monitor_gate] GET" in out and SENTINEL[:4] not in out
 
 
 def test_source_health_never_stores_or_logs_a_key(monkeypatch, tmp_path, caplog):
     import api.services.source_health as sh
     monkeypatch.setattr(sh, "DB_PATH", tmp_path / "scratch_source_health.db")
     caplog.set_level(logging.DEBUG)
-    sh.record_failure("twc_actuals", f"InvalidURL: {URL}")
-    sh.record_failure("twc_actuals", f"InvalidURL again: {URL}")  # UPDATE branch too
+    # short message: record_failure logs error_msg[:100], so the key must sit inside that window
+    msg = f"InvalidURL: ?apiKey={SENTINEL}"
+    sh.record_failure("twc_actuals", msg)
+    sh.record_failure("twc_actuals", msg)  # UPDATE branch too
     h = sh.get_source_health("twc_actuals")
     assert h is not None and h["total_failures"] == 2
     assert "REDACTED" in h["last_error_msg"]
-    assert SENTINEL not in h["last_error_msg"]
-    assert SENTINEL not in caplog.text
+    assert SENTINEL[:4] not in h["last_error_msg"]
+    assert SENTINEL[:4] not in caplog.text
