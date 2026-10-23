@@ -22,7 +22,12 @@ from typing import Dict, List, Optional
 from loguru import logger
 
 # Per-scan book cache (cleared at the start of espn_edges_to_alerts): both teams of a game share one slug.
-_BOOK_CACHE: Dict[str, Optional[Dict]] = {}
+_BOOK_CACHE: Dict[str, Dict] = {}
+
+# PM-US serves about 5 books per burst before a 429 (see nfl_fast_move_monitor._is_rate_limited); keep one
+# for the fast-move loop. Edges arrive sorted by |edge|, so the budget goes to the largest gaps first.
+_BOOK_MAX_PER_SCAN = 4
+_scan_fetches = 0
 
 
 def _executable_for_edge(slug: str, pm_side: Optional[str]) -> Optional[Dict]:
@@ -32,9 +37,13 @@ def _executable_for_edge(slug: str, pm_side: Optional[str]) -> Optional[Dict]:
     = sell the long instrument → walk bids at 1 − price (same convention
     as nfl_fast_move_monitor._executable_for_team).
     """
+    global _scan_fetches
     from signals.nfl_fast_move_monitor import _fetch_us_book, _executable_edge_from_book
     book = _BOOK_CACHE.get(slug)
     if book is None:
+        if _scan_fetches >= _BOOK_MAX_PER_SCAN:
+            return None              # over this scan's book budget: the next scan starts fresh
+        _scan_fetches += 1
         book = _fetch_us_book(slug)
         if not book:
             return None              # a failure is never cached: the next scan (or the other side) retries
@@ -53,7 +62,9 @@ def espn_edges_to_alerts(edges: List[Dict]) -> List[SimpleNamespace]:
     """Convert edge dicts to alert objects. Per-edge failures are skipped
     (logged at debug), never raised — an adapter bug must not kill the
     scheduled scan task."""
+    global _scan_fetches
     _BOOK_CACHE.clear()  # per scan: both sides of a game share one book; a book is never reused across scans
+    _scan_fetches = 0
     try:
         from execution.fee_model import taker_fee_fraction
     except Exception:

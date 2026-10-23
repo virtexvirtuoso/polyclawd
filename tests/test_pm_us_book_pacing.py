@@ -52,6 +52,7 @@ def clock(monkeypatch):
     monkeypatch.setattr(m, "_book_last_ts", 0.0)
     monkeypatch.setattr(m, "_book_cooldown_until", 0.0)
     ad._BOOK_CACHE.clear()
+    monkeypatch.setattr(ad, "_scan_fetches", 0)
     return c
 
 
@@ -121,3 +122,44 @@ def test_adapter_never_caches_a_failure_and_clears_per_scan(monkeypatch, clock):
     assert "slug-1" in ad._BOOK_CACHE
     ad.espn_edges_to_alerts([])                                  # a new scan starts empty
     assert ad._BOOK_CACHE == {}
+
+
+def test_a_non_rate_limit_error_mentioning_429_does_not_open_a_cooldown(monkeypatch, clock):
+    calls = []
+    install_client(monkeypatch, lambda s: ValueError("market aec-nfl-x-429 not found"), calls)
+    m._fetch_us_book("a")
+    m._fetch_us_book("b")
+    assert calls == ["a", "b"]
+
+
+def test_an_error_carrying_status_code_429_opens_a_cooldown(monkeypatch, clock):
+    class APIStatusError(Exception):
+        status_code = 429
+
+    calls = []
+    install_client(monkeypatch, lambda s: APIStatusError("Too Many Requests"), calls)
+    m._fetch_us_book("a")
+    m._fetch_us_book("b")
+    assert calls == ["a"]
+
+
+def test_the_second_side_of_a_game_reuses_the_scan_book(monkeypatch, clock):
+    calls = []
+    monkeypatch.setattr(m, "_executable_edge_from_book", lambda book, side: {"available": False})
+    install_client(monkeypatch, lambda s: {"marketData": {"bids": [], "offers": []}}, calls)
+    ad.espn_edges_to_alerts([])
+    ad._executable_for_edge("slug-1", None)
+    ad._executable_for_edge("slug-1", "short")
+    assert calls == ["slug-1"]
+
+
+def test_a_scan_fetches_at_most_the_book_budget(monkeypatch, clock):
+    calls = []
+    monkeypatch.setattr(m, "_executable_edge_from_book", lambda book, side: {"available": False})
+    install_client(monkeypatch, lambda s: {"marketData": {"bids": [], "offers": []}}, calls)
+    edges = [{"polymarket_slug": f"slug-{i}", "pm_side": "long", "espn_prob": 60.0} for i in range(10)]
+    ad.espn_edges_to_alerts(edges)
+    assert calls == [f"slug-{i}" for i in range(ad._BOOK_MAX_PER_SCAN)]
+    calls.clear()
+    ad.espn_edges_to_alerts(edges)                 # the next scan has a fresh budget
+    assert len(calls) == ad._BOOK_MAX_PER_SCAN

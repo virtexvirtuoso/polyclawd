@@ -269,9 +269,10 @@ def _executable_edge_from_book(book: Dict, side: str, target_usd: float = 100.0,
     }
 
 
-# PM-US limits public requests per IP and Cloudflare location, shared by every polyclawd process
-# (docs.polymarket.us, Rate Limits: 20-25 req/s). The edge scan fetched 7-9 books 60 ms apart and
-# drew 73 Cloudflare 1015 pages in 48 h (2026-10-23). Space book requests and back off on a limit.
+# PM-US rate-limits book requests (Cloudflare 1015, sent as HTTP 429). In 72 h of scheduler journal
+# (2026-10-23) every burst got exactly 5 books, ~0.3 s apart, then 429 for the rest: a budget of about
+# 5 books, not a per-second rate (searches never hit it). The edge adapter caps books per scan below that
+# budget; here a rate limit pauses every book fetch in this process, and requests stay spaced.
 _BOOK_MIN_INTERVAL_S = 0.35
 _BOOK_COOLDOWN_S = 120.0
 _book_last_ts = 0.0
@@ -281,8 +282,9 @@ _sleeper = time.sleep
 
 
 def _is_rate_limited(e: Exception) -> bool:
-    s = str(e)[:4000]
-    return type(e).__name__ == "RateLimitError" or "429" in s or "<span>1015</span>" in s
+    """polymarket_us raises RateLimitError (status_code 429) for a 1015 page; match on that, not on any '429' in text."""
+    return (type(e).__name__ == "RateLimitError" or getattr(e, "status_code", None) == 429
+            or "<span>1015</span>" in str(e)[:4000])
 
 
 def _fetch_us_book(slug: str) -> Optional[Dict]:
