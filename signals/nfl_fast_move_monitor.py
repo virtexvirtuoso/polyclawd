@@ -269,14 +269,41 @@ def _executable_edge_from_book(book: Dict, side: str, target_usd: float = 100.0,
     }
 
 
+# PM-US limits public requests per IP and Cloudflare location, shared by every polyclawd process
+# (docs.polymarket.us, Rate Limits: 20-25 req/s). The edge scan fetched 7-9 books 60 ms apart and
+# drew 73 Cloudflare 1015 pages in 48 h (2026-10-23). Space book requests and back off on a limit.
+_BOOK_MIN_INTERVAL_S = 0.35
+_BOOK_COOLDOWN_S = 120.0
+_book_last_ts = 0.0
+_book_cooldown_until = 0.0
+_clock = time.monotonic
+_sleeper = time.sleep
+
+
+def _is_rate_limited(e: Exception) -> bool:
+    s = str(e)[:4000]
+    return type(e).__name__ == "RateLimitError" or "429" in s or "<span>1015</span>" in s
+
+
 def _fetch_us_book(slug: str) -> Optional[Dict]:
-    """Fetch the US-sports order book for a market slug."""
+    """Fetch the US-sports order book for a market slug: paced, and silent during a rate-limit cooldown."""
+    global _book_last_ts, _book_cooldown_until
+    now = _clock()
+    if now < _book_cooldown_until:
+        return None
+    wait = _book_last_ts + _BOOK_MIN_INTERVAL_S - now
+    if wait > 0:
+        _sleeper(wait)
+    _book_last_ts = _clock()
     try:
         from polymarket_us import PolymarketUS
-        client = PolymarketUS()
-        return client.markets.book(slug)
+        return PolymarketUS().markets.book(slug)
     except Exception as e:
-        logger.debug(f"NFL fast-move book fetch failed ({slug}): {e}")
+        if _is_rate_limited(e):
+            _book_cooldown_until = _clock() + _BOOK_COOLDOWN_S
+            logger.warning(f"PM-US book rate-limited ({slug}); pausing book fetches {int(_BOOK_COOLDOWN_S)}s")
+        else:
+            logger.debug(f"NFL fast-move book fetch failed ({slug}): {type(e).__name__}: {str(e)[:160]}")
         return None
 
 
@@ -304,8 +331,8 @@ def _fetch_us_book_for_game(home: str, away: str) -> Optional[Dict]:
                 if m.get("sportsMarketType") != "football_team_full_game_winner":
                     continue
                 slug = m.get("slug")
-                book = client.markets.book(slug)
-                return {"market": m, "book": book}
+                book = _fetch_us_book(slug)   # paced and cooldown-aware, like the edge scan
+                return {"market": m, "book": book} if book else None
     except Exception as e:
         logger.debug(f"NFL fast-move US book fetch failed ({home} vs {away}): {e}")
     return None

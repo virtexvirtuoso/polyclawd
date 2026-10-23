@@ -21,9 +21,7 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
-# Per-scan book cache: both teams of a game share one slug, and the adapter
-# sees both sides' edge dicts — cache avoids double-fetching the same book
-# (28 calls → 14) and softens gateway 429 pressure during game day.
+# Per-scan book cache (cleared at the start of espn_edges_to_alerts): both teams of a game share one slug.
 _BOOK_CACHE: Dict[str, Optional[Dict]] = {}
 
 
@@ -35,11 +33,12 @@ def _executable_for_edge(slug: str, pm_side: Optional[str]) -> Optional[Dict]:
     as nfl_fast_move_monitor._executable_for_team).
     """
     from signals.nfl_fast_move_monitor import _fetch_us_book, _executable_edge_from_book
-    if slug not in _BOOK_CACHE:
-        _BOOK_CACHE[slug] = _fetch_us_book(slug)
-    book = _BOOK_CACHE[slug]
-    if not book:
-        return None
+    book = _BOOK_CACHE.get(slug)
+    if book is None:
+        book = _fetch_us_book(slug)
+        if not book:
+            return None              # a failure is never cached: the next scan (or the other side) retries
+        _BOOK_CACHE[slug] = book
     if pm_side == "short":
         ex = _executable_edge_from_book(book, "NO")
         if ex and ex.get("available"):
@@ -54,6 +53,7 @@ def espn_edges_to_alerts(edges: List[Dict]) -> List[SimpleNamespace]:
     """Convert edge dicts to alert objects. Per-edge failures are skipped
     (logged at debug), never raised — an adapter bug must not kill the
     scheduled scan task."""
+    _BOOK_CACHE.clear()  # per scan: both sides of a game share one book; a book is never reused across scans
     try:
         from execution.fee_model import taker_fee_fraction
     except Exception:
