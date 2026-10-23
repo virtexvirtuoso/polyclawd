@@ -29,6 +29,15 @@ _BOOK_CACHE: Dict[str, Dict] = {}
 _BOOK_MAX_PER_SCAN = 4
 _scan_fetches = 0
 
+# The only consumer (sport_edge_alerts.run_sport_edge_alerts) drops anything under MIN_EXEC_EDGE, and net edge
+# can never exceed the mid-price gap (the book price is never better than the mid, fees are >= 0). A game whose
+# gap is under the gate minus 1 pp of quote drift can never alert, so its book is not fetched (2026-10-23).
+try:
+    from signals.sport_edge_alerts import MIN_EXEC_EDGE as _ALERT_GATE
+except Exception:
+    _ALERT_GATE = 0.03
+_BOOK_FLOOR_PP = _ALERT_GATE * 100 - 1.0
+
 
 def _executable_for_edge(slug: str, pm_side: Optional[str]) -> Optional[Dict]:
     """Executable buy info for one edge's team from the PM-US book.
@@ -70,7 +79,9 @@ def espn_edges_to_alerts(edges: List[Dict]) -> List[SimpleNamespace]:
     except Exception:
         taker_fee_fraction = None
     out: List[SimpleNamespace] = []
-    for e in edges:
+    for e in sorted(edges, key=lambda d: -abs(d.get("edge_pct") or 0.0)):
+        if abs(e.get("edge_pct") or 0.0) < _BOOK_FLOOR_PP:
+            continue             # cannot reach the alert gate: spend no book request on it
         try:
             ex = _executable_for_edge(e["polymarket_slug"], e.get("pm_side"))
             if not ex or not ex.get("available") or not ex.get("tradeable"):

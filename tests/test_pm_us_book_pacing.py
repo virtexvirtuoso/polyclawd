@@ -157,9 +157,30 @@ def test_a_scan_fetches_at_most_the_book_budget(monkeypatch, clock):
     calls = []
     monkeypatch.setattr(m, "_executable_edge_from_book", lambda book, side: {"available": False})
     install_client(monkeypatch, lambda s: {"marketData": {"bids": [], "offers": []}}, calls)
-    edges = [{"polymarket_slug": f"slug-{i}", "pm_side": "long", "espn_prob": 60.0} for i in range(10)]
+    edges = [{"polymarket_slug": f"slug-{i}", "pm_side": "long", "espn_prob": 60.0, "edge_pct": 5.0} for i in range(10)]
     ad.espn_edges_to_alerts(edges)
     assert calls == [f"slug-{i}" for i in range(ad._BOOK_MAX_PER_SCAN)]
     calls.clear()
     ad.espn_edges_to_alerts(edges)                 # the next scan has a fresh budget
     assert len(calls) == ad._BOOK_MAX_PER_SCAN
+
+
+def test_games_whose_gap_cannot_reach_the_alert_gate_get_no_book(monkeypatch, clock):
+    calls = []
+    monkeypatch.setattr(m, "_executable_edge_from_book", lambda book, side: {"available": False})
+    install_client(monkeypatch, lambda s: {"marketData": {"bids": [], "offers": []}}, calls)
+    edges = [{"polymarket_slug": "small", "pm_side": "long", "espn_prob": 51.5, "edge_pct": 1.5},
+             {"polymarket_slug": "small", "pm_side": "short", "espn_prob": 48.5, "edge_pct": -1.5},
+             {"polymarket_slug": "big", "pm_side": "long", "espn_prob": 60.0, "edge_pct": 3.5}]
+    ad.espn_edges_to_alerts(edges)
+    assert calls == ["big"]
+
+
+def test_the_book_budget_goes_to_the_largest_gaps_whatever_the_input_order(monkeypatch, clock):
+    calls = []
+    monkeypatch.setattr(m, "_executable_edge_from_book", lambda book, side: {"available": False})
+    install_client(monkeypatch, lambda s: {"marketData": {"bids": [], "offers": []}}, calls)
+    edges = [{"polymarket_slug": f"g{i}", "pm_side": "long", "espn_prob": 60.0, "edge_pct": float(i)}
+             for i in range(3, 10)]                 # ascending: smallest gap first
+    ad.espn_edges_to_alerts(edges)
+    assert calls == ["g9", "g8", "g7", "g6"]
