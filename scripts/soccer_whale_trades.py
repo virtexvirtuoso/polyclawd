@@ -13,7 +13,7 @@ soccer game outcome. Dedup by transaction hash stored in sqlite.
 """
 
 from __future__ import annotations
-from config.polymarket_urls import POLYMARKET_DATA_API as DATA_API  # polyproxy: central URL config
+from config.data_api import fetch_data_v2_page
 
 import json
 import os
@@ -250,7 +250,7 @@ def get_live_ws_trade(token_id: str) -> Optional[Dict]:
 def get_global_trades(watched_tokens: set, since_ts: int = 0) -> List[Dict]:
     """Poll data-api global trade feed, filter to our watched tokens.
 
-    Paginates (via offset) until either:
+    Paginates with the v2 cursor until either:
     - a trade older than `since_ts` is reached (no more relevant history), or
     - DATA_API_MAX_PAGES pages fetched (hard cap)
 
@@ -260,11 +260,20 @@ def get_global_trades(watched_tokens: set, since_ts: int = 0) -> List[Dict]:
         since_ts = int(time.time()) - POLL_LOOKBACK_S
 
     out = []
-    for page in range(DATA_API_MAX_PAGES):
-        offset = page * DATA_API_PAGE_SZ
-        data = _get(f"{DATA_API}/trades", {"limit": DATA_API_PAGE_SZ, "offset": offset})
-        if not data or not isinstance(data, list):
+    cursor = None
+    for _page in range(DATA_API_MAX_PAGES):
+        data, cursor = fetch_data_v2_page(
+            "trades",
+            {"limit": DATA_API_PAGE_SZ},
+            lambda url: _get(url),
+            cursor=cursor,
+        )
+        if data is None:
             break
+        if not data:
+            if not cursor:
+                break
+            continue
 
         oldest_ts_this_page = int(time.time())
         for t in data:
@@ -289,8 +298,9 @@ def get_global_trades(watched_tokens: set, since_ts: int = 0) -> List[Dict]:
                 "source": "data-api",
             })
 
-        # Stop paginating once the oldest trade on this page is older than our window
-        if oldest_ts_this_page < since_ts:
+        # Stop once this page is older than the window, or the cursor is exhausted.
+        # A short page is not the end on v2; only a null cursor is.
+        if oldest_ts_this_page < since_ts or not cursor:
             break
 
     return out

@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
-from config.polymarket_urls import POLYMARKET_DATA_API as DATA_API  # polyproxy: central URL config
+from config.data_api import read_data_v2
 
 # Resilient fetch wrapper
 try:
@@ -492,12 +492,12 @@ def get_recent_trades(token_id: str, limit: int = 500, condition_id: str = "") -
     """
     Fetch recent trades for a CLOB token via the public Data API.
 
-    The Data API /trades endpoint filters by market via the `market` param,
-    which must be a conditionId (0x… hex). A CLOB token_id passed there is
-    SILENTLY IGNORED and the unfiltered global trade tape comes back with
-    HTTP 200 — so this function requires a conditionId (resolving it from
-    Gamma when not supplied) and keeps only trades whose `asset` matches
-    the requested token.
+    Data API v2 filters by condition id (`condition`), not by CLOB token.
+    `token_id` / `asset_id` on /v2/trades are ignored and the global tape
+    comes back with HTTP 200 — so this function requires a conditionId
+    (resolving it from Gamma when not supplied) and keeps only trades whose
+    `asset` matches the requested token. v2 caps limit at 1000 and rejects
+    offset, so a request above 1000 follows next_cursor.
 
     Args:
         token_id: The CLOB token ID (asset ID)
@@ -516,18 +516,25 @@ def get_recent_trades(token_id: str, limit: int = 500, condition_id: str = "") -
             print(f"Warning: no conditionId for token {token_id[:16]}… — cannot fetch trades")
             return []
 
-        url = f"{DATA_API}/trades?market={condition_id}&limit={min(limit, 2000)}&takerOnly=true"
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Polyclawd/2.0",
-        })
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            raw = json.loads(resp.read().decode())
+        page_size = min(max(limit, 1), 1000)
+        max_pages = max(1, (min(limit, 3000) + page_size - 1) // page_size)
 
-        # Data API returns an array directly.
+        def _fetch(url):
+            req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read().decode())
+
+        raw = read_data_v2(
+            "trades",
+            {"market": condition_id, "limit": page_size, "takerOnly": "true"},
+            _fetch,
+            max_pages=max_pages,
+        ) or []
+
         # proxyWallet is the taker wallet (maker_address in our schema).
         # A conditionId covers both outcome tokens — keep only the requested one.
         out = []
-        for t in raw if isinstance(raw, list) else raw.get("data", []):
+        for t in raw:
             if str(t.get("asset", "")) != str(token_id):
                 continue
             out.append({

@@ -18,8 +18,8 @@ State: storage/shadow_trades.db (auto-migrated tables)
 """
 
 from __future__ import annotations
-from config.polymarket_urls import POLYMARKET_DATA_API as DATA_API  # polyproxy: central URL config
-from config.polymarket_urls import clob_url, data_url  # polyproxy: central URL config
+from config.data_api import fetch_data_v2_page, read_data_v2
+from config.polymarket_urls import GAMMA_API, clob_url  # polyproxy: central URL config
 
 import json
 import os
@@ -33,7 +33,7 @@ import requests
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
+from config.polymarket_urls import CLOB_API  # polyproxy: central URL config
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
@@ -421,11 +421,20 @@ def get_global_trades(watched_tokens: set, since_ts: int = 0) -> List[Dict]:
         since_ts = int(time.time()) - POLL_LOOKBACK_S
 
     out = []
-    for page in range(DATA_API_MAX_PAGES):
-        offset = page * DATA_API_PAGE_SZ
-        data = _get(f"{DATA_API}/trades", {"limit": DATA_API_PAGE_SZ, "offset": offset})
-        if not data or not isinstance(data, list):
+    cursor = None
+    for _page in range(DATA_API_MAX_PAGES):
+        data, cursor = fetch_data_v2_page(
+            "trades",
+            {"limit": DATA_API_PAGE_SZ},
+            lambda url: _get(url),
+            cursor=cursor,
+        )
+        if data is None:
             break
+        if not data:
+            if not cursor:
+                break
+            continue
 
         oldest_ts = int(time.time())
         for t in data:
@@ -448,7 +457,7 @@ def get_global_trades(watched_tokens: set, since_ts: int = 0) -> List[Dict]:
                 "source": "data-api",
             })
 
-        if oldest_ts < since_ts:
+        if oldest_ts < since_ts or not cursor:
             break
 
     return out
@@ -507,6 +516,33 @@ def _get_vegas_consensus(sport: str, home: str, away: str, outcome_label: str) -
     except Exception:
         return None
 
+def _as_epoch(value) -> Optional[float]:
+    """Data API timestamps are epoch seconds. Accept that, plus an ISO string."""
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _condition_for_token(token_id: str) -> str:
+    """CLOB token → condition id. /v2/trades cannot filter on token_id."""
+    data = _get(f"{GAMMA_API}/markets", {"clob_token_ids": token_id})
+    if isinstance(data, list) and data:
+        return str(data[0].get("conditionId") or "")
+    if isinstance(data, dict):
+        return str(data.get("conditionId") or "")
+    return ""
+
+
 def _get_net_flow(conn: sqlite3.Connection, sport: str, token_id: str,
                   window_s: int = 900) -> Tuple[float, float, int]:
     """Returns (buy_usd, sell_usd, trade_count) in last window_s seconds."""
@@ -516,20 +552,25 @@ def _get_net_flow(conn: sqlite3.Connection, sport: str, token_id: str,
             SELECT last_tx FROM whale_trade_seen
             WHERE sport=? AND token_id=? AND last_ts > ?
         """, (sport, token_id, cutoff)).fetchall()
-        # We don't store individual trade amounts in whale_trade_seen,
-        # so use the data-api for recent trades on this token
-        url = data_url(f"/trades?asset_id={token_id}&limit=50")
-        data = _get(url)
+        # /v2/trades has no token filter: asset_id and token_id are both
+        # ignored (HTTP 200, global tape). Scope the page with the condition
+        # id and keep only this token's rows.
+        condition_id = _condition_for_token(token_id)
+        if not condition_id:
+            return (0.0, 0.0, 0)
+        data = read_data_v2(
+            "trades",
+            {"condition": condition_id, "asset_id": token_id, "limit": 50},
+            lambda url: _get(url),
+            max_pages=1,
+        )
         if not data:
             return (0.0, 0.0, 0)
         buy_usd, sell_usd, count = 0.0, 0.0, 0
         cutoff_ts = time.time() - window_s
         for t in data:
-            ts_str = t.get("match_time", t.get("timestamp", ""))
-            try:
-                from datetime import datetime as _dt
-                ts = _dt.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
-            except Exception:
+            ts = _as_epoch(t.get("timestamp", t.get("match_time", "")))
+            if ts is None:
                 continue
             if ts < cutoff_ts:
                 break
@@ -553,18 +594,23 @@ def _get_wallet_intel(maker_addr: str) -> Optional[str]:
     if not maker_addr:
         return None
     try:
-        url = data_url(f"/activity?user={maker_addr}&limit=5")
-        data = _get(url)
+        data = read_data_v2(
+            "activity",
+            {"user": maker_addr, "limit": 5},
+            lambda url: _get(url),
+            max_pages=1,
+        )
         if not data:
             return None
         if len(data) <= 1:
             return "🆕 First trade on PM"
-        # Check age of earliest trade
+        # Check age of earliest trade in this page (newest-first, so the last row).
         oldest = data[-1]
-        ts_str = oldest.get("timestamp", oldest.get("match_time", ""))
+        ts = _as_epoch(oldest.get("timestamp", oldest.get("match_time", "")))
         try:
-            from datetime import datetime as _dt
-            oldest_ts = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
+            if ts is None:
+                raise ValueError("no timestamp")
+            oldest_ts = datetime.fromtimestamp(ts, timezone.utc)
             age_days = (datetime.now(timezone.utc) - oldest_ts).days
             if age_days < 1:
                 return "🆕 New wallet (< 1 day old)"

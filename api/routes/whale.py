@@ -15,7 +15,8 @@ from pathlib import Path
 
 from fastapi import APIRouter, Query
 from typing import Optional
-from config.polymarket_urls import clob_url, data_url, gamma_url  # polyproxy: central URL config
+from config.data_api import read_data_v2
+from config.polymarket_urls import clob_url, gamma_url  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
 
@@ -351,10 +352,17 @@ def whale_wallet_detail(wallet_addr: str):
     # Fetch recent trades from PM data-api
     trades = []
     try:
-        url = data_url(f"/trades?user={wallet_addr.lower()}&limit=50")
-        req = _ur.Request(url, headers={"User-Agent": "polyclawd/1.0"})
-        with _ur.urlopen(req, timeout=12) as r:
-            raw = json.loads(r.read().decode())
+        def _fetch(url):
+            req = _ur.Request(url, headers={"User-Agent": "polyclawd/1.0"})
+            with _ur.urlopen(req, timeout=12) as resp:
+                return json.loads(resp.read().decode())
+
+        raw = read_data_v2(
+            "trades",
+            {"user": wallet_addr.lower(), "limit": 50},
+            _fetch,
+            max_pages=1,
+        ) or []
         for t in raw:
             size = float(t.get("size", 0) or 0)
             price = float(t.get("price", 0) or 0)

@@ -146,7 +146,13 @@ def gamma_url(path: str) -> str:
 
 
 def data_url(path: str) -> str:
-    """Build a data-api.polymarket.com URL (read-only, cacheable)."""
+    """Build a data-api.polymarket.com URL (read-only, cacheable).
+
+    Data API reads go to ``/v2/...`` (see ``config.data_api``). The one
+    exception is ``/v1/accounting/snapshot``, which has no v2 route.
+    When POLYPROXY_BASE is set this returns ``{proxy}/data`` + path, so the
+    Worker must forward ``/data/v2/*`` to ``https://data-api.polymarket.com/v2/*``.
+    """
     return f"{POLYMARKET_DATA_API}{path}"
 
 

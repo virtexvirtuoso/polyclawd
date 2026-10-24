@@ -31,14 +31,13 @@ from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from config.data_api import read_data_v2  # noqa: E402
 from db import connect as db_connect  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent
 META_DB_PATH = BASE_DIR / "storage" / "whale_meta.db"
-PM_DATA_API = "https://data-api.polymarket.com"
-
 # Smart-wallet criteria (re-weighted 2026-06-12 after the phantom-winrate
 # investigation): NET profit is the primary signal — "show me the money".
 # Win rate is only a sanity floor at 50%: it filters longshot sprayers whose
@@ -213,16 +212,26 @@ def compute_stats(rows: list) -> dict:
             "concentration": concentration}
 
 
+def _fetch_positions(wallet: str) -> Optional[list]:
+    """Open positions for one wallet (v2 /positions, cursor pages).
+
+    None when the first page cannot be fetched. v1 /positions was this same
+    open book; v2 status defaults to OPEN and a probed wallet returned the
+    same rows. offset is rejected, so pages follow next_cursor.
+    """
+    return read_data_v2(
+        "positions",
+        {"user": wallet, "limit": 500},
+        _fetch_json,
+        max_pages=POSITIONS_PAGE_CAP,
+    )
+
+
 def fetch_wallet_stats(wallet: str) -> Optional[dict]:
     """Full-history track record from the public positions endpoint."""
-    rows = []
-    for page in range(POSITIONS_PAGE_CAP):
-        d = _fetch_json(f"{PM_DATA_API}/positions?user={wallet}&limit=500&offset={page * 500}")
-        if d is None:
-            return None if page == 0 else _stats_with_skill(rows)
-        rows.extend(d)
-        if len(d) < 500:
-            break
+    rows = _fetch_positions(wallet)
+    if rows is None:
+        return None
     return _stats_with_skill(rows)
 
 
@@ -660,15 +669,8 @@ def track_exits(conn) -> dict:
         if stats is None:
             continue
 
-        # Get all positions from the API (open + closed)
-        rows = []
-        for page in range(POSITIONS_PAGE_CAP):
-            d = _fetch_json(f"{PM_DATA_API}/positions?user={wallet}&limit=500&offset={page * 500}")
-            if d is None:
-                break
-            rows.extend(d)
-            if len(d) < 500:
-                break
+        # Open book (v2 default). Keyed on conditionId, the v1 field name.
+        rows = _fetch_positions(wallet) or []
 
         if not rows:
             continue
@@ -685,7 +687,7 @@ def track_exits(conn) -> dict:
 
         current_markets = set()
         for p in rows:
-            market = p.get("market") or p.get("condition_id") or ""
+            market = p.get("conditionId") or p.get("market") or p.get("condition_id") or ""
             if not market:
                 continue
             current_markets.add(market)

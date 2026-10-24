@@ -14,7 +14,8 @@ import logging
 import time
 import urllib.request
 
-from config.polymarket_urls import data_url, gamma_url  # polyproxy: central URL config
+from config.data_api import read_data_v2
+from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
 
@@ -100,40 +101,88 @@ def _try_redeem_position(market_id: str, position_id: int) -> str:
 
 
 _DEPOSIT_WALLET = "0xa495c42d60521ee28e1da237c0bab560d5095777"
-_PM_POSITIONS_URL = data_url(f"/positions?user={_DEPOSIT_WALLET}&sizeThreshold=0.01")
+
+
+def _num(value, default=0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _sdk_position_to_v1(p) -> dict:
+    """Map a polymarket-client>=0.10 Position onto the dict sync_positions reads.
+
+    0.10 renamed size→current_size, cur_price→current_price, cash_pnl→unrealized_pnl,
+    initial_value→entry_cost_usdc, asset→token_id. The pre-0.10 names are still
+    accepted so a test double written against the old attributes keeps working.
+    """
+
+    def pick(*names, default=""):
+        for name in names:
+            value = getattr(p, name, None)
+            if value is not None and value != "":
+                return value
+        return default
+
+    return {
+        "asset": str(pick("token_id", "asset", default="") or ""),
+        "conditionId": str(pick("condition_id", default="") or ""),
+        "slug": str(getattr(p, "slug", "") or ""),
+        "title": str(getattr(p, "title", "") or ""),
+        "avgPrice": _num(pick("avg_price", default=0)),
+        "size": _num(pick("current_size", "size", default=0)),
+        "initialValue": _num(pick("entry_cost_usdc", "initial_value", default=0)),
+        "curPrice": _num(pick("current_price", "cur_price", default=0)),
+        "cashPnl": _num(pick("unrealized_pnl", "cash_pnl", default=0)),
+        "redeemable": bool(getattr(p, "redeemable", False)),
+    }
+
+
+def _iter_sdk_positions(client, *, filter_amount: float):
+    """Walk cursor pages from list_positions (polymarket-client>=0.10).
+
+    size_threshold was removed; the v2 floor is filter_type=TOKENS + filter_amount.
+    A paginator yields pages with .items. A flat iterable of positions is also
+    accepted.
+    """
+    # PositionFilterType is Literal["CASH", "TOKENS"] as of polymarket-client 0.10.
+    kwargs = {
+        "filter_amount": filter_amount,
+        "filter_type": "TOKENS",
+        "page_size": 500,
+    }
+    for page in client.list_positions(**kwargs):
+        items = getattr(page, "items", None)
+        if items is None:
+            yield page
+        else:
+            yield from items
+
+
+def _rest_json(url: str):
+    req = urllib.request.Request(url, headers={"User-Agent": "polyclawd/1.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
 
 
 def _fetch_pm_positions() -> list[dict]:
-    """Fetch open positions via SDK (typed, no raw REST parsing)."""
+    """Fetch open positions via SDK (typed). REST /v2/positions is the fallback."""
     try:
         from execution.clob_client import _get_client
 
         client = _get_client()
-        positions = list(client.list_positions(size_threshold=0.01))
-        result = []
-        for p in positions:
-            result.append(
-                {
-                    "asset": str(getattr(p, "asset", "") or ""),
-                    "conditionId": str(getattr(p, "condition_id", "") or ""),
-                    "slug": str(getattr(p, "slug", "") or ""),
-                    "title": str(getattr(p, "title", "") or ""),
-                    "avgPrice": float(getattr(p, "avg_price", 0) or 0),
-                    "size": float(getattr(p, "size", 0) or 0),
-                    "initialValue": float(getattr(p, "initial_value", 0) or 0),
-                    "curPrice": float(getattr(p, "cur_price", 0) or 0),
-                    "cashPnl": float(getattr(p, "cash_pnl", 0) or 0),
-                    "redeemable": bool(getattr(p, "redeemable", False)),
-                }
-            )
-        return result
+        return [_sdk_position_to_v1(p) for p in _iter_sdk_positions(client, filter_amount=0.01)]
     except Exception as exc:
         logger.warning("position_sync: SDK list_positions failed (%s), falling back to REST", exc)
-        # Fallback to raw REST
         try:
-            req = urllib.request.Request(_PM_POSITIONS_URL, headers={"User-Agent": "polyclawd/1.0"})
-            with urllib.request.urlopen(req, timeout=15) as r:
-                return json.loads(r.read().decode()) or []
+            rows = read_data_v2(
+                "positions",
+                {"user": _DEPOSIT_WALLET, "sizeThreshold": 0.01, "limit": 500},
+                _rest_json,
+                max_pages=10,
+            )
+            return rows or []
         except Exception as exc2:
             logger.warning("position_sync: REST fallback also failed: %s", exc2)
             return []
@@ -159,15 +208,37 @@ def _sdk_token_price_map() -> dict[str, tuple] | None:
         from execution.clob_client import _get_client
 
         client = _get_client()
-        for page in client.list_positions(size_threshold=0.001):
-            for sdk_pos in page.items:
-                t = str(getattr(sdk_pos, "token_id", "") or getattr(sdk_pos, "asset", "") or "")
-                if t:
-                    out[t] = (getattr(sdk_pos, "cur_price", None), bool(getattr(sdk_pos, "redeemable", False)))
+        for sdk_pos in _iter_sdk_positions(client, filter_amount=0.001):
+            t = str(getattr(sdk_pos, "token_id", "") or getattr(sdk_pos, "asset", "") or "")
+            if not t:
+                continue
+            price = getattr(sdk_pos, "current_price", None)
+            if price is None:
+                price = getattr(sdk_pos, "cur_price", None)
+            out[t] = (price, bool(getattr(sdk_pos, "redeemable", False)))
     except Exception as exc:
         logger.warning("position_sync: sdk position map failed: %s", exc)
         return None
     return out
+
+
+def _load_activity(limit: int = 500) -> list:
+    """Wallet activity as the v1 row shape (usdcSize, asset, conditionId, ...)."""
+
+    def fetch(url: str):
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+
+    acts = read_data_v2(
+        "activity",
+        {"user": _DEPOSIT_WALLET, "limit": limit},
+        fetch,
+        max_pages=1,
+    )
+    if not isinstance(acts, list):
+        raise TypeError(f"unexpected activity payload: {type(acts).__name__}")
+    return acts
 
 
 def _fetch_redeem_payouts() -> dict[str, float] | None:
@@ -177,11 +248,7 @@ def _fetch_redeem_payouts() -> dict[str, float] | None:
     condition can never inherit the winning outcome's payout.
     None = activity feed unreachable (caller must skip the heuristic)."""
     try:
-        url = data_url(f"/activity?user={_DEPOSIT_WALLET}&limit=500")
-        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
-        acts = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
-        if not isinstance(acts, list):
-            raise TypeError(f"unexpected activity payload: {type(acts).__name__}")
+        acts = _load_activity()
         payouts = {}  # (conditionId, outcomeIndex) -> summed payout
         for a in acts:
             if not isinstance(a, dict) or a.get("type") != "REDEEM":
@@ -216,11 +283,7 @@ _FILL_DRIFT_ALERT_COOLDOWN_S = 3600
 def _fetch_trade_activity_usd(since_ts: int) -> tuple:
     """(count, total_usd) of TRADE rows in wallet activity newer than since_ts.
     Raises on failure — caller decides how to degrade."""
-    url = data_url(f"/activity?user={_DEPOSIT_WALLET}&limit=500")
-    req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
-    acts = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
-    if not isinstance(acts, list):
-        raise TypeError(f"unexpected activity payload: {type(acts).__name__}")
+    acts = _load_activity()
     if len(acts) == 500:
         logger.warning("position_sync: activity window may be truncated (500-row limit)")
     rows = [

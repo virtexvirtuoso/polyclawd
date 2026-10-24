@@ -29,7 +29,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from api.middleware import verify_api_key
 from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
-from config.polymarket_urls import POLYMARKET_DATA_API  # polyproxy: central URL config
+from config.data_api import read_data_v2
 from signals.source_win_rates import SOURCE_TO_STRATEGY, lookup as lookup_empirical_counts
 
 router = APIRouter()
@@ -177,10 +177,20 @@ def load_conflict_history() -> dict:
 def fetch_polymarket_positions(address: str, limit: int = 50) -> list:
     """Fetch positions from Polymarket Data API."""
     try:
-        url = f"{POLYMARKET_DATA_API}/positions?user={address}&limit={limit}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode())
+        def _fetch(url):
+            req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read().decode())
+
+        rows = read_data_v2(
+            "positions",
+            {"user": address, "limit": limit},
+            _fetch,
+            max_pages=1,
+        )
+        if rows is None:
+            raise RuntimeError("positions fetch failed")
+        return rows
     except Exception as e:
         return {"error": str(e)}
 
