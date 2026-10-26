@@ -7,13 +7,23 @@ live positions (by condition id, else by CLOB token id). Rows with no usable id 
 
 Each run fetches those markets, compares the rules fields with the last stored copy, records every changed
 field in rule_events and pages on: a rules / resolution-source / end-date edit, a new UMA dispute, and once
-for a market that is already disputed when first seen. A UMA proposal that is not a dispute is recorded,
-not paged. Polymarket (Gamma /markets): question, description, resolutionSource, endDate,
-umaResolutionStatus(es); docs are keyed by conditionId. Kalshi (/markets/{ticker}): title, rules_primary,
-rules_secondary, settlement_sources, close_time.
+for a market that is already disputed when first seen.
+  Polymarket (Gamma /markets, keyed by conditionId): question, description, resolutionSource, endDate,
+    umaResolutionStatus(es). UMA status steps are recorded, not paged; only a new dispute pages.
+  Kalshi (/markets/{ticker}): title, rules_primary, rules_secondary, close_time, status; settlement_sources
+    is never on the market object, so it comes from /events/{event_ticker}, fetched once per distinct event.
+    status is recorded, not paged; a close_time change pages only once the market is no longer active.
+A doc whose field list changed (a newer version of this script) is re-seeded silently: the differences are
+recorded with reseed=1 and only a new dispute still pages. A missing event (404, or no event_ticker) is
+counted; its market keeps the settlement_sources it had (or none), so its later arrival is a silent re-seed.
 
-Failure handling: a fetch error is recorded in runs.error and the run still exits 0 (whatever was fetched is
-still diffed); 3 runs in a row with an error page once, and the next clean run pages "recovered". A Kalshi
+Delivery: messages are written to the outbox in the same transaction that advances rules.doc_json, sent
+after commit, and deleted only once sent. Each run first resends outbox rows younger than 24 h and prints,
+then drops, older ones.
+
+Failure handling: fetch errors are recorded in runs.error and printed, and the run exits 0, still diffing
+what was fetched. A run is FAILING when it fetched fewer than half of the tracked markets; 3 failing runs in a
+row page once and the next run that is not failing pages "recovered". Partial errors never page. A Kalshi
 ticker that 404s is skipped and counted (n_missing). A non-zero exit means the run itself crashed.
 Added 2026-10-26 (vault 05-Infrastructure/Plans/2026-10-23-Venue-Event-Capture-Plan, Task 7).
 
@@ -38,23 +48,28 @@ SHADOW_DB = os.path.join(ROOT, "storage", "shadow_trades.db")
 DB_PATH = os.path.join(ROOT, "storage", "market_rules.db")
 GAMMA = "https://gamma-api.polymarket.com/markets"
 KALSHI = "https://api.elections.kalshi.com/trade-api/v2/markets/"
+KALSHI_EVENTS = "https://api.elections.kalshi.com/trade-api/v2/events/"
 NOTIFY = os.getenv("MARKET_RULES_NOTIFY", "/home/linuxuser/bin/infra-notify")
 UA = "polyclawd-market-rules/1"
 TIMEOUT_S = 20
 CHUNK = 20
 FAIL_STREAK_ALERT = 3
+OUTBOX_TTL_MS = 24 * 3600 * 1000
 MAX_MSG = 3500          # one Telegram message holds 4096 characters
 PM_FIELDS = ("question", "description", "resolutionSource", "endDate", "umaResolutionStatus", "umaResolutionStatuses")
-K_FIELDS = ("title", "rules_primary", "rules_secondary", "settlement_sources", "close_time")
-SILENT_FIELDS = {"umaResolutionStatus", "umaResolutionStatuses"}   # recorded; only a new dispute pages
+K_FIELDS = ("title", "rules_primary", "rules_secondary", "close_time", "status")
+K_EVENT_FIELDS = ("settlement_sources",)
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS rules (platform TEXT NOT NULL, market TEXT NOT NULL, label TEXT, doc_json TEXT NOT NULL,
     since_ms INTEGER NOT NULL, PRIMARY KEY (platform, market));
 CREATE TABLE IF NOT EXISTS rule_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER NOT NULL,
-    platform TEXT NOT NULL, market TEXT NOT NULL, field TEXT NOT NULL, before TEXT, after TEXT);
+    platform TEXT NOT NULL, market TEXT NOT NULL, field TEXT NOT NULL, before TEXT, after TEXT,
+    reseed INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER NOT NULL, n_tracked INTEGER,
-    n_untracked INTEGER, n_fetched INTEGER, n_missing INTEGER, n_events INTEGER, error TEXT);
+    n_untracked INTEGER, n_fetched INTEGER, n_missing INTEGER, n_ev_fetched INTEGER, n_ev_missing INTEGER,
+    n_events INTEGER, failing INTEGER NOT NULL DEFAULT 0, error TEXT);
 CREATE TABLE IF NOT EXISTS alert_state (name TEXT PRIMARY KEY, alerted INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER NOT NULL, text TEXT NOT NULL);
 """
 
 
@@ -114,9 +129,9 @@ def fetch_pm(cids, ids, tokens, errors):
     for key, values in (("condition_ids", sorted(cids)), ("id", sorted(ids)), ("clob_token_ids", sorted(tokens))):
         for i in range(0, len(values), CHUNK):
             for closed in ("false", "true"):
-                url = GAMMA + "?" + urllib.parse.urlencode([(key, v) for v in values[i:i + CHUNK]] + [("closed", closed)])
+                params = [(key, v) for v in values[i:i + CHUNK]] + [("closed", closed), ("limit", CHUNK)]
                 try:
-                    markets = _get(url)
+                    markets = _get(GAMMA + "?" + urllib.parse.urlencode(params))
                 except Exception as e:
                     errors.append(f"gamma {key} chunk {i // CHUNK} closed={closed}: {type(e).__name__}: {e}"[:300])
                     continue
@@ -128,14 +143,23 @@ def fetch_pm(cids, ids, tokens, errors):
     return out
 
 
-def fetch_k(ticker):
-    """The Kalshi market, or None when Kalshi no longer has it (404)."""
+def _kalshi(base, ticker, key):
     try:
-        return _get(KALSHI + urllib.parse.quote(ticker))["market"]
+        return _get(base + urllib.parse.quote(ticker))[key]
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return None
         raise
+
+
+def fetch_k(ticker):
+    """The Kalshi market, or None when Kalshi no longer has it (404)."""
+    return _kalshi(KALSHI, ticker, "market")
+
+
+def fetch_event(event_ticker):
+    """The Kalshi event (it carries settlement_sources), or None when Kalshi has no such event (404)."""
+    return _kalshi(KALSHI_EVENTS, event_ticker, "event")
 
 
 def infra_notify(text):
@@ -159,6 +183,17 @@ def _n_disputes(doc):
         return str(raw).count("disputed")
 
 
+def _pages(platform, field, doc):
+    """Whether a change to this field is worth a page (every change is recorded either way)."""
+    if platform == "polymarket":
+        return field not in ("umaResolutionStatus", "umaResolutionStatuses")   # disputes page on their own
+    if field == "status":
+        return False
+    if field == "close_time":
+        return doc.get("status") != "active"
+    return True
+
+
 def _text(v):
     return v if isinstance(v, str) else json.dumps(v, sort_keys=True, ensure_ascii=False)
 
@@ -177,53 +212,58 @@ def _snippet(before, after, cap=600):
     return "\n".join(parts)[:cap]
 
 
-def _send(notify, msgs):
-    """Pack messages into notifier calls under MAX_MSG; a batch that fails to send is printed to the log."""
-    batches, cur = [], "market rules watch:"
+def _pack(msgs):
+    """Messages packed into texts of at most MAX_MSG characters."""
+    texts, cur = [], "market rules watch:"
     for m in msgs:
         m = m[:MAX_MSG - 30]
         if len(cur) + 2 + len(m) > MAX_MSG:
-            batches.append(cur)
+            texts.append(cur)
             cur = "market rules watch (cont.):"
         cur += "\n\n" + m
-    batches.append(cur)
-    for text in batches:
-        if not notify(text):
-            print("NOTIFY FAILED, message follows:\n" + text, flush=True)
+    texts.append(cur)
+    return texts
 
 
-def _check_streak(con, error, notify):
-    """Page once when FAIL_STREAK_ALERT runs in a row recorded an error, once when a run is clean again."""
+def _flush_outbox(con, notify, now_ms, ids=None):
+    """Print and drop rows older than OUTBOX_TTL_MS, then send the rest (only `ids` when given); a row is
+    deleted only once its send succeeded."""
+    with con:
+        for oid, text in con.execute("SELECT id, text FROM outbox WHERE ts_ms < ? ORDER BY id",
+                                     (now_ms - OUTBOX_TTL_MS,)).fetchall():
+            print(f"OUTBOX DROPPED (unsent for over 24 h), message follows:\n{text}", flush=True)
+            con.execute("DELETE FROM outbox WHERE id=?", (oid,))
+    for oid, text in con.execute("SELECT id, text FROM outbox ORDER BY id").fetchall():
+        if ids is not None and oid not in ids:
+            continue
+        if notify(text):
+            with con:
+                con.execute("DELETE FROM outbox WHERE id=?", (oid,))
+        else:
+            print(f"notify failed; outbox row {oid} kept for the next run", flush=True)
+
+
+def _check_streak(con, failing, error, notify):
+    """Page once when FAIL_STREAK_ALERT runs in a row were failing, once when a run is not failing again."""
     row = con.execute("SELECT alerted FROM alert_state WHERE name='fetch'").fetchone()
     alerted = bool(row and row[0])
-    if error is None:
+    if not failing:
         if alerted and notify("market rules watch recovered: fetching rules again."):
             with con:
                 con.execute("INSERT OR REPLACE INTO alert_state VALUES ('fetch', 0)")
         return
-    recent = [r[0] for r in con.execute("SELECT error FROM runs ORDER BY id DESC LIMIT ?", (FAIL_STREAK_ALERT,))]
-    if not alerted and len(recent) == FAIL_STREAK_ALERT and all(e is not None for e in recent):
-        if notify(f"market rules watch FAILING: {FAIL_STREAK_ALERT} runs in a row had fetch errors, so rule "
-                  f"edits and disputes on tracked markets may be missed.\nlast error: {error}\ndb: {DB_PATH}"):
+    recent = [r[0] for r in con.execute("SELECT failing FROM runs ORDER BY id DESC LIMIT ?", (FAIL_STREAK_ALERT,))]
+    if not alerted and len(recent) == FAIL_STREAK_ALERT and all(recent):
+        if notify(f"market rules watch FAILING: {FAIL_STREAK_ALERT} runs in a row fetched under half of the "
+                  f"tracked markets, so rule edits and disputes may be missed.\nlast error: {error}\ndb: {DB_PATH}"):
             with con:
                 con.execute("INSERT OR REPLACE INTO alert_state VALUES ('fetch', 1)")
 
 
-def run(shadow_db=SHADOW_DB, db_path=DB_PATH, fetch_pm=None, fetch_k=None, notify=None, now_ms=None):
-    fetch_pm = fetch_pm or globals()["fetch_pm"]   # resolved at call time, not bound as defaults at import
-    fetch_k = fetch_k or globals()["fetch_k"]
-    notify = notify or infra_notify
-    now_ms = now_ms or int(time.time() * 1000)
-    k, cids, ids, tokens, n_untracked = tracked(shadow_db)
-    n_tracked = len(k) + len(cids) + len(ids) + len(tokens)
-    docs, errors, n_missing = [], [], 0
-    try:
-        for m in fetch_pm(cids, ids, tokens, errors):
-            docs.append(("polymarket", m["conditionId"], m.get("slug") or m.get("question"),
-                         {f: m.get(f) for f in PM_FIELDS}))
-    except Exception as e:
-        errors.append(f"gamma: {type(e).__name__}: {e}"[:300])
-    for t in sorted(k):
+def _fetch_kalshi(tickers, fetch_k, fetch_ev, errors):
+    """([(ticker, label, doc, carry_fields)], n_missing markets, n events fetched, n events missing)."""
+    markets, n_missing = [], 0
+    for t in sorted(tickers):
         try:
             m = fetch_k(t)
         except Exception as e:
@@ -231,50 +271,102 @@ def run(shadow_db=SHADOW_DB, db_path=DB_PATH, fetch_pm=None, fetch_k=None, notif
             continue
         if m is None:
             n_missing += 1
+        else:
+            markets.append((t, m))
+    events, n_ev_missing = {}, sum(1 for _, m in markets if not m.get("event_ticker"))
+    for et in sorted({m["event_ticker"] for _, m in markets if m.get("event_ticker")}):
+        try:
+            ev = fetch_ev(et)
+        except Exception as e:
+            errors.append(f"kalshi event {et}: {type(e).__name__}: {e}"[:300])
             continue
-        docs.append(("kalshi", t, m.get("title") or t, {f: m.get(f) for f in K_FIELDS}))
-    if n_tracked and not docs and not errors:
-        errors.append(f"fetched 0 of {n_tracked} tracked markets")
-    error = "; ".join(errors)[:1000] if errors else None
+        if ev is None:
+            n_ev_missing += 1
+        else:
+            events[et] = ev
+    out = []
+    for t, m in markets:
+        doc = {f: m.get(f) for f in K_FIELDS}
+        ev = events.get(m.get("event_ticker"))
+        if ev is not None:
+            doc.update({f: ev.get(f) for f in K_EVENT_FIELDS})
+        out.append((t, m.get("title") or t, doc, () if ev is not None else K_EVENT_FIELDS))
+    return out, n_missing, len(events), n_ev_missing
 
+
+def run(shadow_db=SHADOW_DB, db_path=DB_PATH, fetch_pm=None, fetch_k=None, fetch_ev=None, notify=None, now_ms=None):
+    fetch_pm = fetch_pm or globals()["fetch_pm"]   # resolved at call time, not bound as defaults at import
+    fetch_k = fetch_k or globals()["fetch_k"]
+    fetch_ev = fetch_ev or fetch_event
+    notify = notify or infra_notify
+    now_ms = now_ms or int(time.time() * 1000)
     con = sqlite3.connect(db_path, timeout=30)
     con.executescript(SCHEMA)
-    msgs, n_events = [], 0
+    _flush_outbox(con, notify, now_ms)   # what an earlier run could not send
+
+    k, cids, ids, tokens, n_untracked = tracked(shadow_db)
+    n_tracked = len(k) + len(cids) + len(ids) + len(tokens)
+    docs, errors = [], []
+    try:
+        for m in fetch_pm(cids, ids, tokens, errors):
+            docs.append(("polymarket", m["conditionId"], m.get("slug") or m.get("question"),
+                         {f: m.get(f) for f in PM_FIELDS}, ()))
+    except Exception as e:
+        errors.append(f"gamma: {type(e).__name__}: {e}"[:300])
+    k_docs, n_missing, n_ev_fetched, n_ev_missing = _fetch_kalshi(k, fetch_k, fetch_ev, errors)
+    docs += [("kalshi", t, label, doc, carry) for t, label, doc, carry in k_docs]
+    failing = bool(n_tracked) and 2 * len(docs) < n_tracked
+    if failing:
+        errors.insert(0, f"fetched {len(docs)} of {n_tracked} tracked markets")
+    error = "; ".join(errors)[:1000] if errors else None
+
+    msgs, n_events, new_ids = [], 0, set()
     with con:
-        for platform, market, label, doc in docs:
+        for platform, market, label, doc, carry in docs:
             row = con.execute("SELECT doc_json FROM rules WHERE platform=? AND market=?", (platform, market)).fetchone()
+            old = json.loads(row[0]) if row else None
+            for f in carry:   # not fetched this run: keep what is stored, or leave the field out
+                if old is not None and f in old:
+                    doc[f] = old[f]
             js = json.dumps(doc, sort_keys=True, ensure_ascii=False)
-            if row is None:
+            if old is None:
                 con.execute("INSERT INTO rules VALUES (?,?,?,?,?)", (platform, market, label, js, now_ms))
                 if platform == "polymarket" and _n_disputes(doc):
                     msgs.append(f"Polymarket {label} [{market}]: already disputed when first tracked "
                                 f"({doc.get('umaResolutionStatuses')}).")
                 continue
-            old = json.loads(row[0])
             if old == doc:
                 continue
+            reseed = set(old) != set(doc)   # a newer field list, not a market event
             for f in sorted(set(old) | set(doc)):
                 if old.get(f) == doc.get(f):
                     continue
-                con.execute("INSERT INTO rule_events (ts_ms, platform, market, field, before, after) VALUES (?,?,?,?,?,?)",
-                            (now_ms, platform, market, f, json.dumps(old.get(f)), json.dumps(doc.get(f))))
+                con.execute("INSERT INTO rule_events (ts_ms, platform, market, field, before, after, reseed) "
+                            "VALUES (?,?,?,?,?,?,?)", (now_ms, platform, market, f, json.dumps(old.get(f)),
+                                                       json.dumps(doc.get(f)), int(reseed)))
                 n_events += 1
                 if f == "umaResolutionStatuses" and _n_disputes(doc) > _n_disputes(old):
                     msgs.append(f"Polymarket {label} [{market}]: DISPUTED ({doc.get(f)}).")
-                elif f not in SILENT_FIELDS:
+                elif not reseed and _pages(platform, f, doc):
                     msgs.append(f"{platform.capitalize()} {label} [{market}]: {f} changed\n"
                                 f"{_snippet(old.get(f), doc.get(f))}")
             con.execute("UPDATE rules SET doc_json=?, label=?, since_ms=? WHERE platform=? AND market=?",
                         (js, label, now_ms, platform, market))
-        con.execute("INSERT INTO runs (ts_ms, n_tracked, n_untracked, n_fetched, n_missing, n_events, error) "
-                    "VALUES (?,?,?,?,?,?,?)", (now_ms, n_tracked, n_untracked, len(docs), n_missing, n_events, error))
-    if msgs:
-        _send(notify, msgs)
-    _check_streak(con, error, notify)
+        for text in (_pack(msgs) if msgs else []):
+            new_ids.add(con.execute("INSERT INTO outbox (ts_ms, text) VALUES (?,?)", (now_ms, text)).lastrowid)
+        con.execute("INSERT INTO runs (ts_ms, n_tracked, n_untracked, n_fetched, n_missing, n_ev_fetched, "
+                    "n_ev_missing, n_events, failing, error) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (now_ms, n_tracked, n_untracked, len(docs), n_missing, n_ev_fetched, n_ev_missing, n_events,
+                     int(failing), error))
+    if new_ids:
+        _flush_outbox(con, notify, now_ms, ids=new_ids)
+    _check_streak(con, failing, error, notify)
+    n_outbox = con.execute("SELECT count(*) FROM outbox").fetchone()[0]
     con.close()
     print(f"{datetime.fromtimestamp(now_ms / 1000, timezone.utc):%Y-%m-%dT%H:%M:%SZ} tracked={n_tracked} "
-          f"untracked={n_untracked} fetched={len(docs)} missing={n_missing} events={n_events} msgs={len(msgs)}"
-          + (f" ERROR {error}" if error else ""), flush=True)
+          f"untracked={n_untracked} fetched={len(docs)} missing={n_missing} events_fetched={n_ev_fetched} "
+          f"events_missing={n_ev_missing} changes={n_events} msgs={len(msgs)} outbox={n_outbox}"
+          + (" FAILING" if failing else "") + (f" ERROR {error}" if error else ""), flush=True)
     return 0
 
 
