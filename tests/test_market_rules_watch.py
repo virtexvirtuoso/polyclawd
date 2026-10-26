@@ -200,16 +200,16 @@ def test_a_kalshi_rules_change_pages(dbs):
     assert len(f.sent) == 1 and "rules_secondary" in f.sent[-1] and "KXTEST-1" in f.sent[-1]
 
 
-def test_a_kalshi_close_time_change_is_silent_while_active_and_pages_once_it_is_not(dbs):
+def test_a_kalshi_close_time_change_pages_while_active_and_is_silent_once_it_is_not(dbs):
     f = Fake()
     go(dbs, f, 1000)
-    f.k["KXTEST-1"]["close_time"] = "2027-03-31T00:00:00Z"
+    f.k["KXTEST-1"]["close_time"] = "2027-03-31T00:00:00Z"   # a pushed deadline on an open market
     go(dbs, f, 2000)
-    assert f.sent == []
-    assert q(dbs, "select market, field from rule_events") == [("KXTEST-1", "close_time")]
-    f.k["KXTEST-1"].update(close_time="2026-11-01T00:00:00Z", status="closed")
+    assert len(f.sent) == 1 and "close_time changed" in f.sent[0] and "KXTEST-1" in f.sent[0]
+    f.k["KXTEST-1"].update(close_time="2026-11-01T00:00:00Z", status="determined")   # settlement rewrites it
     go(dbs, f, 3000)
-    assert len(f.sent) == 1 and "close_time" in f.sent[0] and "status" not in f.sent[0]
+    assert len(f.sent) == 1
+    assert q(dbs, "select field from rule_events where ts_ms=3000 order by field") == [("close_time",), ("status",)]
 
 
 # --- Kalshi settlement sources come from the event --------------------------------------------------------
@@ -224,6 +224,20 @@ def test_kalshi_settlement_sources_come_from_the_event_fetched_once_per_run(dbs)
     go(dbs, f, 2000)
     assert f.ev_calls == ["KXTEST", "KXTEST"]
     assert len(f.sent) == 1 and f.sent[0].count("settlement_sources changed") == 2 and "ESPN" in f.sent[0]
+
+
+def test_a_reseed_silences_only_the_added_field_and_a_field_in_both_docs_still_pages(dbs):
+    f = Fake()
+    f.ev_error = TimeoutError("events timed out")   # seeded without settlement_sources
+    go(dbs, f, 1000)
+    assert "settlement_sources" not in doc(dbs, "KXTEST-1")
+    f.ev_error = None
+    f.k["KXTEST-1"]["rules_primary"] = "If B then Yes."
+    go(dbs, f, 2000)
+    assert len(f.sent) == 1 and "rules_primary changed" in f.sent[0] and "settlement_sources" not in f.sent[0]
+    assert set(q(dbs, "select market, field, reseed from rule_events")) == {
+        ("KXTEST-1", "rules_primary", 0), ("KXTEST-1", "settlement_sources", 1),
+        ("KXTEST-2", "settlement_sources", 1)}
 
 
 def test_a_missing_event_is_counted_not_an_error_and_its_later_arrival_reseeds_silently(dbs):
@@ -251,7 +265,7 @@ def test_a_failed_event_fetch_keeps_the_stored_sources_and_is_a_partial_error(db
     assert "kalshi slow" in q(dbs, "select error from runs order by id desc limit 1")[0][0]
 
 
-def test_a_new_field_in_the_doc_reseeds_silently_and_pages_on_its_next_change(dbs, monkeypatch):
+def test_a_new_field_in_the_doc_is_recorded_silently_and_pages_on_its_next_change(dbs, monkeypatch):
     f = Fake()
     go(dbs, f, 1000)
     monkeypatch.setattr(w, "PM_FIELDS", w.PM_FIELDS + ("negRisk",))
@@ -259,12 +273,12 @@ def test_a_new_field_in_the_doc_reseeds_silently_and_pages_on_its_next_change(db
         m["negRisk"] = False
     f.pm["0xabc"]["description"] = "Edited in the same run as the deploy."
     go(dbs, f, 2000)
-    assert f.sent == []
+    assert len(f.sent) == 1 and "description changed" in f.sent[0] and "negRisk" not in f.sent[0]
     assert q(dbs, "select count(*) from rule_events where reseed=1 and field='negRisk'")[0][0] == 5
-    assert q(dbs, "select reseed from rule_events where field='description'") == [(1,)]
+    assert q(dbs, "select reseed from rule_events where field='description'") == [(0,)]
     f.pm["0xabc"]["negRisk"] = True
     go(dbs, f, 3000)
-    assert len(f.sent) == 1 and "negRisk changed" in f.sent[0]
+    assert len(f.sent) == 2 and "negRisk changed" in f.sent[1]
 
 
 def test_a_dispute_still_pages_during_a_reseed(dbs, monkeypatch):

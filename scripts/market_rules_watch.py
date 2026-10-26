@@ -12,9 +12,10 @@ for a market that is already disputed when first seen.
     umaResolutionStatus(es). UMA status steps are recorded, not paged; only a new dispute pages.
   Kalshi (/markets/{ticker}): title, rules_primary, rules_secondary, close_time, status; settlement_sources
     is never on the market object, so it comes from /events/{event_ticker}, fetched once per distinct event.
-    status is recorded, not paged; a close_time change pages only once the market is no longer active.
-A doc whose field list changed (a newer version of this script) is re-seeded silently: the differences are
-recorded with reseed=1 and only a new dispute still pages. A missing event (404, or no event_ticker) is
+    status is recorded, not paged; a close_time change pages while the market is active (a pushed deadline)
+    and is recorded silently once it is not (settlement rewrites close_time).
+A field added to or removed from a doc (a newer field list, or an event that became available) is recorded
+with reseed=1 and never pages; fields present in both docs page as usual. A missing event (404, or no event_ticker) is
 counted; its market keeps the settlement_sources it had (or none), so its later arrival is a silent re-seed.
 
 Delivery: messages are written to the outbox in the same transaction that advances rules.doc_json, sent
@@ -190,7 +191,7 @@ def _pages(platform, field, doc):
     if field == "status":
         return False
     if field == "close_time":
-        return doc.get("status") != "active"
+        return doc.get("status") == "active"
     return True
 
 
@@ -337,17 +338,17 @@ def run(shadow_db=SHADOW_DB, db_path=DB_PATH, fetch_pm=None, fetch_k=None, fetch
                 continue
             if old == doc:
                 continue
-            reseed = set(old) != set(doc)   # a newer field list, not a market event
+            reseed_fields = set(old) ^ set(doc)   # added or removed by a newer field list: not a market event
             for f in sorted(set(old) | set(doc)):
                 if old.get(f) == doc.get(f):
                     continue
                 con.execute("INSERT INTO rule_events (ts_ms, platform, market, field, before, after, reseed) "
                             "VALUES (?,?,?,?,?,?,?)", (now_ms, platform, market, f, json.dumps(old.get(f)),
-                                                       json.dumps(doc.get(f)), int(reseed)))
+                                                       json.dumps(doc.get(f)), int(f in reseed_fields)))
                 n_events += 1
                 if f == "umaResolutionStatuses" and _n_disputes(doc) > _n_disputes(old):
                     msgs.append(f"Polymarket {label} [{market}]: DISPUTED ({doc.get(f)}).")
-                elif not reseed and _pages(platform, f, doc):
+                elif f not in reseed_fields and _pages(platform, f, doc):
                     msgs.append(f"{platform.capitalize()} {label} [{market}]: {f} changed\n"
                                 f"{_snippet(old.get(f), doc.get(f))}")
             con.execute("UPDATE rules SET doc_json=?, label=?, since_ms=? WHERE platform=? AND market=?",
