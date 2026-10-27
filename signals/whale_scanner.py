@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
-from config.polymarket_urls import POLYMARKET_DATA_API as PM_DATA_API  # polyproxy: central URL config
+from config.data_api import fetch_data_v2_page
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1336,15 +1336,25 @@ def scan_kalshi(conn) -> list:
 def fetch_pm_trades_since(since_ts: int) -> list:
     """Taker trades exchange-wide from the Data API, newest first, until we
     pass since_ts. Fields include title/slug/side/outcome/size/price inline."""
-    out, offset = [], 0
+    out = []
+    cursor = None
     for _ in range(PM_TRADES_PAGE_CAP):
-        d = _fetch_json(f"{PM_DATA_API}/trades?limit=500&takerOnly=true&offset={offset}")
+        # v2 rejects offset. A short page is not the end; only a null cursor is.
+        d, cursor = fetch_data_v2_page(
+            "trades",
+            {"limit": 500, "takerOnly": "true"},
+            _fetch_json,
+            cursor=cursor,
+        )
+        if d is None:
+            break
         if not d:
-            break
+            if not cursor:
+                break
+            continue
         out.extend(t for t in d if (t.get("timestamp") or 0) >= since_ts)
-        if len(d) < 500 or (d[-1].get("timestamp") or 0) < since_ts:
+        if not cursor or (d[-1].get("timestamp") or 0) < since_ts:
             break
-        offset += 500
     else:
         logger.warning("PM trades feed hit page cap (%d) — burst truncated",
                        PM_TRADES_PAGE_CAP)

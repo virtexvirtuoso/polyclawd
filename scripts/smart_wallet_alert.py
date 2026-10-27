@@ -37,7 +37,8 @@ import sys
 import time
 from pathlib import Path
 from typing import Callable, Optional
-from config.polymarket_urls import clob_url, data_url  # polyproxy: central URL config
+from config.data_api import read_data_v2
+from config.polymarket_urls import clob_url  # polyproxy: central URL config
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
@@ -1191,16 +1192,21 @@ def settle_via_wallet_positions(row: dict) -> Optional[float]:
     if not wallet or not cid:
         return None
     try:
-        req = urllib.request.Request(
-            data_url(f"/positions?user={wallet}&limit=500"),
-            headers={"User-Agent": "Polyclawd/2.0"},
+        def _fetch(url):
+            req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                return json.loads(resp.read().decode())
+
+        positions = read_data_v2(
+            "positions",
+            {"user": wallet, "limit": 500},
+            _fetch,
+            max_pages=1,
         )
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            positions = json.loads(resp.read().decode())
     except Exception:  # noqa: BLE001
         return None
     now = time.time()
-    for p in positions if isinstance(positions, list) else positions.get("data", []):
+    for p in positions or []:
         if p.get("conditionId") != cid or p.get("outcomeIndex") != oidx:
             continue
         iv = float(p.get("initialValue") or 0)

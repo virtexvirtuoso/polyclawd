@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 
 import httpx
 from loguru import logger
-from config.polymarket_urls import POLYMARKET_DATA_API as DATA_API  # polyproxy: central URL config
+from config.data_api import read_data_v2
 from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
 
 # Thresholds
@@ -53,7 +53,7 @@ def _fetch(url: str, params: dict = None, timeout: int = 15) -> Optional[any]:
 
 def discover_whales(trade_limit: int = TRADE_FETCH_LIMIT) -> List[Dict]:
     """Discover active whale wallets from recent trade activity."""
-    trades = _fetch(f"{DATA_API}/trades", {"limit": trade_limit})
+    trades = read_data_v2("trades", {"limit": trade_limit}, lambda url: _fetch(url), max_pages=1)
     if not trades:
         return []
     
@@ -90,7 +90,12 @@ def discover_whales(trade_limit: int = TRADE_FETCH_LIMIT) -> List[Dict]:
 
 def fetch_wallet_positions(address: str) -> List[Dict]:
     """Fetch active positions for a wallet from data API."""
-    data = _fetch(f"{DATA_API}/positions", {"user": address})
+    data = read_data_v2(
+        "positions",
+        {"user": address, "limit": 500},
+        lambda url: _fetch(url),
+        max_pages=4,
+    )
     if not data or not isinstance(data, list):
         return []
     return data

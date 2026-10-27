@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
-from config.polymarket_urls import POLYMARKET_DATA_API as DATA_API  # polyproxy: central URL config
+from config.data_api import read_data_v2, read_price_history
 
 # Resilient fetch wrapper
 try:
@@ -142,47 +142,45 @@ def get_price_history(
     end_ts: Optional[int] = None
 ) -> List[Dict]:
     """
-    Fetch OHLC price history for a token.
-    
+    Fetch price history for a token, shaped as OHLC candles.
+
+    The series is Data API ``GET /v2/prices-history`` (the CLOB
+    ``/prices-history`` route's replacement). That API returns ``{t, p}``
+    points, not OHLC. ``p`` is copied onto open/high/low/close/price so
+    callers keep the candle dict they already read.
+
     Args:
         token_id: CLOB token ID
-        interval: Time range - "1h", "1d", "1w", "1m", "all"
-        fidelity: Candle width in minutes (1, 5, 15, 60, 1440)
-        start_ts: Unix timestamp start (optional)
-        end_ts: Unix timestamp end (optional)
-    
-    Returns:
-        List of OHLC candles
+        interval: Time range - "1h", "6h", "1d", "1w", "1m", "max", "all"
+        fidelity: Bucket width in minutes (mapped to bucket_seconds)
+        start_ts: Unix timestamp start (optional; replaces interval)
+        end_ts: Unix timestamp end (optional, exclusive)
     """
     try:
-        url = f"{CLOB_API}/prices-history?market={token_id}&interval={interval}&fidelity={fidelity}"
-        if start_ts:
-            url += f"&startTs={start_ts}"
-        if end_ts:
-            url += f"&endTs={end_ts}"
-        
-        data = _resilient_urlopen("polymarket_clob", url, timeout=15)
-        
-        if not data or "history" not in data:
+        points = read_price_history(
+            token_id,
+            lambda url: _resilient_urlopen("polymarket_clob", url, timeout=15),
+            interval=interval,
+            fidelity=fidelity,
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
+        if not points:
             return []
-        
-        # Polymarket /prices-history returns {t, p} price points (NOT OHLC).
-        # Map price -> close (and o/h/l) so callers get a usable series;
-        # fall back to OHLC keys if a variant ever returns them.
+
         out = []
-        for h in data["history"]:
-            p = h.get("p")
-            if p is not None:
-                price = float(p)
-                out.append({"timestamp": h.get("t"), "open": price, "high": price,
-                            "low": price, "close": price, "price": price})
-            else:
-                c = float(h.get("c", 0))
-                out.append({"timestamp": h.get("t"), "open": float(h.get("o", 0)),
-                            "high": float(h.get("h", 0)), "low": float(h.get("l", 0)),
-                            "close": c, "price": c})
+        for h in points:
+            price = float(h["p"])
+            out.append({
+                "timestamp": h.get("t"),
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "price": price,
+            })
         return out
-        
+
     except Exception as e:
         print(f"Price history error: {e}")
         return []
@@ -492,12 +490,12 @@ def get_recent_trades(token_id: str, limit: int = 500, condition_id: str = "") -
     """
     Fetch recent trades for a CLOB token via the public Data API.
 
-    The Data API /trades endpoint filters by market via the `market` param,
-    which must be a conditionId (0x… hex). A CLOB token_id passed there is
-    SILENTLY IGNORED and the unfiltered global trade tape comes back with
-    HTTP 200 — so this function requires a conditionId (resolving it from
-    Gamma when not supplied) and keeps only trades whose `asset` matches
-    the requested token.
+    Data API v2 filters by condition id (`condition`), not by CLOB token.
+    `token_id` / `asset_id` on /v2/trades are ignored and the global tape
+    comes back with HTTP 200 — so this function requires a conditionId
+    (resolving it from Gamma when not supplied) and keeps only trades whose
+    `asset` matches the requested token. v2 caps limit at 1000 and rejects
+    offset, so a request above 1000 follows next_cursor.
 
     Args:
         token_id: The CLOB token ID (asset ID)
@@ -516,18 +514,25 @@ def get_recent_trades(token_id: str, limit: int = 500, condition_id: str = "") -
             print(f"Warning: no conditionId for token {token_id[:16]}… — cannot fetch trades")
             return []
 
-        url = f"{DATA_API}/trades?market={condition_id}&limit={min(limit, 2000)}&takerOnly=true"
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Polyclawd/2.0",
-        })
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            raw = json.loads(resp.read().decode())
+        page_size = min(max(limit, 1), 1000)
+        max_pages = max(1, (min(limit, 3000) + page_size - 1) // page_size)
 
-        # Data API returns an array directly.
+        def _fetch(url):
+            req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read().decode())
+
+        raw = read_data_v2(
+            "trades",
+            {"market": condition_id, "limit": page_size, "takerOnly": "true"},
+            _fetch,
+            max_pages=max_pages,
+        ) or []
+
         # proxyWallet is the taker wallet (maker_address in our schema).
         # A conditionId covers both outcome tokens — keep only the requested one.
         out = []
-        for t in raw if isinstance(raw, list) else raw.get("data", []):
+        for t in raw:
             if str(t.get("asset", "")) != str(token_id):
                 continue
             out.append({
