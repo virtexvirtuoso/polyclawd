@@ -3156,7 +3156,8 @@ def _filter_clarity_markets(policy_pulse: dict) -> list:
     """Extract CLARITY-relevant markets from policy_pulse, deduped by question.
 
     Live passage markets (the ones the hero chart cares about) also get a
-    `price_history` field attached via Polymarket's CLOB prices-history API.
+    `price_history` field attached via Data API GET /v2/prices-history
+    (still a list of {t, p} points).
     """
     if not isinstance(policy_pulse, dict):
         return []

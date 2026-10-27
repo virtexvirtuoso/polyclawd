@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
-from config.data_api import read_data_v2
+from config.data_api import read_data_v2, read_price_history
 
 # Resilient fetch wrapper
 try:
@@ -142,47 +142,45 @@ def get_price_history(
     end_ts: Optional[int] = None
 ) -> List[Dict]:
     """
-    Fetch OHLC price history for a token.
-    
+    Fetch price history for a token, shaped as OHLC candles.
+
+    The series is Data API ``GET /v2/prices-history`` (the CLOB
+    ``/prices-history`` route's replacement). That API returns ``{t, p}``
+    points, not OHLC. ``p`` is copied onto open/high/low/close/price so
+    callers keep the candle dict they already read.
+
     Args:
         token_id: CLOB token ID
-        interval: Time range - "1h", "1d", "1w", "1m", "all"
-        fidelity: Candle width in minutes (1, 5, 15, 60, 1440)
-        start_ts: Unix timestamp start (optional)
-        end_ts: Unix timestamp end (optional)
-    
-    Returns:
-        List of OHLC candles
+        interval: Time range - "1h", "6h", "1d", "1w", "1m", "max", "all"
+        fidelity: Bucket width in minutes (mapped to bucket_seconds)
+        start_ts: Unix timestamp start (optional; replaces interval)
+        end_ts: Unix timestamp end (optional, exclusive)
     """
     try:
-        url = f"{CLOB_API}/prices-history?market={token_id}&interval={interval}&fidelity={fidelity}"
-        if start_ts:
-            url += f"&startTs={start_ts}"
-        if end_ts:
-            url += f"&endTs={end_ts}"
-        
-        data = _resilient_urlopen("polymarket_clob", url, timeout=15)
-        
-        if not data or "history" not in data:
+        points = read_price_history(
+            token_id,
+            lambda url: _resilient_urlopen("polymarket_clob", url, timeout=15),
+            interval=interval,
+            fidelity=fidelity,
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
+        if not points:
             return []
-        
-        # Polymarket /prices-history returns {t, p} price points (NOT OHLC).
-        # Map price -> close (and o/h/l) so callers get a usable series;
-        # fall back to OHLC keys if a variant ever returns them.
+
         out = []
-        for h in data["history"]:
-            p = h.get("p")
-            if p is not None:
-                price = float(p)
-                out.append({"timestamp": h.get("t"), "open": price, "high": price,
-                            "low": price, "close": price, "price": price})
-            else:
-                c = float(h.get("c", 0))
-                out.append({"timestamp": h.get("t"), "open": float(h.get("o", 0)),
-                            "high": float(h.get("h", 0)), "low": float(h.get("l", 0)),
-                            "close": c, "price": c})
+        for h in points:
+            price = float(h["p"])
+            out.append({
+                "timestamp": h.get("t"),
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "price": price,
+            })
         return out
-        
+
     except Exception as e:
         print(f"Price history error: {e}")
         return []

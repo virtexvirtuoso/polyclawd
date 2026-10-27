@@ -22,6 +22,7 @@ import urllib.parse
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Dict, List, Any
+from config.data_api import read_price_history
 from config.polymarket_urls import clob_url  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
@@ -609,10 +610,16 @@ def _get_closing_line(market_id: str, platform: str) -> Optional[float]:
             token_id = tokens[0].get("token_id")
             if not token_id:
                 return None
-            hist = _fetch_json(
-                clob_url(f"/prices-history?market={token_id}&interval=1w&fidelity=60")
+            # Closing line is the last {t, p} at or before market end.
+            # Data API /v2/prices-history replaces CLOB /prices-history.
+            # fidelity=60 minutes → bucket_seconds=3600 over interval=1w.
+            hist = read_price_history(
+                token_id,
+                _fetch_json,
+                interval="1w",
+                fidelity=60,
             )
-            pts = (hist or {}).get("history") or []
+            pts = hist or []
             if not pts:
                 return None
             # Take the last point at or before market end; fall back to last point.
