@@ -175,10 +175,12 @@ def test_later_page_failure_keeps_points(caplog):
 
 def test_clob_helper_keeps_ohlc_shape(monkeypatch):
     import importlib.util
+    import pathlib
 
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
     spec = importlib.util.spec_from_file_location(
         "polymarket_clob_under_test",
-        "/workspace/odds/polymarket_clob.py",
+        repo_root / "odds" / "polymarket_clob.py",
     )
     clob = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(clob)
