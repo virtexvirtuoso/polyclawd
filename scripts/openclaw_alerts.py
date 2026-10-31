@@ -17,6 +17,90 @@ OPENCLAW_GATEWAY = "http://localhost:18789"
 
 DEFAULT_CHAT_ID = "468298295"  # Mr. V
 
+# Forum-topic routing (2026-10-31). Topic ids live ONLY in .polyclawd-topics.env at
+# the repo root (copy of ~/.config/polyclawd-topics.env on the Mac; ids are Telegram's
+# own createForumTopic replies). The topic is picked by the NEAREST module in the call
+# stack that appears below, so a scheduler task calling signals.insider_detector lands
+# in WHALES, not wherever scheduler.py would go. Unmapped callers stay chat-level
+# (pre-topic behaviour). POLYCLAWD_TOPIC=<name|id|none> in the env overrides the lookup.
+_TOPIC_ROUTES = {
+    # ⚡ Live Arb
+    "in_game_arb": "ARB", "hf_spread_scanner": "ARB", "hf_paper_trader": "ARB",
+    "mlb_live_monitor": "ARB", "soccer_live_monitor": "ARB", "ufc_live_monitor": "ARB",
+    # 🐋 Whales
+    "whale_alert_tg": "WHALES", "whale_alert_drain": "WHALES", "tier1_whale_alert": "WHALES",
+    "whale_wallets": "WHALES", "smart_wallet_alert": "WHALES", "smart_wallet_fast_poll": "WHALES",
+    "sport_whale_trades": "WHALES", "soccer_whale_trades": "WHALES", "pm_leaderboard_scraper": "WHALES",
+    "insider_detector": "WHALES", "elite_tracker": "WHALES", "whale_resolution_tracker": "WHALES",
+    "whale_gate_check": "WHALES",
+    # 🎯 Edges
+    "kalshi_prop_alerts": "EDGES", "mlb_prop_alerts": "EDGES", "sport_edge_alerts": "EDGES",
+    "stale_line_alerts": "EDGES", "nfl_edges_alerts": "EDGES", "nfl_fast_move_monitor": "EDGES",
+    "ufc_edge_cron": "EDGES", "wc_edge_scanner": "EDGES", "cross_sport_drift": "EDGES",
+    "discord_alerts": "EDGES", "alert_dispatch": "EDGES", "options_resolver": "EDGES",
+    "btts_totals_snapshot": "EDGES", "scorer_paper_logger": "EDGES", "kalshi_fade_report": "EDGES",
+    # 💰 Execution & Risk
+    "clob_client": "EXEC", "risk_governor": "EXEC", "kalshi_order_maker": "EXEC",
+    "stop_evaluator": "EXEC", "position_sync": "EXEC", "entry_reasoning_check": "EXEC",
+    # 📊 Reports
+    "daily_pnl_summary": "REPORTS", "daily_portfolio_report": "REPORTS", "paper_pnl_report": "REPORTS",
+    "live_monitor_report": "REPORTS", "brier_report": "REPORTS", "weekly_signal_report": "REPORTS",
+    "mlb_prop_gate2_report": "REPORTS", "shadow_compare_report": "REPORTS", "sports_pulse": "REPORTS",
+    # 🩺 Health
+    "canary_watch": "HEALTH", "weather_canary": "HEALTH", "send_ledger_watchdog": "HEALTH",
+    "wallet_allowlist_gate_check": "HEALTH", "wg-polymarket-drift-check": "HEALTH",
+}
+_TOPIC_IDS: Optional[dict] = None  # read once per process; recreate a topic => restart services
+
+
+def _load_topic_ids() -> dict:
+    """POLYCLAWD_TOPIC_<NAME>=<id> lines from .polyclawd-topics.env. Missing or
+    unreadable file => {} (everything stays chat-level). NEVER raises."""
+    global _TOPIC_IDS
+    if _TOPIC_IDS is None:
+        ids = {}
+        try:
+            import os as _os
+
+            path = _os.environ.get("POLYCLAWD_TOPICS_ENV") or _os.path.join(
+                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), ".polyclawd-topics.env"
+            )
+            with open(path) as f:
+                for line in f:
+                    m = re.match(r"^POLYCLAWD_TOPIC_([A-Z]+)=(\d+)\s*$", line)
+                    if m:
+                        ids[m.group(1)] = m.group(2)
+        except Exception:  # noqa: BLE001
+            pass
+        _TOPIC_IDS = ids
+    return _TOPIC_IDS
+
+
+def topic_thread_id() -> str:
+    """message_thread_id for the current alert, or "" for chat-level.
+    Env override first, then the nearest mapped module in the call stack, then
+    the entry script (sys.argv[0]). NEVER raises: routing must not break delivery."""
+    try:
+        import os as _os
+        import sys as _sys
+
+        ids = _load_topic_ids()
+        want = (_os.environ.get("POLYCLAWD_TOPIC") or "").strip()
+        if want:
+            if want.lower() == "none":
+                return ""
+            return want if want.isdigit() else ids.get(want.upper(), "")
+        f = _sys._getframe(1)
+        while f is not None:
+            key = _TOPIC_ROUTES.get(_os.path.splitext(_os.path.basename(f.f_code.co_filename))[0])
+            if key:
+                return ids.get(key, "")
+            f = f.f_back
+        main = _os.path.splitext(_os.path.basename(_sys.argv[0] or ""))[0]
+        return ids.get(_TOPIC_ROUTES.get(main, ""), "")
+    except Exception:  # noqa: BLE001
+        return ""
+
 # Safe-tag pattern for the send-layer 400 self-heal (2026-09-14). Keep the
 # pattern in sync with the local copy inside scripts/alert_formatter.py
 # (_send_telegram_inner) — that path keeps its own retry for historical reasons.
@@ -56,12 +140,16 @@ def _telegram_http_send(message: str, silent: bool = False, parse_mode: Optional
         print("[OpenClaw] no openclaw CLI and TELEGRAM_BOT_TOKEN unset — telegram alert dropped")
         return False, "no_token"
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", DEFAULT_CHAT_ID)
+    thread_id = topic_thread_id()
+    use_thread = [bool(thread_id)]  # flipped off by the topic-400 fallback below
     def _payload(text: str, with_parse: bool) -> bytes:
         f = {
             "chat_id": chat_id,
             "text": text,
             "disable_notification": "true" if silent else "false",
         }
+        if use_thread[0]:
+            f["message_thread_id"] = thread_id
         if with_parse and parse_mode:  # omit entirely for plain text (avoids 400 on stray _ / * in data)
             f["parse_mode"] = parse_mode
         return urllib.parse.urlencode(f).encode()
@@ -100,6 +188,15 @@ def _telegram_http_send(message: str, silent: bool = False, parse_mode: Optional
         return ok, err
 
     ok, err = _send(_payload(message, True))
+    if not ok and use_thread[0] and err.startswith("http_400") and "can't parse entities" not in err:
+        # Topic rejected (thread not found / TOPIC_CLOSED / TOPIC_DELETED ...):
+        # resend ONCE chat-level so an alert is never lost for routing (same rule
+        # as ~/bin/lib/tg-topic-send.sh). Parse 400s fall through to the retry below.
+        topic_cause = err[:160]
+        use_thread[0] = False
+        ok, err = _send(_payload(message, True))
+        if ok:
+            err = f"degraded:topic_400_chat_fallback thread={thread_id} cause={topic_cause}"
     if not ok and parse_mode and err.startswith("http_400") and "can't parse entities" in err:
         # Deterministic formatting 400 (unescaped < / & in dynamic content).
         # 2026-09-14: retry ONCE with stray entities escaped before degrading
@@ -149,6 +246,9 @@ def _ledger_log(ok: bool, channel: str, parse_mode, msg_len: int, err: str = "")
             "parse_mode": parse_mode,
             "len": msg_len,
         }
+        thread = topic_thread_id()
+        if thread:
+            line["thread"] = thread
         if err:
             line["err"] = str(err)[:200]
         with open(path, "a") as f:
