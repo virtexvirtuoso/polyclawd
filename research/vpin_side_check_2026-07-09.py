@@ -4,6 +4,8 @@
 """
 import json, time, urllib.request
 
+from config.data_api import read_data_v2
+
 UA = {"User-Agent": "Polyclawd-QA/1.0"}
 
 def get(url):
@@ -27,7 +29,12 @@ for m in markets:
 
 now = time.time()
 for slug, cid, tok in picked:
-    trades = get(f"https://data-api.polymarket.com/trades?market={cid}&limit=500&takerOnly=true")
+    trades = read_data_v2(
+        "trades",
+        {"market": cid, "limit": 500, "takerOnly": "true"},
+        get,
+        max_pages=1,
+    ) or []
     trades = [t for t in trades if str(t.get("asset")) == str(tok)]
     if len(trades) < 50:
         print(f"{slug}: only {len(trades)} trades for YES token, skipping")

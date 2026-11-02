@@ -40,7 +40,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from config.polymarket_urls import POLYMARKET_DATA_API as DATA_API  # polyproxy: central URL config
+from config.data_api import read_data_v2
 from config.polymarket_urls import GAMMA_API as GAMMA  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
@@ -179,17 +179,15 @@ def record_evening(now: datetime = None, force_window: bool = False) -> dict:
 def fetch_trades(condition_id: str) -> list:
     """Public trade tape for one market (most recent first; weather brackets
     are low-volume so one page generally covers an evening)."""
-    out, offset = [], 0
-    while offset <= 2000:
-        d = _jget(f"{DATA_API}/trades?market={condition_id}&limit=500&offset={offset}")
-        if not d or not isinstance(d, list):
-            break
-        out += d
-        if len(d) < 500:
-            break
-        offset += 500
-        time.sleep(0.1)
-    return out
+    # v1 walked offset 0..2000. v2 rejects offset; five cursor pages cover the same cap.
+    # A short page is not the end — read_data_v2 stops on a null cursor.
+    rows = read_data_v2(
+        "trades",
+        {"market": condition_id, "limit": 500},
+        _jget,
+        max_pages=5,
+    )
+    return rows or []
 
 def judge_fill(order: dict, trades: list) -> dict:
     """Fill from tape, honoring PM complementary matching.

@@ -32,7 +32,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
-from config.polymarket_urls import data_url  # polyproxy: central URL config
+from config.data_api import read_data_v2
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
@@ -368,12 +368,13 @@ _UP_DOWN_RE = re.compile(r"up[\s-]*or[\s-]*down|updown|up-down", re.IGNORECASE)
 
 def _fetch_positions(wallet: str) -> Optional[List[Dict]]:
     """Open positions for a wallet from the PM data-api (None on failure)."""
-    url = data_url(f"/positions?user={wallet}&limit=100")
-    req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+    def _fetch(url):
+        req = urllib.request.Request(url, headers={"User-Agent": "Polyclawd/2.0"})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            return json.loads(resp.read().decode())
+
     try:
-        with urllib.request.urlopen(req, timeout=12) as r:
-            data = json.loads(r.read().decode())
-        return data if isinstance(data, list) else None
+        return read_data_v2("positions", {"user": wallet, "limit": 100}, _fetch, max_pages=1)
     except Exception as e:
         print(f"[leaderboard] positions fetch failed {wallet[:10]}…: {e}", flush=True)
         return None

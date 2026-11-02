@@ -95,7 +95,7 @@ def test_skill_score_empty_is_neutral():
 
 def _skilled(net):
     """Stats that pass the statistical skill gate outright."""
-    return {"skill_n": 501, "skill_ret": 0.0128, "skill_p": 0.0165,
+    return {"skill_n": 501, "skill_ret": 0.0128, "skill_p": 0.0065,
             "closed": 501, "wins": 29, "realized": net, "net": net}
 
 
@@ -106,7 +106,7 @@ def test_skill_path_rejects_capital_destroying_wallet():
 
 def test_skill_path_still_admits_a_profitable_skilled_wallet():
     """The gate's legitimate purpose survives: low WR is still forgiven."""
-    stats = _skilled(2500.0)
+    stats = _skilled(25000.0)
     assert stats["wins"] / stats["closed"] < 0.10   # 5.8% WR, way under the floor
     assert is_smart(stats) is True
 

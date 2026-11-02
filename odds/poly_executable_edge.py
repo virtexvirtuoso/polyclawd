@@ -168,7 +168,7 @@ def poly_price_move(
     condition_id: Optional[str] = None,
     outcome_index: int = 0,
 ) -> Dict:
-    """Polymarket's OWN recent price movement for a token, via CLOB price-history.
+    """Polymarket's OWN recent price movement for a token, via /v2/prices-history.
 
     A persistent (API-backed) momentum signal — unlike the in-memory line-movement
     tracker, it survives restarts and reflects Polymarket price drift (not the

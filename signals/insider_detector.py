@@ -33,7 +33,7 @@ import httpx
 from loguru import logger
 from config.polymarket_urls import GAMMA_API, CLOB_API  # polyproxy: central URL config
 from config.polymarket_urls import clob_url  # polyproxy: central URL config
-from config.polymarket_urls import POLYMARKET_DATA_API as DATA_API  # polyproxy: central URL config
+from config.data_api import read_data_v2
 
 # ── Config ──────────────────────────────────────────────────────────
 
@@ -146,12 +146,19 @@ def _client() -> httpx.Client:
         _http = httpx.Client(timeout=15, headers={"User-Agent": "Polyclawd/2.0"})
     return _http
 
+def _data_json(url: str):
+    r = _client().get(url)
+    if r.status_code == 200:
+        return r.json()
+    logger.debug("HTTP {} from {}", r.status_code, url)
+    return None
+
+
 def fetch_recent_trades(limit: int = SCAN_LIMIT) -> List[Dict]:
-    """Fetch most recent trades from Polymarket."""
+    """Fetch most recent trades from Polymarket Data API v2."""
     try:
-        r = _client().get(f"{DATA_API}/trades", params={"limit": limit})
-        if r.status_code == 200:
-            return r.json()
+        rows = read_data_v2("trades", {"limit": limit}, _data_json, max_pages=1)
+        return rows or []
     except Exception as e:
         logger.warning("Trade fetch failed: {}", e)
     return []
@@ -173,16 +180,18 @@ def get_wallet_first_trade(address: str) -> Optional[float]:
 
     # Fetch from API — oldest trade
     try:
-        r = _client().get(f"{DATA_API}/activity", params={
-            "user": address, "limit": 1, "sortBy": "timestamp", "sortOrder": "asc"
-        })
-        if r.status_code == 200:
-            data = r.json()
-            if data and len(data) > 0:
-                ts = data[0].get("timestamp", 0)
-                # Cache it
-                _cache_wallet(address, ts)
-                return ts
+        # v2 ignores sortBy/sortOrder. sort_direction=ASC plus start=1 is the
+        # full-history oldest row (omitted start floors to three years).
+        data = read_data_v2(
+            "activity",
+            {"user": address, "limit": 1, "sortBy": "timestamp", "sortOrder": "asc", "start": 1},
+            _data_json,
+            max_pages=1,
+        )
+        if data:
+            ts = data[0].get("timestamp", 0)
+            _cache_wallet(address, ts)
+            return ts
     except Exception as e:
         logger.debug("Wallet age lookup failed for {}: {}", address[:12], e)
     return None
@@ -190,11 +199,13 @@ def get_wallet_first_trade(address: str) -> Optional[float]:
 def get_wallet_positions(address: str) -> List[Dict]:
     """Get wallet's current positions to calculate concentration."""
     try:
-        r = _client().get(f"{DATA_API}/activity", params={
-            "user": address, "limit": 50, "sortBy": "timestamp", "sortOrder": "desc"
-        })
-        if r.status_code == 200:
-            return r.json()
+        data = read_data_v2(
+            "activity",
+            {"user": address, "limit": 50, "sortBy": "timestamp", "sortOrder": "desc"},
+            _data_json,
+            max_pages=1,
+        )
+        return data or []
     except Exception as e:
         logger.debug("Position fetch failed for {}: {}", address[:12], e)
     return []

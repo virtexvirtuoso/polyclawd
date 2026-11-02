@@ -146,7 +146,13 @@ def gamma_url(path: str) -> str:
 
 
 def data_url(path: str) -> str:
-    """Build a data-api.polymarket.com URL (read-only, cacheable)."""
+    """Build a data-api.polymarket.com URL (read-only, cacheable).
+
+    Data API reads go to ``/v2/...`` (see ``config.data_api``). The one
+    exception is ``/v1/accounting/snapshot``, which has no v2 route.
+    When POLYPROXY_BASE is set this returns ``{proxy}/data`` + path, so the
+    Worker must forward ``/data/v2/*`` to ``https://data-api.polymarket.com/v2/*``.
+    """
     return f"{POLYMARKET_DATA_API}{path}"
 
 
@@ -237,35 +243,78 @@ __all__ = [
 ]
 
 # --- SDK monkey-patch (Phase 2d) ---------------------------------------------
-# The polymarket-client SDK has hardcoded URLs in environments.PRODUCTION.
-# Patch them at import time so SDK calls also route through the Worker.
-# Uses object.__setattr__ to bypass the frozen=True dataclass restriction.
-# Safety: only patches when POLYPROXY_BASE is set; otherwise no-op.
-# Relayer URL is NEVER patched (writes must stay on tunnel).
+# polymarket-client reads its hosts from environments.PRODUCTION.
+#   <= 0.10-era: clob_url / gamma_url / data_url are fields on Environment.
+#   0.14: Environment only has name + _config (_EnvironmentConfig holds the
+#   hosts). Setting Environment.clob_url raises AttributeError and the whole
+#   patch used to abort, so list_positions went straight to data-api.
+# Patch whichever object actually has the fields. object.__setattr__ bypasses
+# frozen=True. Only when POLYPROXY_BASE is set; otherwise no-op.
+# clob_url() stays on the tunnel (_NEVER_PROXY: Worker /clob/* is CF 1010 from
+# this colo), so order placement is not sent through the Worker.
+# Relayer URL is NEVER patched. WS URLs are NEVER patched.
+
+
+_SDK_HOST_FIELDS = ("clob_url", "gamma_url", "data_url")
+
+
+def _sdk_host_overrides() -> dict:
+    """Hosts the SDK should use once POLYPROXY_BASE is on.
+
+    Gamma and Data are the Worker prefixes. CLOB stays on the direct origin.
+    """
+    return {
+        "clob_url": clob_url(""),
+        "gamma_url": gamma_url(""),
+        "data_url": data_url(""),
+    }
+
+
+def _sdk_host_target(environment):
+    """Object whose clob/gamma/data fields the client actually reads.
+
+    0.14 keeps them on ``environment._config``. Older releases keep them on
+    ``Environment`` itself.
+    """
+    config = getattr(environment, "_config", None)
+    if config is not None and all(hasattr(config, name) for name in _SDK_HOST_FIELDS):
+        return config
+    if all(hasattr(environment, name) for name in _SDK_HOST_FIELDS):
+        return environment
+    raise AttributeError(
+        "polymarket Environment has no clob_url/gamma_url/data_url "
+        "(checked Environment._config and Environment)"
+    )
+
+
+def _apply_sdk_host_patch(environment, hosts: dict) -> None:
+    """Write host overrides onto a frozen SDK environment. Raises if it cannot."""
+    target = _sdk_host_target(environment)
+    for name in _SDK_HOST_FIELDS:
+        object.__setattr__(target, name, hosts[name])
 
 
 def _patch_polymarket_sdk() -> None:
-    """Patch polymarket-client SDK to use Worker URLs when proxy is enabled."""
+    """Patch polymarket-client SDK hosts when the proxy is enabled.
+
+    ImportError (SDK not installed) is a no-op. Any other failure is logged
+    at ERROR and does not crash the process; those calls then stay on the
+    SDK's built-in origins.
+    """
     if not PROXY_ENABLED:
         return
     try:
         from polymarket import environments as _env
-
-        prod = _env.PRODUCTION
-        # Bypass frozen dataclass
-        object.__setattr__(prod, "clob_url", clob_url(""))
-        object.__setattr__(prod, "gamma_url", gamma_url(""))
-        object.__setattr__(prod, "data_url", data_url(""))
-        # Do NOT patch relayer_url — relayer must stay on tunnel
-        # Do NOT patch WS URLs — Worker does not proxy websockets
     except ImportError:
-        # SDK not installed (e.g. test env) — no-op
-        pass
+        return
+    try:
+        _apply_sdk_host_patch(_env.PRODUCTION, _sdk_host_overrides())
     except Exception as e:
-        # Log but do not crash — the patched code paths will fall back to direct
         import logging
 
-        logging.getLogger("polyproxy").warning("Failed to monkey-patch polymarket-client SDK: %s", e)
+        logging.getLogger("polyproxy").error(
+            "Failed to monkey-patch polymarket-client SDK: %s", e,
+        )
 
 
 _patch_polymarket_sdk()

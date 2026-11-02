@@ -28,7 +28,7 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Optional
-from config.polymarket_urls import POLYMARKET_DATA_API as PM_DATA_API  # polyproxy: central URL config
+from config.data_api import read_data_v2
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -203,16 +203,25 @@ def compute_stats(rows: list) -> dict:
             "net": realized + unrealized,
             "concentration": concentration}
 
+def _fetch_positions(wallet: str) -> Optional[list]:
+    """Open positions for one wallet (v2 /positions, cursor pages).
+
+    None when the first page cannot be fetched. v2 status defaults to OPEN,
+    which is the book v1 /positions returned. offset is rejected.
+    """
+    return read_data_v2(
+        "positions",
+        {"user": wallet, "limit": 500},
+        _fetch_json,
+        max_pages=POSITIONS_PAGE_CAP,
+    )
+
+
 def fetch_wallet_stats(wallet: str) -> Optional[dict]:
     """Full-history track record from the public positions endpoint."""
-    rows = []
-    for page in range(POSITIONS_PAGE_CAP):
-        d = _fetch_json(f"{PM_DATA_API}/positions?user={wallet}&limit=500&offset={page * 500}")
-        if d is None:
-            return None if page == 0 else compute_stats(rows)
-        rows.extend(d)
-        if len(d) < 500:
-            break
+    rows = _fetch_positions(wallet)
+    if rows is None:
+        return None
     return compute_stats(rows)
 
 def demote_stale_wallets(conn) -> dict:
@@ -457,15 +466,7 @@ def track_exits(conn) -> dict:
         if stats is None:
             continue
 
-        # Get all positions from the API (open + closed)
-        rows = []
-        for page in range(POSITIONS_PAGE_CAP):
-            d = _fetch_json(f"{PM_DATA_API}/positions?user={wallet}&limit=500&offset={page * 500}")
-            if d is None:
-                break
-            rows.extend(d)
-            if len(d) < 500:
-                break
+        rows = _fetch_positions(wallet) or []
 
         if not rows:
             continue
@@ -482,7 +483,7 @@ def track_exits(conn) -> dict:
 
         current_markets = set()
         for p in rows:
-            market = p.get("market") or p.get("condition_id") or ""
+            market = p.get("conditionId") or p.get("market") or p.get("condition_id") or ""
             if not market:
                 continue
             current_markets.add(market)

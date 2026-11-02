@@ -15,6 +15,9 @@ pytest
 pytest-asyncio
 locust
 py-clob-client==0.34.6
+# Data API v2 reads (position_sync list_positions). Order placement still goes
+# through execution/clob_client.py; install this into the VPS venv before restart.
+polymarket-client>=0.10.0
 # DEPLOY NOTE (Phase H): /live + execution layer add ONE new runtime dep:
 # py-clob-client. Do NOT force-upgrade fastapi/starlette on the VPS — the /live
 # code is plain APIRouter and runs on the existing versions. See

@@ -3,9 +3,10 @@
 
 Two-step fetch:
   1. gamma-api.polymarket.com/markets?slug=... -> clobTokenIds[0] (YES token)
-  2. clob.polymarket.com/prices-history?market={token}&interval=max&fidelity=1440
+  2. data-api GET /v2/prices-history?token_id={token}&interval=max&bucket_seconds=86400
+     (replaces clob /prices-history?market=&interval=max&fidelity=1440)
 
-Returns downsampled daily points so the dashboard can render a real
+Returns downsampled {t, p} points so the dashboard can render a real
 price trajectory instead of fabricating confidence bands.
 """
 
@@ -16,12 +17,12 @@ from pathlib import Path
 
 from loguru import logger
 
+from config.data_api import read_price_history
+from config.polymarket_urls import GAMMA_API as GAMMA_BASE  # polyproxy: central URL config
+
 CACHE_DIR = Path(__file__).parent.parent / "storage" / "polymarket_price_history_cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_TTL = 15 * 60  # 15 min — prices move intraday
-
-from config.polymarket_urls import GAMMA_API as GAMMA_BASE  # polyproxy: central URL config
-from config.polymarket_urls import CLOB_API as CLOB_BASE  # polyproxy: central URL config
 
 
 def _fetch_json(url: str, timeout: int = 15):
@@ -97,13 +98,19 @@ def get_price_history(slug: str, max_points: int = 60) -> list[dict] | None:
         return None
 
     try:
-        url = f"{CLOB_BASE}/prices-history?market={token_id}&interval=max&fidelity=1440"
-        data = _fetch_json(url)
-        raw = data.get("history") or []
+        # fidelity=1440 minutes → bucket_seconds=86400 (daily). interval=max
+        # is the full-history form; v2 rejects the old `market` param.
+        raw = read_price_history(
+            token_id,
+            _fetch_json,
+            interval="max",
+            fidelity=1440,
+        )
+        if raw is None:
+            raise RuntimeError("prices-history fetch failed")
         if not raw:
             return None
 
-        # Normalize + downsample
         pts = [{"t": int(x["t"]), "p": float(x["p"])} for x in raw if "t" in x and "p" in x]
         pts.sort(key=lambda x: x["t"])
 

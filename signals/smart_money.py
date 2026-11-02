@@ -9,8 +9,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from config.polymarket_urls import data_url  # polyproxy: central URL config
-HOLDERS_API = data_url("/holders")
+from config.data_api import read_data_v2
 from config.polymarket_urls import gamma_url  # polyproxy: central URL config
 GAMMA_API = gamma_url("/markets")
 CACHE_DIR = Path(__file__).parent.parent / "storage" / "smart_money_cache"
@@ -37,11 +36,21 @@ def _fetch_holders(condition_id: str, limit: int = 20) -> list[dict]:
             with open(cache_path) as f:
                 return json.load(f)
 
-    url = f"{HOLDERS_API}?market={condition_id}&limit={limit}"
-    req = urllib.request.Request(url, headers={"User-Agent": "polyclawd/1.0"})
-    try:
+    def _fetch(url):
+        req = urllib.request.Request(url, headers={"User-Agent": "polyclawd/1.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
+            return json.loads(resp.read())
+
+    try:
+        # v2 rejects market=; the condition id is the `condition` param.
+        data = read_data_v2(
+            "holders",
+            {"market": condition_id, "limit": limit},
+            _fetch,
+            max_pages=1,
+        )
+        if data is None:
+            raise RuntimeError("holders fetch failed")
         with open(cache_path, "w") as f:
             json.dump(data, f)
         return data

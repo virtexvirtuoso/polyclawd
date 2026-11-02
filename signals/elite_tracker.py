@@ -22,7 +22,7 @@ import time
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
-from config.polymarket_urls import POLYMARKET_DATA_API as PM_DATA_API  # polyproxy: central URL config
+from config.data_api import read_data_v2
 from config.polymarket_urls import GAMMA_API  # polyproxy: central URL config
 
 logger = logging.getLogger(__name__)
@@ -198,8 +198,11 @@ def fetch_elite_trades(elite_addrs: list, limit: int = 100) -> list:
     all_trades = []
     cutoff = time.time() - SCAN_LOOKBACK
     for addr in elite_addrs:
-        data = _fetch_json(
-            f"{PM_DATA_API}/trades?user={addr}&limit=20"
+        data = read_data_v2(
+            "trades",
+            {"user": addr, "limit": 20},
+            _fetch_json,
+            max_pages=1,
         )
         if data:
             for t in data:
