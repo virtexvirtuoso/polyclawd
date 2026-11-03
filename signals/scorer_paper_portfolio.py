@@ -46,6 +46,20 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Optional
 
+def _tg_open(url, data, timeout=15, headers=None):
+    """Direct sendMessage with forum-topic routing (2026-11-03). Falls back to the
+    original un-threaded urlopen if the shared router cannot be imported."""
+    import urllib.request
+    try:
+        try:
+            from scripts.openclaw_alerts import topic_urlopen
+        except ImportError:
+            from openclaw_alerts import topic_urlopen
+    except Exception:  # noqa: BLE001
+        return urllib.request.urlopen(urllib.request.Request(url, data=data, headers=headers or {}), timeout=timeout)
+    return topic_urlopen(url, data, timeout, headers)
+
+
 # Resolution states reused from the canonical two-source resolver. Imported
 # defensively so this module also loads when run standalone outside the package.
 try:
@@ -394,7 +408,7 @@ def send_alert(sized_bets: Iterable, send: bool = False) -> Optional[str]:
         return msg
     data = urllib.parse.urlencode({"chat_id": chat, "text": msg}).encode()
     try:
-        urllib.request.urlopen(f"https://api.telegram.org/bot{tok}/sendMessage", data=data, timeout=20)
+        _tg_open(f"https://api.telegram.org/bot{tok}/sendMessage", data, 20)
         print("[send] PAPER alert sent")
     except Exception as e:  # pragma: no cover - network failure path
         print(f"[send] failed: {e}")

@@ -28,6 +28,20 @@ import phase0_prop_falsification as P  # noqa: E402  (fetch + iso parse helpers)
 from prop_clv_config import CONFIGS  # noqa: E402
 from prop_clv_shapes import extract_bets  # noqa: E402
 
+def _tg_open(url, data, timeout=15, headers=None):
+    """Direct sendMessage with forum-topic routing (2026-11-03). Falls back to the
+    original un-threaded urlopen if the shared router cannot be imported."""
+    import urllib.request
+    try:
+        try:
+            from scripts.openclaw_alerts import topic_urlopen
+        except ImportError:
+            from openclaw_alerts import topic_urlopen
+    except Exception:  # noqa: BLE001
+        return urllib.request.urlopen(urllib.request.Request(url, data=data, headers=headers or {}), timeout=timeout)
+    return topic_urlopen(url, data, timeout, headers)
+
+
 # ── Odds source switch ────────────────────────────────────────────────────────
 # CLV_ODDS_SOURCE=espn_dk (default since 2026-10-17: the Odds API key was
 # permanently deactivated) | the_odds_api (rollback path, needs ODDS_API_KEY).
@@ -83,7 +97,7 @@ def send_telegram(text: str):
         return
     data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
     try:
-        urllib.request.urlopen(f"https://api.telegram.org/bot{tok}/sendMessage", data=data, timeout=20)
+        _tg_open(f"https://api.telegram.org/bot{tok}/sendMessage", data, 20)
         print("[send] alert sent")
     except Exception as e:
         print(f"[send] failed: {e}")

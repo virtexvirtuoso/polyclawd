@@ -14,6 +14,20 @@ from pathlib import Path
 from typing import Optional
 from config.polymarket_urls import GAMMA_API as GAMMA  # polyproxy: central URL config
 
+def _tg_open(url, data, timeout=15, headers=None):
+    """Direct sendMessage with forum-topic routing (2026-11-03). Falls back to the
+    original un-threaded urlopen if the shared router cannot be imported."""
+    import urllib.request
+    try:
+        try:
+            from scripts.openclaw_alerts import topic_urlopen
+        except ImportError:
+            from openclaw_alerts import topic_urlopen
+    except Exception:  # noqa: BLE001
+        return urllib.request.urlopen(urllib.request.Request(url, data=data, headers=headers or {}), timeout=timeout)
+    return topic_urlopen(url, data, timeout, headers)
+
+
 # ── Config ────────────────────────────────────────────────────────────────────
 API         = "http://127.0.0.1:8420"
 
@@ -843,11 +857,7 @@ def _send_telegram(text: str):
             "text": chunk,
         }).encode()
         try:
-            req = urllib.request.Request(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                data=payload
-            )
-            with urllib.request.urlopen(req, timeout=15) as r:
+            with _tg_open(f"https://api.telegram.org/bot{token}/sendMessage", payload, 15) as r:
                 resp = json.loads(r.read())
                 if not resp.get("ok"):
                     print(f"[WARN] TG send returned ok=false: {resp}", file=sys.stderr)

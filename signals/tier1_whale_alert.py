@@ -25,6 +25,20 @@ from typing import Optional, Dict, List, Any
 from config.data_api import read_price_history
 from config.polymarket_urls import clob_url  # polyproxy: central URL config
 
+def _tg_open(url, data, timeout=15, headers=None):
+    """Direct sendMessage with forum-topic routing (2026-11-03). Falls back to the
+    original un-threaded urlopen if the shared router cannot be imported."""
+    import urllib.request
+    try:
+        try:
+            from scripts.openclaw_alerts import topic_urlopen
+        except ImportError:
+            from openclaw_alerts import topic_urlopen
+    except Exception:  # noqa: BLE001
+        return urllib.request.urlopen(urllib.request.Request(url, data=data, headers=headers or {}), timeout=timeout)
+    return topic_urlopen(url, data, timeout, headers)
+
+
 logger = logging.getLogger(__name__)
 
 # ── Paths ────────────────────────────────────────────────────────────────
@@ -869,12 +883,10 @@ def _send_telegram(message: str) -> bool:
     }
     data = urllib.parse.urlencode(fields).encode()
     try:
-        req = urllib.request.Request(
+        with _tg_open(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
+            data, 15, {"Content-Type": "application/x-www-form-urlencoded"},
+        ) as resp:
             result = json.loads(resp.read().decode())
             return result.get("ok", False)
     except Exception as e:

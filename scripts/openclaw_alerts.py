@@ -39,6 +39,7 @@ _TOPIC_ROUTES = {
     "ufc_edge_cron": "EDGES", "wc_edge_scanner": "EDGES", "cross_sport_drift": "EDGES",
     "discord_alerts": "EDGES", "alert_dispatch": "EDGES", "options_resolver": "EDGES",
     "btts_totals_snapshot": "EDGES", "scorer_paper_logger": "EDGES", "kalshi_fade_report": "EDGES",
+    "scorer_paper_portfolio": "EDGES",
     # 💰 Execution & Risk
     "clob_client": "EXEC", "risk_governor": "EXEC", "kalshi_order_maker": "EXEC",
     "stop_evaluator": "EXEC", "position_sync": "EXEC", "entry_reasoning_check": "EXEC",
@@ -46,6 +47,7 @@ _TOPIC_ROUTES = {
     "daily_pnl_summary": "REPORTS", "daily_portfolio_report": "REPORTS", "paper_pnl_report": "REPORTS",
     "live_monitor_report": "REPORTS", "brier_report": "REPORTS", "weekly_signal_report": "REPORTS",
     "mlb_prop_gate2_report": "REPORTS", "shadow_compare_report": "REPORTS", "sports_pulse": "REPORTS",
+    "prop_clv_logger": "REPORTS",
     # 🩺 Health
     "canary_watch": "HEALTH", "weather_canary": "HEALTH", "send_ledger_watchdog": "HEALTH",
     "wallet_allowlist_gate_check": "HEALTH", "wg-polymarket-drift-check": "HEALTH",
@@ -100,6 +102,34 @@ def topic_thread_id() -> str:
         return ids.get(_TOPIC_ROUTES.get(main, ""), "")
     except Exception:  # noqa: BLE001
         return ""
+
+def topic_urlopen(url, data, timeout=15, headers=None):
+    """urlopen() drop-in for the direct Bot API senders outside this module
+    (sports_pulse, prop_clv_logger, scorer_paper_portfolio, tier1_whale_alert).
+    Adds message_thread_id for the calling module's topic (same lookup as
+    topic_thread_id). A non-parse HTTP 400 (e.g. deleted topic) is retried once
+    un-threaded so routing never drops an alert. Returns the response object."""
+    import urllib.parse as _up
+
+    def _go(body):
+        req = urllib.request.Request(url, data=body, headers=headers or {})
+        return urllib.request.urlopen(req, timeout=timeout)
+
+    tid = topic_thread_id()
+    if tid:
+        try:
+            pairs = _up.parse_qsl(data.decode(), keep_blank_values=True) + [("message_thread_id", tid)]
+            return _go(_up.urlencode(pairs).encode())
+        except urllib.error.HTTPError as e:
+            try:
+                detail = e.read()[:200].decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                detail = ""
+            if e.code != 400 or "parse entities" in detail:
+                raise
+            print("[OpenClaw] topic 400 - resending un-threaded")
+    return _go(data)
+
 
 # Safe-tag pattern for the send-layer 400 self-heal (2026-09-14). Keep the
 # pattern in sync with the local copy inside scripts/alert_formatter.py
