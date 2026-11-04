@@ -249,6 +249,11 @@ def _fetch_redeem_payouts() -> dict[str, float] | None:
     None = activity feed unreachable (caller must skip the heuristic)."""
     try:
         acts = _load_activity()
+        if not acts:
+            # An error body is adapted to [] upstream; this wallet always has
+            # activity, so empty means unreachable, not "no redeems".
+            logger.warning("position_sync: redeem activity feed returned no rows — treating as unreachable")
+            return None
         payouts = {}  # (conditionId, outcomeIndex) -> summed payout
         for a in acts:
             if not isinstance(a, dict) or a.get("type") != "REDEEM":
@@ -440,6 +445,7 @@ def check_resolutions(conn) -> list[dict]:
             resolved.append(
                 {
                     "id": pos_id,
+                    "token_id": token_id,
                     "market_title": market_title,
                     "pnl": pnl,
                     "entry_price": entry_price,
@@ -564,6 +570,7 @@ def check_resolutions(conn) -> list[dict]:
         resolved.append(
             {
                 "pos_id": pos_id,
+                "token_id": token_id,
                 "market_title": market_title,
                 "entry_price": entry_price,
                 "exit_price": exit_price,
@@ -878,6 +885,13 @@ def sync_open_orders(conn) -> dict:
     return {"reconciled": len(db_rows), "cancelled_stale": cancelled_stale, "filled_stale": filled_stale}
 
 
+try:
+    from odds.gamma_title import outcome_label as _side_label
+except Exception:  # alert cosmetics must never break this module
+    def _side_label(_token_id):
+        return "?"
+
+
 def run() -> dict:
     """Entry point called by scheduler. Returns summary dict."""
     try:
@@ -912,6 +926,7 @@ def run() -> dict:
                     lines = [
                         f"{r['result_emoji']} <b>POSITION RESOLVED — {r['result_label']}</b>",
                         f"Market: {r['market_title']}",
+                        f"Side: {_side_label(r.get('token_id'))}",
                         f"Entry: {r['entry_price']:.2f} → Exit: {r['exit_price']:.2f} | Shares: {r['shares']:.1f}{time_held}",
                         f"PnL: {pnl_str}",
                     ]
@@ -1019,7 +1034,7 @@ def run() -> dict:
                     lines = [
                         "\U0001f4e1 <b>MANUAL POSITION DETECTED</b>",
                         f"Market: {p['title']}",
-                        f"Side: BUY | Entry: {p['entry_price']:.2f} | Now: {p['cur_price']:.2f}",
+                        f"Side: {_side_label(p.get('token_id'))} | Entry: {p['entry_price']:.2f} | Now: {p['cur_price']:.2f}",
                         f"Shares: {p['shares']:.1f} | Cost: ${p['cost_usd']:.2f} | PnL: {pnl_str}",
                         "<i>Registered in live_positions — stop evaluator now active.</i>",
                     ]

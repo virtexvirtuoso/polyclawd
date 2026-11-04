@@ -111,3 +111,87 @@ def resolve_title(market_id, db_path: Path | None = None) -> str | None:
         return title
     except Exception:
         return None
+
+
+def _outcome_cache_get(db_path: Path, token_id: str) -> str | None:
+    con = sqlite3.connect(str(db_path), timeout=0.5)
+    try:
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS outcome_cache ("
+            " token_id TEXT PRIMARY KEY,"
+            " outcome  TEXT NOT NULL,"
+            " ts       INTEGER NOT NULL)"
+        )
+        row = con.execute(
+            "SELECT outcome FROM outcome_cache WHERE token_id = ?", (token_id,)
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        con.close()
+
+
+def _outcome_cache_put(db_path: Path, token_id: str, outcome: str) -> None:
+    con = sqlite3.connect(str(db_path), timeout=0.5)
+    try:
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS outcome_cache ("
+            " token_id TEXT PRIMARY KEY,"
+            " outcome  TEXT NOT NULL,"
+            " ts       INTEGER NOT NULL)"
+        )
+        con.execute(
+            "INSERT OR REPLACE INTO outcome_cache(token_id, outcome, ts) VALUES (?, ?, ?)",
+            (token_id, outcome, int(time.time())),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def _fetch_outcome(token_id: str) -> str | None:
+    for suffix in ("", "&closed=true"):
+        req = urllib.request.Request(
+            GAMMA_TOKEN_URL.format(token_id) + suffix, headers={"User-Agent": "polyclawd/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+            body = json.loads(resp.read().decode("utf-8", errors="replace"))
+        if not (isinstance(body, list) and body and isinstance(body[0], dict)):
+            continue
+        toks, outs = body[0].get("clobTokenIds"), body[0].get("outcomes")
+        if isinstance(toks, str):
+            toks = json.loads(toks)
+        if isinstance(outs, str):
+            outs = json.loads(outs)
+        for t, o in zip(toks or [], outs or []):
+            if str(t) == token_id and isinstance(o, str) and o.strip():
+                return o.strip()
+    return None
+
+
+def resolve_outcome(token_id, db_path: Path | None = None) -> str | None:
+    """Resolve a decimal CLOB token id to the outcome it represents ("Yes", "No",
+    a team name, ...). Never raises; failures are not cached."""
+    try:
+        if not (isinstance(token_id, str) and token_id.isdigit() and len(token_id) >= 30):
+            return None
+        path = db_path or DB_PATH
+        try:
+            cached = _outcome_cache_get(path, token_id)
+        except Exception:
+            cached = None
+        if cached:
+            return cached
+        outcome = _fetch_outcome(token_id)
+        if outcome:
+            try:
+                _outcome_cache_put(path, token_id, outcome)
+            except Exception:
+                pass
+        return outcome
+    except Exception:
+        return None
+
+
+def outcome_label(token_id) -> str:
+    """Side label for alerts: the outcome the token represents, or "?". Never raises."""
+    return resolve_outcome(str(token_id or "")) or "?"

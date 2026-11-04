@@ -11,6 +11,13 @@ from datetime import datetime, timezone, timedelta
 logger = logging.getLogger(__name__)
 
 
+try:
+    from odds.gamma_title import outcome_label as _side_label
+except Exception:  # alert cosmetics must never break this module
+    def _side_label(_token_id):
+        return "?"
+
+
 def _fmt_pnl(v: float) -> str:
     return f"${v:+.2f}"
 
@@ -26,14 +33,14 @@ def run() -> dict:
     try:
         # ── Open positions ────────────────────────────────────────────────────
         open_rows = conn.execute(
-            "SELECT market_title, side, entry_price, shares, cost_usd, archetype "
+            "SELECT market_title, side, entry_price, shares, cost_usd, archetype, token_id "
             "FROM live_positions WHERE status='open' ORDER BY opened_at DESC"
         ).fetchall()
 
         # ── Today's closed positions (last 24h) ───────────────────────────────
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         closed_rows = conn.execute(
-            "SELECT market_title, side, entry_price, exit_price, shares, pnl, close_reason "
+            "SELECT market_title, side, entry_price, exit_price, shares, pnl, close_reason, token_id "
             "FROM live_positions WHERE status != 'open' AND closed_at >= ? ORDER BY closed_at DESC",
             (cutoff,)
         ).fetchall()
@@ -48,7 +55,7 @@ def run() -> dict:
         if open_rows:
             for r in open_rows:
                 title = r[0][:40] if r[0] else "Unknown"
-                lines.append(f"  • {title} | {r[1]} @ {r[2]:.2f} | {r[3]:.1f} shares | ${r[4]:.2f}")
+                lines.append(f"  • {title} | {_side_label(r[6])} @ {r[2]:.2f} | {r[3]:.1f} shares | ${r[4]:.2f}")
         else:
             lines.append("  (none)")
 
@@ -62,7 +69,7 @@ def run() -> dict:
             for r in closed_rows:
                 title = r[0][:40] if r[0] else "Unknown"
                 pnl_str = _fmt_pnl(float(r[5] or 0))
-                lines.append(f"  {'✅' if (r[5] or 0) > 0 else '❌'} {title} | {pnl_str} [{r[6] or 'exit'}]")
+                lines.append(f"  {'✅' if (r[5] or 0) > 0 else '❌'} {title} ({_side_label(r[7])}) | {pnl_str} [{r[6] or 'exit'}]")
             lines.append(f"\n  Net realized: {_fmt_pnl(realized_pnl)} | WR: {win_rate:.0%} ({wins}/{len(closed_rows)})")
         else:
             lines.append("  (none today)")

@@ -222,6 +222,13 @@ def _should_alert(position_id):
     _save_alert_cache(cache)
     return True
 
+try:
+    from odds.gamma_title import outcome_label as _side_label
+except Exception:  # alert cosmetics must never break this module
+    def _side_label(_token_id):
+        return "?"
+
+
 def _display_title(raw_title, market_id):
     """Best human-readable title for alerts (Task 3.3, hex-ID fix).
 
@@ -387,6 +394,7 @@ def _close_live_position_early(live_pos_row, current_yes_price, reason, hard_cap
                     lines = [
                         f"{pnl_emoji} <b>{label}</b> ({liq.upper()}) — {reason}",
                         f"Market: {market_title}",
+                        f"Side: {_side_label(live_pos_row.get('token_id'))}",
                         f"Entry: {entry_price:.2f} → Exit: {exit_price:.2f} | Shares: {shares_sold:.2f}",
                         f"PnL: ${pnl:+.2f} | Fee: ${fee:.4f}",
                     ]
