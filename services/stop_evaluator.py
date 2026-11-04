@@ -417,6 +417,7 @@ def _close_live_position_early(live_pos_row, current_yes_price, reason, hard_cap
                 "market_title": _display_title(
                     live_pos_row.get("market_title"), market_id),
                 "side": live_pos_row.get("side", "BUY"),
+                "outcome": _side_label(live_pos_row.get("token_id")),
                 "entry_price": live_pos_row.get("entry_price", 0.0),
                 "current_price": mark_price,
                 "pnl": round(pnl, 4),
@@ -500,7 +501,7 @@ def _send_discord_alert(stop_info):
 
         entry = stop_info["entry_price"]
         current = stop_info["current_price"]
-        side = stop_info["side"]
+        side = stop_info.get("outcome") or stop_info["side"]
         bet_size = stop_info["bet_size"]
         pnl = stop_info["pnl"]
         full_loss = -bet_size
@@ -571,7 +572,7 @@ def _send_stop_close_telegram(stop_info):
         title = (stop_info.get("market_title") or "?")[:70]
         msg = (
             f"🛑 STOP-LOSS CLOSED — {title}\n"
-            f"Side: {stop_info.get('side', '?')} | "
+            f"Side: {stop_info.get('outcome') or stop_info.get('side', '?')} | "
             f"Entry: {stop_info.get('entry_price') or 0:.0%} → "
             f"Exit: {stop_info.get('current_price') or 0:.0%}\n"
             f"PnL: ${stop_info.get('pnl') or 0:+.2f} | "
@@ -677,12 +678,16 @@ def evaluate_stops():
                 if 0 < hours_to_close <= PRE_RESOLVE_WARN_HOURS:
                     try:
                         from scripts.alert_formatter import send_telegram
+                        _lp = _get_live_position(pos["market_id"])
+                        _warn_side = _side_label(_lp.get("token_id")) if _lp else "?"
+                        if _warn_side == "?":
+                            _warn_side = side
                         lines = [
                             f"⚠️ <b>PRE-RESOLUTION WARNING</b>",
                             f"Market: {_display_title(pos.get('market_title'), pos['market_id'])[:60]}",
                             f"Entry: {entry_price:.0%} → Current: {current_yes_price:.0%}",
                             f"Loss: {loss_pct:.0%} | {hours_to_close:.1f}h to resolution",
-                            f"Side: {side} | Bet: ${bet_size:.2f}",
+                            f"Side: {_warn_side} | Bet: ${bet_size:.2f}",
                         ]
                         send_telegram("\n".join(lines))
                         warnings_fired += 1

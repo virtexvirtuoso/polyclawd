@@ -959,11 +959,17 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
                     gm_question = gm.get("question") or ""
                     # Use the most descriptive name available
                     display_name = gm_question or market_name
+                    try:
+                        from odds.gamma_title import outcome_label as _ol
+                        _o = _ol(token_id)
+                    except Exception:
+                        _o = "?"
+                    _fill_side = "BUY" + (f" {_o}" if _o and _o != "?" else "")
                     emoji = "✅" if action == "maker_filled" else "⚡"
                     lines = [
                         f"{emoji} <b>LIVE FILL</b> ({liq.upper()})",
                         f"Market: {display_name}",
-                        f"Side: BUY | Price: {fill_price:.2f} | Size: ${usd:.2f}",
+                        f"Side: {_fill_side} | Price: {fill_price:.2f} | Size: ${usd:.2f}",
                         f"Fee: ${fee:.4f} | Ref: {client_order_ref}",
                     ]
                     send_telegram("\n".join(lines))
