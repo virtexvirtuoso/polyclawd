@@ -100,6 +100,13 @@ def store_snapshot(snapshot: dict, deduper):
     for m in markets:
         if m.get("race_category") != "primary" or not m.get("state"):
             continue
+        # race_category "primary" also catches margin-of-victory and 2028 markets;
+        # only nomination markets with live volume belong in this table
+        q = m["question"].lower()
+        if not any(kw in q for kw in ("nominee", "nomination", "primary")):
+            continue
+        if not (m.get("volume") or 0):
+            continue
         outs = sorted(m.get("outcomes", []), key=lambda o: o["price"], reverse=True)
         if len(outs) < 2:
             continue

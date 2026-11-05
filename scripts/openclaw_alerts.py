@@ -51,6 +51,8 @@ _TOPIC_ROUTES = {
     # 🩺 Health
     "canary_watch": "HEALTH", "weather_canary": "HEALTH", "send_ledger_watchdog": "HEALTH",
     "wallet_allowlist_gate_check": "HEALTH", "wg-polymarket-drift-check": "HEALTH",
+    # 🗳️ Elections
+    "election_day_report": "ELECTIONS",
 }
 _TOPIC_IDS: Optional[dict] = None  # read once per process; recreate a topic => restart services
 

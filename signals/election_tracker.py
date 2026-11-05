@@ -1100,6 +1100,88 @@ def _compute_insights(markets: list[dict], party_control: dict) -> dict:
 
     return insights
 
+_KALSHI_STATEWIDE_RE = {
+    "senate": re.compile(r"^SENATE([A-Z]{2})-26-([RD])$"),
+    "governor": re.compile(r"^GOVPARTY([A-Z]{2})-26-([RD])$"),
+}
+_POLY_STATEWIDE_RE = re.compile(
+    r"will the (democrats|republicans) win the .+ (senate|governor) race in 2026", re.I)
+
+
+# Party-win events whose tickers break the patterns above. SENATELA-26 is
+# Kalshi's Kentucky race; Louisiana is KXSENATELA-26NOV.
+_KALSHI_STATEWIDE_ALT = {
+    "SENATELA-26": ("senate", "KY"),
+    "KXSENATELA-26NOV": ("senate", "LA"),
+    "SENATEFLS-26": ("senate", "FL"),  # class-3 special
+    "SENATEOHS-26": ("senate", "OH"),  # class-3 special
+    "GOVPARTYKS-27": ("governor", "KS"),
+    "GOVPARTYNH-28": ("governor", "NH"),
+    "KXGOVPARTYAK-26": ("governor", "AK"),
+}
+
+
+def _dedupe_statewide_races(markets: list[dict], category: str) -> dict:
+    """Senate/governor: one entry per state, from party-win markets only.
+
+    The generic scorer below picked Kalshi combo tickers (KX..SENGOVCOMBO, whose
+    NO side is labelled "Republicans sweep"), state-legislature races (KXPASEN)
+    and trusted Kalshi no_sub_title, which names the market, not the NO side
+    (SENATEDE-26-R's NO was "Republican party" -> R 0.98). Party-win markets
+    are identified by ticker/question instead and priced off their YES side.
+    d_price is 1 - r_price, i.e. non-Republican (NE: Osborn, not the Dem).
+    """
+    sides = {}  # state -> platform -> party -> (yes_price, volume)
+    for m in markets:
+        event, _, suffix = m.get("id", "").rpartition("-")
+        alt = _KALSHI_STATEWIDE_ALT.get(event) if m.get("platform") == "kalshi" else None
+        if alt:
+            if alt[0] != category:
+                continue
+        elif m.get("race_category") != category:
+            continue
+        vol = m.get("volume", 0) or 0
+        outs = m.get("outcomes") or []
+        if m.get("platform") == "kalshi":
+            if alt:
+                st, party = alt[1], suffix
+                if party not in ("R", "D") or not outs:
+                    continue
+            else:
+                hit = _KALSHI_STATEWIDE_RE[category].match(m.get("id", ""))
+                if not hit or not outs:
+                    continue
+                st, party = hit.groups()
+            yes = outs[0].get("price")  # _parse_outcomes appends YES first
+        else:
+            hit = _POLY_STATEWIDE_RE.search(m.get("question", ""))
+            if not hit or hit.group(2).lower() != category or not m.get("state"):
+                continue
+            st, party = m["state"], hit.group(1)[0].upper()
+            yes = next((o.get("price") for o in outs
+                        if (o.get("name") or "").lower() == "yes"), None)
+        if yes is None:
+            continue
+        sides.setdefault(st, {}).setdefault(m["platform"], {})[party] = (yes, vol)
+
+    by_key = {}
+    for st, plats in sides.items():
+        plat, ps = max(plats.items(),
+                       key=lambda kv: sum(v for _, v in kv[1].values()))
+        if "R" in ps:
+            r_price = ps["R"][0]
+            d_price = round(1 - r_price, 4)
+        else:
+            d_price = ps["D"][0]
+            r_price = round(1 - d_price, 4)
+        vol = sum(v for _, v in ps.values())
+        by_key[st] = {
+            "score": vol, "r_price": r_price, "d_price": d_price,
+            "platform": plat, "volume": vol, "state": st, "district": "",
+        }
+    return by_key
+
+
 def _dedupe_state_races(markets: list[dict], category: str) -> dict:
     """Deduplicate markets per race, picking best data source.
 
@@ -1109,6 +1191,8 @@ def _dedupe_state_races(markets: list[dict], category: str) -> dict:
     silently become 1 row per state).
     """
     by_key = {}
+    if category in ("senate", "governor"):
+        return _dedupe_statewide_races(markets, category)
     for m in markets:
         if m["race_category"] != category or not m.get("state"):
             continue
