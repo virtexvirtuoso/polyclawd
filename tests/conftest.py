@@ -20,6 +20,56 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from api.main import app
 
 
+_NOTIFIER_ENV_VARS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DISCORD_WEBHOOK_URL")
+
+
+@pytest.fixture(autouse=True)
+def _notifier_capture(request, monkeypatch, tmp_path):
+    """Suite-wide notifier capture (hard rule 2): no test can send a Telegram
+    or Discord message; every attempt is recorded in the list this yields.
+
+    Recorded by default: the wrapper `alert_openclaw`, its transports
+    (`_alert_openclaw_inner`, `_telegram_http_send`) and the Discord sender
+    (`signals.discord_alerts._send`, the function that performs the HTTP call).
+    Patching the transports as well means a module that did
+    `from scripts.openclaw_alerts import alert_openclaw` still ends at a recorder.
+    Opt-outs, for tests of the send layer itself (they mock the network):
+      @pytest.mark.real_alert_wrapper    keep the real wrapper
+      @pytest.mark.real_alert_transport  keep the real wrapper and Telegram transports
+    A test's own monkeypatch of the same names runs later and wins."""
+    import scripts.openclaw_alerts as oa
+    import signals.discord_alerts as da
+
+    calls: list = []
+
+    def recorder(name, result):
+        def _record(*args, **kwargs):
+            calls.append({"fn": name, "args": args, "kwargs": kwargs})
+            return result
+        return _record
+
+    for var in _NOTIFIER_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    # the send ledger is a live file the watchdog reads: never write it from a test
+    monkeypatch.setenv("POLYCLAWD_LEDGER_PATH", str(tmp_path / "telegram_sent.jsonl"))
+
+    keep_transport = request.node.get_closest_marker("real_alert_transport") is not None
+    keep_wrapper = keep_transport or request.node.get_closest_marker("real_alert_wrapper") is not None
+    if not keep_transport:
+        monkeypatch.setattr(oa, "_telegram_http_send", recorder("_telegram_http_send", (True, "")))
+        monkeypatch.setattr(oa, "_alert_openclaw_inner", recorder("_alert_openclaw_inner", (True, "")))
+    if not keep_wrapper:
+        monkeypatch.setattr(oa, "alert_openclaw", recorder("alert_openclaw", True))
+    monkeypatch.setattr(da, "_send", recorder("discord_alerts._send", True))
+    yield calls
+
+
+@pytest.fixture
+def sent_alerts(_notifier_capture) -> list:
+    """Notifier calls recorded during this test: dicts with fn, args, kwargs."""
+    return _notifier_capture
+
+
 @pytest.fixture
 def tmp_storage(tmp_path: Path) -> Path:
     """Temporary storage directory for test artifacts."""

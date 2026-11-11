@@ -11,7 +11,12 @@ import subprocess
 import urllib.error
 import urllib.parse
 
+import pytest
+
 import scripts.alert_formatter as af
+
+# These tests drive the real send stack against a mocked network (see tests/conftest.py).
+pytestmark = pytest.mark.real_alert_transport
 
 
 class _Resp:
