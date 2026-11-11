@@ -100,3 +100,37 @@ def test_capture_is_autouse_no_fixture_requested(no_real_io):
     # make the real transport unreachable here.
     assert oa._alert_openclaw_inner("x") == (True, "")
     assert oa._telegram_http_send("x") == (True, "")
+
+
+# --- import-time credential constants (plan task 1.0c, part 1) --------------
+# signals.tier1_whale_alert and signals.ingame_monitor copy their credentials
+# into module constants at import, so the per-test environment cleanup cannot
+# change them. Importing the real modules in a test is not safe (ingame_monitor
+# reads /etc/default/polyclawd into os.environ at import), so these tests put
+# stand-in module objects holding a non-empty constant of the same name into
+# sys.modules before the capture fixture runs.
+
+import sys
+import types
+
+_IMPORT_TIME_CONSTANTS = {
+    "signals.tier1_whale_alert": "TELEGRAM_BOT_TOKEN",
+    "signals.ingame_monitor": "DISCORD_WEBHOOK_URL",
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _fake_import_time_modules():
+    """Module scope runs before the function-scoped capture fixture."""
+    mp = pytest.MonkeyPatch()
+    for modname, const in _IMPORT_TIME_CONSTANTS.items():
+        fake = types.ModuleType(modname)
+        setattr(fake, const, "live-value-must-not-survive")
+        mp.setitem(sys.modules, modname, fake)
+    yield
+    mp.undo()
+
+
+@pytest.mark.parametrize("modname,const", sorted(_IMPORT_TIME_CONSTANTS.items()))
+def test_import_time_credential_constant_is_emptied(modname, const, sent_alerts):
+    assert getattr(sys.modules[modname], const) == ""

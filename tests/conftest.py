@@ -21,6 +21,11 @@ from api.main import app
 
 
 _NOTIFIER_ENV_VARS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DISCORD_WEBHOOK_URL")
+# module -> constant that holds its token/webhook, read once at import
+_IMPORT_TIME_CREDENTIAL_CONSTANTS = {
+    "signals.tier1_whale_alert": "TELEGRAM_BOT_TOKEN",
+    "signals.ingame_monitor": "DISCORD_WEBHOOK_URL",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -61,6 +66,15 @@ def _notifier_capture(request, monkeypatch, tmp_path):
     if not keep_wrapper:
         monkeypatch.setattr(oa, "alert_openclaw", recorder("alert_openclaw", True))
     monkeypatch.setattr(da, "_send", recorder("discord_alerts._send", True))
+    # Two modules copy their credential into a module constant at import time,
+    # which the environment cleanup above cannot change. Blank the constant for
+    # the test (monkeypatch undoes it) in each such module that is ALREADY
+    # imported; never import them from here (ingame_monitor loads
+    # /etc/default/polyclawd into os.environ at import).
+    for modname, const in _IMPORT_TIME_CREDENTIAL_CONSTANTS.items():
+        mod = sys.modules.get(modname)
+        if mod is not None and getattr(mod, const, ""):
+            monkeypatch.setattr(mod, const, "")
     yield calls
 
 
