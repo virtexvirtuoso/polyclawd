@@ -5,6 +5,7 @@ touching the existing schema. Every public function accepts a `conn` so
 callers can inject a test DB (tmp file or :memory:).
 """
 
+import os
 import sqlite3
 from db import connect as db_connect
 from pathlib import Path
@@ -218,8 +219,23 @@ def init_live_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL)
 
 
-def connect(path: Path = DB_PATH) -> sqlite3.Connection:
+def resolve_db_path(path: "Path | str | None" = None) -> Path:
+    """Path `connect()` opens: the explicit *path* if given, else the
+    POLYCLAWD_LIVE_DB environment variable if set and non-empty, else DB_PATH.
+
+    Decided at call time, so a test (or an operator) can redirect every
+    argument-less `connect()` to another file without touching callers."""
+    if path is not None:
+        return Path(path)
+    override = os.environ.get("POLYCLAWD_LIVE_DB", "").strip()
+    return Path(override) if override else DB_PATH
+
+
+def connect(path: "Path | str | None" = None) -> sqlite3.Connection:
     """Return a sqlite3 connection with WAL mode, busy_timeout, and tables ensured.
+
+    With no *path* the file is chosen by `resolve_db_path()` (POLYCLAWD_LIVE_DB,
+    else DB_PATH).
 
     Creates the parent directory if it does not exist (needed for local dev
     where storage/ may be absent).
@@ -227,7 +243,7 @@ def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     check_same_thread=False is required because the live paper engine and the
     FastAPI layer share this connection across async contexts (C1/M1).
     """
-    path = Path(path)
+    path = resolve_db_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = db_connect(str(path), check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
