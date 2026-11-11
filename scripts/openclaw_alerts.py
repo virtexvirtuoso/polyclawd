@@ -305,6 +305,22 @@ def alert_openclaw(
     return ok_all
 
 
+def page_once(key: str, cooldown_s: int, text: str, *, state: dict, now: Optional[float] = None,
+              **send_kw) -> bool:
+    """Send unless `key` was DELIVERED within cooldown_s; stamp only on delivery.
+
+    A failed send leaves `state` untouched, so the next call tries again (a
+    stamp-before-send cooldown silences a page that never reached anyone).
+    `alert_openclaw` is looked up at call time. Returns whether it was delivered."""
+    now = time.time() if now is None else now
+    if now - state.get(key, 0) < cooldown_s:
+        return False
+    delivered = alert_openclaw(text, **send_kw)
+    if delivered:
+        state[key] = now
+    return delivered
+
+
 TELEGRAM_MAX_LEN = 4000  # headroom under Telegram's hard 4096-char sendMessage limit
 
 
