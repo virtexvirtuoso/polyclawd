@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -60,6 +61,8 @@ CONVERGENCE_MIN_WALLETS = 2   # ≥2 distinct wallets needed
 # still record every would-have-fired event for the forward test. Re-enable
 # with SMART_WALLET_CONVERGENCE_SEND=1 only after it earns the gate back.
 CONVERGENCE_SEND = os.environ.get("SMART_WALLET_CONVERGENCE_SEND", "0") == "1"
+logger = logging.getLogger(__name__)
+
 THRESHOLD = 1000.0  # $ cumulative that triggers an alert (raised from $500 2026-06-25 — sub-$1K too noisy)
 REFIRE_MULT = 2.0  # re-alert when cumulative doubles
 # 2026-10-01: two-sided merge-arb suppressor. Wallets buying BOTH outcomes of
@@ -422,6 +425,56 @@ def _price_band_gate_suppress(rec: dict) -> bool:
     return px is not None and px >= PRICE_GATE_MAX
 
 
+def _clv_muted_once(memo: list, shadow_conn, wallet: str) -> bool:
+    """`_clv_gate_suppress` asked at most once per record (one query). An error
+    is not memoised, so a second ask raises again exactly as an unmemoised call."""
+    if not memo:
+        memo.append(_clv_gate_suppress(shadow_conn, wallet))
+    return memo[0]
+
+
+def _live_eligibility(rec: dict, is_bot: bool, memo: list, shadow_conn, wallet: str) -> None:
+    """Stamp rec with the live router's verdict (task 1.3, audit #54).
+
+    live_eligible is True only for an entry from a non-bot wallet that passes the
+    price band and the CLV gate: the same filters as the Telegram alert. Anything
+    else, including an error while computing it, is False. live_filter_reason is
+    None or the FIRST failing reason in this order: not_entry, bot_wallet,
+    price_band, clv_muted, eligibility_error. Also records the gate results
+    (clv_muted is None when the gate itself failed) for the router's shadow log.
+    """
+    errors = []
+    try:
+        band = bool(_price_band_gate_suppress(rec))
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        band = None
+        errors.append(exc)
+    try:
+        muted = bool(_clv_muted_once(memo, shadow_conn, wallet))
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        muted = None
+        errors.append(exc)
+    if errors:
+        logger.warning("smart_wallet_alert: live eligibility check failed for %s (%s: %s); "
+                       "record is not live-eligible", wallet, type(errors[0]).__name__, errors[0])
+    if rec["alert_type"] != "entry":
+        reason = "not_entry"
+    elif is_bot:
+        reason = "bot_wallet"
+    elif band:
+        reason = "price_band"
+    elif muted:
+        reason = "clv_muted"
+    elif errors:
+        reason = "eligibility_error"
+    else:
+        reason = None
+    rec["is_bot"] = is_bot
+    rec["clv_muted"] = muted
+    rec["live_eligible"] = reason is None
+    rec["live_filter_reason"] = reason
+
+
 # --------------------------------------------------------------------------- #
 # Convergence detection (T1-C)
 # --------------------------------------------------------------------------- #
@@ -756,6 +809,8 @@ def check_and_fire(
             "outcome": f.get("outcome") or "",
             "outcome_index": f.get("outcome_index"),
             "price_at_alert": float(f["price"]),
+            "price": float(f["price"]),
+            "asset": f.get("asset") or "",
             "cumulative_usd": round(total, 2),
             "num_fills": nfills,
             "alert_type": alert_type,
@@ -787,10 +842,15 @@ def check_and_fire(
                            close_time=rec.get("close_time") or "",
                            outcome_index=rec.get("outcome_index"),
                            bots=_bots_from_smart(smart))
+        # Live router verdict (task 1.3): same band/CLV/bot filters as the alert,
+        # computed once here. The CLV answer is memoised so the delivery decision
+        # below does not run the query a second time.
+        _clv_memo = []
+        _live_eligibility(rec, is_bot, _clv_memo, shadow_conn, f["wallet"])
         deliver = send and not is_bot and (
             rec["alert_type"] == "fade"  # fades bypass band/CLV gates (they'd self-suppress)
             or (not _price_band_gate_suppress(rec)
-                and not _clv_gate_suppress(shadow_conn, f["wallet"])))
+                and not _clv_muted_once(_clv_memo, shadow_conn, f["wallet"])))
         if deliver:
             if rec["alert_type"] != "fade":
                 rec["size_hint"] = _kelly_hint(shadow_conn, rec.get("price_at_alert"), rec["direction"])
@@ -1100,10 +1160,14 @@ def fills_from_trades(trades: list, smart: dict) -> list:
                 "outcome": t.get("outcome") or "",
                 "outcome_index": t.get("outcomeIndex"),
                 "title": (t.get("title") or "")[:80],
+                "asset": "",
                 "name": smart[w].get("name") or t.get("name") or w[:8],
                 "parts": [],
             },
         )
+        # The trade's own token id (the same outcome for every row of this key).
+        if not a["asset"] and t.get("asset"):
+            a["asset"] = t["asset"]
         a["usd"] += usd
         a["pxw"] += usd * price
         base = _accum_key(t)
@@ -1128,6 +1192,7 @@ def fills_from_trades(trades: list, smart: dict) -> list:
                 "trade_parts": a["parts"],
                 "name": a["name"],
                 "title": a["title"],
+                "asset": a["asset"],
                 "wallet_wr": sw.get("win_rate"),
                 "wallet_pnl": sw.get("net_pnl"),
                 "wallet_trades": sw.get("closed_positions") or sw.get("closed"),
