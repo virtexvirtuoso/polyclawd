@@ -1155,7 +1155,7 @@ def test_the_expected_universal_stop_matches_the_stop_evaluator_default():
 
 # built from pieces so that this file does not match its own search
 MACHINE_STRINGS = ("linux" + "user", "/var/" + "www")
-PUBLIC_FILES = ("scripts/live_preflight.py", "scripts/shadow_evidence_report.py",
+PUBLIC_FILES = ("scripts/live_preflight.py", "scripts/shadow_evidence_report.py", "scripts/export_shadow_lines.sh",
                 "tests/live/test_live_preflight.py", "tests/test_shadow_evidence_report.py")
 
 
