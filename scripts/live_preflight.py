@@ -6,11 +6,11 @@ non-zero if any check is a FAIL. It writes nothing (the live database is opened 
 never created), sends no alert, and makes no network call except the public order-book and
 /book reads and one authenticated balance read.
 
-Run it as `linuxuser` (the user both services run as): the allowlist is read from
+Run it as the service user (the user both services run as): the allowlist is read from
 /proc/<MainPID>/environ of polyclawd-scheduler and polyclawd-api, which only the owner of a
 process can read.
 
-    cd /var/www/virtuosocrypto.com/polyclawd && venv/bin/python3 -m scripts.live_preflight --token <token_id>
+    cd <the repository root> && venv/bin/python3 -m scripts.live_preflight --token <token_id>
 
 Three layers: gather() does all I/O through injectable sources, evaluate() is pure, main()
 parses arguments and prints. Two formulas are copied from code that cannot be called without
@@ -525,14 +525,22 @@ def _stored_checks(inp, floor, add):
             f"(what the governor reads; it kills when the stored reading is below the floor)")
     limit = inp.get("max_bankroll_age_minutes", DEFAULT_MAX_BANKROLL_AGE_MINUTES)
     _shown, age, detail = _stored_age(inp)
-    tail = ("the sizing checks above use this figure; it may not reflect the account now. "
-            "A WARN, not a FAIL: under PAPER the position sync may legitimately be idle")
+    # The governor and the router size from this stored row. In LIVE (or when the mode cannot
+    # be read) a stale or unreadable row means sizing on an old figure: FAIL. Otherwise a WARN:
+    # under PAPER the position sync may legitimately be idle.
+    arming = inp.get("arming")
+    mode = arming["mode"] if arming else None
+    status = "WARN" if mode and mode != "LIVE" else "FAIL"
+    tail = (f"mode={mode or 'unknown'}; the sizing checks above use this figure; it may not reflect the "
+            f"account now. " + ("A FAIL because the mode is LIVE or unknown: the governor and the router "
+                                "size from this row" if status == "FAIL" else
+                                "A WARN, not a FAIL: under PAPER the position sync may legitimately be idle"))
     if age is None:
-        add("WARN", "stored_bankroll_fresh", f"age unknown ({detail}); {tail}")
+        add(status, "stored_bankroll_fresh", f"age unknown ({detail}); {tail}")
     elif age < 0:
-        add("WARN", "stored_bankroll_fresh", f"newest row is dated in the future ({detail}); {tail}")
+        add(status, "stored_bankroll_fresh", f"newest row is dated in the future ({detail}); {tail}")
     elif age > limit * 60:
-        add("WARN", "stored_bankroll_fresh",
+        add(status, "stored_bankroll_fresh",
             f"newest row is {_shown} old, over the {limit:g} minute limit; {tail}")
     else:
         add("PASS", "stored_bankroll_fresh", f"newest row written {detail}, within {limit:g} minutes")
@@ -790,7 +798,7 @@ def evaluate(inp):
     unreadable = [u for u in UNITS if al[u] is None]
     if unreadable:
         add("FAIL", "allowlist_readable", "environment not read for " + ", ".join(unreadable)
-            + " (unreadable is not absent; run as linuxuser)")
+            + " (unreadable is not absent; run as the service user)")
         add("FAIL", "allowlists_agree", "cannot compare: " + ", ".join(unreadable) + " unreadable")
         add("FAIL", "allowlist_is_smart_wallet_only", "unknown: " + ", ".join(unreadable) + " unreadable")
     else:

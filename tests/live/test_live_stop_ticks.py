@@ -618,10 +618,26 @@ def test_one_and_two_failures_do_not_page_third_does(monkeypatch, state_path, lo
     run(T0 + 120, state_path=state_path)
     assert page_texts(sent_alerts) == [
         "Polyclawd live stop: the stop evaluation itself has failed 3 times in a row; last error "
-        "OperationalError: database is locked. No position was checked."]
+        "OperationalError: database is locked. No position was checked. (shadow)"]
     assert [m for m in logs(logging.ERROR)] == [
         f"live_stops FAILED source=stop_evaluator consecutive={n} error=OperationalError: "
         f"database is locked" for n in (1, 2, 3)]
+
+
+def test_tick_failed_page_says_it_is_the_shadow_when_unarmed(monkeypatch, state_path, sent_alerts):
+    failing_eval(monkeypatch, RuntimeError("x"))
+    for k in range(3):
+        run(T0 + 60 * k, state_path=state_path)
+    (text,) = page_texts(sent_alerts)
+    assert text.endswith("No position was checked. (shadow)")
+
+
+def test_tick_failed_page_has_no_shadow_tag_when_armed(monkeypatch, state_path, sent_alerts, armed):
+    failing_eval(monkeypatch, RuntimeError("x"))
+    for k in range(3):
+        run(T0 + 60 * k, state_path=state_path)
+    (text,) = page_texts(sent_alerts)
+    assert text.endswith("No position was checked.") and "(shadow)" not in text
 
 
 def test_failure_page_names_the_last_error_truncated(monkeypatch, state_path, sent_alerts):

@@ -1091,3 +1091,75 @@ def test_the_position_sync_that_writes_the_row_still_runs_every_five_minutes():
     block = sched.split('"5min": [', 1)[1].split("],", 1)[0]
     assert '"position_sync"' in block
     assert pf.DEFAULT_MAX_BANKROLL_AGE_MINUTES >= 2 * 5
+
+
+# --------------------------------------------------------------------------- fix-8 E: stale stored row in LIVE
+
+LIVE_ARMING = {"mode": "LIVE", "enforce": False, "path_ready": False, "armed": False}
+
+
+def test_a_stale_stored_row_is_a_fail_in_live_and_a_warn_in_paper():
+    live = pf.evaluate(ok_mk(arming=LIVE_ARMING, stored_row=row_aged(61)))
+    c = one(live, "stored_bankroll_fresh")
+    assert c["status"] == "FAIL" and "mode=LIVE" in c["text"] and "1h 1m" in c["text"]
+    assert "stored_bankroll_fresh" in live["failing"] and live["exit"] != 0
+    paper = pf.evaluate(ok_mk(stored_row=row_aged(61)))
+    c = one(paper, "stored_bankroll_fresh")
+    assert c["status"] == "WARN" and "mode=PAPER" in c["text"] and paper["exit"] == 0
+
+
+def test_a_fresh_stored_row_passes_in_live():
+    assert one(pf.evaluate(mk(arming=LIVE_ARMING, stored_row=row_aged(5))), "stored_bankroll_fresh")["status"] == "PASS"
+
+
+@pytest.mark.parametrize("row", [{"has_column": True, "value": "not a time"}, {"has_column": False, "value": None},
+                                 None, row_aged(-30)])
+def test_an_unknown_or_future_age_is_a_fail_in_live(row):
+    rep = pf.evaluate(mk(arming=LIVE_ARMING, stored_row=row, failures={"stored_row": "x"} if row is None else {}))
+    assert one(rep, "stored_bankroll_fresh")["status"] == "FAIL"
+
+
+def test_a_stale_row_when_the_mode_cannot_be_read_is_a_fail():
+    rep = pf.evaluate(mk(arming=None, stored_row=row_aged(61), failures={"arming": "boom"}))
+    c = one(rep, "stored_bankroll_fresh")
+    assert c["status"] == "FAIL" and "mode=unknown" in c["text"]
+
+
+# --------------------------------------------------------------------------- fix-8 F: copied numbers
+
+
+def test_the_tier_cap_default_matches_the_governor_and_live_config():
+    """The governor's cap (risk_governor.check, rule 3) reads POLYCLAWD_TIER_SIZE_CAP with its OWN
+    literal default; live_config.tiered_size_usd has another. They can differ, so both are pinned."""
+    pattern = re.compile(r'_parse_float\(\s*"POLYCLAWD_TIER_SIZE_CAP",\s*"([^"]+)"\s*\)')
+    for rel in ("execution/risk_governor.py", "execution/live_config.py"):
+        found = pattern.findall((REPO / rel).read_text())
+        assert found == [pf.TIER_CAP_DEFAULT], (rel, found)
+
+
+def test_the_expected_universal_stop_matches_the_stop_evaluator_default():
+    import ast
+
+    tree = ast.parse((REPO / "services" / "stop_evaluator.py").read_text())
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "UNIVERSAL_MAX_LOSS_PCT"
+                                                 for t in node.targets)):
+            getenv = node.value.args[0]                      # float(os.getenv("UNIVERSAL_MAX_LOSS_PCT", "0.40"))
+            assert getenv.args[0].value == "UNIVERSAL_MAX_LOSS_PCT"
+            assert float(getenv.args[1].value) == pf.EXPECTED_UNIVERSAL_STOP
+            return
+    raise AssertionError("UNIVERSAL_MAX_LOSS_PCT assignment not found")
+
+
+# --------------------------------------------------------------------------- fix-8 G: no machine-specific strings
+
+# built from pieces so that this file does not match its own search
+MACHINE_STRINGS = ("linux" + "user", "/var/" + "www")
+PUBLIC_FILES = ("scripts/live_preflight.py", "scripts/shadow_evidence_report.py",
+                "tests/live/test_live_preflight.py", "tests/test_shadow_evidence_report.py")
+
+
+@pytest.mark.parametrize("rel", PUBLIC_FILES)
+def test_no_machine_specific_strings_in_the_public_files(rel):
+    text = (REPO / rel).read_text()
+    assert [s for s in MACHINE_STRINGS if s in text] == []

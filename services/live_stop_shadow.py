@@ -230,6 +230,7 @@ def run_live_stop_tick(source: str, *, now: float | None = None, state_path=None
     try:
         now = time.time() if now is None else now
         path = DEFAULT_STATE_PATH if state_path is None else state_path
+        armed = False  # until read: a tick that fails before it is read says "(shadow)"
         try:
             from execution import live_config
             from services.stop_evaluator import evaluate_live_stops
@@ -246,7 +247,7 @@ def run_live_stop_tick(source: str, *, now: float | None = None, state_path=None
                                 f"Polyclawd live stop: the stop evaluation itself has failed "
                                 f"{n} times in a row; last error "
                                 f"{type(exc).__name__}: {str(exc)[:ERROR_TEXT_MAX]}. "
-                                f"No position was checked."))
+                                f"No position was checked." + (" (shadow)" if not armed else "")))
             result = {"failed": True}
         else:
             _CONSECUTIVE_FAILURES = 0
