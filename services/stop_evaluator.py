@@ -255,6 +255,20 @@ def _num(value, default=0.0):
     return f if f == f and abs(f) != float("inf") else default
 
 
+def _short(exc_or_text, limit=300):
+    """Bounded text for an error field: "<Type>: <message>" for an exception, the text
+    itself otherwise, cut to *limit* characters. Exceptions from the exchange SDK and
+    HTTP libraries can carry URLs and whole response bodies; none of that is kept past
+    the limit, and the exception type name always stays at the front."""
+    if isinstance(exc_or_text, BaseException):
+        message = str(exc_or_text)
+        name = type(exc_or_text).__name__
+        text = f"{name}: {message}" if message else name
+    else:
+        text = str(exc_or_text)
+    return text[:limit]
+
+
 def _fire_stop(live_pos_row, result, mark, reason):
     """The one alert for a live close: the same text to Discord and to Telegram.
 
@@ -263,6 +277,8 @@ def _fire_stop(live_pos_row, result, mark, reason):
       * every share sold          -> CLOSED
       * some, but not all, sold   -> PARTLY CLOSED, and how many shares remain
       * none sold (held_remainder)-> NOT SOLD, and how many shares are still held
+      * no usable share count     -> "outcome unclear, check the exchange and the
+        ledger" (never NOT SOLD, never CLOSED), and a failure note is returned
     "How many were sold" is judged from the shares, not from the action's name, so
     a held_remainder (or a short taker fill named partial_closed) is never reported
     as a close (#17). exit_failed, exit_unknown and anything else that is not one
@@ -274,7 +290,8 @@ def _fire_stop(live_pos_row, result, mark, reason):
     if action not in _EXECUTOR_ACTIONS:
         return []
     held = _num(live_pos_row.get("shares"))
-    sold = _num(result.get("shares_sold"))
+    sold_known = _num(result.get("shares_sold"), None)
+    sold = sold_known if sold_known is not None else 0.0
     remaining = max(0.0, held - sold)
     price = _num(result.get("exit_price"), mark)
     pnl = _num(result.get("pnl"))
@@ -287,7 +304,12 @@ def _fire_stop(live_pos_row, result, mark, reason):
                f"(stop price {mark:.4f})\n"
                f"PnL: ${pnl:+.2f} | Fee: ${fee:.4f}\n"
                f"Reason: {reason}")
-    if sold <= _SHARES_EPS:
+    if sold_known is None:
+        head = f"🛑 STOP-LOSS OUTCOME UNCLEAR — {title}"
+        text = (f"🛑 STOP-LOSS: {title}: the executor reported {action} but no share "
+                "count. Check the position on the exchange and in the ledger.")
+        color_red = False
+    elif sold <= _SHARES_EPS:
         head = f"🛑 STOP-LOSS NOT SOLD — {title}"
         text = (f"{head}\nThe stop fired but no shares were sold: all {held:.2f} shares "
                 f"are still held.\n{figures}")
@@ -311,7 +333,8 @@ def _fire_stop(live_pos_row, result, mark, reason):
     def _failed(channel, exc):
         logger.error("_fire_stop: {} alert failed for position {} ({}): {}: {}",
                      channel, live_pos_row.get("id"), action, type(exc).__name__, exc)
-        failures.append(f"{type(exc).__name__}: {exc} [{channel}]")
+        tag = f" [{channel}]"
+        failures.append(_short(exc, 300 - len(tag)) + tag)
 
     try:
         from signals.discord_alerts import _send, COLOR_ORANGE, COLOR_RED
@@ -322,8 +345,9 @@ def _fire_stop(live_pos_row, result, mark, reason):
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "footer": {"text": "Stop-Loss Monitor"},
         }], alert_type="stop_loss", alert_meta={
-            "market": title, "action": action, "shares_sold": sold,
-            "shares_remaining": remaining, "pnl": pnl, "reason": reason,
+            "market": title, "action": action, "shares_sold": sold_known,
+            "shares_remaining": None if sold_known is None else remaining,
+            "pnl": pnl, "reason": reason,
         }):
             raise RuntimeError("the Discord sender reported failure")
     except Exception as exc:
@@ -334,6 +358,8 @@ def _fire_stop(live_pos_row, result, mark, reason):
             raise RuntimeError("the Telegram sender reported failure")
     except Exception as exc:
         _failed("telegram", exc)
+    if sold_known is None:
+        failures.append(f"the executor reported {action} but no share count; outcome unclear")
     return failures
 
 
@@ -353,7 +379,7 @@ def _close_live_position_early(live_pos_row, mark, reason, *, hard_cap_frac):
          was attempted and its outcome is unknown; the caller labels that
          exit_unknown. If execute_exit returns without one of its four actions the
          result is {"action": "exit_unknown", "error": ..., "raw": repr[:200]}.
-      3. after the sale (log line, share-count bookkeeping, alerts, cooldown): an
+      3. after the sale (log line, alerts, cooldown; no database write): an
          exception is logged at ERROR and recorded in result["post_error"]; the
          result still reports what execute_exit returned.
 
@@ -388,7 +414,9 @@ def _close_live_position_early(live_pos_row, mark, reason, *, hard_cap_frac):
         try:
             from execution.clob_client import get_tick_size
             tick_size = get_tick_size(token_id) if token_id else 0.01
-        except Exception:
+        except Exception as exc:
+            logger.warning("_close_live_position_early: tick size lookup failed for position "
+                           "{}, using 0.01: {}", position_id, _short(exc))
             tick_size = 0.01
 
         # I4: derive category and strategy label from archetype so non-weather
@@ -405,7 +433,7 @@ def _close_live_position_early(live_pos_row, mark, reason, *, hard_cap_frac):
         logger.error("_close_live_position_early: position {} failed BEFORE the sale, "
                      "nothing was sold: {}: {}", position_id, type(exc).__name__, exc)
         return {"position_id": position_id, "action": "exit_failed",
-                "error": f"{type(exc).__name__}: {exc}", "stage": "pre"}
+                "error": _short(exc), "stage": "pre"}
 
     # ---- stage 2: the sale ---------------------------------------------------
     try:
@@ -444,10 +472,10 @@ def _close_live_position_early(live_pos_row, mark, reason, *, hard_cap_frac):
         logger.error("_close_live_position_early: {} failed AFTER the sale of position {} "
                      "(action {}): {}: {}", step, position_id, exit_action,
                      type(exc).__name__, exc)
-        post_errors.append(f"{type(exc).__name__}: {exc}")
+        post_errors.append(_short(exc))
 
     pnl = _num(exit_result.get("pnl"))
-    shares_sold = _num(exit_result.get("shares_sold"))
+    shares_sold = _num(exit_result.get("shares_sold"), None)   # None = the executor gave no count
     exit_price = _num(exit_result.get("exit_price"), mark_price)
     try:
         result = {
@@ -478,32 +506,15 @@ def _close_live_position_early(live_pos_row, mark, reason, *, hard_cap_frac):
 
     try:
         logger.info(
-            "LIVE STOP-LOSS: market={} action={} shares={:.2f} @ {:.4f} pnl={:+.4f} reason={}",
-            market_id, exit_action, shares_sold, exit_price, pnl, reason,
+            "LIVE STOP-LOSS: market={} action={} shares={} @ {:.4f} pnl={:+.4f} reason={}",
+            market_id, exit_action,
+            "unknown" if shares_sold is None else f"{shares_sold:.2f}", exit_price, pnl, reason,
         )
     except Exception as exc:
         _post_failed("logging the sale", exc)
 
-    # Partial fill: update shares_held in live_positions
-    if exit_action == "partial_closed":
-        try:
-            orig_shares = float(live_pos_row.get("shares", 0))
-            remaining = max(0.0, orig_shares - shares_sold)
-            conn_upd = live_db.connect()
-            try:
-                conn_upd.execute(
-                    "UPDATE live_positions SET shares=? WHERE id=?",
-                    (remaining, position_id)
-                )
-                conn_upd.commit()
-            finally:
-                conn_upd.close()
-            logger.info(
-                "_close_live_position_early: partial_closed shares {} -> {} remaining",
-                orig_shares, remaining
-            )
-        except Exception as exc:
-            _post_failed("the partial shares update", exc)
+    # No write to live_positions here: execute_exit's close_position calls (the position
+    # tracker) already reduced shares and cost_usd for every leg, partial_closed included.
 
     # One alert, both channels. held_remainder is announced as what it is.
     try:
@@ -523,7 +534,7 @@ def _close_live_position_early(live_pos_row, mark, reason, *, hard_cap_frac):
             _post_failed("registering the exit cooldown", exc)
 
     if post_errors:
-        result["post_error"] = "; ".join(post_errors)
+        result["post_error"] = _short("; ".join(post_errors))
     return result
 
 
@@ -570,6 +581,30 @@ def _stop_decision(entry: float, bid: float, ask: float) -> tuple[str, dict]:
     return "exit", figures
 
 
+def _ledger_now(row, db_path):
+    """What the ledger shows for *row*'s position after a sale of unknown outcome:
+    {"shares_before", "shares_now", "status_now"}, or shares_now None and
+    reread_error when the row cannot be read again. A short-lived connection,
+    its own try; never raises."""
+    info = {"shares_before": row.get("shares")}
+    try:
+        from execution import live_db
+        conn = live_db.connect(db_path) if db_path else live_db.connect()
+        try:
+            cur = conn.execute("SELECT shares, status FROM live_positions WHERE id=?",
+                               (row["id"],)).fetchone()
+        finally:
+            conn.close()
+        if cur is None:
+            raise LookupError(f"position {row['id']} not found")
+        info["shares_now"] = cur["shares"]
+        info["status_now"] = cur["status"]
+    except Exception as exc:
+        info["shares_now"] = None
+        info["reread_error"] = _short(exc)
+    return info
+
+
 def evaluate_live_stops(*, dry_run: bool = False, db_path=None) -> list[dict]:
     """One pass over open live positions. The mark is the best bid of the held
     token, and the same mark goes to the exit. Nothing re-prices it.
@@ -587,7 +622,9 @@ def evaluate_live_stops(*, dry_run: bool = False, db_path=None) -> list[dict]:
     the sale: no sale happened as far as it knows), exit_unknown (the exit
     raised, or returned something that does not say what happened: a sale may
     have happened) and error (this position could not be evaluated, and no sale
-    was attempted)."""
+    was attempted). An exit_unknown entry also carries shares_before (the row the
+    loop started with), shares_now and status_now (the row read again), or
+    shares_now None and reread_error when the ledger could not be read."""
     from execution import live_config, live_db
     from odds.polymarket_clob import get_orderbook
     armed = live_config.live_armed()
@@ -655,8 +692,8 @@ def evaluate_live_stops(*, dry_run: bool = False, db_path=None) -> list[dict]:
             info = _close_live_position_early(row, mark, f"live stop {figures['loss_pct']:.0%}",
                                               hard_cap_frac=UNIVERSAL_MAX_LOSS_PCT)
         except Exception as exc:
-            out.append({**detail, "action": "exit_unknown",
-                        "error": f"{type(exc).__name__}: {exc}"})
+            out.append({**detail, "action": "exit_unknown", "error": _short(exc),
+                        **_ledger_now(row, db_path)})
             continue
         if not info:
             out.append({**detail, "action": "exit_failed"})
@@ -666,10 +703,13 @@ def evaluate_live_stops(*, dry_run: bool = False, db_path=None) -> list[dict]:
                 merged["action"] = "exit_unknown"   # is not a confirmed exit
                 if not merged.get("error"):
                     merged["error"] = "exit result has no action"
+            if merged["action"] == "exit_unknown":
+                merged.update(_ledger_now(row, db_path))
             out.append(merged)
         else:
             out.append({**detail, "action": "exit_unknown",
-                        "error": f"exit returned {repr(info)[:120]}"})
+                        "error": f"exit returned {repr(info)[:120]}",
+                        **_ledger_now(row, db_path)})
     return out
 
 

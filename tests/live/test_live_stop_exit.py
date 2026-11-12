@@ -214,6 +214,19 @@ def test_the_executor_raising_becomes_exit_unknown_through_evaluate_live_stops(
     assert out[0]["mark"] == 0.20 and out[0]["loss_pct"] == 0.6
 
 
+# =============================================================================
+# DEFECT PINNED ON PURPOSE (1B-fix-3 F6). This test does not describe wanted
+# behaviour. It records what the UNCHANGED executor does today: execute_exit posts
+# a POST-ONLY sell at the mark, the mark is the best bid, the exchange rejects it
+# as "would cross", and an armed stop therefore sells NOTHING.
+# Phase 1C (task 1.7) must make an exit at or over the hard cap skip the maker leg
+# and cross immediately. When it does, INVERT this test: assert the taker is
+# called (place_market_order) and the position closes. Do not "fix" it by loosening.
+# =============================================================================
+@pytest.mark.flip_in_phase_1c(
+    reason="pins an executor defect: a post-only SELL at the best bid is rejected, so an "
+           "armed stop sells nothing; Phase 1C task 1.7 must cross taker at/over the hard "
+           "cap, then invert this test")
 def test_a_real_post_only_rejection_at_the_bid_propagates_and_nothing_is_sold(
         live_db, fake_clob, shapes, env, armed, sent_alerts):
     """CHARACTERIZATION of what happens today, not a wish: execute_exit posts a
@@ -466,3 +479,383 @@ def test_a_partial_exit_through_the_whole_function_is_announced_as_partly_closed
     assert _row(live_db, pid)["shares"] == pytest.approx(6.0)
     text = _alerts(sent_alerts)[1][0]["args"][0]
     assert "PARTLY CLOSED" in text and "6.00" in text and BARE_CLOSED.search(text) is None
+
+
+# ---------------------------------------------------------------------------
+# 1B-fix-3 F1: one writer. The position tracker (close_position, called inside
+# execute_exit) already reduces shares and cost_usd for every leg; the evaluator
+# must not write the row a second time.
+# ---------------------------------------------------------------------------
+
+def _statements_after_the_executor(monkeypatch, live_db):
+    """Run the real execute_exit, then record every statement of every connection
+    opened through live_db.connect AFTER it returned (that is the stage-3 code)."""
+    from execution import live_db as live_db_module
+    state = {"after": False, "connects": 0, "statements": []}
+    real_connect = live_db_module.connect
+    real_exit = live_executor.execute_exit
+
+    def connect(*a, **k):
+        conn = real_connect(*a, **k)
+        if state["after"]:
+            state["connects"] += 1
+            conn.set_trace_callback(state["statements"].append)
+        return conn
+
+    def exit_then_mark(*a, **k):
+        try:
+            return real_exit(*a, **k)
+        finally:
+            state["after"] = True
+
+    monkeypatch.setattr(live_db_module, "connect", connect)
+    monkeypatch.setattr(live_executor, "execute_exit", exit_then_mark)
+    return state
+
+
+def test_partial_closed_leaves_shares_and_cost_to_the_tracker_and_writes_nothing_itself(
+        live_db, fake_clob, shapes, env, armed, monkeypatch):
+    """Real executor: the maker fills 4 of 10, the cap is reached, the taker FAK fills
+    3 of the 6 remaining (partial_closed, 7 sold, 3 left). The row is what the
+    tracker wrote (shares 3, cost 0.72), and _close_live_position_early opens no
+    connection and runs no statement after the executor returned."""
+    pid = _insert_position(live_db)
+    fake_clob.script("place_limit_order", shapes.accepted_post("oid-m"))
+    partial = shapes.open_order("oid-m", "LIVE", side="SELL", price="0.08",
+                                original_size="10", size_matched="4")
+    fake_clob.script("get_order", partial, partial, partial)
+    fake_clob.script("cancel_order", shapes.cancel_confirmed("oid-m"))
+    fake_clob.script("place_market_order", shapes.fak_filled_sell(shares="3", usd="0.24"))
+    state = _statements_after_the_executor(monkeypatch, live_db)
+    out = _call(_row(live_db, pid), cap=0.40)
+    assert out["action"] == "partial_closed" and out["shares_sold"] == pytest.approx(7.0)
+    row = _row(live_db, pid)
+    assert row["status"] == "open"
+    assert row["shares"] == pytest.approx(3.0)
+    assert row["cost_usd"] == pytest.approx(COST * 0.3)          # the tracker reduced the cost too
+    assert state["connects"] == 0 and state["statements"] == []
+
+
+def test_partial_closed_never_rewrites_a_row_the_tracker_left_different(
+        live_db, env, monkeypatch):
+    """If the row and the executor's own sums ever disagree, the row stays as the
+    tracker left it: a stale snapshot minus shares_sold is never written back."""
+    pid = _insert_position(live_db)
+    state = _statements_after_the_executor(monkeypatch, live_db)
+
+    def exit_with_other_books(conn, gov, **kw):
+        conn.execute("UPDATE live_positions SET shares=8.0, cost_usd=1.9 WHERE id=?", (pid,))
+        conn.commit()
+        return {"action": "partial_closed", "shares_sold": 7.0, "exit_price": MARK,
+                "fee_paid": 0.0, "pnl": -1.0, "reason": "r"}
+
+    monkeypatch.setattr(live_executor, "execute_exit",
+                        lambda *a, **k: _run_then_mark(exit_with_other_books, state, *a, **k))
+    out = _call(_row(live_db, pid))
+    assert out["action"] == "partial_closed"
+    row = _row(live_db, pid)
+    assert row["shares"] == 8.0 and row["cost_usd"] == 1.9
+    assert state["statements"] == []
+
+
+def _run_then_mark(fn, state, *a, **k):
+    try:
+        return fn(*a, **k)
+    finally:
+        state["after"] = True
+
+
+# ---------------------------------------------------------------------------
+# 1B-fix-3 F2: a close with no share count is "unclear", never "NOT SOLD"
+# ---------------------------------------------------------------------------
+
+_MISSING = object()
+
+
+def _result_without_count(action, count):
+    res = {"action": action, "exit_price": MARK, "fee_paid": 0.0, "pnl": -1.0}
+    if count is not _MISSING:
+        res["shares_sold"] = count
+    return res
+
+
+@pytest.mark.parametrize("count", [_MISSING, None, "abc"], ids=["absent", "none", "abc"])
+@pytest.mark.parametrize("action", ["maker_closed", "taker_closed", "partial_closed", "held_remainder"])
+def test_an_executor_action_with_no_share_count_is_announced_as_unclear(
+        sent_alerts, action, count):
+    fails = stop_evaluator._fire_stop(ROW, _result_without_count(action, count), MARK, "live stop 67%")
+    discord, telegram = _alerts(sent_alerts)
+    assert len(discord) == 1 and len(telegram) == 1
+    expected = (f"STOP-LOSS: Will it rain in X?: the executor reported {action} but no share "
+                "count. Check the position on the exchange and in the ledger.")
+    for text in (_discord_text(discord[0]), telegram[0]["args"][0]):
+        assert expected in text
+        assert "NOT SOLD" not in text.upper() and "CLOSED" not in text and "all 10.00" not in text
+    assert _discord_text(discord[0]) == telegram[0]["args"][0]
+    assert len(fails) == 1 and action in fails[0] and "no share count" in fails[0]
+
+
+def test_unclear_close_through_the_whole_function_gains_post_error_and_keeps_the_action(
+        live_db, env, monkeypatch, sent_alerts):
+    pid = _insert_position(live_db)
+    monkeypatch.setattr(live_executor, "execute_exit", lambda conn, gov, **kw: {
+        "action": "taker_closed", "exit_price": MARK, "pnl": -1.6})
+    out = _call(_row(live_db, pid))
+    assert out["action"] == "taker_closed"
+    assert "no share count" in out["post_error"]
+    discord, telegram = _alerts(sent_alerts)
+    assert "NOT SOLD" not in telegram[0]["args"][0].upper()
+    assert env.cooldowns == [TOKEN]                    # still counts as a close for the cooldown
+
+
+# ---------------------------------------------------------------------------
+# 1B-fix-3 F3: after a failed sale, say what the ledger shows now
+# ---------------------------------------------------------------------------
+
+from execution import live_position_tracker
+from services import live_stop_shadow as shadow
+
+
+def _stop_book(monkeypatch, bid=0.20, ask=0.21):
+    book = OrderBook(market_id="m", token_id=TOKEN, outcome="Yes",
+                     bids=[OrderBookLevel(price=bid, size=50.0)],
+                     asks=[OrderBookLevel(price=ask, size=50.0)],
+                     spread=0.01, mid_price=0.205, timestamp="2026-11-11T00:00:00")
+    monkeypatch.setattr("odds.polymarket_clob.get_orderbook", lambda t: book)
+
+
+def _page_for(entry):
+    pending = []
+    shadow._page_errors([entry], False, pending)
+    (key, cooldown, text), = pending
+    return text
+
+
+def test_executor_raising_after_the_tracker_recorded_a_partial_sale_shows_both_figures(
+        live_db, env, armed, monkeypatch):
+    pid = _insert_position(live_db, entry=0.50)
+    _stop_book(monkeypatch)
+
+    def sell_four_then_raise(conn, gov, **kw):
+        live_position_tracker.close_position(
+            conn, position_id=pid, exit_price=0.20, shares_sold=4.0, fee_paid=0.0,
+            reason="maker_exit: t", liquidity="maker", order_id="o1")
+        raise ConnectionError("reset by peer")
+
+    monkeypatch.setattr(live_executor, "execute_exit", sell_four_then_raise)
+    (entry,) = stop_evaluator.evaluate_live_stops(db_path=live_db.path)
+    assert entry["action"] == "exit_unknown"
+    assert entry["shares_before"] == 10.0 and entry["shares_now"] == pytest.approx(6.0)
+    assert entry["status_now"] == "open" and "reread_error" not in entry
+    text = _page_for(entry)
+    assert "Before: 10 shares. The ledger now shows 6 shares, status open." in text
+
+
+def test_executor_raising_before_anything_was_sold_shows_the_same_count(
+        live_db, env, armed, monkeypatch):
+    pid = _insert_position(live_db, entry=0.50)
+    _stop_book(monkeypatch)
+
+    def boom(conn, gov, **kw):
+        raise ConnectionError("reset by peer")
+
+    monkeypatch.setattr(live_executor, "execute_exit", boom)
+    (entry,) = stop_evaluator.evaluate_live_stops(db_path=live_db.path)
+    assert entry["shares_now"] == entry["shares_before"] == 10.0 and entry["status_now"] == "open"
+    assert "Before: 10 shares. The ledger now shows 10 shares, status open." in _page_for(entry)
+
+
+def test_a_result_that_comes_back_exit_unknown_gets_the_ledger_figures_too(
+        live_db, env, armed, monkeypatch):
+    pid = _insert_position(live_db, entry=0.50)
+    _stop_book(monkeypatch)
+
+    def sell_all_and_return_junk(conn, gov, **kw):
+        live_position_tracker.close_position(
+            conn, position_id=pid, exit_price=0.20, shares_sold=10.0, fee_paid=0.0,
+            reason="maker_exit: t", liquidity="maker", order_id="o1")
+        return {"pnl": -3.0}                                    # no action
+
+    monkeypatch.setattr(live_executor, "execute_exit", sell_all_and_return_junk)
+    (entry,) = stop_evaluator.evaluate_live_stops(db_path=live_db.path)
+    assert entry["action"] == "exit_unknown"
+    assert entry["shares_before"] == 10.0 and entry["status_now"] == "closed"
+    assert "status closed" in _page_for(entry)
+
+
+def test_a_failed_reread_is_marked_not_guessed(live_db, env, armed, monkeypatch):
+    from execution import live_db as live_db_module
+    pid = _insert_position(live_db, entry=0.50)
+    _stop_book(monkeypatch)
+    real_connect = live_db_module.connect
+    broken = {"on": False}
+
+    def connect(*a, **k):
+        if broken["on"]:
+            raise OSError("disk went away")
+        return real_connect(*a, **k)
+
+    def boom(conn, gov, **kw):
+        broken["on"] = True
+        raise ConnectionError("reset by peer")
+
+    monkeypatch.setattr(live_db_module, "connect", connect)
+    monkeypatch.setattr(live_executor, "execute_exit", boom)
+    (entry,) = stop_evaluator.evaluate_live_stops(db_path=live_db.path)
+    assert entry["action"] == "exit_unknown" and entry["shares_before"] == 10.0
+    assert entry["shares_now"] is None and entry["reread_error"].startswith("OSError: disk went away")
+    assert "The ledger could not be re-read." in _page_for(entry)
+
+
+# ---------------------------------------------------------------------------
+# 1B-fix-3 F4: every error text is bounded and keeps the exception type up front
+# ---------------------------------------------------------------------------
+
+HUGE = "x" * 2000
+
+
+def test_short_keeps_the_type_name_and_the_limit():
+    assert stop_evaluator._short(ValueError("boom")) == "ValueError: boom"
+    out = stop_evaluator._short(ValueError(HUGE))
+    assert len(out) == 300 and out.startswith("ValueError: xxx")
+    assert stop_evaluator._short("a" * 500, limit=50) == "a" * 50
+    assert stop_evaluator._short("plain") == "plain"
+
+
+def test_post_error_is_bounded(live_db, env, monkeypatch):
+    pid = _insert_position(live_db)
+    monkeypatch.setattr(live_executor, "execute_exit", lambda conn, gov, **kw: _result("maker_closed", SHARES))
+    monkeypatch.setattr(stop_evaluator, "_fire_stop",
+                        lambda *a, **k: (_ for _ in ()).throw(ValueError(HUGE)))
+    out = _call(_row(live_db, pid))
+    assert len(out["post_error"]) <= 300 and out["post_error"].startswith("ValueError: ")
+
+
+def test_channel_failure_notes_and_the_post_error_built_from_them_are_bounded(
+        live_db, env, monkeypatch, sent_alerts):
+    pid = _insert_position(live_db)
+    monkeypatch.setattr(live_executor, "execute_exit", lambda conn, gov, **kw: _result("maker_closed", SHARES))
+
+    def down(*a, **k):
+        raise OSError(HUGE)
+
+    monkeypatch.setattr("signals.discord_alerts._send", down)
+    monkeypatch.setattr("scripts.openclaw_alerts.alert_openclaw", down)
+    fails = stop_evaluator._fire_stop(ROW, _result("maker_closed", SHARES), MARK, "r")
+    assert len(fails) == 2 and all(len(f) <= 300 and f.startswith("OSError: ") for f in fails)
+    assert fails[0].endswith("[discord]") and fails[1].endswith("[telegram]")
+    out = _call(_row(live_db, pid))
+    assert len(out["post_error"]) <= 300 and out["post_error"].startswith("OSError: ")
+
+
+def test_exit_failed_error_is_bounded(live_db, env, monkeypatch):
+    pid = _insert_position(live_db)
+
+    def boom(conn, mode=None):
+        raise ValueError(HUGE)
+
+    monkeypatch.setattr("execution.risk_governor.RiskGovernor", boom)
+    out = _call(_row(live_db, pid))
+    assert out["action"] == "exit_failed" and out["stage"] == "pre"
+    assert len(out["error"]) <= 300 and out["error"].startswith("ValueError: ")
+
+
+def test_exit_unknown_error_is_bounded_and_raw_stays_at_200(live_db, env, armed, monkeypatch):
+    pid = _insert_position(live_db, entry=0.50)
+    _stop_book(monkeypatch)
+
+    def boom(conn, gov, **kw):
+        raise RuntimeError(HUGE)
+
+    monkeypatch.setattr(live_executor, "execute_exit", boom)
+    (entry,) = stop_evaluator.evaluate_live_stops(db_path=live_db.path)
+    assert entry["action"] == "exit_unknown"
+    assert len(entry["error"]) <= 300 and entry["error"].startswith("RuntimeError: ")
+    monkeypatch.setattr(live_executor, "execute_exit",
+                        lambda conn, gov, **kw: {"pnl": HUGE})
+    out = _call(_row(live_db, pid))
+    assert out["action"] == "exit_unknown" and len(out["raw"]) == 200
+
+
+# ---------------------------------------------------------------------------
+# 1B-fix-3 F5: a failed tick-size lookup falls back to 0.01 and says so
+# ---------------------------------------------------------------------------
+
+def test_a_failed_tick_size_lookup_falls_back_to_a_cent_and_logs_a_warning(
+        live_db, env, monkeypatch, log_records):
+    pid = _insert_position(live_db)
+    seen = {}
+
+    def no_tick(token_id):
+        raise RuntimeError(HUGE)
+
+    monkeypatch.setattr(clob_client, "get_tick_size", no_tick)
+
+    def rec(conn, gov, **kw):
+        seen.update(kw)
+        return _result("maker_closed", SHARES)
+
+    monkeypatch.setattr(live_executor, "execute_exit", rec)
+    _call(_row(live_db, pid))
+    assert seen["tick_size"] == 0.01
+    warnings = [m for lvl, m in log_records if lvl == "WARNING" and "tick" in m.lower()]
+    assert len(warnings) == 1
+    assert f"position {pid}" in warnings[0] and "RuntimeError: xxx" in warnings[0]
+    assert len(warnings[0]) < 600                       # the error went through _short
+
+
+# ---------------------------------------------------------------------------
+# 1B-fix-3 F7: stage-1 connect failure, the minimum-size notes, keyword-only cap
+# ---------------------------------------------------------------------------
+
+def test_a_connect_failure_in_stage_one_is_exit_failed_pre_and_the_executor_never_runs(
+        live_db, env, monkeypatch, sent_alerts):
+    from execution import live_db as live_db_module
+    pid = _insert_position(live_db)
+    called = []
+    monkeypatch.setattr(live_executor, "execute_exit", lambda *a, **k: called.append(1))
+
+    def no_connect(*a, **k):
+        raise OSError("unable to open database file")
+
+    monkeypatch.setattr(live_db_module, "connect", no_connect)
+    out = _call(_row(live_db, pid))
+    assert out["action"] == "exit_failed" and out["stage"] == "pre"
+    assert out["error"] == "OSError: unable to open database file"
+    assert called == [] and sent_alerts == []
+
+
+def test_hard_stop_blocked_held_remainder_says_the_hard_stop_could_not_execute(sent_alerts):
+    """What the executor returns for a sub-minimum remainder at the hard cap: nothing
+    sold, min_size_blocked and hard_stop_blocked both set."""
+    res = _result("held_remainder", 0.0, min_size_blocked=True, hard_stop_blocked=True)
+    stop_evaluator._fire_stop(ROW, res, MARK, "live stop 67%")
+    discord, telegram = _alerts(sent_alerts)
+    for text in (_discord_text(discord[0]), telegram[0]["args"][0]):
+        assert "NOT SOLD" in text.upper()
+        assert "The hard stop could not execute (position below the exchange minimum)." in text
+
+
+def test_hard_stop_blocked_partial_sale_says_the_rest_could_not_be_sold(sent_alerts):
+    res = _result("held_remainder", 4.0, min_size_blocked=True, hard_stop_blocked=True)
+    stop_evaluator._fire_stop(ROW, res, MARK, "live stop 67%")
+    discord, telegram = _alerts(sent_alerts)
+    for text in (_discord_text(discord[0]), telegram[0]["args"][0]):
+        assert "PARTLY CLOSED" in text
+        assert "The rest could not be sold (below the exchange minimum)." in text
+
+
+def test_min_size_blocked_alone_adds_no_note_only_hard_stop_blocked_does(sent_alerts):
+    """Pins what _fire_stop does today: it reads hard_stop_blocked only."""
+    res = _result("held_remainder", 4.0, min_size_blocked=True)
+    stop_evaluator._fire_stop(ROW, res, MARK, "live stop 67%")
+    text = _alerts(sent_alerts)[1][0]["args"][0]
+    assert "exchange minimum" not in text
+
+
+def test_hard_cap_frac_is_required_and_keyword_only(live_db):
+    row = _row(live_db, _insert_position(live_db))
+    with pytest.raises(TypeError):
+        stop_evaluator._close_live_position_early(row, MARK, "r")
+    with pytest.raises(TypeError):
+        stop_evaluator._close_live_position_early(row, MARK, "r", 0.4)

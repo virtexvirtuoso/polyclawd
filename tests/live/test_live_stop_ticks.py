@@ -540,6 +540,21 @@ def test_exit_unknown_is_an_error_not_exited_and_pages(monkeypatch, state_path, 
     assert len(pages(sent_alerts)) == 1
 
 
+@pytest.mark.parametrize("extra, sentence", [
+    ({"shares_before": 10.0, "shares_now": 6.0, "status_now": "open"},
+     "Before: 10 shares. The ledger now shows 6 shares, status open."),
+    ({"shares_before": 10.0, "shares_now": None, "reread_error": "OSError: gone"},
+     "Before: 10 shares. The ledger could not be re-read."),
+], ids=["reread-ok", "reread-failed"])
+def test_exit_unknown_page_carries_the_ledger_figures_when_the_entry_has_them(
+        monkeypatch, state_path, sent_alerts, armed, extra, sentence):
+    patched_eval(monkeypatch, [{**unknown_entry(error="boom"), **extra}])
+    shadow.run_live_stop_tick("stop_evaluator", now=T0, state_path=state_path)
+    (text,) = page_texts(sent_alerts)
+    assert text == ("Polyclawd live stop: a sale of position 7 was attempted and its outcome is "
+                    f"UNKNOWN (boom). Check the exchange and the ledger now. {sentence}")
+
+
 def test_exit_unknown_in_a_dry_run_does_not_crash(monkeypatch, state_path, logs, sent_alerts):
     patched_eval(monkeypatch, [unknown_entry()])
     out = shadow.run_live_stop_tick("stop_evaluator", now=T0, state_path=state_path)

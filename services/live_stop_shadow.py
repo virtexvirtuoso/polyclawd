@@ -171,6 +171,25 @@ def _page_unpriced(since, now, shadow, pending):
                             text + (" (shadow)" if shadow else "")))
 
 
+def _shares_text(value):
+    try:
+        return f"{float(value):g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _ledger_sentence(entry):
+    """The share figures an exit_unknown entry carries, in plain words; "" when it
+    carries none (an entry from before the ledger was re-read)."""
+    if "shares_before" not in entry and "shares_now" not in entry:
+        return ""
+    before = f"Before: {_shares_text(entry.get('shares_before'))} shares. "
+    if entry.get("shares_now") is None:
+        return before + "The ledger could not be re-read."
+    return (before + f"The ledger now shows {_shares_text(entry['shares_now'])} shares, "
+            f"status {entry.get('status_now')}.")
+
+
 def _page_errors(entries, shadow, pending):
     tag = " (shadow)" if shadow else ""
     for e in entries:
@@ -181,6 +200,9 @@ def _page_errors(entries, shadow, pending):
         if action == "exit_unknown":
             text = (f"Polyclawd live stop: a sale of position {pid} was attempted and its outcome "
                     f"is UNKNOWN ({err}). Check the exchange and the ledger now.")
+            ledger = _ledger_sentence(e)
+            if ledger:
+                text += " " + ledger
         elif action == "exit_failed":
             text = (f"Polyclawd live stop: the exit of position {pid} did not confirm a sale. "
                     "Check the exchange and the ledger.")
