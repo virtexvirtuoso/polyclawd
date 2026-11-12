@@ -741,7 +741,7 @@ def _send_discord_alert(stop_info):
 
         entry = stop_info["entry_price"]
         current = stop_info["current_price"]
-        side = stop_info.get("outcome") or stop_info["side"]
+        side = stop_info["side"]
         bet_size = stop_info["bet_size"]
         pnl = stop_info["pnl"]
         full_loss = -bet_size
@@ -812,7 +812,7 @@ def _send_stop_close_telegram(stop_info):
         title = (stop_info.get("market_title") or "?")[:70]
         msg = (
             f"🛑 STOP-LOSS CLOSED — {title}\n"
-            f"Side: {stop_info.get('outcome') or stop_info.get('side', '?')} | "
+            f"Side: {stop_info.get('side', '?')} | "
             f"Entry: {stop_info.get('entry_price') or 0:.0%} → "
             f"Exit: {stop_info.get('current_price') or 0:.0%}\n"
             f"PnL: ${stop_info.get('pnl') or 0:+.2f} | "
