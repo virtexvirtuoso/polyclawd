@@ -184,10 +184,40 @@ def test_would_route_at_061_fails_and_prints_the_line(stop_msgs):
     assert "price=0.6100" in out  # the offending line is printed
 
 
-def test_would_route_at_exactly_060_fails_too():
-    lines = [record_line(T0, "would_route", price=0.60, bid=0.59, ask=0.60, spread=0.0167)]
-    rc, out = run(lines)
+def test_would_route_logged_0_6000_is_not_a_failure_but_0_6001_is():
+    """Rewritten in fix-8: the router filters at a true price >= 0.60 and logs 4 decimals, so a
+    would_route line logged 0.6000 is a true price in [0.59995, 0.6): rightly passed."""
+    ok = [record_line(T0, "would_route", price=0.60, bid=0.59, ask=0.60, spread=0.0167)]
+    rc, out = run(ok)
+    assert "never_routes:price_at_or_over_ceiling" not in checks_failing(out), out
+    assert "logged to 4 decimals; 0.6000 can be a price just under the ceiling" in out
+    bad = [record_line(T0, "would_route", price=0.6001, bid=0.59, ask=0.60, spread=0.0167)]
+    rc, out = run(bad)
     assert "never_routes:price_at_or_over_ceiling" in checks_failing(out)
+
+
+def test_the_router_really_passes_a_price_logged_as_0_6000():
+    """The reason for the strict probe: a true price of 0.59996 is not suppressed by the router
+    and its RECORD line shows 0.6000."""
+    from scripts import smart_wallet_alert as sa
+
+    assert not sa._price_band_gate_suppress({"direction": "BUY", "price_at_alert": 0.59996})
+    assert "price=0.6000" in record_msg("would_route", price=0.59996, bid=0.59, ask=0.60, spread=0.0167)
+    assert sa._price_band_gate_suppress({"direction": "BUY", "price_at_alert": 0.60})
+
+
+def test_spread_probe_is_consistent_with_how_the_router_rounds_and_compares():
+    """The router stores round((ask - bid) / ask, 4) and filters when it is > SPREAD_ALLOW_PCT;
+    the probe compares the logged (same rounded) value with > SPREAD_ALLOW. 0.1000 passes, 0.1001 fails."""
+    import inspect
+
+    src = inspect.getsource(sw)
+    assert "spread_pct = round((ask - bid) / ask, 4)" in src
+    assert "if spread_pct > live_config.SPREAD_ALLOW_PCT" in src
+    ok = [record_line(T0, "would_route", bid=0.36, ask=0.40, spread=0.1000)]
+    assert "never_routes:spread_pct_over_allowance" not in checks_failing(run(ok)[1])
+    bad = [record_line(T0, "would_route", bid=0.36, ask=0.40, spread=0.1001)]
+    assert "never_routes:spread_pct_over_allowance" in checks_failing(run(bad)[1])
 
 
 def test_would_route_bot_muted_and_wide_spread_fail_each(stop_msgs):
@@ -250,7 +280,8 @@ def test_record_lines_vs_summary_mismatch_is_only_a_warning(stop_msgs):
 
 
 def test_stop_gap_of_12_minutes_fails_with_times(stop_msgs):
-    """Rewritten in fix-6: the gap is per source."""
+    """Rewritten in fix-8: a SKIPPED line inside the hole keeps the task alive but is not an
+    evaluation, so the evaluation gap fails and the task-alive check does not."""
     tick = stop_msgs(entries=ENTRIES)
     skipped = stop_msgs(hold_lock=True)
     lines = []
@@ -258,9 +289,10 @@ def test_stop_gap_of_12_minutes_fails_with_times(stop_msgs):
         lines += stop_lines(T0 + timedelta(minutes=m), tick)
     lines += stop_lines(T0 + timedelta(minutes=26), skipped)  # a SKIPPED line inside the hole
     rc, out = run(lines, "--min-days", "0")
-    assert "stop_gap[stop_evaluator_urgent]" in checks_failing(out)
+    assert "stop_evaluation_gap" in checks_failing(out)
+    assert "stop_task_alive[stop_evaluator_urgent]" not in checks_failing(out)
     assert "12.0 min" in out and "00:20:00" in out and "00:32:00" in out
-    assert "SKIPPED lines: 1" in out
+    assert "SKIPPED lines: 1" in out and "stop_evaluator_urgent:1" in out
 
 
 def test_stop_gap_of_9_minutes_passes(stop_msgs):
@@ -269,7 +301,8 @@ def test_stop_gap_of_9_minutes_passes(stop_msgs):
     for m in (0, 5, 14, 19):
         lines += stop_lines(T0 + timedelta(minutes=m), tick)
     rc, out = run(lines, "--min-days", "0")
-    assert "stop_gap[stop_evaluator_urgent]" not in checks_failing(out)
+    assert "stop_task_alive[stop_evaluator_urgent]" not in checks_failing(out)
+    assert "stop_evaluation_gap" not in checks_failing(out)
     assert "9.0 min" in out
 
 
@@ -277,7 +310,8 @@ def test_max_gap_minutes_option(stop_msgs):
     tick = stop_msgs(entries=ENTRIES)
     lines = stop_lines(T0, tick) + stop_lines(T0 + timedelta(minutes=9), tick)
     rc, out = run(lines, "--min-days", "0", "--max-gap-minutes", "5")
-    assert "stop_gap[stop_evaluator_urgent]" in checks_failing(out)
+    assert "stop_task_alive[stop_evaluator_urgent]" in checks_failing(out)
+    assert "stop_evaluation_gap" in checks_failing(out)
 
 
 def test_no_dryrun_line_at_all_fails_every_source_as_missing():
@@ -343,7 +377,8 @@ def test_journald_prefix_alone_gives_the_time_and_year_from_other_lines(stop_msg
     # not widen the window (the per-source gap now includes the ends of the window).
     lines.insert(0, pre(T0 - timedelta(days=1)) + "some other log line")
     rc, out = run(lines, "--min-days", "0")
-    assert "longest gap between DRYRUN lines 5.0 min, from 2026-11-05 00:00:00 to 2026-11-05 00:05:00" in out
+    # rewritten in fix-8 (the check was renamed stop_evaluation_gap)
+    assert "longest gap between DRYRUN lines of any source 5.0 min, from 2026-11-05 00:00:00 to 2026-11-05 00:05:00" in out
 
 
 def test_iso_journald_prefix_with_offset_is_converted_to_utc(stop_msgs):
@@ -746,8 +781,9 @@ def _two_sources_with_a_hole(stop_msgs, hole_source, hole_minutes):
 def test_one_source_with_a_12_minute_gap_fails_naming_it_while_the_other_is_continuous(stop_msgs):
     lines = _two_sources_with_a_hole(stop_msgs, "stop_evaluator", [112])
     rc, out = run1(lines)
-    assert rc == 1 and failing(out) == ["stop_gap[stop_evaluator]"], out
-    assert "12.0 min" in out and status_of(out, "stop_gap[stop_evaluator_urgent]") == "PASS"
+    assert rc == 1 and failing(out) == ["stop_task_alive[stop_evaluator]"], out
+    assert "12.0 min" in out and status_of(out, "stop_task_alive[stop_evaluator_urgent]") == "PASS"
+    assert status_of(out, "stop_evaluation_gap") == "PASS"  # the other source evaluated meanwhile
 
 
 def test_the_same_hole_in_one_source_would_pass_if_the_sources_were_pooled_but_is_still_9_minutes_ok(stop_msgs):
@@ -764,13 +800,78 @@ def test_a_source_that_stops_partway_fails_even_though_the_other_keeps_the_windo
         if m < 600:
             lines.append(pre(T0 + timedelta(minutes=m), "live_stops") + ticks["stop_evaluator"])
     rc, out = run1(lines + one_day(stop_msgs, sources=()))
-    assert "stop_gap[stop_evaluator]" in failing(out), out
-    assert "stop_gap[stop_evaluator_urgent]" not in failing(out)
+    assert "stop_task_alive[stop_evaluator]" in failing(out), out
+    assert "stop_task_alive[stop_evaluator_urgent]" not in failing(out)
 
 
-def test_the_overall_gap_stays_as_an_information_line(stop_msgs):
+def test_the_overall_gap_is_now_a_check_not_an_information_line(stop_msgs):
+    """Rewritten in fix-8: the pooled DRYRUN gap is the check stop_evaluation_gap."""
     rc, out = run1(one_day(stop_msgs))
-    assert "longest gap between DRYRUN lines of either source together" in out
+    assert status_of(out, "stop_evaluation_gap") == "PASS"
+    assert "longest gap between DRYRUN lines of any source 5.0 min" in out
+
+
+# --------------------------------------------------------------------------- fix-8 B: skipped is alive
+
+
+def _source_lines(stop_msgs, spec):
+    """spec: {source: [(minute, kind)]} with kind dry|skip|fail. Plus a clean one-day entry batch."""
+    msgs = {}
+    for src in SOURCES:
+        msgs[src] = {"dry": stop_msgs(entries=ENTRIES, source=src)[0],
+                     "skip": stop_msgs(hold_lock=True, source=src)[0],
+                     "fail": stop_msgs(fail=RuntimeError("x"), source=src)[0]}
+    lines = []
+    for src, items in spec.items():
+        for minute, kind in items:
+            lines.append(pre(T0 + timedelta(minutes=minute), "live_stops") + msgs[src][kind])
+    return lines + one_day(stop_msgs, sources=())
+
+
+def _every_5(drop=(), add=()):
+    return [(m, "dry") for m in range(0, 24 * 60 + 1, 5) if m not in drop] + list(add)
+
+
+def test_one_skipped_tick_between_dryruns_11_minutes_apart_is_a_healthy_week(stop_msgs):
+    five = _every_5(drop=(105, 110), add=[(105, "skip"), (111, "dry")])
+    lines = _source_lines(stop_msgs, {"stop_evaluator": five, "stop_evaluator_urgent": _every_5()})
+    rc, out = run1(lines)
+    assert rc == 0, out
+    for name in ("stop_task_alive[stop_evaluator]", "stop_task_alive[stop_evaluator_urgent]",
+                 "stop_evaluation_gap", "stop_source_present[stop_evaluator]"):
+        assert status_of(out, name) == "PASS", name
+    assert "by source: stop_evaluator:1" in out
+
+
+def test_a_source_silent_for_12_minutes_fails_task_alive(stop_msgs):
+    five = _every_5(drop=(105, 110), add=[(112, "dry")])
+    lines = _source_lines(stop_msgs, {"stop_evaluator": five, "stop_evaluator_urgent": _every_5()})
+    rc, out = run1(lines)
+    assert rc == 1 and failing(out) == ["stop_task_alive[stop_evaluator]"], out
+    assert "12.0 min" in out
+
+
+def test_both_sources_only_skipping_or_failing_for_12_minutes_fails_the_evaluation_gap(stop_msgs):
+    gap = (105, 110)
+    five = _every_5(drop=gap, add=[(105, "skip"), (110, "fail"), (112, "dry")])
+    urgent = _every_5(drop=gap, add=[(105, "fail"), (110, "skip"), (112, "dry")])
+    lines = _source_lines(stop_msgs, {"stop_evaluator": five, "stop_evaluator_urgent": urgent})
+    rc, out = run1(lines)
+    assert rc == 1 and failing(out) == ["stop_evaluation_gap"], out
+    assert "12.0 min" in out
+
+
+def test_a_source_with_only_skipped_lines_fails_source_present(stop_msgs):
+    five = [(m, "skip") for m in range(0, 24 * 60 + 1, 5)]
+    lines = _source_lines(stop_msgs, {"stop_evaluator": five, "stop_evaluator_urgent": _every_5()})
+    rc, out = run1(lines)
+    assert rc == 1 and failing(out) == ["stop_source_present[stop_evaluator]"], out
+    assert status_of(out, "stop_task_alive[stop_evaluator]") == "PASS"
+
+
+def test_a_skipped_line_without_a_source_is_malformed(stop_msgs):
+    p = rpt.parse_lines([pre(T0, "live_stops") + "live_stops SKIPPED reason=lock"])
+    assert len(p["malformed"]) == 1 and not p["stop_skipped"]
 
 
 # --------------------------------------------------------------------------- B4 failed ticks
@@ -966,3 +1067,106 @@ def test_archetype_logged_on_filtered_records_only_with_no_would_route_does_not_
     t = T0 + timedelta(hours=5)
     rc, out = run1(one_day(stop_msgs, tail=[record_line(t, "filtered", "price_band", arch="-")]))
     assert "[WARN] archetype_gate_had_data" not in out
+
+
+# --------------------------------------------------------------------------- fix-8 C: hook failures
+
+
+def jd_prefix(ts, host="host", unit="polyclawd-scheduler", pid=123):
+    """What `journalctl -o short-iso` puts before a message."""
+    return f"{ts:%Y-%m-%dT%H:%M:%S}+00:00 {host} {unit}[{pid}]: "
+
+
+@pytest.fixture
+def hook_text(monkeypatch, capsys):
+    """The first line scanner_hook really prints when a sweep raises (the traceback follows it)."""
+    from scripts import smart_wallet_alert as sa
+
+    def boom(conn):
+        raise RuntimeError("init failed")
+
+    monkeypatch.setattr(sa, "init_accum", boom)
+    assert sa.scanner_hook(None, [], {}, {}) == []
+    err = capsys.readouterr().err
+    first = err.splitlines()[0]
+    assert first == "SMART_WALLET_ALERT scanner_hook FAILED:" and "RuntimeError: init failed" in err
+    return first
+
+
+def hook_lines(hook_text, n, base=T0 + timedelta(minutes=20)):
+    return [jd_prefix(base + timedelta(minutes=i)) + hook_text for i in range(n)]
+
+
+def many_summaries(n):
+    return [summary_line(T0 + timedelta(minutes=30 + i), 0, 0, {}) for i in range(n)]
+
+
+def test_the_scanner_hook_failure_text_is_still_in_the_source():
+    from pathlib import Path
+
+    src = (Path(rpt.__file__).resolve().parents[1] / "scripts" / "smart_wallet_alert.py").read_text()
+    assert "SMART_WALLET_ALERT scanner_hook FAILED" in src
+    assert rpt.HOOK_FAILED.pattern in src
+
+
+def test_no_hook_failure_passes(stop_msgs):
+    rc, out = run1(one_day(stop_msgs, tail=many_summaries(49)))
+    assert rc == 0, out
+    assert status_of(out, "hook_failures") == "PASS"
+
+
+def test_one_hook_failure_with_50_summaries_warns_and_prints_the_day(stop_msgs, hook_text):
+    rc, out = run1(one_day(stop_msgs, tail=many_summaries(49) + hook_lines(hook_text, 1)))
+    assert rc == 0, out
+    assert status_of(out, "hook_failures") == "WARN"
+    assert "2026-11-05  scanner_hook failures 1" in out
+    assert "never reached the entry-filter log" in out
+
+
+def test_six_hook_failures_with_50_summaries_fail(stop_msgs, hook_text):
+    rc, out = run1(one_day(stop_msgs, tail=many_summaries(49) + hook_lines(hook_text, 6)))
+    assert rc == 1 and failing(out) == ["hook_failures"], out
+
+
+def test_max_hook_failure_share_flag(stop_msgs, hook_text):
+    lines = one_day(stop_msgs, tail=many_summaries(49) + hook_lines(hook_text, 6))
+    rc, out = run1(lines, "--max-hook-failure-share", "0.2")
+    assert rc == 0 and status_of(out, "hook_failures") == "WARN", out
+    rc, out = run1(lines, "--max-hook-failure-share", "0.05")
+    assert rc == 1
+
+
+def test_an_untimed_hook_failure_counts_and_does_not_fail_untimed_lines(stop_msgs, hook_text):
+    rc, out = run1(one_day(stop_msgs, tail=many_summaries(49) + [hook_text]))
+    assert rc == 0, out
+    assert status_of(out, "hook_failures") == "WARN" and status_of(out, "untimed_lines") == "PASS"
+    assert "scanner_hook FAILED lines without a parseable time: 1" in out
+    assert "1 scanner_hook FAILED lines" in out
+
+
+def test_the_journald_prefix_gives_the_hook_failure_its_time_and_the_traceback_is_not_counted(hook_text):
+    p = rpt.parse_lines([jd_prefix(T0) + hook_text, jd_prefix(T0) + "Traceback (most recent call last):",
+                         jd_prefix(T0) + "RuntimeError: init failed"])
+    assert len(p["hook_failures"]) == 1 and not p["hook_untimed"] and p["hook_failures"][0]["ts"] == T0
+
+
+# --------------------------------------------------------------------------- fix-8 D: constants
+
+
+def _module_constant(relpath, name):
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(rpt.__file__).resolve().parents[1] / relpath).read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} not found in {relpath}")
+
+
+def test_the_price_ceiling_equals_the_routers_price_gate():
+    assert rpt.PRICE_CEILING == _module_constant("scripts/smart_wallet_alert.py", "PRICE_GATE_MAX")
+
+
+def test_the_spread_allowance_equals_the_live_config_allowance():
+    assert rpt.SPREAD_ALLOW == live_config.SPREAD_ALLOW_PCT

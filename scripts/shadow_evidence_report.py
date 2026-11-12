@@ -82,6 +82,14 @@ LINE_KINDS = (
      "stop_warning"),
 )
 
+# `scanner_hook` (scripts/smart_wallet_alert.py) catches every exception of a sweep, prints
+#   SMART_WALLET_ALERT scanner_hook FAILED:
+#   <traceback>
+# to stderr (the journal: one journald entry per printed line, each with the journald prefix) and
+# returns [], so the router never runs and the sweep leaves no sw_live line. Only the first line
+# carries the text below and no sw_live marker; the traceback lines are not read.
+HOOK_FAILED = re.compile(r"SMART_WALLET_ALERT scanner_hook FAILED")
+
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 MARKER = re.compile(r"\b(sw_live|live_stops)(?=[ :])")
 KV = re.compile(r"(\w+)=(\S*)")
@@ -188,6 +196,8 @@ def _usable(system, category, kv):
         return _summary_ok(kv) if system == "sw_live" else bool(kv.get("source"))
     if category == "stop_dry":
         return bool(kv.get("source")) and "would_exit" in kv and "spread_held" in kv
+    if category == "stop_skipped":
+        return bool(kv.get("source"))
     if category == "stop_failed":
         return bool(kv.get("source")) and kv.get("consecutive", "").isdigit()
     return True
@@ -205,7 +215,7 @@ def parse_lines(lines):
 
     out = {k: [] for k in ("events", "no_time", "unrecognised", "malformed", "records", "dryruns", "armed",
                            "filter_errors", "router_warnings", "stop_warnings", "stop_dry", "stop_detail",
-                           "stop_skipped", "stop_failed")}
+                           "stop_skipped", "stop_failed", "hook_failures", "hook_untimed")}
     by_category = {"record": "records", "dryrun": "dryruns", "filter_error": "filter_errors",
                    "router_warning": "router_warnings", "stop_warning": "stop_warnings",
                    "stop_dry": "stop_dry", "stop_detail": "stop_detail", "stop_skipped": "stop_skipped",
@@ -219,6 +229,11 @@ def parse_lines(lines):
         total += 1
         m = MARKER.search(ln)
         if not m:
+            h = HOOK_FAILED.search(ln)
+            if h:
+                ts, _src = _parse_time(ln[:h.start()], default_year)
+                out["hook_failures" if ts is not None else "hook_untimed"].append(
+                    {"n": n, "ts": ts, "raw": ln})
             continue
         system, rest = m.group(1), ln[m.end():]
         category = _classify(system, rest)
@@ -292,6 +307,16 @@ def _day(ts):
     return ts.strftime("%Y-%m-%d")
 
 
+def _longest_gap(first, stamps, last):
+    """(longest gap, start, end) over the window start, the sorted `stamps` and the window end."""
+    marks = [first] + sorted(stamps) + [last]
+    longest, a, b = timedelta(0), marks[0], marks[0]
+    for x, y in zip(marks, marks[1:]):
+        if y - x > longest:
+            longest, a, b = y - x, x, y
+    return longest, a, b
+
+
 def _show(rep, items, label):
     for n, ln in items[:SHOW_MAX]:
         rep.text(f"    {label} line {n}: {ln[:300]}")
@@ -300,7 +325,7 @@ def _show(rep, items, label):
 
 
 def build_report(parsed, min_days=7.0, max_gap_minutes=10.0, max_filter_errors=5, allow_empty_days=0,
-                 page_after=None):
+                 page_after=None, max_hook_failure_share=0.10):
     rep = Report()
     P = parsed
     events = P["events"]
@@ -311,6 +336,9 @@ def build_report(parsed, min_days=7.0, max_gap_minutes=10.0, max_filter_errors=5
     rep.text(f"input: {P['total']} lines, {len(events)} sw_live/live_stops lines with a parseable time")
     rep.text(f"lines without a parseable time: {len(P['no_time'])}")
     _show(rep, P["no_time"], "no-time")
+    rep.text(f"scanner_hook FAILED lines without a parseable time: {len(P['hook_untimed'])} (counted in "
+             f"hook_failures; they do not fail untimed_lines: a traceback line may lack the log prefix)")
+    _show(rep, [(e["n"], e["raw"]) for e in P["hook_untimed"]], "hook-untimed")
     rep.text(f"unrecognised sw_live/live_stops line kinds: {len(P['unrecognised'])}")
     _show(rep, P["unrecognised"], "unrecognised")
     rep.text(f"malformed lines (a field a check needs is missing): {len(P['malformed'])}")
@@ -419,7 +447,10 @@ def build_report(parsed, min_days=7.0, max_gap_minutes=10.0, max_filter_errors=5
               "no would_route record in the window: the filters rejected everything, so the checks under "
               "'never routes a filtered record' had nothing to check", warn=True)
     probes = [
-        ("price_at_or_over_ceiling", lambda kv: (_num(kv["price"]) is not None and _num(kv["price"]) >= PRICE_CEILING)),
+        # The router filters at a true price >= 0.60 and logs the price with 4 decimals, so a
+        # would_route line logged `0.6000` can only come from a true price in [0.59995, 0.6):
+        # it passed rightly. Only a logged price strictly above the ceiling is a failure.
+        ("price_at_or_over_ceiling", lambda kv: (_num(kv["price"]) is not None and _num(kv["price"]) > PRICE_CEILING)),
         ("is_bot", lambda kv: kv["is_bot"] == "true"),
         ("clv_muted", lambda kv: kv["clv_muted"] == "true"),
         ("spread_pct_over_allowance", lambda kv: (_num(kv["spread_pct"]) is not None and _num(kv["spread_pct"]) > SPREAD_ALLOW)),
@@ -429,7 +460,9 @@ def build_report(parsed, min_days=7.0, max_gap_minutes=10.0, max_filter_errors=5
     ]
     for name, fn in probes:
         bad = [(e["n"], e["raw"]) for e in wr if fn(e["kv"])]
-        rep.check(not bad, f"never_routes:{name}", f"{len(bad)} of {len(wr)} would_route records")
+        note = (" (logged to 4 decimals; 0.6000 can be a price just under the ceiling)"
+                if name == "price_at_or_over_ceiling" else "")
+        rep.check(not bad, f"never_routes:{name}", f"{len(bad)} of {len(wr)} would_route records{note}")
         _show(rep, bad, "offending")
     rep.text("(this row counts only together with the 'each gate was seen' rows above)")
 
@@ -504,40 +537,46 @@ def build_report(parsed, min_days=7.0, max_gap_minutes=10.0, max_filter_errors=5
     rep.head("STOP SHADOW (live_stops)")
     dry = sorted(P["stop_dry"], key=lambda e: (e["ts"], e["n"]))
     rep.text(f"live_stops DRYRUN lines: {len(dry)}")
-    if len(dry) > 1:
-        longest, a, b = timedelta(0), dry[0]["ts"], dry[0]["ts"]
-        for x, y in zip(dry, dry[1:]):
-            g = y["ts"] - x["ts"]
-            if g > longest:
-                longest, a, b = g, x["ts"], y["ts"]
-        rep.text(f"longest gap between DRYRUN lines of either source together: "
-                 f"{longest.total_seconds() / 60.0:.1f} min, from {a:%Y-%m-%d %H:%M:%S} to {b:%Y-%m-%d %H:%M:%S} "
-                 f"(information only: the checks below are per source)")
     by_source = defaultdict(list)
     for e in dry:
         by_source[e["kv"]["source"]].append(e)
-    others = sorted(set(by_source) - set(STOP_SOURCES))
+    lines_by_source = defaultdict(list)  # a line of any tick kind, per source
+    for e in dry + P["stop_skipped"] + P["stop_failed"]:
+        lines_by_source[e["kv"]["source"]].append(e)
+    others = sorted(set(lines_by_source) - set(STOP_SOURCES))
     if others:
-        rep.text("DRYRUN lines from source names the scheduler is not expected to use: "
-                 + ", ".join(f"{k} ({len(by_source[k])})" for k in others))
+        rep.text("stop tick lines from source names the scheduler is not expected to use: "
+                 + ", ".join(f"{k} ({len(lines_by_source[k])})" for k in others))
     for src in STOP_SOURCES:
         xs = by_source.get(src, [])
         rep.check(bool(xs), f"stop_source_present[{src}]",
-                  f"{len(xs)} DRYRUN lines" if xs else "no live_stops DRYRUN line from this source")
-        if not xs:
+                  f"{len(xs)} DRYRUN lines" if xs else
+                  "no live_stops DRYRUN line from this source (a task that only skips or fails has never evaluated)")
+        ys = lines_by_source.get(src, [])
+        if not ys:
             continue
-        # the gaps include the two ends of the window: a source that stops (or starts) partway
-        # is a gap even when the other source keeps the window open
-        marks = [first] + [e["ts"] for e in xs] + [last]
-        longest, a, b = timedelta(0), marks[0], marks[0]
-        for x, y in zip(marks, marks[1:]):
-            if y - x > longest:
-                longest, a, b = y - x, x, y
+        # A skipped tick is a live task: when the two stop tasks collide, one logs SKIPPED and
+        # does not evaluate, because the other is evaluating at that moment. So "the task is
+        # alive" is judged from every kind of tick line of that source, and "the positions were
+        # evaluated" (below) from DRYRUN lines of any source. Both include the two ends of the
+        # window: a source that stops or starts partway is a gap even when the other keeps the
+        # window open.
+        longest, a, b = _longest_gap(first, [e["ts"] for e in ys], last)
         mins = longest.total_seconds() / 60.0
-        rep.check(mins < max_gap_minutes, f"stop_gap[{src}]",
-                  f"longest gap between DRYRUN lines {mins:.1f} min, from {a:%Y-%m-%d %H:%M:%S} "
-                  f"to {b:%Y-%m-%d %H:%M:%S} (window ends included); under {max_gap_minutes:g} min required")
-    rep.text(f"live_stops SKIPPED lines: {len(P['stop_skipped'])} (reported, do not fail)")
+        rep.check(mins < max_gap_minutes, f"stop_task_alive[{src}]",
+                  f"longest gap between tick lines (DRYRUN, SKIPPED or FAILED) of this source {mins:.1f} min, "
+                  f"from {a:%Y-%m-%d %H:%M:%S} to {b:%Y-%m-%d %H:%M:%S} (window ends included); "
+                  f"under {max_gap_minutes:g} min required")
+    if events:
+        longest, a, b = _longest_gap(first, [e["ts"] for e in dry], last)
+        mins = longest.total_seconds() / 60.0
+        rep.check(mins < max_gap_minutes, "stop_evaluation_gap",
+                  f"longest gap between DRYRUN lines of any source {mins:.1f} min, from {a:%Y-%m-%d %H:%M:%S} "
+                  f"to {b:%Y-%m-%d %H:%M:%S} (window ends included; a SKIPPED tick is not an evaluation); "
+                  f"under {max_gap_minutes:g} min required")
+    skipped = Counter(e["kv"]["source"] for e in P["stop_skipped"])
+    rep.text(f"live_stops SKIPPED lines: {len(P['stop_skipped'])} (reported, do not fail); by source: "
+             + (", ".join(f"{k}:{v}" for k, v in sorted(skipped.items())) or "none"))
     rep.text(f"live_stops FAILED lines: {len(P['stop_failed'])}")
     ticks = sorted([e for e in events if e["system"] == "live_stops"
                     and e["kind"] in ("stop_dry", "armed", "stop_failed")], key=lambda e: (e["ts"], e["n"]))
@@ -580,6 +619,24 @@ def build_report(parsed, min_days=7.0, max_gap_minutes=10.0, max_filter_errors=5
         rep.text("!!! ARMED LINES IN THE WINDOW !!!")
         _show(rep, [(e["n"], e["raw"]) for e in P["armed"]], "ARMED")
 
+    # ---- sweeps that failed before the router ran
+    rep.head("SCANNER HOOK FAILURES (SMART_WALLET_ALERT scanner_hook FAILED)")
+    hook_all = P["hook_failures"] + P["hook_untimed"]
+    n_hook = len(hook_all)
+    per_hook_day = Counter(_day(e["ts"]) for e in P["hook_failures"])
+    for day in sorted(per_hook_day):
+        rep.text(f"{day}  scanner_hook failures {per_hook_day[day]}")
+    if P["hook_untimed"]:
+        rep.text(f"(no day) scanner_hook failures {len(P['hook_untimed'])}")
+    n_sum = len(P["dryruns"])
+    hook_share = n_hook / (n_hook + n_sum) if (n_hook + n_sum) else 0.0
+    rep.check(n_hook == 0, "hook_failures",
+              f"{n_hook} scanner_hook FAILED lines against {n_sum} sw_live DRYRUN summaries "
+              f"({hook_share:.1%} of summaries plus failures); each is a sweep whose records, if any, never "
+              f"reached the entry-filter log; FAIL above {max_hook_failure_share:.0%}",
+              warn=hook_share <= max_hook_failure_share)
+    _show(rep, [(e["n"], e["raw"]) for e in hook_all], "hook failure")
+
     rep.head("NOT COVERED BY THIS REPORT")
     rep.text("not covered by this report: the pre-flight output row, the reconciliation row, the "
              "production controls for the stop (1.2 control output), the root-cause write-up")
@@ -611,6 +668,9 @@ def main(argv=None, stdin=None, out=None):
                     help="FAIL when more `sw_live DRYRUN error=.. stage=filter` lines than this (default 5)")
     ap.add_argument("--allow-empty-days", type=int, default=0, metavar="N",
                     help="accept N whole UTC days with no entry-shadow line, knowingly (default 0)")
+    ap.add_argument("--max-hook-failure-share", type=float, default=0.10, metavar="X",
+                    help="FAIL when scanner_hook failures exceed this share of (DRYRUN summaries + failures) "
+                         "(default 0.10); any failure below that is a WARN")
     try:
         args = ap.parse_args(argv)
     except SystemExit as exc:
@@ -629,7 +689,8 @@ def main(argv=None, stdin=None, out=None):
         print("empty input: nothing to report on", file=sys.stderr)
         return 2
     rep = build_report(parse_lines(lines), args.min_days, args.max_gap_minutes,
-                       args.max_filter_errors, args.allow_empty_days)
+                       args.max_filter_errors, args.allow_empty_days,
+                       max_hook_failure_share=args.max_hook_failure_share)
     out.write("\n".join(rep.out) + "\n")
     return 1 if rep.failing else 0
 
