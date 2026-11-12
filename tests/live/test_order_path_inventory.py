@@ -29,6 +29,7 @@ MODE_READERS = {
     "execution/clob_client.py": "order gate: assert_live_armed() in post_maker and cross_taker",
     "execution/soccer_executor.py": "order gate: returns unless live_armed()",
     "execution/weather_executor.py": "order gate: returns unless live_armed()",
+    "scripts/live_preflight.py": "display only: pre-flight report (prints arming_state(); sends no order)",
     "scripts/position_sync.py": "passed to RiskGovernor (the governor ignores the mode); no order gate",
     "scripts/smart_wallet_fast_poll.py": "order gate: _route_live_smart_wallet filters and logs (stage 1, mode() only in the DRYRUN line), then returns unless live_armed()",
     "services/live_stop_shadow.py": "live_armed() and mode(): tick passes dry_run unless armed; mode in the log line; no order gate of its own",
