@@ -2585,8 +2585,8 @@ async def main():
     logger.info("Polyclawd Scheduler starting")
     logger.info("Project: %s", PROJECT_ROOT)
     logger.info("DB: %s", DB_PATH)
-    _assert_live_cap_fits_min_action()
     _validate_stop_exempt_ids()
+    _assert_live_cap_fits_min_action()
     _start_live_unarmed_page()
     logger.info("=" * 60)
 
