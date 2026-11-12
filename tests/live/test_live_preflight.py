@@ -45,6 +45,10 @@ def mk(**over):
         allowlists={u: set(SM) for u in UNITS},
         stop={"universal": 0.40, "spread_allow": 0.10},
         sizers={"smart_wallet": sizer},
+        own_override=None,
+        unit_vars={u: {} for u in UNITS},
+        env_file={"path": "config/polymarket.env", "mtime": 1_000.0},
+        unit_started={u: 2_000.0 for u in UNITS},
     )
     base.update(over)
     return base
@@ -103,6 +107,13 @@ def test_smallest_passing_bankroll_is_30_00_and_29_99_fails():
     assert one(below, "sizer_covers_exchange_minimum")["status"] == "FAIL"
     at = pf.evaluate(mk(cash=30.00, governor_bankroll=30.00))
     assert not [c for c in at["checks"] if c["status"] == "FAIL"]
+
+
+def test_smallest_passing_bankroll_wording_describes_the_settings_and_claims_nothing_unchecked():
+    text = line(pf.evaluate(mk()), "SMALLEST_PASSING_BANKROLL")
+    assert "lowest bankroll at which the sizing checks pass" in text
+    assert "searched in cents up to $1,000" in text and "not advice" in text
+    assert "every sizing check passes from here" not in text
 
 
 def test_smallest_passing_bankroll_none_up_to_1000():
@@ -313,6 +324,10 @@ def make_sources(**over):
         price_ceiling=lambda: 0.60,
         allowlist=lambda unit: set(SM),
         stop_bounds=lambda: (0.40, 0.10),
+        own_override=lambda: None,
+        unit_vars=lambda unit: {},
+        env_file=lambda: {"path": "config/polymarket.env", "mtime": 1_000.0},
+        unit_started=lambda unit: 2_000.0,
         sizers={"smart_wallet": sizer},
     )
     src.update(over)
@@ -585,3 +600,275 @@ def test_unit_names_and_variable_match_the_services_and_live_config():
     assert pf.UNITS == UNITS
     assert pf.ALLOWLIST_VAR == "POLYCLAWD_LIVE_STRATEGY_ALLOWLIST"
     assert pf.ALLOWLIST_VAR in (REPO / "execution" / "live_config.py").read_text()
+
+
+# =========================================================================== fix-6, part A
+
+
+def ok_mk(**over):
+    """A passing base: bankroll 31 (stored reading and market value)."""
+    return mk(cash=31.0, governor_bankroll=31.0, **over)
+
+
+# --------------------------------------------------------------------------- A2 override
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "nan", "inf", "abc", "2"])
+def test_override_that_is_not_positive_finite_or_below_the_exchange_minimum_fails(raw):
+    rep = pf.evaluate(ok_mk(own_override=raw))
+    c = one(rep, "min_order_override")
+    assert c["status"] == "FAIL" and "this process" in c["text"], c
+    # the sizing check is computed from the exchange's 5 shares x 0.60, never from the override
+    mn = one(rep, "sizer_covers_exchange_minimum")
+    assert "$3.00" in mn["text"] and "5 shares" in mn["text"]
+    assert rep["exit"] != 0
+
+
+def test_override_equal_to_the_exchange_minimum_warns_and_does_not_change_the_exit_code():
+    plain = pf.evaluate(ok_mk())
+    rep = pf.evaluate(ok_mk(own_override="5"))
+    c = one(rep, "min_order_override")
+    assert c["status"] == "WARN" and "instead of the exchange's figure" in c["text"] and "5" in c["text"]
+    assert rep["exit"] == plain["exit"] == 0
+
+
+def test_override_above_the_exchange_minimum_warns():
+    assert one(pf.evaluate(ok_mk(own_override="6")), "min_order_override")["status"] == "WARN"
+
+
+def test_override_not_set_anywhere_passes_and_says_so():
+    c = one(pf.evaluate(ok_mk(own_override="  ")), "min_order_override")
+    assert c["status"] == "PASS" and "not set" in c["text"]
+
+
+def test_override_set_only_in_one_units_environment_names_that_unit():
+    rep = pf.evaluate(ok_mk(unit_vars={UNITS[0]: {}, UNITS[1]: {"POLYCLAWD_MIN_ORDER_SHARES": "0"}}))
+    c = one(rep, "min_order_override")
+    assert c["status"] == "FAIL" and UNITS[1] in c["text"] and UNITS[0] not in c["text"]
+
+
+def test_override_check_does_not_pass_when_a_units_environment_could_not_be_read():
+    c = one(pf.evaluate(ok_mk(unit_vars={UNITS[0]: {}, UNITS[1]: None})), "min_order_override")
+    assert c["status"] == "FAIL" and UNITS[1] in c["text"]
+
+
+def test_default_min_order_source_ignores_the_override(monkeypatch):
+    from execution import clob_client
+
+    seen = {}
+
+    def fake(token, strict=False):
+        seen["strict"] = strict
+        return 15.0
+
+    monkeypatch.setattr(clob_client, "get_min_order_size", fake)
+    monkeypatch.setenv("POLYCLAWD_MIN_ORDER_SHARES", "1")
+    assert pf._default_min_order("T") == (15.0, "exchange")
+    assert seen["strict"] is True
+
+
+# --------------------------------------------------------------------------- A3 partial read
+
+
+def test_partial_read_is_pass_plus_a_warn_naming_each_failed_token():
+    rep = pf.evaluate(ok_mk(tokens=["T1", "T2", "T3"], min_failures={"T2": "ClobError: x", "T3": "ClobError: y"}))
+    assert one(rep, "exchange_minimum_read")["status"] == "PASS"
+    c = one(rep, "exchange_minimum_partial")
+    assert c["status"] == "WARN" and "T2" in c["text"] and "ClobError: x" in c["text"]
+    assert "T3" in c["text"] and "ClobError: y" in c["text"] and "T1" not in c["text"]
+    assert rep["exit"] == 0
+
+
+def test_no_partial_warning_when_every_read_worked():
+    assert one(pf.evaluate(ok_mk()), "exchange_minimum_partial")["status"] == "PASS"
+
+
+# --------------------------------------------------------------------------- A4 bankrolls
+
+
+def test_each_consumer_prints_which_reading_it_uses():
+    rep = pf.evaluate(ok_mk())
+    for name in ("BANKROLL_USED_BY_GOVERNOR", "BANKROLL_USED_BY_ROUTER", "BANKROLL_USED_BY_SCHEDULER_START_CHECK"):
+        assert line(rep, name).startswith("$31.00"), name
+        assert "live_portfolio_state" in line(rep, name)
+
+
+def test_cap_and_sizer_use_the_stored_reading_the_consumers_read_not_the_market_value():
+    # stored reading 40, market value 20: cap = min(5, 4.40) = 4.40, sizer = 4.00 -> PASS
+    rep = pf.evaluate(mk(governor_bankroll=40.0, cash=20.0))
+    c = one(rep, "cap_covers_sizer")
+    assert c["status"] == "PASS" and "$4.40" in c["text"] and "$4.00" in c["text"] and "$40.00" in c["text"]
+    assert line(rep, "SIZER[smart_wallet]") == "$4.00"
+    assert line(rep, "EFFECTIVE_CAP_GOVERNOR").startswith("$4.40")
+    assert one(rep, "sizer_covers_exchange_minimum")["status"] == "PASS"  # 4.00 >= 3.00
+
+
+def test_result_follows_the_stored_reading_in_both_directions():
+    low_stored = pf.evaluate(mk(governor_bankroll=18.0, cash=40.0))  # market value would pass
+    assert one(low_stored, "cap_covers_sizer")["status"] == "FAIL"  # cap 1.98 < sizer 2.00
+    low_market = pf.evaluate(mk(governor_bankroll=40.0, cash=18.0))  # market value would fail
+    assert one(low_market, "cap_covers_sizer")["status"] == "PASS"
+
+
+def test_kill_floor_check_stays_on_the_market_value():
+    rep = pf.evaluate(mk(governor_bankroll=40.0, cash=9.0))
+    c = one(rep, "bankroll_above_kill_floor")
+    assert c["status"] == "FAIL" and "market-value" in c["text"] and "$9.00" in c["text"]
+
+
+def test_unreadable_stored_reading_fails_the_sizing_checks_and_warns_with_both_figures():
+    rep = pf.evaluate(mk(governor_bankroll=None, cash=31.0, failures={"governor_bankroll": "LookupError: none"}))
+    assert one(rep, "cap_covers_sizer")["status"] == "FAIL"
+    assert one(rep, "sizer_covers_exchange_minimum")["status"] == "FAIL"
+    c = one(rep, "bankroll_readings_agree")
+    assert c["status"] == "WARN" and "unknown" in c["text"] and "$31.00" in c["text"]
+
+
+@pytest.mark.parametrize("stored,market,status", [
+    (100.0, 95.0, "PASS"), (100.0, 94.9, "WARN"),
+    (95.0, 100.0, "PASS"), (94.9, 100.0, "WARN"),
+    (100.0, 100.0, "PASS"),
+])
+def test_readings_agree_boundary_is_five_percent_of_the_larger(stored, market, status):
+    c = one(pf.evaluate(mk(governor_bankroll=stored, cash=market)), "bankroll_readings_agree")
+    assert c["status"] == status
+    if status == "WARN":
+        assert f"${stored:,.2f}" in c["text"] and f"${market:,.2f}" in c["text"]
+
+
+def test_consumer_sources_still_read_the_reading_this_script_says_they_read():
+    gov = _squash((REPO / "execution" / "risk_governor.py").read_text())
+    assert 'saved = live_db.get_state(conn)' in gov
+    assert 'self._bankroll: float = float(saved.get("bankroll") or 0.0)' in gov
+    assert '"SELECT * FROM live_portfolio_state ORDER BY id DESC LIMIT 1"' in _squash(
+        (REPO / "execution" / "live_db.py").read_text())
+    fast = _squash((REPO / "scripts" / "smart_wallet_fast_poll.py").read_text())
+    assert '_ldb.execute("SELECT bankroll FROM live_portfolio_state ORDER BY id DESC LIMIT 1")' in fast
+    assert "size_usd = _sw_live_size_usd(bankroll)" in fast
+    sched = _squash((REPO / "services" / "scheduler.py").read_text())
+    assert '"SELECT bankroll FROM live_portfolio_state ORDER BY id DESC LIMIT 1"' in sched
+    assert [n for n, _ in pf.CONSUMER_READINGS] == ["GOVERNOR", "ROUTER", "SCHEDULER_START_CHECK"]
+
+
+# --------------------------------------------------------------------------- A5 settings
+
+
+@pytest.mark.parametrize("var,theirs", [
+    ("POLYCLAWD_WEATHER_PER_TRADE_CAP", "50"), ("POLYCLAWD_TIER_SIZE_CAP", "25"),
+    ("POLYCLAWD_PER_TRADE_FRAC", "0.5"), ("POLYCLAWD_KILL_FLOOR", "1"),
+    ("POLYCLAWD_DAILY_LOSS_HALT", "999"), ("POLYCLAWD_MODE", "LIVE"),
+])
+def test_a_setting_that_differs_in_a_units_start_environment_fails_naming_both_values(var, theirs):
+    rep = pf.evaluate(ok_mk(unit_vars={UNITS[0]: {}, UNITS[1]: {var: theirs}}))
+    c = one(rep, "settings_match_services")
+    assert c["status"] == "FAIL" and var in c["text"] and theirs in c["text"] and UNITS[1] in c["text"]
+    assert f"in {UNITS[0]} is" not in c["text"]
+    assert rep["exit"] != 0
+
+
+def test_same_value_written_differently_is_not_a_difference_and_absent_is_not_a_failure():
+    same = {"POLYCLAWD_WEATHER_PER_TRADE_CAP": "5.0", "POLYCLAWD_PER_TRADE_FRAC": "0.110", "POLYCLAWD_MODE": "paper"}
+    c = one(pf.evaluate(ok_mk(unit_vars={UNITS[0]: same, UNITS[1]: {}})), "settings_match_services")
+    assert c["status"] == "PASS"
+    assert "not in the unit's start environment (loaded from the env file at start)" in c["text"]
+
+
+def test_settings_check_fails_when_a_units_environment_could_not_be_read():
+    c = one(pf.evaluate(ok_mk(unit_vars={UNITS[0]: None, UNITS[1]: {}})), "settings_match_services")
+    assert c["status"] == "FAIL" and UNITS[0] in c["text"]
+
+
+def test_env_file_newer_than_a_units_start_warns_naming_the_unit():
+    rep = pf.evaluate(ok_mk(env_file={"path": "e.env", "mtime": 5_000.0},
+                            unit_started={UNITS[0]: 9_000.0, UNITS[1]: 4_000.0}))
+    c = one(rep, "env_file_older_than_services")
+    assert c["status"] == "WARN" and UNITS[1] in c["text"] and UNITS[0] not in c["text"]
+    assert "older settings" in c["text"]
+    assert rep["exit"] == 0
+
+
+def test_env_file_older_than_both_units_passes():
+    assert one(pf.evaluate(ok_mk()), "env_file_older_than_services")["status"] == "PASS"
+
+
+def test_unreadable_env_file_or_start_time_is_a_warn_never_a_pass():
+    for over in (dict(env_file=None), dict(unit_started={UNITS[0]: None, UNITS[1]: 2_000.0})):
+        c = one(pf.evaluate(ok_mk(**over)), "env_file_older_than_services")
+        assert c["status"] == "WARN" and "unreadable" in c["text"], over
+
+
+def test_number_lines_from_this_processs_environment_say_so():
+    rep = pf.evaluate(ok_mk())
+    for name in ("KILL_FLOOR", "DAILY_LOSS_HALT", "FIXED_PER_TRADE_CAP", "TIER_CAP", "FRACTION"):
+        assert line(rep, name).endswith("(as this script sees it)"), name
+
+
+def test_unit_vars_reader_returns_only_the_listed_names():
+    env = (b"BOT_EOA_PRIVATE_KEY=0xSECRETSECRET\0POLYCLAWD_MODE=LIVE\0CLOB_API_SECRET=hush\0"
+           b"POLYCLAWD_MIN_ORDER_SHARES=3\0POLYCLAWD_MODE_X=zzz\0NOEQUALS\0")
+    got = pf.read_unit_vars("u", main_pid=lambda unit: 7, read_environ=lambda pid: env)
+    assert got == {"POLYCLAWD_MODE": "LIVE", "POLYCLAWD_MIN_ORDER_SHARES": "3"}
+
+
+@pytest.mark.parametrize("pid,env,exc", [(0, b"", RuntimeError), (77, None, PermissionError)])
+def test_unit_vars_reader_failures_raise(pid, env, exc):
+    def read_environ(p):
+        raise PermissionError("denied")
+
+    with pytest.raises(exc):
+        pf.read_unit_vars("u", main_pid=lambda unit: pid, read_environ=read_environ)
+
+
+def test_unit_vars_reader_absent_variables_are_an_empty_dict_not_a_failure():
+    assert pf.read_unit_vars("u", main_pid=lambda unit: 7, read_environ=lambda pid: b"A=1\0") == {}
+
+
+def test_no_secret_from_a_units_environment_reaches_the_output():
+    secret = "0xSECRETVALUE1234567890"
+    env = (f"BOT_EOA_PRIVATE_KEY={secret}\0CLOB_API_SECRET={secret}\0POLYCLAWD_WEATHER_PER_TRADE_CAP=50\0"
+           f"POLYCLAWD_MIN_ORDER_SHARES=0\0").encode()
+    reader = lambda unit: pf.read_unit_vars(unit, main_pid=lambda u: 7, read_environ=lambda pid: env)
+    rc, out = run_main(["--token", "T1"], unit_vars=reader)
+    assert rc == 1
+    assert "settings_match_services" in out and "min_order_override" in out
+    assert secret not in out
+    assert "BOT_EOA_PRIVATE_KEY" not in out and "CLOB_API_SECRET" not in out
+
+
+def test_unit_active_since_parses_systemctl_output_and_refuses_what_it_cannot_read():
+    class R:
+        def __init__(self, out, rc=0):
+            self.stdout, self.returncode, self.stderr = out, rc, ""
+
+    got = pf.unit_active_since("u", run=lambda *a, **k: R("Thu 2026-11-12 02:16:03 UTC\n"))
+    assert got == pytest.approx(1_794_449_763.0)
+    for bad in (R(""), R("Thu 2026-11-12 02:16:03 CET\n"), R("n/a\n"), R("x", rc=1)):
+        with pytest.raises(Exception):
+            pf.unit_active_since("u", run=lambda *a, **k: bad)
+
+
+def test_setting_names_match_live_config_and_the_env_file_path_variable():
+    src = (REPO / "execution" / "live_config.py").read_text()
+    for name in pf.SETTING_VARS:
+        assert f'"{name}"' in src, name
+    assert "POLYCLAWD_ENV_FILE" in src and "_ENV_FILE" in src
+    assert 'os.environ.get("POLYCLAWD_MIN_ORDER_SHARES"' in (REPO / "execution" / "clob_client.py").read_text()
+
+
+# --------------------------------------------------------------------------- A6 URI
+
+
+def test_database_path_with_a_space_hash_question_mark_and_percent_opens_the_right_file(tmp_path):
+    d = tmp_path / "my dir #1 ?x %41"
+    d.mkdir()
+    db = d / "live ?#%.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE t (a)")
+    con.execute("INSERT INTO t VALUES (7)")
+    con.commit()
+    con.close()
+    ro = pf.open_readonly(db)
+    assert ro.execute("SELECT a FROM t").fetchone()[0] == 7
+    with pytest.raises(sqlite3.OperationalError):
+        ro.execute("INSERT INTO t VALUES (8)")
+    ro.close()

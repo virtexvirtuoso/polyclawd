@@ -69,11 +69,59 @@ def test_strict_reads_the_exchange_value_even_under_pytest(monkeypatch):
     assert len(calls) == 1
 
 
-def test_strict_honours_the_environment_override_without_a_request(monkeypatch):
+def test_strict_ignores_the_environment_override_and_reads_the_exchange(monkeypatch):
+    """Rewritten in fix-6 (A1): the override used to win over the exchange in strict mode."""
+    calls = _serve(monkeypatch, _Resp({"min_order_size": "15"}))
+    for override in ("1", "0", "-1", "nan", "7"):
+        clob_client._min_order_size_cache.clear()
+        monkeypatch.setenv("POLYCLAWD_MIN_ORDER_SHARES", override)
+        assert clob_client.get_min_order_size(TOKEN, strict=True) == 15.0, override
+    assert len(calls) == 5
+
+
+def test_strict_with_override_and_failed_read_raises_never_returns_the_override(monkeypatch):
+    _serve(monkeypatch, ConnectionError("vendor down"))
+    monkeypatch.setenv("POLYCLAWD_MIN_ORDER_SHARES", "0")
+    with pytest.raises(clob_client.ClobError):
+        clob_client.get_min_order_size(TOKEN, strict=True)
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "-3"])
+def test_strict_non_finite_or_non_positive_exchange_value_raises(monkeypatch, raw):
+    _serve(monkeypatch, _Resp({"min_order_size": raw}))
+    with pytest.raises(clob_client.ClobError):
+        clob_client.get_min_order_size(TOKEN, strict=True)
+
+
+def test_non_strict_override_is_unchanged(monkeypatch):
     calls = _serve(monkeypatch, ConnectionError("must not be called"))
     monkeypatch.setenv("POLYCLAWD_MIN_ORDER_SHARES", "7")
-    assert clob_client.get_min_order_size(TOKEN, strict=True) == 7.0
+    assert clob_client.get_min_order_size(TOKEN) == 7.0
     assert calls == []
+
+
+def test_non_strict_fallback_is_never_cached_and_never_served_to_a_strict_call(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    _serve(monkeypatch, ConnectionError("vendor down"))
+    assert clob_client.get_min_order_size(TOKEN) == clob_client.DEFAULT_MIN_ORDER_SHARES
+    assert clob_client._min_order_size_cache == {}
+    with pytest.raises(clob_client.ClobError):
+        clob_client.get_min_order_size(TOKEN, strict=True)
+    # the pytest short-circuit and the override path do not cache either
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "x")
+    assert clob_client.get_min_order_size(TOKEN) == clob_client.DEFAULT_MIN_ORDER_SHARES
+    monkeypatch.setenv("POLYCLAWD_MIN_ORDER_SHARES", "9")
+    assert clob_client.get_min_order_size(TOKEN) == 9.0
+    assert clob_client._min_order_size_cache == {}
+
+
+def test_a_non_finite_value_a_non_strict_call_cached_is_not_served_to_a_strict_call(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    calls = _serve(monkeypatch, _Resp({"min_order_size": "nan"}))
+    clob_client.get_min_order_size(TOKEN)  # non-strict keeps its old behaviour
+    with pytest.raises(clob_client.ClobError):
+        clob_client.get_min_order_size(TOKEN, strict=True)
+    assert len(calls) == 2  # the strict call did not take the cached nan
 
 
 def test_non_strict_failed_read_still_returns_the_default(monkeypatch):

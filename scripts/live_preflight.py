@@ -26,6 +26,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -38,6 +39,22 @@ EXPECTED_ALLOWLIST = {"smart_wallet"}
 TIER_CAP_VAR = "POLYCLAWD_TIER_SIZE_CAP"
 TIER_CAP_DEFAULT = "25.0"
 EXPECTED_UNIVERSAL_STOP = 0.40
+OVERRIDE_VAR = "POLYCLAWD_MIN_ORDER_SHARES"
+# Settings the services keep from the moment they started (names checked against
+# execution/live_config.py by a test). Only these names, and only these values, are ever
+# read from a unit's /proc/<pid>/environ and printed.
+SETTING_VARS = ("POLYCLAWD_WEATHER_PER_TRADE_CAP", TIER_CAP_VAR, "POLYCLAWD_PER_TRADE_FRAC",
+                "POLYCLAWD_KILL_FLOOR", "POLYCLAWD_DAILY_LOSS_HALT", "POLYCLAWD_MODE")
+UNIT_VARS = SETTING_VARS + (OVERRIDE_VAR,)
+AS_SEEN = "(as this script sees it)"
+READINGS_TOLERANCE = 0.05  # bankroll_readings_agree warns above this share of the larger reading
+# Which bankroll reading each consumer reads (task fix-6 A4; drift tests quote the sources).
+CONSUMER_READINGS = (
+    ("GOVERNOR", "RiskGovernor.__init__ loads live_db.get_state(conn)['bankroll'], the newest live_portfolio_state row"),
+    ("ROUTER", "_route_live_stage2 reads SELECT bankroll FROM live_portfolio_state ORDER BY id DESC LIMIT 1, "
+               "the same row, and passes it to _sw_live_size_usd and the governor rails"),
+    ("SCHEDULER_START_CHECK", "_assert_live_cap_fits_min_action reads the same newest live_portfolio_state row"),
+)
 SEARCH_MAX_CENTS = 100_000  # $1,000.00
 EPS = 1e-9
 
@@ -76,7 +93,7 @@ def open_readonly(path):
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"live database not found: {path}")
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+    con = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
     con.row_factory = sqlite3.Row
     return con
 
@@ -141,6 +158,48 @@ def read_unit_allowlist(unit, main_pid=systemctl_main_pid, read_environ=_read_pr
     raise LookupError(f"{ALLOWLIST_VAR} is not in the environment of {unit} (pid {pid})")
 
 
+def read_unit_vars(unit, names=UNIT_VARS, main_pid=systemctl_main_pid, read_environ=_read_proc_environ):
+    """The listed variables (and no others) from the start environment of the RUNNING unit,
+    as {name: value} for the ones present. Never returns, logs or prints any other variable.
+    Any failure raises: unreadable is not the same as absent."""
+    pid = main_pid(unit)
+    if not pid:
+        raise RuntimeError(f"{unit} has MainPID 0 (not running)")
+    wanted = set(names)
+    found = {}
+    for item in read_environ(pid).split(b"\0"):
+        key, sep, value = item.partition(b"=")
+        name = key.decode("utf-8", "replace")
+        if sep and name in wanted:
+            found[name] = value.decode("utf-8", "replace")
+    return found
+
+
+def unit_active_since(unit, run=subprocess.run):
+    """Epoch seconds of the unit's ActiveEnterTimestamp (when its current run started)."""
+    res = run(["systemctl", "show", "-p", "ActiveEnterTimestamp", "--value", unit],
+              capture_output=True, text=True, timeout=10)
+    if res.returncode != 0:
+        raise RuntimeError(f"systemctl show {unit} failed rc={res.returncode}: {(res.stderr or '')[:100]}")
+    text = res.stdout.strip()
+    if not text:
+        raise RuntimeError(f"{unit} has no ActiveEnterTimestamp (not active)")
+    parts = text.split()
+    if len(parts) != 4 or parts[3] not in ("UTC", "GMT"):
+        raise ValueError(f"unexpected ActiveEnterTimestamp format: {text[:40]!r}")
+    when = datetime.strptime(" ".join(parts[1:3]), "%Y-%m-%d %H:%M:%S")
+    return when.replace(tzinfo=timezone.utc).timestamp()
+
+
+def read_env_file_info():
+    """The env file live_config loads (POLYCLAWD_ENV_FILE or config/polymarket.env): path and
+    modification time. Contents are never read."""
+    from execution import live_config
+
+    path = Path(live_config._ENV_FILE)
+    return {"path": str(path), "mtime": path.stat().st_mtime}
+
+
 def read_price_ceiling():
     """PRICE_GATE_MAX from scripts/smart_wallet_alert.py, read from the source with `ast`.
 
@@ -183,14 +242,8 @@ def _best_bid(book):
 def _default_min_order(token):
     from execution import clob_client
 
-    value = clob_client.get_min_order_size(token, strict=True)
-    override = os.environ.get("POLYCLAWD_MIN_ORDER_SHARES", "").strip()
-    try:
-        float(override)
-        source = "POLYCLAWD_MIN_ORDER_SHARES"
-    except ValueError:
-        source = "exchange"
-    return value, source
+    # strict=True ignores POLYCLAWD_MIN_ORDER_SHARES: this is always the exchange's figure.
+    return clob_client.get_min_order_size(token, strict=True), "exchange"
 
 
 def default_sources():
@@ -230,6 +283,10 @@ def default_sources():
         min_order=_default_min_order,
         price_ceiling=read_price_ceiling,
         allowlist=read_unit_allowlist,
+        own_override=lambda: os.environ.get(OVERRIDE_VAR),
+        unit_vars=read_unit_vars,
+        env_file=read_env_file_info,
+        unit_started=unit_active_since,
         stop_bounds=stop_bounds,
         sizers=None,  # filled lazily by gather
     )
@@ -300,6 +357,10 @@ def gather(cli_tokens, sources=None):
             failures[f"min_order[{t}]"] = inp["min_failures"][t]
 
     inp["allowlists"] = {u: call(f"allowlist[{u}]", src["allowlist"], u) for u in UNITS}
+    inp["own_override"] = call("own_override", src["own_override"])
+    inp["unit_vars"] = {u: call(f"unit_vars[{u}]", src["unit_vars"], u) for u in UNITS}
+    inp["env_file"] = call("env_file", src["env_file"])
+    inp["unit_started"] = {u: call(f"unit_started[{u}]", src["unit_started"], u) for u in UNITS}
     return inp
 
 
@@ -347,11 +408,143 @@ def _sizing_passes(bankroll, strategies, caps, sizers, minimum_shares, ceiling, 
     return True
 
 
+def _shown(raw):
+    return repr(str(raw)[:30])
+
+
+def _override_check(inp, minimum, add):
+    """POLYCLAWD_MIN_ORDER_SHARES, wherever it is set: the live code uses it instead of the
+    exchange's figure (strict reads, as this script does, ignore it)."""
+    where, unreadable = {}, []
+    own = (inp["own_override"] or "").strip()
+    if own:
+        where["this process"] = own
+    for u in UNITS:
+        uv = inp["unit_vars"][u]
+        if uv is None:
+            unreadable.append(u)
+        elif (uv.get(OVERRIDE_VAR) or "").strip():
+            where[u] = uv[OVERRIDE_VAR].strip()
+    bad = []
+    for loc, raw in where.items():
+        try:
+            v = float(raw)
+        except ValueError:
+            v = float("nan")
+        if not (math.isfinite(v) and v > 0):
+            bad.append(f"{loc}={_shown(raw)} is not a positive finite number")
+        elif minimum is not None and v < minimum:
+            bad.append(f"{loc}={_shown(raw)} is below the exchange minimum {minimum:g}: orders sized to it "
+                       f"would be refused by the exchange")
+    parts = []
+    if where:
+        parts.append(f"{OVERRIDE_VAR} is set in " + ", ".join(f"{loc}={_shown(raw)}" for loc, raw in where.items())
+                     + ": the live code will use this instead of the exchange's figure")
+    parts += bad
+    if unreadable:
+        parts.append("environment of " + ", ".join(unreadable) + " not read, so the override cannot be said to be unset")
+    if bad or unreadable:
+        add("FAIL", "min_order_override", "; ".join(parts))
+    elif where:
+        add("WARN", "min_order_override", "; ".join(parts))
+    else:
+        add("PASS", "min_order_override", f"{OVERRIDE_VAR} not set in this process or in either unit's start environment")
+
+
+def _readings_check(reading, market, add):
+    if reading is None or market is None:
+        add("WARN", "bankroll_readings_agree",
+            f"cannot compare: stored reading {_money(reading)}, market value {_money(market)}")
+        return
+    larger = max(abs(reading), abs(market))
+    differ = abs(reading - market) > READINGS_TOLERANCE * larger + EPS
+    add("WARN" if differ else "PASS", "bankroll_readings_agree",
+        f"stored reading {_money(reading)} (what the governor and router read), market value {_money(market)} "
+        f"(what the kill-floor check uses); " + (f"they differ by more than {READINGS_TOLERANCE:.0%} of the larger"
+                                                  if differ else f"within {READINGS_TOLERANCE:.0%} of the larger"))
+
+
+def _same_setting(var, theirs, mine):
+    if mine is None:
+        return False
+    raw = theirs.strip()
+    if var == "POLYCLAWD_MODE":
+        return raw.upper() == str(mine)
+    try:
+        return abs(float(raw) - float(mine)) <= EPS
+    except ValueError:
+        return False
+
+
+def _settings_check(inp, add):
+    caps, arming = inp["caps"], inp["arming"]
+    mine = {
+        "POLYCLAWD_WEATHER_PER_TRADE_CAP": caps["fixed"] if caps else None,
+        TIER_CAP_VAR: caps["tier"] if caps else None,
+        "POLYCLAWD_PER_TRADE_FRAC": caps["frac"] if caps else None,
+        "POLYCLAWD_KILL_FLOOR": inp["kill_floor"],
+        "POLYCLAWD_DAILY_LOSS_HALT": inp["daily_halt"],
+        "POLYCLAWD_MODE": arming["mode"] if arming else None,
+    }
+    differ, absent, unreadable = [], [], []
+    for u in UNITS:
+        uv = inp["unit_vars"][u]
+        if uv is None:
+            unreadable.append(u)
+            continue
+        missing = [v for v in SETTING_VARS if v not in uv]
+        if missing:
+            absent.append(f"{u}: " + ", ".join(missing))
+        for var in SETTING_VARS:
+            if var in uv and not _same_setting(var, uv[var], mine[var]):
+                here = "unknown" if mine[var] is None else (
+                    str(mine[var]) if var == "POLYCLAWD_MODE" else f"{mine[var]:g}")
+                differ.append(f"{var} in {u} is {_shown(uv[var])} but this script has {here}")
+    text = []
+    if differ:
+        text.append("; ".join(differ))
+    if unreadable:
+        text.append("start environment of " + ", ".join(unreadable) + " not read, so its settings cannot be compared")
+    if not differ and not unreadable:
+        text.append("no listed setting differs")
+    if absent:
+        text.append("not in the unit's start environment (loaded from the env file at start): " + " | ".join(absent))
+    add("FAIL" if differ or unreadable else "PASS", "settings_match_services", "; ".join(text))
+
+
+def _utc(epoch):
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _env_file_check(inp, add):
+    ef, started = inp["env_file"], inp["unit_started"]
+    newer, unreadable = [], []
+    if ef is None:
+        unreadable.append("env file time")
+    for u in UNITS:
+        if started[u] is None:
+            unreadable.append(f"{u} start time")
+        elif ef is not None and ef["mtime"] > started[u]:
+            newer.append(f"{u} (started {_utc(started[u])})")
+    text = []
+    if newer:
+        text.append(f"the env file {ef['path']} was modified {_utc(ef['mtime'])}, after " + ", ".join(newer)
+                    + ": the services may be running older settings than the ones printed above")
+    if unreadable:
+        text.append("unreadable: " + ", ".join(unreadable) + " (cannot say whether the services are older than the file)")
+    if newer or unreadable:
+        add("WARN", "env_file_older_than_services", "; ".join(text))
+    else:
+        add("PASS", "env_file_older_than_services",
+            f"the env file {ef['path']} was last modified {_utc(ef['mtime'])}, before both units started")
+
+
 def evaluate(inp):
     caps, floor, halt = inp["caps"], inp["kill_floor"], inp["daily_halt"]
     ceiling, sizers = inp["price_ceiling"], inp["sizers"]
     strategies, assumed = _strategies(inp)
-    bankroll = _market_value(inp)
+    bankroll = _market_value(inp)  # market value: used for the kill floor only
+    reading = inp["governor_bankroll"]  # the stored reading the governor, router and scheduler check all read
     minimum = _exchange_minimum(inp)
     min_usd = None if minimum is None or ceiling is None else minimum * ceiling
 
@@ -366,29 +559,34 @@ def evaluate(inp):
                   ("LIVE_ORDER_PATH_READY", str(arming["path_ready"])), ("ARMED", str(arming["armed"]))]
     else:
         lines += [(n, "unknown") for n in ("MODE", "ENFORCE", "LIVE_ORDER_PATH_READY", "ARMED")]
-    lines += [("KILL_FLOOR", _money(floor)), ("DAILY_LOSS_HALT", _money(halt))]
+    lines += [("KILL_FLOOR", f"{_money(floor)}  {AS_SEEN}"), ("DAILY_LOSS_HALT", f"{_money(halt)}  {AS_SEEN}")]
     if caps:
-        lines += [("FIXED_PER_TRADE_CAP", _money(caps["fixed"])),
-                  ("TIER_CAP", _money(caps["tier"]) if caps["tier"] is not None else "unreadable (governor uses the fixed cap)"),
-                  ("FRACTION", f"{caps['frac']:.4f}")]
+        lines += [("FIXED_PER_TRADE_CAP", f"{_money(caps['fixed'])}  {AS_SEEN}"),
+                  ("TIER_CAP", (_money(caps["tier"]) if caps["tier"] is not None
+                                else "unreadable (governor uses the fixed cap)") + f"  {AS_SEEN}"),
+                  ("FRACTION", f"{caps['frac']:.4f}  {AS_SEEN}")]
     else:
         lines += [("FIXED_PER_TRADE_CAP", "unknown"), ("TIER_CAP", "unknown"), ("FRACTION", "unknown")]
 
     gov_eff = sch_eff = frac_cap = None
-    if caps and bankroll is not None:
-        frac_cap = bankroll * caps["frac"]
-        gov_eff = governor_cap(bankroll, caps["fixed"], caps["tier"], caps["frac"])
-        sch_eff = scheduler_cap(bankroll, caps["fixed"], caps["frac"])
+    if caps and reading is not None:
+        frac_cap = reading * caps["frac"]
+        gov_eff = governor_cap(reading, caps["fixed"], caps["tier"], caps["frac"])
+        sch_eff = scheduler_cap(reading, caps["fixed"], caps["frac"])
     lines += [
-        ("FRACTIONAL_CAP", _money(frac_cap)),
-        ("EFFECTIVE_CAP_GOVERNOR", f"{_money(gov_eff)}  = min(max(tier cap, fixed cap), bankroll x fraction)"),
-        ("EFFECTIVE_CAP_SCHEDULER_CHECK", f"{_money(sch_eff)}  = min(fixed cap, bankroll x fraction)"),
+        ("FRACTIONAL_CAP", f"{_money(frac_cap)}  at the stored reading {AS_SEEN}"),
+        ("EFFECTIVE_CAP_GOVERNOR",
+         f"{_money(gov_eff)}  = min(max(tier cap, fixed cap), bankroll x fraction) at the stored reading {AS_SEEN}"),
+        ("EFFECTIVE_CAP_SCHEDULER_CHECK",
+         f"{_money(sch_eff)}  = min(fixed cap, bankroll x fraction) at the stored reading {AS_SEEN}"),
     ]
     stop = inp["stop"]
     spread_allow = stop["spread_allow"] if stop else None
     lines.append(("SPREAD_ALLOW_PCT", "unknown" if spread_allow is None else f"{spread_allow:.2f}"))
 
     lines.append(("BANKROLL_GOVERNOR_READING", _money(inp["governor_bankroll"])))
+    for consumer, how in CONSUMER_READINGS:
+        lines.append((f"BANKROLL_USED_BY_{consumer}", f"{_money(reading)}  = the stored reading: {how}"))
     lines.append(("EXCHANGE_CASH", _money(inp["cash"])))
     if inp["positions"] is None:
         lines += [("OPEN_POSITIONS", "unknown"), ("UNPRICED_POSITIONS", "unknown")]
@@ -405,10 +603,10 @@ def evaluate(inp):
         fn = sizers.get(s)
         if fn is None:
             lines.append((f"SIZER[{s}]", "no live sizer known"))
-        elif bankroll is None:
-            lines.append((f"SIZER[{s}]", "unknown (bankroll unknown)"))
+        elif reading is None:
+            lines.append((f"SIZER[{s}]", "unknown (stored bankroll reading unknown)"))
         else:
-            lines.append((f"SIZER[{s}]", _money(fn(bankroll))))
+            lines.append((f"SIZER[{s}]", _money(fn(reading))))
     if assumed:
         lines.append(("SIZER_NOTE", "no allowlist could be read: sizing shown for smart_wallet only"))
 
@@ -439,7 +637,8 @@ def evaluate(inp):
                 smallest = cents / 100.0
                 break
         lines.append(("SMALLEST_PASSING_BANKROLL",
-                      f"${smallest:,.2f}  (every sizing check passes from here)" if smallest is not None
+                      f"${smallest:,.2f}  (lowest bankroll at which the sizing checks pass (searched in cents up to "
+                      f"$1,000; a description of the settings, not advice))" if smallest is not None
                       else "none up to $1,000"))
     else:
         lines.append(("SMALLEST_PASSING_BANKROLL", "unknown (an input is missing)"))
@@ -450,15 +649,16 @@ def evaluate(inp):
     # ---- checks
     for s in strategies:
         fn = sizers.get(s)
-        if fn is None or bankroll is None or caps is None:
-            why = "no live sizer known" if fn is None else "bankroll or caps unknown"
+        if fn is None or reading is None or caps is None:
+            why = "no live sizer known" if fn is None else "stored bankroll reading or caps unknown"
             add("FAIL", f"cap_covers_sizer[{s}]", why)
             add("FAIL", f"sizer_covers_exchange_minimum[{s}]", why)
             continue
-        size = fn(bankroll)
+        size = fn(reading)
         ok = _ge(gov_eff, size)
         add("PASS" if ok else "FAIL", f"cap_covers_sizer[{s}]",
-            f"effective cap {_money(gov_eff)} {'>=' if ok else '<'} sizer {_money(size)} at bankroll {_money(bankroll)}")
+            f"effective cap {_money(gov_eff)} {'>=' if ok else '<'} sizer {_money(size)} at the stored bankroll "
+            f"reading {_money(reading)} (the governor and the router both read it) {AS_SEEN}")
         if min_usd is None:
             add("FAIL", f"sizer_covers_exchange_minimum[{s}]",
                 "exchange minimum or price ceiling unknown, so the sizer cannot be shown to cover it")
@@ -481,12 +681,21 @@ def evaluate(inp):
             extra = "; not read: " + ", ".join(f"{t} ({e})" for t, e in inp["min_failures"].items())
         add("PASS", "exchange_minimum_read",
             f"read {len(inp['min_reads'])} of {len(inp['tokens'])} sampled tokens; largest {minimum:g} shares{extra}")
+        if inp["min_failures"]:
+            add("WARN", "exchange_minimum_partial",
+                f"{len(inp['min_failures'])} of {len(inp['tokens'])} sampled tokens could not be read: "
+                + ", ".join(f"{t} ({e})" for t, e in inp["min_failures"].items())
+                + "; the largest minimum above is the largest of the others")
+        else:
+            add("PASS", "exchange_minimum_partial", f"all {len(inp['tokens'])} sampled tokens were read")
     elif not inp["tokens"]:
         add("FAIL", "exchange_minimum_read",
             "no sample: no open live position and no --token given, so no minimum was read from the exchange")
     else:
         add("FAIL", "exchange_minimum_read",
             "every read failed: " + ", ".join(f"{t} ({e})" for t, e in inp["min_failures"].items()))
+
+    _override_check(inp, minimum, add)
 
     al = inp["allowlists"]
     unreadable = [u for u in UNITS if al[u] is None]
@@ -514,6 +723,10 @@ def evaluate(inp):
         add("WARN", "cap_formulas_agree",
             f"governor {_money(gov_eff)} = min(max(tier, fixed), bankroll x frac) differs from the scheduler "
             f"start check {_money(sch_eff)} = min(fixed, bankroll x frac); the start check is the stricter or looser of the two")
+
+    _readings_check(reading, bankroll, add)
+    _settings_check(inp, add)
+    _env_file_check(inp, add)
 
     if bankroll is None or halt is None or floor is None:
         add("WARN", "daily_halt_reachable", "unknown (bankroll, halt or floor missing)")

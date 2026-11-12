@@ -90,6 +90,7 @@ from __future__ import annotations
 from config.polymarket_urls import clob_url  # polyproxy: central URL config
 
 import logging
+import math
 import os
 import socket
 from typing import TYPE_CHECKING
@@ -347,13 +348,14 @@ def get_min_order_size(token_id: str, *, strict: bool = False) -> float:
     strict=True (the live pre-flight): a failed read raises ClobError naming the
     token and the cause instead of returning the default, and the pytest
     short-circuit below is skipped, so the default is never read as a fact. The
-    environment override is still honoured.
+    environment override is IGNORED: the value is the exchange's /book answer
+    (present, finite and positive) or the call raises.
 
     POLYCLAWD_MIN_ORDER_SHARES env var overrides the lookup entirely (ops
     escape hatch if Polymarket changes the field name).
     """
     override = os.environ.get("POLYCLAWD_MIN_ORDER_SHARES", "").strip()
-    if override:
+    if override and not strict:
         try:
             return float(override)
         except ValueError:
@@ -370,7 +372,11 @@ def get_min_order_size(token_id: str, *, strict: bool = False) -> float:
 
     now = _time.monotonic()
     hit = _min_order_size_cache.get(token_id)
-    if hit is not None and (now - hit[1]) < _MIN_ORDER_SIZE_TTL:
+    # The cache holds exchange reads only (a fallback or an override is never stored).
+    # A strict call also refuses a cached value that is not finite and positive, which a
+    # non-strict read could have stored.
+    if hit is not None and (now - hit[1]) < _MIN_ORDER_SIZE_TTL and (
+            not strict or (math.isfinite(hit[0]) and hit[0] > 0)):
         return hit[0]
 
     try:
@@ -386,6 +392,8 @@ def get_min_order_size(token_id: str, *, strict: bool = False) -> float:
         val = float(raw)
         if val <= 0:
             raise ValueError(f"non-positive min_order_size {val!r}")
+        if strict and not math.isfinite(val):
+            raise ValueError(f"non-finite min_order_size {val!r}")
     except Exception as exc:
         if strict:
             raise ClobError(
