@@ -55,6 +55,9 @@ CONSUMER_READINGS = (
                "the same row, and passes it to _sw_live_size_usd and the governor rails"),
     ("SCHEDULER_START_CHECK", "_assert_live_cap_fits_min_action reads the same newest live_portfolio_state row"),
 )
+# The position sync (scheduler tick "5min", task_position_sync) writes the stored row every 5
+# minutes when it can reach the exchange, so an hour is twelve missed syncs. A test checks the tick.
+DEFAULT_MAX_BANKROLL_AGE_MINUTES = 60
 SEARCH_MAX_CENTS = 100_000  # $1,000.00
 EPS = 1e-9
 
@@ -124,6 +127,23 @@ def read_governor_bankroll():
     if row is None or row["bankroll"] is None:
         raise LookupError("live_portfolio_state has no bankroll row")
     return float(row["bankroll"])
+
+
+def read_stored_row():
+    """When the newest live_portfolio_state row was written: {"has_column", "value"} with the
+    raw `ts` text. A table without a `ts` column says so (nothing is invented); an empty table
+    raises."""
+    con = open_readonly(_db_path())
+    try:
+        columns = {r["name"] for r in con.execute("PRAGMA table_info(live_portfolio_state)")}
+        if "ts" not in columns:
+            return {"has_column": False, "value": None}
+        row = con.execute("SELECT ts FROM live_portfolio_state ORDER BY id DESC LIMIT 1").fetchone()
+    finally:
+        con.close()
+    if row is None:
+        raise LookupError("live_portfolio_state has no row")
+    return {"has_column": True, "value": row["ts"]}
 
 
 def systemctl_main_pid(unit, run=subprocess.run):
@@ -277,6 +297,8 @@ def default_sources():
         kill_floor=live_config.kill_floor,
         daily_halt=live_config.daily_loss_halt,
         governor_bankroll=read_governor_bankroll,
+        stored_row=read_stored_row,
+        now=lambda: datetime.now(timezone.utc),
         cash=cash,
         positions=read_open_positions,
         orderbook=orderbook,
@@ -318,6 +340,8 @@ def gather(cli_tokens, sources=None):
     inp["kill_floor"] = call("kill_floor", src["kill_floor"])
     inp["daily_halt"] = call("daily_halt", src["daily_halt"])
     inp["governor_bankroll"] = call("governor_bankroll", src["governor_bankroll"])
+    inp["stored_row"] = call("stored_row", src["stored_row"])
+    inp["now"] = call("now", src["now"])
     inp["cash"] = call("cash", src["cash"])
     inp["price_ceiling"] = call("price_ceiling", src["price_ceiling"])
     sb = call("stop_bounds", src["stop_bounds"])
@@ -449,6 +473,69 @@ def _override_check(inp, minimum, add):
         add("WARN", "min_order_override", "; ".join(parts))
     else:
         add("PASS", "min_order_override", f"{OVERRIDE_VAR} not set in this process or in either unit's start environment")
+
+
+def _parse_utc(value):
+    """A timestamp text as an aware UTC datetime, or None. A time with no offset is UTC (the
+    governor writes aware ISO times); the process time zone is never consulted."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        when = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        return when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc)
+
+
+def _utc_text(when):
+    return when.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _stored_age(inp):
+    """(age line value, age in seconds or None, why it is unknown). Never a guess."""
+    row = inp.get("stored_row")
+    if row is None:
+        return "unknown (the newest row could not be read)", None, "the newest row could not be read"
+    if not row.get("has_column"):
+        return "unknown (no timestamp column)", None, "live_portfolio_state has no timestamp column"
+    written = _parse_utc(row.get("value"))
+    if written is None:
+        return "unknown (timestamp not readable)", None, "the row's timestamp is missing or not a readable time"
+    now = inp.get("now") or datetime.now(timezone.utc)
+    age = (now - written).total_seconds()
+    minutes = int(abs(age) // 60)
+    shown = f"{minutes // 60}h {minutes % 60}m (row written {_utc_text(written)})"
+    return shown, age, _utc_text(written)
+
+
+def _stored_checks(inp, floor, add):
+    """The governor's kill floor on the stored figure, and how old that figure is."""
+    reading = inp["governor_bankroll"]
+    if reading is None or floor is None:
+        add("FAIL", "stored_bankroll_above_kill_floor",
+            f"unknown: stored bankroll {_money(reading)}, kill floor {_money(floor)}")
+    else:
+        # RiskGovernor.check: `self._bankroll < live_config.kill_floor()` is a KILL; equal is not.
+        killed = reading < floor
+        what = "is below" if killed else ("equals" if reading == floor else "is above")
+        add("FAIL" if killed else "PASS", "stored_bankroll_above_kill_floor",
+            f"stored bankroll {_money(reading)} {what} kill floor {_money(floor)} "
+            f"(what the governor reads; it kills when the stored reading is below the floor)")
+    limit = inp.get("max_bankroll_age_minutes", DEFAULT_MAX_BANKROLL_AGE_MINUTES)
+    _shown, age, detail = _stored_age(inp)
+    tail = ("the sizing checks above use this figure; it may not reflect the account now. "
+            "A WARN, not a FAIL: under PAPER the position sync may legitimately be idle")
+    if age is None:
+        add("WARN", "stored_bankroll_fresh", f"age unknown ({detail}); {tail}")
+    elif age < 0:
+        add("WARN", "stored_bankroll_fresh", f"newest row is dated in the future ({detail}); {tail}")
+    elif age > limit * 60:
+        add("WARN", "stored_bankroll_fresh",
+            f"newest row is {_shown} old, over the {limit:g} minute limit; {tail}")
+    else:
+        add("PASS", "stored_bankroll_fresh", f"newest row written {detail}, within {limit:g} minutes")
 
 
 def _readings_check(reading, market, add):
@@ -585,6 +672,7 @@ def evaluate(inp):
     lines.append(("SPREAD_ALLOW_PCT", "unknown" if spread_allow is None else f"{spread_allow:.2f}"))
 
     lines.append(("BANKROLL_GOVERNOR_READING", _money(inp["governor_bankroll"])))
+    lines.append(("STORED_BANKROLL_AGE", _stored_age(inp)[0]))
     for consumer, how in CONSUMER_READINGS:
         lines.append((f"BANKROLL_USED_BY_{consumer}", f"{_money(reading)}  = the stored reading: {how}"))
     lines.append(("EXCHANGE_CASH", _money(inp["cash"])))
@@ -674,6 +762,7 @@ def evaluate(inp):
         ok = bankroll > floor
         add("PASS" if ok else "FAIL", "bankroll_above_kill_floor",
             f"market-value bankroll {_money(bankroll)} {'>' if ok else 'is not >'} kill floor {_money(floor)}")
+    _stored_checks(inp, floor, add)
 
     if inp["min_reads"]:
         extra = ""
@@ -780,13 +869,29 @@ def render(rep):
     return "\n".join(out) + "\n"
 
 
+def _positive_minutes(text):
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive finite number of minutes: {text!r}")
+    return value
+
+
 def main(argv=None, *, sources=None, out=None):
     ap = argparse.ArgumentParser(description="Read-only live trading pre-flight (plan task 1.12).")
     ap.add_argument("--token", action="append", default=[], metavar="TOKEN_ID",
                     help="extra token to read the exchange minimum for (repeatable)")
+    ap.add_argument("--max-bankroll-age-minutes", type=_positive_minutes,
+                    default=DEFAULT_MAX_BANKROLL_AGE_MINUTES, metavar="MINUTES",
+                    help="warn when the newest live_portfolio_state row is older than this "
+                         f"(default {DEFAULT_MAX_BANKROLL_AGE_MINUTES}; the position sync writes it every 5 minutes)")
     args = ap.parse_args(argv)
     out = out or sys.stdout
-    rep = evaluate(gather(args.token, sources))
+    inp = gather(args.token, sources)
+    inp["max_bankroll_age_minutes"] = args.max_bankroll_age_minutes
+    rep = evaluate(inp)
     out.write(render(rep))
     return rep["exit"]
 

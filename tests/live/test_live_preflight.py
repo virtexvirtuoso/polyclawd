@@ -13,6 +13,8 @@ price ceiling 0.60 (minimum order $3.00), kill floor $10.
 import io
 import re
 import sqlite3
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,14 @@ from scripts import live_preflight as pf
 REPO = Path(__file__).resolve().parents[2]
 SM = {"smart_wallet"}
 UNITS = ("polyclawd-scheduler", "polyclawd-api")
+
+
+NOW = datetime(2026, 11, 12, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def row_aged(minutes):
+    """The newest live_portfolio_state row, written `minutes` before NOW (how the governor writes ts)."""
+    return {"has_column": True, "value": (NOW - timedelta(minutes=minutes)).isoformat()}
 
 
 def sizer(bankroll):
@@ -49,6 +59,8 @@ def mk(**over):
         unit_vars={u: {} for u in UNITS},
         env_file={"path": "config/polymarket.env", "mtime": 1_000.0},
         unit_started={u: 2_000.0 for u in UNITS},
+        stored_row=row_aged(5),
+        now=NOW,
     )
     base.update(over)
     return base
@@ -328,6 +340,8 @@ def make_sources(**over):
         unit_vars=lambda unit: {},
         env_file=lambda: {"path": "config/polymarket.env", "mtime": 1_000.0},
         unit_started=lambda unit: 2_000.0,
+        stored_row=lambda: row_aged(5),
+        now=lambda: NOW,
         sizers={"smart_wallet": sizer},
     )
     src.update(over)
@@ -872,3 +886,208 @@ def test_database_path_with_a_space_hash_question_mark_and_percent_opens_the_rig
     with pytest.raises(sqlite3.OperationalError):
         ro.execute("INSERT INTO t VALUES (8)")
     ro.close()
+
+
+# --------------------------------------------------------------------------- fix-7 P1: the governor's kill floor
+# on the figure the governor reads
+
+
+def test_stored_bankroll_under_the_kill_floor_fails_even_when_the_market_value_is_fine():
+    rep = pf.evaluate(mk(governor_bankroll=9.99, cash=40.0))
+    c = one(rep, "stored_bankroll_above_kill_floor")
+    assert c["status"] == "FAIL" and "$9.99" in c["text"] and "$10.00" in c["text"]
+    assert one(rep, "bankroll_above_kill_floor")["status"] == "PASS"       # the market value is untouched
+    assert rep["exit"] == 1 and "stored_bankroll_above_kill_floor" in rep["failing"]
+
+
+def test_stored_bankroll_exactly_at_the_kill_floor_follows_the_governors_comparison():
+    # RiskGovernor.check kills when `self._bankroll < kill_floor()`: equal is not a kill.
+    c = one(pf.evaluate(mk(governor_bankroll=10.0, cash=40.0)), "stored_bankroll_above_kill_floor")
+    assert c["status"] == "PASS" and "equal" in c["text"]
+    assert one(pf.evaluate(mk(governor_bankroll=10.01, cash=40.0)),
+               "stored_bankroll_above_kill_floor")["status"] == "PASS"
+    assert one(pf.evaluate(mk(governor_bankroll=9.999, cash=40.0)),
+               "stored_bankroll_above_kill_floor")["status"] == "FAIL"
+
+
+def test_unreadable_stored_bankroll_fails_the_stored_kill_floor_check():
+    rep = pf.evaluate(mk(governor_bankroll=None, cash=40.0, failures={"governor_bankroll": "LookupError: none"}))
+    c = one(rep, "stored_bankroll_above_kill_floor")
+    assert c["status"] == "FAIL" and "unknown" in c["text"]
+
+
+def test_unknown_kill_floor_fails_the_stored_kill_floor_check():
+    rep = pf.evaluate(mk(kill_floor=None))
+    assert one(rep, "stored_bankroll_above_kill_floor")["status"] == "FAIL"
+
+
+def test_the_two_kill_floor_checks_read_their_own_figure():
+    stored_ok = pf.evaluate(mk(governor_bankroll=40.0, cash=9.0))
+    assert one(stored_ok, "stored_bankroll_above_kill_floor")["status"] == "PASS"
+    assert one(stored_ok, "bankroll_above_kill_floor")["status"] == "FAIL"
+    market_ok = pf.evaluate(mk(governor_bankroll=9.0, cash=40.0))
+    assert one(market_ok, "stored_bankroll_above_kill_floor")["status"] == "FAIL"
+    assert one(market_ok, "bankroll_above_kill_floor")["status"] == "PASS"
+
+
+# --------------------------------------------------------------------------- fix-7 P2: how old the stored figure is
+
+
+def test_a_row_59_minutes_old_is_fresh_and_61_warns_with_the_age_and_the_time():
+    fresh = pf.evaluate(ok_mk(stored_row=row_aged(59)))
+    assert one(fresh, "stored_bankroll_fresh")["status"] == "PASS"
+    assert line(fresh, "STORED_BANKROLL_AGE") == "0h 59m (row written 2026-11-12 11:01:00 UTC)"
+    stale = pf.evaluate(ok_mk(stored_row=row_aged(61)))
+    c = one(stale, "stored_bankroll_fresh")
+    assert c["status"] == "WARN"
+    assert "1h 1m" in c["text"] and "2026-11-12 10:59:00 UTC" in c["text"]
+    assert "may not reflect the account now" in c["text"] and "PAPER" in c["text"]
+    assert line(stale, "STORED_BANKROLL_AGE") == "1h 1m (row written 2026-11-12 10:59:00 UTC)"
+    assert stale["exit"] == 0 and stale["failing"] == fresh["failing"]       # a WARN never changes the exit
+
+
+def test_a_row_exactly_at_the_limit_is_fresh():
+    assert one(pf.evaluate(mk(stored_row=row_aged(60))), "stored_bankroll_fresh")["status"] == "PASS"
+
+
+@pytest.mark.parametrize("value", ["not a time", "", None, 12345, "2026-13-45 99:00:00"])
+def test_a_timestamp_that_cannot_be_parsed_warns_and_prints_unknown(value):
+    rep = pf.evaluate(ok_mk(stored_row={"has_column": True, "value": value}))
+    c = one(rep, "stored_bankroll_fresh")
+    assert c["status"] == "WARN" and "may not reflect the account now" in c["text"]
+    assert line(rep, "STORED_BANKROLL_AGE").startswith("unknown")
+    assert rep["exit"] == 0
+
+
+def test_a_table_with_no_timestamp_column_prints_that_and_warns_and_invents_nothing():
+    rep = pf.evaluate(ok_mk(stored_row={"has_column": False, "value": None}))
+    assert line(rep, "STORED_BANKROLL_AGE") == "unknown (no timestamp column)"
+    assert one(rep, "stored_bankroll_fresh")["status"] == "WARN" and rep["exit"] == 0
+
+
+def test_a_row_that_could_not_be_read_warns_it_is_not_a_pass():
+    rep = pf.evaluate(mk(stored_row=None, failures={"stored_row": "OperationalError: locked"}))
+    assert one(rep, "stored_bankroll_fresh")["status"] == "WARN"
+    assert line(rep, "STORED_BANKROLL_AGE").startswith("unknown")
+
+
+def test_a_row_written_in_the_future_is_not_a_fresh_row():
+    rep = pf.evaluate(mk(stored_row=row_aged(-30)))
+    c = one(rep, "stored_bankroll_fresh")
+    assert c["status"] == "WARN" and "future" in c["text"]
+
+
+def test_the_limit_comes_from_the_input_and_defaults_to_sixty():
+    assert one(pf.evaluate(mk(stored_row=row_aged(61), max_bankroll_age_minutes=120)),
+               "stored_bankroll_fresh")["status"] == "PASS"
+    assert one(pf.evaluate(mk(stored_row=row_aged(31), max_bankroll_age_minutes=30)),
+               "stored_bankroll_fresh")["status"] == "WARN"
+    assert pf.DEFAULT_MAX_BANKROLL_AGE_MINUTES == 60
+
+
+@pytest.fixture
+def tz_los_angeles(monkeypatch):
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+@pytest.mark.parametrize("written", ["2026-11-12T10:59:00+00:00", "2026-11-12T10:59:00Z", "2026-11-12 10:59:00",
+                                     "2026-11-12T10:59:00"])
+def test_the_time_is_read_as_utc_whatever_the_process_time_zone_is(tz_los_angeles, written):
+    assert datetime.now().astimezone().utcoffset() != timedelta(0)         # the zone really is not UTC
+    rep = pf.evaluate(mk(stored_row={"has_column": True, "value": written}))
+    assert line(rep, "STORED_BANKROLL_AGE") == "1h 1m (row written 2026-11-12 10:59:00 UTC)"
+    assert one(rep, "stored_bankroll_fresh")["status"] == "WARN"
+
+
+def test_a_time_with_an_offset_is_converted_to_utc():
+    rep = pf.evaluate(mk(stored_row={"has_column": True, "value": "2026-11-12T05:59:00-05:00"}))
+    assert line(rep, "STORED_BANKROLL_AGE") == "1h 1m (row written 2026-11-12 10:59:00 UTC)"
+
+
+def test_main_flag_changes_the_limit_and_the_age_line_is_printed():
+    rc, out = run_main(["--token", "T1"], stored_row=lambda: row_aged(90))
+    assert rc == 0 and re.search(r"^STORED_BANKROLL_AGE: 1h 30m \(row written 2026-11-12 10:30:00 UTC\)$", out, re.M)
+    assert re.search(r"^WARN stored_bankroll_fresh: ", out, re.M)
+    rc, out = run_main(["--token", "T1", "--max-bankroll-age-minutes", "120"], stored_row=lambda: row_aged(90))
+    assert re.search(r"^PASS stored_bankroll_fresh: ", out, re.M)
+    rc, out = run_main(["--token", "T1", "--max-bankroll-age-minutes", "30"], stored_row=lambda: row_aged(40))
+    assert re.search(r"^WARN stored_bankroll_fresh: ", out, re.M)
+    assert re.search(r"^(PASS|FAIL) stored_bankroll_above_kill_floor: ", out, re.M)
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "nan", "inf", "abc"])
+def test_main_refuses_a_limit_that_is_not_a_positive_finite_number(bad):
+    with pytest.raises(SystemExit) as exc:
+        pf.main(["--max-bankroll-age-minutes", bad], sources=make_sources(), out=io.StringIO())
+    assert exc.value.code == 2
+
+
+def test_a_source_that_fails_for_the_row_is_recorded_and_warns_in_main():
+    def boom():
+        raise sqlite3.OperationalError("database is locked")
+
+    rc, out = run_main(["--token", "T1"], stored_row=boom)
+    assert rc == 0
+    assert re.search(r"^FAILED_SOURCE\[stored_row\]: OperationalError", out, re.M)
+    assert re.search(r"^WARN stored_bankroll_fresh: ", out, re.M)
+
+
+def test_the_row_reader_returns_the_timestamp_of_the_newest_row_read_only(tmp_path, monkeypatch):
+    db = tmp_path / "live.db"
+    con = sqlite3.connect(db)
+    con.executescript("""
+        CREATE TABLE live_portfolio_state (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, bankroll REAL);
+        INSERT INTO live_portfolio_state (ts, bankroll) VALUES ('2026-11-12T08:00:00+00:00', 20.0),
+                                                                ('2026-11-12T09:30:00+00:00', 16.97);
+    """)
+    con.commit()
+    con.close()
+    monkeypatch.setenv("POLYCLAWD_LIVE_DB", str(db))
+    assert pf.read_stored_row() == {"has_column": True, "value": "2026-11-12T09:30:00+00:00"}
+
+
+def test_the_row_reader_says_when_there_is_no_timestamp_column_and_fails_on_an_empty_table(tmp_path, monkeypatch):
+    db = tmp_path / "live.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE live_portfolio_state (id INTEGER PRIMARY KEY AUTOINCREMENT, bankroll REAL)")
+    con.execute("INSERT INTO live_portfolio_state (bankroll) VALUES (5.0)")
+    con.commit()
+    con.close()
+    monkeypatch.setenv("POLYCLAWD_LIVE_DB", str(db))
+    assert pf.read_stored_row() == {"has_column": False, "value": None}
+    empty = tmp_path / "empty.db"
+    con = sqlite3.connect(empty)
+    con.execute("CREATE TABLE live_portfolio_state (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, bankroll REAL)")
+    con.commit()
+    con.close()
+    monkeypatch.setenv("POLYCLAWD_LIVE_DB", str(empty))
+    with pytest.raises(LookupError):
+        pf.read_stored_row()
+
+
+def test_the_row_reader_does_not_create_a_missing_database(tmp_path, monkeypatch):
+    missing = tmp_path / "sub" / "nope.db"
+    monkeypatch.setenv("POLYCLAWD_LIVE_DB", str(missing))
+    with pytest.raises(Exception):
+        pf.read_stored_row()
+    assert not missing.exists() and not missing.parent.exists()
+
+
+def test_the_governor_still_kills_below_the_floor_and_the_table_still_has_a_ts_column():
+    gov = _squash((REPO / "execution" / "risk_governor.py").read_text())
+    assert "if self._governor_state == \"KILL\" or self._bankroll < live_config.kill_floor():" in gov
+    ddl = _squash((REPO / "execution" / "live_db.py").read_text())
+    assert ("CREATE TABLE IF NOT EXISTS live_portfolio_state ( id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "ts TEXT, bankroll REAL,") in ddl
+    assert "ts=datetime.now(timezone.utc).isoformat()," in gov            # written as an aware ISO time
+
+
+def test_the_position_sync_that_writes_the_row_still_runs_every_five_minutes():
+    sched = (REPO / "services" / "scheduler.py").read_text()
+    block = sched.split('"5min": [', 1)[1].split("],", 1)[0]
+    assert '"position_sync"' in block
+    assert pf.DEFAULT_MAX_BANKROLL_AGE_MINUTES >= 2 * 5
