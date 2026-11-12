@@ -465,3 +465,46 @@ EXPECTED = {'accum': [['0xA',
 def test_alerts_and_rows_of_a_mixed_cycle_are_unchanged(dbs, sends):
     snap = json.loads(json.dumps(_snapshot(dbs, sends)))
     assert snap == EXPECTED
+
+
+# --------------------------------------------------------------------------- #
+# fix-5 F6: the eligibility call cannot break the alert loop
+# --------------------------------------------------------------------------- #
+def test_an_unexpected_error_in_the_eligibility_call_does_not_touch_the_alert(tmp_path, monkeypatch, caplog):
+    """Patch _live_eligibility to raise: the record comes back not eligible with reason
+    eligibility_error, the alert is delivered exactly as in a run where it does not
+    raise (same dispatch calls), and check_and_fire does not raise."""
+    def run_once(sub, patched):
+        d = tmp_path / sub
+        d.mkdir()
+        meta, shadow = _open(d / "whale_meta.db"), _open(d / "shadow_trades.db")
+        swa.init_accum(meta)
+        swa.init_shadows(shadow)
+        calls = []
+        with monkeypatch.context() as m:
+            m.setattr(swa, "page_tier_for", lambda wallet, alert_type: 3)
+            m.setattr(swa, "_executable_snapshot", lambda *a, **k: dict(BOOK))
+            m.setattr(swa, "dispatch", lambda pipeline, msg, tier, **kw: calls.append((pipeline, msg, tier)))
+            import scripts.alert_formatter as af
+            m.setattr(af, "send_telegram", lambda msg, *a, **k: calls.append(("telegram", msg, None)))
+            if patched:
+                def boom(*a, **k):
+                    raise RuntimeError("eligibility boom with /secret/path")
+                m.setattr(swa, "_live_eligibility", boom)
+            try:
+                with caplog.at_level(logging.WARNING, logger=swa.__name__):
+                    caplog.clear()
+                    fired = swa.check_and_fire(meta, shadow, [_fill()], _meta_provider(), send=True, now=NOW)
+            finally:
+                meta.close()
+                shadow.close()
+        return fired, calls, [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+    base_fired, base_calls, _ = run_once("clean", patched=False)
+    fired, calls, warnings = run_once("boom", patched=True)
+    assert len(base_calls) == 1 and calls == base_calls          # delivered, identically
+    (r,) = fired
+    assert (r["live_eligible"], r["live_filter_reason"]) == (False, "eligibility_error")
+    assert (base_fired[0]["live_eligible"], base_fired[0]["live_filter_reason"]) == (True, None)
+    assert len(warnings) == 1 and "RuntimeError" in warnings[0]
+    assert "secret" not in warnings[0] and "boom" not in warnings[0]      # type only

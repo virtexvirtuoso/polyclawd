@@ -309,25 +309,38 @@ def test_the_limit_is_the_shared_constant():
     assert live_config.SPREAD_ALLOW_PCT == 0.10
 
 
-@pytest.mark.parametrize("book", [
-    None,
-    _book(TOKEN_A, [], [0.40]),
-    _book(TOKEN_A, [0.39], []),
-    _book(TOKEN_A, [], []),
-    _book(TOKEN_A, [0.39, float("nan")], [0.40]),
-    _book(TOKEN_A, [0.39], [0.40, 0.0]),
-    _book(TOKEN_A, [0.39], [0.40, 1.5]),
-    _book(TOKEN_A, [-0.1, 0.39], [0.40]),
-    _book(TOKEN_A, [0.39], [0.40, None]),
-    _book(TOKEN_A, [0.39], [0.40, "0.41"]),
-    _book(TOKEN_A, [0.39, True], [0.40]),
-    _book(TOKEN_A, [0.39], [float("inf")]),
+@pytest.mark.parametrize("book,kind", [
+    (None, "none"),
+    (_book(TOKEN_A, [], []), "empty"),
+    (_book(TOKEN_A, [0.39, float("nan")], [0.40]), "bad_price"),
+    (_book(TOKEN_A, [0.39], [0.40, 0.0]), "bad_price"),
+    (_book(TOKEN_A, [0.39], [0.40, 1.5]), "bad_price"),
+    (_book(TOKEN_A, [-0.1, 0.39], [0.40]), "bad_price"),
+    (_book(TOKEN_A, [0.39], [0.40, None]), "bad_price"),
+    (_book(TOKEN_A, [0.39], [0.40, "0.41"]), "bad_price"),
+    (_book(TOKEN_A, [0.39, True], [0.40]), "bad_price"),
+    (_book(TOKEN_A, [0.39], [float("inf")]), "bad_price"),
 ])
-def test_missing_one_sided_or_corrupt_book_is_unpriced(env, paper, book):
+def test_missing_empty_or_corrupt_book_is_unpriced(env, paper, book, kind):
     env.books[TOKEN_A] = book
     f = _one(env, _rec())
     assert (f["verdict"], f["reason"]) == ("filtered", "unpriced_book")
     assert (f["bid"], f["ask"], f["spread_pct"]) == ("-", "-", "-")
+    assert f["book"] == kind
+
+
+@pytest.mark.parametrize("book,bid,ask", [
+    (_book(TOKEN_A, [0.39, 0.30], []), "0.3900", "-"),
+    (_book(TOKEN_A, [], [0.40, 0.55]), "-", "0.4000"),
+])
+def test_a_one_sided_book_is_unpriced_and_logs_the_side_that_exists(env, paper, book, bid, ask):
+    env.books[TOKEN_A] = book
+    sw._route_live_smart_wallet([_rec()], _gamma())
+    (line,) = _lines(env, "sw_live RECORD")
+    f = _fields(line)
+    assert (f["verdict"], f["reason"], f["book"]) == ("filtered", "unpriced_book", "one_sided")
+    assert (f["bid"], f["ask"], f["spread_pct"]) == (bid, ask, "-")
+    assert f"bid={bid} ask={ask} spread_pct=-" in line
 
 
 def test_a_level_priced_exactly_one_is_real(env, paper):
@@ -375,6 +388,7 @@ def test_each_reason_appears_for_a_record_built_to_trigger_it(env, paper):
     env.books[TOKEN_B] = _book(TOKEN_B, [0.39], [0.40])
     env.books["tok-wide"] = _book("tok-wide", [0.30], [0.40])
     env.books["tok-none"] = None
+    env.books["tok-crossed"] = _book("tok-crossed", [0.50], [0.40])
     env.books["tok-drift"] = _book("tok-drift", [0.69], [0.70])
     cases = {
         "price_band": _rec(live_eligible=False, live_filter_reason="price_band"),
@@ -386,6 +400,7 @@ def test_each_reason_appears_for_a_record_built_to_trigger_it(env, paper):
         "no_token": _rec(asset=None),
         "no_title": _rec(title=""),
         "wide_spread": _rec(asset="tok-wide"),
+        "crossed_book": _rec(asset="tok-crossed"),
         "unpriced_book": _rec(asset="tok-none"),
         "exit_cooldown": _rec(asset=TOKEN_B),
         "price_drift": _rec(asset="tok-drift"),
@@ -461,7 +476,7 @@ def test_record_line_for_a_would_route_record_field_by_field(env, paper):
     assert line == (
         "sw_live RECORD verdict=would_route reason=- alert_type=entry price=0.4000 "
         f"wallet={WALLET} is_bot=false clv_muted=false category=sports bid=0.3900 ask=0.4000 "
-        f"spread_pct=0.0250 market={CID[:16]} token={TOKEN_A[-8:]}")
+        f"spread_pct=0.0250 market={CID[:16]} token={TOKEN_A[-8:]} gamma=present book=ok")
     assert all(" " not in v for v in _fields(line).values())
 
 
@@ -473,7 +488,7 @@ def test_record_line_for_a_filtered_record_field_by_field(env, paper):
     assert line == (
         "sw_live RECORD verdict=filtered reason=price_band alert_type=entry price=0.7200 "
         f"wallet={WALLET} is_bot=false clv_muted=true category=politics bid=- ask=- "
-        f"spread_pct=- market={CID[:16]} token={TOKEN_A[-8:]}")
+        f"spread_pct=- market={CID[:16]} token={TOKEN_A[-8:]} gamma=present book=-")
     assert all(" " not in v for v in _fields(line).values())
 
 
@@ -499,13 +514,13 @@ def test_dryrun_summary_counts_per_reason_sorted_by_name(env, paper):
     sw._route_live_smart_wallet(recs, _gamma())
     (line,) = _lines(env, "sw_live DRYRUN")
     assert line == ("sw_live DRYRUN mode=PAPER armed=false records=5 would_route=1 "
-                    "filtered=bot_wallet:1,no_title:1,price_band:2")
+                    "filtered=bot_wallet:1,no_title:1,price_band:2 gamma_missing=0")
 
 
 def test_dryrun_summary_with_nothing_filtered(env, paper):
     sw._route_live_smart_wallet([_rec()], _gamma())
     (line,) = _lines(env, "sw_live DRYRUN")
-    assert line == "sw_live DRYRUN mode=PAPER armed=false records=1 would_route=1 filtered=-"
+    assert line == "sw_live DRYRUN mode=PAPER armed=false records=1 would_route=1 filtered=- gamma_missing=0"
 
 
 def test_zero_records_log_nothing(env, paper):
@@ -600,7 +615,7 @@ def test_armed_logs_the_summary_before_routing(armed_env):
     msgs = [r.getMessage() for r in armed_env.caplog.records if r.getMessage().startswith("sw_live")]
     armed_i = next(i for i, m in enumerate(msgs) if m.startswith("sw_live ARMED"))
     routing_i = next(i for i, m in enumerate(msgs) if m.startswith("sw_live: routing"))
-    assert msgs[armed_i] == "sw_live ARMED records=2 would_route=1 filtered=bot_wallet:1"
+    assert msgs[armed_i] == "sw_live ARMED records=2 would_route=1 filtered=bot_wallet:1 gamma_missing=0"
     assert armed_i < routing_i
     assert msgs[routing_i] == "sw_live: routing 1 fired alerts to live executor"
     assert not any(m.startswith("sw_live DRYRUN") for m in msgs)
@@ -658,7 +673,7 @@ def test_a_record_error_filters_that_record_and_the_rest_continue(env, paper):
         ("filtered", "record_error"), ("would_route", "-"),
         ("filtered", "not_eligible"), ("would_route", "-")]
     (line,) = _lines(env, "sw_live DRYRUN")
-    assert line.endswith("records=4 would_route=2 filtered=not_eligible:1,record_error:1")
+    assert line.endswith("records=4 would_route=2 filtered=not_eligible:1,record_error:1 gamma_missing=1")   # the non-dict has no market
 
 
 def test_a_gate_that_raises_outside_the_record_handling_is_the_stage_error(env, paper, monkeypatch):
@@ -723,3 +738,248 @@ def test_meta_write_lock_is_free_when_scanner_hook_hands_records_to_the_router(t
     finally:
         probe.close()
         meta.close()
+
+
+# --------------------------------------------------------------------------- #
+# fix-5 F1: a crossed book is filtered
+# --------------------------------------------------------------------------- #
+def test_a_crossed_book_is_filtered_and_keeps_its_numbers(env, paper):
+    env.books[TOKEN_A] = _book(TOKEN_A, [0.50], [0.40])
+    rec = _rec()
+    sw._route_live_smart_wallet([rec], _gamma())
+    (line,) = _lines(env, "sw_live RECORD")
+    f = _fields(line)
+    assert (f["verdict"], f["reason"], f["book"]) == ("filtered", "crossed_book", "crossed")
+    assert (f["bid"], f["ask"], f["spread_pct"]) == ("0.5000", "0.4000", "-0.2500")
+    assert (rec["bid"], rec["ask"], rec["spread_pct"]) == (0.50, 0.40, -0.25)
+
+
+def test_a_book_with_bid_equal_to_ask_is_a_zero_spread_and_routes(env, paper):
+    env.books[TOKEN_A] = _book(TOKEN_A, [0.40], [0.40])
+    f = _one(env, _rec())
+    assert (f["verdict"], f["reason"], f["book"]) == ("would_route", "-", "ok")
+    assert (f["bid"], f["ask"], f["spread_pct"]) == ("0.4000", "0.4000", "0.0000")
+
+
+def test_a_crossed_book_never_reaches_the_executor_when_armed(armed_env):
+    armed_env.books[TOKEN_A] = _book(TOKEN_A, [0.50], [0.40])
+    (f,) = _route(armed_env, [_rec()])
+    assert f["reason"] == "crossed_book"
+    assert armed_env.intents == []
+    assert armed_env.sizing_calls == 0
+
+
+# --------------------------------------------------------------------------- #
+# fix-5 F2: the archetype gate fails closed
+# --------------------------------------------------------------------------- #
+def test_an_archetype_lookup_that_raises_is_archetype_error_and_never_would_route(env, paper, monkeypatch):
+    def locked(*a, **k):
+        raise sqlite3.OperationalError("database is locked: /secret/path")
+
+    monkeypatch.setattr("signals.whale_wallets.get_meta_db", locked)
+    sw._route_live_smart_wallet([_rec()], _gamma())
+    (line,) = _lines(env, "sw_live RECORD")
+    f = _fields(line)
+    assert (f["verdict"], f["reason"], f["book"]) == ("filtered", "archetype_error", "-")
+    assert env.book_calls == []
+    warnings = [r.getMessage() for r in env.caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "OperationalError" in warnings[0]
+    assert "secret" not in env.caplog.text and "locked" not in env.caplog.text   # type only
+
+
+def test_a_failed_archetype_lookup_blocks_the_order_when_armed(armed_env, monkeypatch):
+    monkeypatch.setattr("signals.whale_wallets.get_meta_db",
+                        lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")))
+    (f,) = _route(armed_env, [_rec()])
+    assert (f["verdict"], f["reason"]) == ("filtered", "archetype_error")
+    assert armed_env.intents == []
+
+
+def test_a_lookup_failure_that_the_gate_swallows_itself_is_also_archetype_error(env, paper, monkeypatch):
+    """archetype_gate_ok catches a failing SELECT and returns (True, 'abstain: lookup
+    failed ...'). That is a record that was not checked, so the router must not
+    treat it like a clean pass. Uses the real gate against a database with no table."""
+    def no_table(*a, **k):
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        return c
+
+    monkeypatch.setattr("signals.whale_wallets.get_meta_db", no_table)
+    f = _one(env, _rec())
+    assert (f["verdict"], f["reason"]) == ("filtered", "archetype_error")
+
+
+def test_a_wallet_with_no_archetype_record_still_routes(env, paper):
+    """The abstain-because-no-evidence answer is a real pass, unlike a failed lookup."""
+    env.archetype_rows = []
+    assert _one(env, _rec())["verdict"] == "would_route"
+
+
+# --------------------------------------------------------------------------- #
+# fix-5 F4: one list of reasons
+# --------------------------------------------------------------------------- #
+def _emitted_reasons(*funcs):
+    import ast
+    import inspect
+    import textwrap
+
+    out = set()
+    for fn in funcs:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Return) and n.value is not None:
+                v = n.value.values[-1] if isinstance(n.value, ast.BoolOp) else n.value
+                if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                    out.add(v.value)
+            elif isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant) \
+                    and isinstance(n.value.value, str):
+                for t in n.targets:
+                    if (isinstance(t, ast.Name) and t.id == "reason") or (
+                            isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant)
+                            and t.slice.value == "live_filter_reason"):
+                        out.add(n.value.value)
+    return out
+
+
+def test_the_reason_list_is_exactly_what_the_code_can_emit():
+    from scripts import smart_wallet_alert as swa
+
+    emitted = _emitted_reasons(sw._live_check_record, sw._live_book_check, sw._live_stage1,
+                               swa._live_eligibility, swa.check_and_fire)
+    assert {"no_token", "price_drift", "price_band", "crossed_book"} <= emitted   # the scan works
+    assert emitted == set(sw.LIVE_FILTER_REASONS)
+
+
+def test_the_reason_list_is_in_the_order_of_the_checks_and_has_no_duplicates():
+    assert sw.LIVE_FILTER_REASONS == (
+        "not_entry", "bot_wallet", "price_band", "clv_muted", "eligibility_error", "not_eligible",
+        "no_token", "no_category", "category", "no_title", "archetype", "archetype_error",
+        "unpriced_book", "crossed_book", "wide_spread", "unusable_rec", "exit_cooldown",
+        "price_drift", "record_error", "unknown_reason")
+    assert len(set(sw.LIVE_FILTER_REASONS)) == len(sw.LIVE_FILTER_REASONS)
+
+
+def test_an_unexpected_reason_from_a_record_becomes_unknown_reason_with_one_warning(env, paper):
+    long_bad = "weird, reason:" + "x" * 80 + "\nsecond line"
+    recs = [_rec(live_eligible=False, live_filter_reason=long_bad),
+            _rec(live_eligible=False, live_filter_reason="other thing"),
+            _rec(live_eligible=False, live_filter_reason=12345),
+            _rec(live_eligible=False, live_filter_reason="price_band")]
+    fields = _route(env, recs)
+    assert [(f["verdict"], f["reason"]) for f in fields] == [
+        ("filtered", "unknown_reason"), ("filtered", "unknown_reason"),
+        ("filtered", "unknown_reason"), ("filtered", "price_band")]
+    warnings = [r.getMessage() for r in env.caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1                                   # once per call
+    assert "weird" in warnings[0] and "\n" not in warnings[0]
+    assert "x" * 41 not in warnings[0]                          # at most 40 characters of the value
+
+
+def test_a_hostile_reason_cannot_break_the_summary_filtered_part(env, paper):
+    import re
+
+    recs = [_rec(live_eligible=False, live_filter_reason="a,b:9 c=d"),
+            _rec(live_eligible=False, live_filter_reason="price_band")]
+    sw._route_live_smart_wallet(recs, _gamma())
+    (line,) = _lines(env, "sw_live DRYRUN")
+    part = _fields(line)["filtered"]
+    assert part == "price_band:1,unknown_reason:1"
+    assert all(re.fullmatch(r"[a-z_]+:\d+", item) for item in part.split(","))
+
+
+# --------------------------------------------------------------------------- #
+# fix-5 F5: gamma= and book= on every RECORD line, gamma_missing= on the summary
+# --------------------------------------------------------------------------- #
+def test_gamma_missing_means_the_lookup_did_not_return_the_market(env, paper):
+    f = _one(env, _rec(), gamma={})
+    assert (f["gamma"], f["reason"], f["category"]) == ("missing", "no_category", "-")
+
+
+def test_gamma_present_with_no_category_is_not_missing(env, paper):
+    f = _one(env, _rec(), gamma=_gamma(category=None))
+    assert (f["gamma"], f["reason"]) == ("present", "no_category")
+
+
+def test_the_summary_counts_the_records_whose_market_was_not_in_the_gamma_data(env, paper):
+    recs = [_rec(), _rec(market="0xother0000000000", asset=TOKEN_B), _rec(market="0xthird00000000")]
+    sw._route_live_smart_wallet(recs, _gamma())
+    (line,) = _lines(env, "sw_live DRYRUN")
+    assert line.endswith("records=3 would_route=1 filtered=no_category:2 gamma_missing=2")
+
+
+def test_the_armed_summary_has_gamma_missing_too(armed_env):
+    _route(armed_env, [_rec(), _rec(market="0xother0000000000", asset=TOKEN_B)])
+    (line,) = _lines(armed_env, "sw_live ARMED")
+    assert line == "sw_live ARMED records=2 would_route=1 filtered=no_category:1 gamma_missing=1"
+
+
+def test_book_is_a_dash_when_the_record_was_filtered_before_the_read(env, paper):
+    f = _one(env, _rec(live_eligible=False, live_filter_reason="bot_wallet"))
+    assert f["book"] == "-" and env.book_calls == []
+
+
+def test_book_ok_for_a_priced_book_even_when_the_spread_is_too_wide(env, paper):
+    f = _spread_case(env, 0.08, 0.09)
+    assert (f["reason"], f["book"]) == ("wide_spread", "ok")
+
+
+def test_book_dash_when_the_read_itself_raised(env, paper):
+    env.books[TOKEN_A] = RuntimeError("boom")
+    f = _one(env, _rec())
+    assert (f["reason"], f["book"]) == ("record_error", "-")
+
+
+# --------------------------------------------------------------------------- #
+# fix-5 F3: a raw trade all the way to the router's log line
+# --------------------------------------------------------------------------- #
+def test_raw_trade_to_router_record_line_end_to_end(env, paper, tmp_path, monkeypatch):
+    """Raw trades in the data API adapter's shape -> the real scanner_hook (fills_from_trades,
+    run_from_scan, check_and_fire) -> the records it returns, untouched -> the real
+    _route_live_smart_wallet. Catches a field-name mismatch between the two halves."""
+    from scripts import smart_wallet_alert as swa
+
+    cid2 = "0xcondition0000000002"
+    monkeypatch.setattr(swa, "SHADOW_DB", tmp_path / "shadow_trades.db")
+    monkeypatch.setattr(swa, "page_tier_for", lambda wallet, alert_type: 3)
+    monkeypatch.setattr(swa, "dispatch", lambda *a, **k: None)
+    monkeypatch.setattr(swa, "_executable_snapshot", lambda *a, **k: {})
+    meta = sqlite3.connect(str(tmp_path / "whale_meta.db"), timeout=30)
+    meta.row_factory = sqlite3.Row
+    try:
+        trades = [
+            {"transactionHash": "0xtx1", "asset": TOKEN_A, "proxyWallet": WALLET, "conditionId": CID,
+             "side": "BUY", "size": 3000.0, "price": 0.40, "outcome": "Yes", "outcomeIndex": 0,
+             "title": TITLE, "slug": "s1", "timestamp": 1_700_000_000},
+            {"transactionHash": "0xtx2", "asset": TOKEN_B, "proxyWallet": WALLET, "conditionId": cid2,
+             "side": "BUY", "size": 2000.0, "price": 0.72, "outcome": "No", "outcomeIndex": 1,
+             "title": "Knicks vs Nets", "slug": "s2", "timestamp": 1_700_000_001},
+        ]
+        gamma = {
+            CID: {"volumeNum": 1_000_000, "last_price": 0.40, "question": TITLE,
+                  "endDate": "2026-12-31", "slug": "s1", "category": "sports"},
+            cid2: {"volumeNum": 1_000_000, "last_price": 0.72, "question": "Knicks vs Nets",
+                   "endDate": "2026-12-31", "slug": "s2", "category": "sports"},
+        }
+        smart = {WALLET: {"name": "w", "win_rate": 0.6, "net_pnl": 1, "closed_positions": 50,
+                          "source_category": "sports", "is_bot": 0}}
+        fired = swa.scanner_hook(meta, trades, gamma, smart)
+    finally:
+        meta.close()
+    assert len(fired) == 2
+
+    env.books[TOKEN_A] = _book(TOKEN_A, [0.39], [0.40])
+    env.caplog.clear()
+    sw._route_live_smart_wallet(fired, gamma)                 # the records exactly as returned
+    lines = _lines(env, "sw_live RECORD")
+    assert lines == [
+        "sw_live RECORD verdict=would_route reason=- alert_type=entry price=0.4000 "
+        f"wallet={WALLET} is_bot=false clv_muted=false category=sports bid=0.3900 ask=0.4000 "
+        f"spread_pct=0.0250 market={CID[:16]} token={TOKEN_A[-8:]} gamma=present book=ok",
+        "sw_live RECORD verdict=filtered reason=price_band alert_type=entry price=0.7200 "
+        f"wallet={WALLET} is_bot=false clv_muted=false category=sports bid=- ask=- "
+        f"spread_pct=- market={cid2[:16]} token={TOKEN_B[-8:]} gamma=present book=-",
+    ]
+    assert env.book_calls == [TOKEN_A]
+    (summary,) = _lines(env, "sw_live DRYRUN")
+    assert summary == ("sw_live DRYRUN mode=PAPER armed=false records=2 would_route=1 "
+                       "filtered=price_band:1 gamma_missing=0")

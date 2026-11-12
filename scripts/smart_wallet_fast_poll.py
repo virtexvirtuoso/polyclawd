@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import time
 from collections import OrderedDict, deque
 from typing import Optional
@@ -103,54 +104,10 @@ def _sw_live_size_usd(bankroll: float) -> float:
 
 
 # Category gate — only follow smart wallets into approved market verticals.
-# Gamma sometimes returns category=None (e.g. entertainment/pop-culture markets).
-# In that case we require a positive slug/question keyword match to proceed.
+# The gate reads the market's own Gamma category only. A market with no Gamma
+# category (Gamma sometimes returns None, e.g. entertainment/pop-culture markets,
+# or the lookup failed) is filtered as `no_category`; there is no slug/keyword fallback.
 _ALLOWED_CATEGORIES = {"sports", "crypto", "politics", "weather", "finance", "economics"}
-_ALLOWED_SLUG_KEYWORDS = (
-    # Sports
-    "mlb",
-    "nfl",
-    "nba",
-    "nhl",
-    "ufc",
-    "mls",
-    "wc",
-    "fwc",
-    "fifwc",
-    "soccer",
-    "football",
-    "basketball",
-    "baseball",
-    "tennis",
-    "golf",
-    "nascar",
-    "boxing",
-    "mma",
-    "hockey",
-    # Crypto / finance
-    "btc",
-    "eth",
-    "bitcoin",
-    "ethereum",
-    "crypto",
-    "sol",
-    "xrp",
-    "doge",
-    "fed-rate",
-    "gdp",
-    "inflation",
-    "cpi",
-    # Politics
-    "trump",
-    "biden",
-    "election",
-    "senate",
-    "congress",
-    "president",
-    "democrat",
-    "republican",
-    "vote",
-)
 
 
 # Vendor-minimum skip alerting — one Telegram per _MIN_SIZE_ALERT_COOLDOWN.
@@ -647,6 +604,16 @@ def _check_governor_rails(bankroll: float, size_usd: float) -> None:
 # --------------------------------------------------------------------------- #
 _SW_PRICE_DRIFT_MAX = 0.15  # >15pp between the book's bid and the alert price = stale signal
 
+# Every reason the router can put in a log line, in the order of the checks. A reason
+# that arrives from the record (live_filter_reason) and is not in this tuple is
+# logged as unknown_reason, so the DRYRUN summary's filtered= part stays parseable.
+LIVE_FILTER_REASONS = (
+    "not_entry", "bot_wallet", "price_band", "clv_muted", "eligibility_error", "not_eligible",
+    "no_token", "no_category", "category", "no_title", "archetype", "archetype_error",
+    "unpriced_book", "crossed_book", "wide_spread", "unusable_rec", "exit_cooldown",
+    "price_drift", "record_error", "unknown_reason",
+)
+
 
 def _lv(v) -> str:
     """One log value: no spaces, '-' for a missing one."""
@@ -667,23 +634,40 @@ def _is_book_price(p) -> bool:
 
 def _live_book_check(token_id: str, rec: dict, info: dict) -> Optional[str]:
     """The spread gate. ONE order-book read: stage 2 prices the order from the same
-    book. Puts bid, ask and spread_pct on rec (and info). Returns the reason or None."""
+    book. Puts bid, ask and spread_pct on rec (and info) and the book's state on
+    info["book"]: none (no book came back), empty, one_sided, bad_price, crossed, ok.
+    A one-sided book keeps the side that exists. Returns the reason or None."""
     from execution import live_config
     from odds.polymarket_clob import get_orderbook
 
     book = get_orderbook(token_id)
-    bids = getattr(book, "bids", None) if book is not None else None
-    asks = getattr(book, "asks", None) if book is not None else None
-    if not bids or not asks:
+    if book is None:
+        info["book"] = "none"
+        return "unpriced_book"
+    bids = getattr(book, "bids", None) or []
+    asks = getattr(book, "asks", None) or []
+    if not bids and not asks:
+        info["book"] = "empty"
         return "unpriced_book"
     bid_px = [getattr(lv, "price", None) for lv in bids]
     ask_px = [getattr(lv, "price", None) for lv in asks]
     if not all(_is_book_price(p) for p in bid_px + ask_px):
+        info["book"] = "bad_price"
+        return "unpriced_book"
+    if not bids or not asks:
+        info["book"] = "one_sided"
+        for key, px, pick in (("bid", bid_px, max), ("ask", ask_px, min)):
+            if px:
+                rec[key] = info[key] = pick(px)
         return "unpriced_book"
     bid, ask = max(bid_px), min(ask_px)
     spread_pct = round((ask - bid) / ask, 4)
     rec["bid"], rec["ask"], rec["spread_pct"] = bid, ask, spread_pct
     info["bid"], info["ask"], info["spread_pct"] = bid, ask, spread_pct
+    if ask < bid:
+        info["book"] = "crossed"
+        return "crossed_book"
+    info["book"] = "ok"
     if spread_pct > live_config.SPREAD_ALLOW_PCT:
         return "wide_spread"
     return None
@@ -730,10 +714,16 @@ def _live_check_record(rec: dict, gamma: dict, info: dict) -> Optional[str]:
             _mconn.close()
         if not _ok:
             return "archetype"
+        if str(_why).startswith("abstain: lookup failed"):
+            # archetype_gate_ok catches a failing lookup itself and abstains. That
+            # is a record nobody checked, not a pass.
+            logger.warning("sw_live: archetype lookup failed (blocking)")
+            return "archetype_error"
     except Exception as _ag_exc:  # noqa: BLE001
-        # Fail OPEN, as before: a gate that errors must not silently halt all
-        # trading, but it must say so rather than look like a clean pass.
-        logger.warning("sw_live: archetype gate errored (allowing): %s", _ag_exc)
+        # Fail CLOSED: a record the gate could not check is not "would_route",
+        # in the shadow log or in the order path.
+        logger.warning("sw_live: archetype gate errored type=%s (blocking)", type(_ag_exc).__name__)
+        return "archetype_error"
 
     # 5. spread gate: one book read per record that gets this far
     reason = _live_book_check(token_id, rec, info)
@@ -769,30 +759,46 @@ def _live_record_line(rec: dict, verdict: str, reason: Optional[str], info: dict
     token = rec.get("asset")
     return (
         "sw_live RECORD verdict=%s reason=%s alert_type=%s price=%s wallet=%s is_bot=%s "
-        "clv_muted=%s category=%s bid=%s ask=%s spread_pct=%s market=%s token=%s" % (
+        "clv_muted=%s category=%s bid=%s ask=%s spread_pct=%s market=%s token=%s gamma=%s book=%s" % (
             verdict, _lv(reason), _lv(rec.get("alert_type")), _lv(price), _lv(rec.get("wallet")),
             _lv(_flag(rec.get("is_bot"))), _lv(_flag(rec.get("clv_muted"))),
             _lv(info.get("category")), _lv(info.get("bid")), _lv(info.get("ask")),
             _lv(info.get("spread_pct")), _lv(str(rec.get("market") or "")[:16]),
-            _lv(token[-8:] if isinstance(token, str) else None)))
+            _lv(token[-8:] if isinstance(token, str) else None),
+            "present" if info.get("gamma") == "present" else "missing", _lv(info.get("book"))))
+
+
+def _safe_text(v, limit: int = 40) -> str:
+    """A value for a log message: printable ASCII word characters only, at most `limit`."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(v))[:limit]
 
 
 def _live_stage1(fired: list, gamma: dict) -> list:
-    """[(rec, reason, token)] for every record, logging one RECORD line each.
-    reason None = would_route. A record-level error filters that record only."""
+    """[(rec, reason, token, gamma_state)] for every record, logging one RECORD line each.
+    reason None = would_route. A record-level error filters that record only. A reason
+    that is not in LIVE_FILTER_REASONS is logged as unknown_reason (one warning per call)."""
     out = []
+    unknown = []
     for rec in fired:
         info: dict = {}
         r = rec if isinstance(rec, dict) else {}
         try:
-            cat = (gamma.get(r.get("market") or "") or {}).get("category")
+            market = r.get("market") or ""
+            info["gamma"] = "present" if market in gamma else "missing"
+            cat = (gamma.get(market) or {}).get("category")
             info["category"] = cat.lower().strip() if isinstance(cat, str) else ""
             reason = _live_check_record(r, gamma, info)
         except Exception as exc:  # noqa: BLE001 - one bad record must not stop the others
             logger.warning("sw_live: record error type=%s", type(exc).__name__)
             reason = "record_error"
+        if reason is not None and reason not in LIVE_FILTER_REASONS:
+            unknown.append(reason)
+            reason = "unknown_reason"
         logger.info(_live_record_line(r, "filtered" if reason else "would_route", reason, info))
-        out.append((rec, reason, info.get("token")))
+        out.append((rec, reason, info.get("token"), info.get("gamma", "missing")))
+    if unknown:
+        logger.warning("sw_live: %d record(s) with a reason outside LIVE_FILTER_REASONS, first=%s",
+                       len(unknown), _safe_text(unknown[0]))
     return out
 
 
@@ -817,18 +823,20 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
 
         decisions = _live_stage1(fired, gamma)
         armed = live_config.live_armed()
-        would_route = [(rec, token) for rec, reason, token in decisions if reason is None]
+        would_route = [(rec, token) for rec, reason, token, _g in decisions if reason is None]
         counts: dict = {}
-        for _rec, reason, _tok in decisions:
+        for _rec, reason, _tok, _g in decisions:
             if reason:
                 counts[reason] = counts.get(reason, 0) + 1
         filtered = ",".join(f"{k}:{counts[k]}" for k in sorted(counts)) or "-"
+        gamma_missing = sum(1 for d in decisions if d[3] != "present")
         if not armed:
-            logger.info("sw_live DRYRUN mode=%s armed=false records=%d would_route=%d filtered=%s",
-                        live_config.mode(), len(decisions), len(would_route), filtered)
+            logger.info("sw_live DRYRUN mode=%s armed=false records=%d would_route=%d filtered=%s "
+                        "gamma_missing=%d", live_config.mode(), len(decisions), len(would_route),
+                        filtered, gamma_missing)
             return
-        logger.info("sw_live ARMED records=%d would_route=%d filtered=%s",
-                    len(decisions), len(would_route), filtered)
+        logger.info("sw_live ARMED records=%d would_route=%d filtered=%s gamma_missing=%d",
+                    len(decisions), len(would_route), filtered, gamma_missing)
     except Exception as exc:  # noqa: BLE001 - fail closed, and say so (type only: no URL can leak)
         logger.error("sw_live DRYRUN error=%s stage=filter", type(exc).__name__)
         return

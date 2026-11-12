@@ -35,11 +35,20 @@ def pre(ts, name=SW_LOGGER, level="INFO"):
 
 
 def record_msg(verdict, reason=None, price=0.40, is_bot=False, clv_muted=False,
-               bid=0.39, ask=0.40, spread=0.025, extra=""):
+               bid=0.39, ask=0.40, spread=0.025, extra="", gamma=None, book=None):
+    """A real RECORD line from the emitter. With neither gamma nor book given, the two
+    trailing diagnostic fields are cut off again: that is a line from before they existed."""
     rec = {"alert_type": "entry", "price": price, "wallet": "0xabc", "is_bot": is_bot,
            "clv_muted": clv_muted, "market": "0xmarket0123456789", "asset": "123456789012345678900000AAAA"}
     info = {"category": "sports", "bid": bid, "ask": ask, "spread_pct": spread}
-    return sw._live_record_line(rec, verdict, reason, info) + extra
+    if gamma is not None:
+        info["gamma"] = gamma
+    if book is not None:
+        info["book"] = book
+    line = sw._live_record_line(rec, verdict, reason, info)
+    if gamma is None and book is None:
+        line = re.sub(r" gamma=\S+ book=\S+$", "", line)
+    return line + extra
 
 
 def record_line(ts, *a, **k):
@@ -202,7 +211,7 @@ def test_would_route_with_missing_price_bid_ask_or_spread_fails():
 def test_one_sided_book_dash_is_missing_for_that_field_only(stop_msgs):
     """A filtered record with ask=- parses; a would_route with ask=- fails; bid stays usable."""
     filt = record_line(T0 + timedelta(hours=5), "filtered", "unpriced_book", ask=None, spread=None,
-                       extra=" gamma=present book=one_sided")
+                       gamma="present", book="one_sided")
     rc, out = run(clean_week(stop_msgs, tail=[filt]))
     assert rc == 0, out
     assert "unpriced_book records by book=: not logged:7, one_sided:1" in out
@@ -403,11 +412,11 @@ def test_new_reasons_are_counted_without_a_closed_list(stop_msgs):
 
 def test_gamma_and_book_diagnostics_when_logged_and_when_not():
     logged = [
-        record_line(T0, "filtered", "no_category", extra=" gamma=missing book=none"),
-        record_line(T0, "filtered", "price_band", extra=" gamma=present book=ok"),
-        record_line(T0, "filtered", "unpriced_book", extra=" gamma=present book=empty"),
-        record_line(T0, "filtered", "unpriced_book", extra=" gamma=present book=one_sided"),
-        record_line(T0, "filtered", "unpriced_book", extra=" gamma=present book=empty"),
+        record_line(T0, "filtered", "no_category", gamma="missing", book="none"),
+        record_line(T0, "filtered", "price_band", gamma="present", book="ok"),
+        record_line(T0, "filtered", "unpriced_book", gamma="present", book="empty"),
+        record_line(T0, "filtered", "unpriced_book", gamma="present", book="one_sided"),
+        record_line(T0, "filtered", "unpriced_book", gamma="present", book="empty"),
     ]
     rc, out = run(logged, "--min-days", "0")
     assert "2026-11-05  records with gamma logged 5, gamma=missing 1" in out

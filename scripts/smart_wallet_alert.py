@@ -846,7 +846,13 @@ def check_and_fire(
         # computed once here. The CLV answer is memoised so the delivery decision
         # below does not run the query a second time.
         _clv_memo = []
-        _live_eligibility(rec, is_bot, _clv_memo, shadow_conn, f["wallet"])
+        try:
+            _live_eligibility(rec, is_bot, _clv_memo, shadow_conn, f["wallet"])
+        except Exception as _le_exc:  # noqa: BLE001 - the verdict must never break the alert loop
+            rec["live_eligible"] = False
+            rec["live_filter_reason"] = "eligibility_error"
+            logger.warning("smart_wallet_alert: live eligibility failed (%s); "
+                           "record is not live-eligible", type(_le_exc).__name__)
         deliver = send and not is_bot and (
             rec["alert_type"] == "fade"  # fades bypass band/CLV gates (they'd self-suppress)
             or (not _price_band_gate_suppress(rec)
