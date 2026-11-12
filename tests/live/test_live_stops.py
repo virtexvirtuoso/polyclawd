@@ -6,6 +6,8 @@ function is a recorder.
 """
 
 import sqlite3
+from decimal import Decimal
+from fractions import Fraction
 
 import pytest
 
@@ -164,7 +166,7 @@ def one(db, world, entry, bids, asks, **kw):
     pid = add_position(db, entry)
     tok = TOKEN.format(pid)
     world.books[tok] = make_book(tok, bids, asks)
-    return evaluate(db, dry_run=True, **kw)[0]
+    return evaluate(db, dry_run=True, **kw)[-1]      # the position just added
 
 
 def test_loss_exactly_40_with_zero_spread_exits(live_db, world):
@@ -202,7 +204,7 @@ def test_synthetic_negative_entry_equals_best_bid(live_db, world):
 
 def test_float_trap_loss_exactly_40_computes_just_under_in_floating_point(live_db, world):
     # 1 - 0.171/0.285 is 0.3999999999999999 in floating point: a naive
-    # `< 0.40` calls it ok. Rounded to 4 places it is 0.4 and the stop fires.
+    # `< 0.40` calls it ok. The EPS tolerance makes it a 40% loss: the stop fires.
     assert 1 - 0.171 / 0.285 < stop_evaluator.UNIVERSAL_MAX_LOSS_PCT
     e = one(live_db, world, 0.285, [0.171], [0.171])
     assert e["loss_pct"] == 0.4 and e["action"] == "would_exit"
@@ -211,7 +213,8 @@ def test_float_trap_loss_exactly_40_computes_just_under_in_floating_point(live_d
 def test_float_trap_loss_equals_threshold_in_floating_point(live_db, world):
     # entry .30, bid .17, ask .18: loss 0.43333333333333324 and threshold
     # 0.4333333333333333 differ in the 16th digit, so a naive `loss < threshold`
-    # holds the position. Both round to 0.4333: the boundary is inclusive, exit.
+    # holds the position. The difference is float noise (inside EPS): the
+    # boundary is inclusive, exit.
     entry, bid, ask = 0.30, 0.17, 0.18
     raw_loss = 1 - bid / entry
     raw_thr = stop_evaluator.UNIVERSAL_MAX_LOSS_PCT + min(
@@ -297,23 +300,65 @@ def test_get_orderbook_raising_is_error_and_next_still_evaluated(live_db, world)
     assert out[1]["id"] == p2 and out[1]["action"] == "ok"
 
 
-def test_exit_raising_is_error_and_next_still_evaluated(live_db, world, armed):
+def test_exit_raising_is_exit_unknown_and_next_still_evaluated(live_db, world, armed):
+    # CHANGED in 1B-fix-1: this test expected "error" when the exit raised. An
+    # exception from the exit call means a sale may have happened, so it is
+    # exit_unknown ("error" now means: could not evaluate, no sale attempted).
     p1 = add_position(live_db, 0.50)
     p2 = add_position(live_db, 0.50)
     for p in (p1, p2):
         world.books[TOKEN.format(p)] = make_book(TOKEN.format(p), [0.20], [0.21])
     world.exit_exc = ValueError("exit blew up")
     out = evaluate(live_db)
-    assert [e["action"] for e in out] == ["error", "error"]
+    assert [e["action"] for e in out] == ["exit_unknown", "exit_unknown"]
     assert out[0]["error"] == "ValueError: exit blew up"
+    assert out[0]["mark"] == 0.20 and out[0]["loss_pct"] == 0.6   # the figures are kept
     assert len(world.exit_calls) == 2       # the second was still attempted
 
 
-def test_exit_returning_none_is_exit_failed(live_db, world, armed):
+def test_book_failure_is_error_and_no_exit_is_attempted(live_db, world, armed):
+    pid = add_position(live_db, 0.50)
+    world.books[TOKEN.format(pid)] = RuntimeError("book down")
+    out = evaluate(live_db)
+    assert [e["action"] for e in out] == ["error"]
+    assert world.exit_calls == []
+
+
+@pytest.mark.parametrize("result", [True, 1, "closed", ["closed"]], ids=["true", "one", "str", "list"])
+def test_exit_returning_truthy_non_dict_is_exit_unknown(live_db, world, armed, result):
     pid = add_position(live_db, 0.50)
     world.books[TOKEN.format(pid)] = make_book(TOKEN.format(pid), [0.20], [0.21])
-    world.exit_result = None
-    assert evaluate(live_db) == [{"id": pid, "action": "exit_failed"}]
+    world.exit_result = result
+    out = evaluate(live_db)
+    assert len(out) == 1 and out[0]["action"] == "exit_unknown"
+    assert out[0]["error"] == f"exit returned {result!r}"
+    assert out[0]["mark"] == 0.20 and out[0]["loss_pct"] == 0.6
+
+
+def test_exit_unknown_error_text_is_capped_at_120_chars_of_repr(live_db, world, armed):
+    pid = add_position(live_db, 0.50)
+    world.books[TOKEN.format(pid)] = make_book(TOKEN.format(pid), [0.20], [0.21])
+    world.exit_result = "x" * 500
+    err = evaluate(live_db)[0]["error"]
+    assert err == "exit returned " + repr("x" * 500)[:120]
+
+
+def test_exit_dict_without_action_gets_exited(live_db, world, armed):
+    pid = add_position(live_db, 0.50)
+    world.books[TOKEN.format(pid)] = make_book(TOKEN.format(pid), [0.20], [0.21])
+    world.exit_result = {"pnl": -2.0}
+    out = evaluate(live_db)
+    assert out[0]["action"] == "exited" and out[0]["pnl"] == -2.0 and out[0]["loss_pct"] == 0.6
+
+
+@pytest.mark.parametrize("falsy", [None, 0, "", [], {}], ids=["none", "zero", "emptystr", "emptylist", "emptydict"])
+def test_exit_returning_falsy_is_exit_failed_with_figures(live_db, world, armed, falsy):
+    pid = add_position(live_db, 0.50)
+    world.books[TOKEN.format(pid)] = make_book(TOKEN.format(pid), [0.20], [0.21])
+    world.exit_result = falsy
+    out = evaluate(live_db)
+    assert out == [{"id": pid, "mark": 0.20, "loss_pct": 0.6, "spread_pct": 0.02,
+                    "threshold": 0.42, "action": "exit_failed"}]
 
 
 def test_malformed_book_object_is_error_not_crash(live_db, world, monkeypatch):
@@ -527,3 +572,289 @@ def test_each_position_fetches_its_book_exactly_once(live_db, world):
     world.books[TOKEN.format(p2)] = make_book(TOKEN.format(p2), [0.45], [0.47])
     evaluate(live_db, dry_run=True)
     assert world.book_calls == [TOKEN.format(p1), TOKEN.format(p2)]
+
+
+# ---------------------------------------------------------------------------
+# 1B-fix-1 A2/A3: decide on unrounded numbers with EPS; the pure helper
+# ---------------------------------------------------------------------------
+
+def test_eps_is_a_named_constant():
+    assert stop_evaluator.EPS == 1e-9
+
+
+def test_off_grid_entry_just_under_40_is_ok_not_exit(live_db, world):
+    # entry 0.33333 (an average fill price), bid 0.20: true loss 0.399994.
+    # Rounded to 4 places that is 0.4 and used to sell. It must be ok.
+    e = one(live_db, world, 0.33333, [0.20], [0.21])
+    assert e["action"] == "ok"
+    assert e["loss_pct"] == 0.4          # display only
+    assert 1 - 0.20 / 0.33333 < 0.4
+
+
+def test_off_grid_helper_directly():
+    assert stop_evaluator._stop_decision(0.33333, 0.20, 0.21)[0] == "ok"
+    assert stop_evaluator._stop_decision(0.33333, 0.19999, 0.21)[0] != "ok"
+
+
+def test_float_trap_cases_through_helper():
+    assert 1 - 0.171 / 0.285 < 0.4       # the noise is real
+    assert stop_evaluator._stop_decision(0.285, 0.171, 0.171)[0] == "exit"
+    assert stop_evaluator._stop_decision(0.30, 0.17, 0.18)[0] == "exit"
+
+
+def test_loss_exactly_the_threshold_by_construction_exits():
+    # 0.20 / 0.10 / 0.13: loss 0.5, capped spread 0.10, threshold 0.5
+    decision, fig = stop_evaluator._stop_decision(0.20, 0.10, 0.13)
+    assert decision == "exit" and fig == {"loss_pct": 0.5, "spread_pct": 0.15, "threshold": 0.5}
+
+
+def test_helper_returns_figures_rounded_for_display():
+    decision, fig = stop_evaluator._stop_decision(0.24, 0.08, 0.09)
+    assert decision == "exit"
+    assert fig == {"loss_pct": 0.6667, "spread_pct": 0.0417, "threshold": 0.4417}
+    decision, fig = stop_evaluator._stop_decision(0.50, 0.49, 0.60)
+    assert decision == "ok" and fig == {"loss_pct": 0.02}
+
+
+def _cents(c):
+    """Exact value of c hundredths, built from a decimal string."""
+    return Fraction(f"{c // 100}.{c % 100:02d}")
+
+
+def test_property_decision_matches_exact_arithmetic_over_grid(monkeypatch):
+    # An exact oracle over every entry 0.01..0.99, bid 0.01..entry, ask bid..bid+0.10
+    # (all step 0.01, ask capped at 1.00), with the true loss computed by Fraction
+    # from decimal strings:
+    #   loss < 40%                                -> "ok", never an exit
+    #   40% <= loss < 40% + min(spread, 10%)      -> "spread_held"
+    #   loss >= 40% + min(spread, 10%)            -> "exit"
+    monkeypatch.setattr(stop_evaluator, "UNIVERSAL_MAX_LOSS_PCT", 0.40)
+    base, cap = Fraction("0.40"), Fraction("0.10")
+    n = {"ok": 0, "spread_held": 0, "exit": 0}
+    for e in range(1, 100):
+        entry_x = _cents(e)
+        for b in range(1, e + 1):
+            bid_x = _cents(b)
+            loss = 1 - bid_x / entry_x
+            for a in range(b, min(b + 10, 100) + 1):
+                spread_share = min((_cents(a) - bid_x) / entry_x, cap)
+                if loss < base:
+                    want = "ok"
+                elif loss < base + spread_share:
+                    want = "spread_held"
+                else:
+                    want = "exit"
+                got, _ = stop_evaluator._stop_decision(e / 100, b / 100, a / 100)
+                assert got == want, (e, b, a, got, want, float(loss))
+                n[want] += 1
+    assert all(n.values()), n                    # every branch was exercised
+    assert sum(n.values()) == 54285              # the grid is the size it claims
+
+
+# ---------------------------------------------------------------------------
+# A4: best prices without trusting the sort order; strict book check
+# ---------------------------------------------------------------------------
+
+def test_unsorted_bids_give_the_same_decision_as_sorted(live_db, world):
+    sorted_e = one(live_db, world, 0.24, [0.12, 0.10, 0.08], [0.13, 0.20])
+    unsorted_e = one(live_db, world, 0.24, [0.08, 0.12, 0.10], [0.13, 0.20])
+    assert sorted_e["mark"] == unsorted_e["mark"] == 0.12
+    assert {k: v for k, v in sorted_e.items() if k != "id"} == {k: v for k, v in unsorted_e.items() if k != "id"}
+    assert unsorted_e["action"] == "would_exit"
+
+
+def test_unsorted_asks_give_the_same_decision_as_sorted(live_db, world):
+    # entry 0.50, bid 0.28, best ask 0.29: spread 0.02, threshold 0.42, loss 0.44 -> exit.
+    # Taking the first (worst) ask 0.40 would give spread 0.24 -> cap -> threshold 0.5 -> held.
+    sorted_e = one(live_db, world, 0.50, [0.28], [0.29, 0.40])
+    unsorted_e = one(live_db, world, 0.50, [0.28], [0.40, 0.29])
+    assert unsorted_e["spread_pct"] == sorted_e["spread_pct"] == 0.02
+    assert unsorted_e["action"] == sorted_e["action"] == "would_exit"
+
+
+@pytest.mark.parametrize("bids,asks", [
+    ([0.08, "abc"], [0.09]),
+    ([0.08, float("nan")], [0.09]),
+    ([0.08, 1.5], [0.09]),
+    ([0.08, 0.0], [0.09]),
+    ([0.08], [0.09, None]),
+    ([0.08], [0.09, float("inf")]),
+    ([0.08], [0.09, -0.2]),
+], ids=["bid-str", "bid-nan", "bid-over-1", "bid-zero", "ask-none", "ask-inf", "ask-neg"])
+def test_book_with_a_corrupt_second_level_is_unpriced(live_db, world, armed, bids, asks):
+    pid = add_position(live_db, 0.24)
+    world.books[TOKEN.format(pid)] = _Raw(bids, asks)
+    assert evaluate(live_db) == [{"id": pid, "action": "unpriced"}]
+    assert world.exit_calls == []
+
+
+@pytest.mark.parametrize("bad", [Decimal("0.08"), True, False, 1 + 0j], ids=["decimal", "true", "false", "complex"])
+def test_decimal_and_bool_prices_are_unpriced(live_db, world, armed, bad):
+    for side in ("bid", "ask"):
+        pid = add_position(live_db, 0.24)
+        world.books[TOKEN.format(pid)] = _Raw([bad] if side == "bid" else [0.08],
+                                              [0.09] if side == "bid" else [bad])
+        out = evaluate(live_db)
+        assert out[-1] == {"id": pid, "action": "unpriced"}, side
+    assert world.exit_calls == []
+
+
+def test_usable_price_is_strict_about_types():
+    class F(float):
+        pass
+
+    assert stop_evaluator._usable_price(F(0.5)) is True          # a float subclass
+    assert stop_evaluator._usable_price(1) is True               # int 1 is the top of the range
+    assert stop_evaluator._usable_price(Decimal("0.5")) is False
+    assert stop_evaluator._usable_price(True) is False
+    assert stop_evaluator._usable_price("0.5") is False
+    np = pytest.importorskip("numpy")
+    assert stop_evaluator._usable_price(np.float64(0.5)) is True  # np.float64 subclasses float
+    assert stop_evaluator._usable_price(np.float32(0.5)) is False  # not an int or float subclass
+
+
+# ---------------------------------------------------------------------------
+# A5: rows
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("token", [None, "", "   "], ids=["null", "empty", "blank"])
+def test_missing_token_id_is_bad_row_and_no_book_fetch(live_db, world, armed, token):
+    cur = live_db.conn.execute(
+        "INSERT INTO live_positions (market_id, token_id, side, entry_price, shares, cost_usd, status)"
+        " VALUES ('m', ?, 'YES', 0.5, 10, 1, 'open')", (token,))
+    pid = cur.lastrowid
+    live_db.conn.commit()
+    out = evaluate(live_db)
+    assert out == [{"id": pid, "action": "bad_row"}]
+    assert world.book_calls == [] and world.exit_calls == []
+
+
+class _FakeConn:
+    """A connection that hands back exactly the given rows, so values SQLite
+    cannot store (NaN becomes NULL on bind; REAL affinity turns "0.24" into a
+    float) can still reach the evaluator."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def execute(self, *a, **k):
+        return list(self._rows)
+
+    def close(self):
+        pass
+
+
+def _rows_with_entry(monkeypatch, entry, token="tok-x"):
+    row = {"id": 1, "token_id": token, "entry_price": entry, "shares": 10.0, "status": "open"}
+    monkeypatch.setattr(live_db_module, "connect", lambda path=None: _FakeConn([row]))
+
+
+@pytest.mark.parametrize("entry", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"])
+def test_non_finite_entry_price_is_bad_row(world, monkeypatch, entry):
+    _rows_with_entry(monkeypatch, entry)
+    world.books["tok-x"] = make_book("tok-x", [0.2], [0.3])
+    out = stop_evaluator.evaluate_live_stops(dry_run=True)
+    assert out == [{"id": 1, "action": "bad_row"}]
+    assert world.book_calls == []
+
+
+def test_numeric_string_entry_price_is_accepted(world, monkeypatch):
+    _rows_with_entry(monkeypatch, "0.24")
+    world.books["tok-x"] = make_book("tok-x", [0.08], [0.09])
+    out = stop_evaluator.evaluate_live_stops(dry_run=True)
+    assert out[0]["action"] == "would_exit" and out[0]["loss_pct"] == 0.6667
+
+
+def test_numeric_string_entry_price_in_a_real_table_is_accepted(live_db, world):
+    # a REAL column turns "0.24" into 0.24 on the way in; same result
+    e = one(live_db, world, "0.24", [0.08], [0.09])
+    assert e["action"] == "would_exit" and e["loss_pct"] == 0.6667
+
+
+def test_nan_entry_price_in_a_real_table_arrives_as_null_and_is_bad_row(live_db, world):
+    # SQLite stores NaN as NULL, so NaN can only reach the evaluator as NULL.
+    pid = add_position(live_db, float("nan"))
+    assert live_db.conn.execute("SELECT entry_price FROM live_positions WHERE id=?", (pid,)).fetchone()[0] is None
+    assert evaluate(live_db, dry_run=True) == [{"id": pid, "action": "bad_row"}]
+
+
+# ---------------------------------------------------------------------------
+# A6: armed mode never sells on a non-exit decision
+# ---------------------------------------------------------------------------
+
+def _arrange(case, live_db, world, monkeypatch):
+    """Returns the expected action; sets up one position for that action."""
+    if case == "exempt":
+        pid = add_position(live_db, 0.24)
+        monkeypatch.setenv("POLYCLAWD_STOP_EXEMPT_IDS", str(pid))
+        world.books[TOKEN.format(pid)] = make_book(TOKEN.format(pid), [0.08], [0.09])
+    elif case == "bad_row":
+        add_position(live_db, 0)
+    elif case == "unpriced":
+        pid = add_position(live_db, 0.24)
+        world.books[TOKEN.format(pid)] = make_book(TOKEN.format(pid), [0.08], [])
+    elif case == "ok":
+        pid = add_position(live_db, 0.50)
+        world.books[TOKEN.format(pid)] = make_book(TOKEN.format(pid), [0.45], [0.47])
+    elif case == "spread_held":
+        pid = add_position(live_db, 0.20)
+        world.books[TOKEN.format(pid)] = make_book(TOKEN.format(pid), [0.11], [0.13])
+    return case
+
+
+@pytest.mark.parametrize("case", ["ok", "bad_row", "unpriced", "exempt", "spread_held"])
+def test_armed_not_dry_run_never_calls_exit_on_a_non_exit_decision(live_db, world, armed, monkeypatch, case):
+    _arrange(case, live_db, world, monkeypatch)
+    out = evaluate(live_db, dry_run=False)
+    assert [e["action"] for e in out] == [case]
+    assert world.exit_calls == []
+
+
+# ---------------------------------------------------------------------------
+# A7: the bound is base plus cap, and the base can be overridden
+# ---------------------------------------------------------------------------
+
+def test_overridden_base_moves_the_bound(monkeypatch):
+    monkeypatch.setattr(stop_evaluator, "UNIVERSAL_MAX_LOSS_PCT", 0.45)
+    # wide spread (cap applies): the bound is 0.45 + 0.10 = 0.55
+    assert stop_evaluator._stop_decision(1.0, 0.45, 0.95)[0] == "exit"          # 55% loss
+    assert stop_evaluator._stop_decision(1.0, 0.46, 0.95)[0] == "spread_held"   # 54% loss
+    assert stop_evaluator._stop_decision(1.0, 0.56, 0.95)[0] == "ok"            # 44% loss, under the base
+    # with the default base a 54% loss would already have sold
+    monkeypatch.setattr(stop_evaluator, "UNIVERSAL_MAX_LOSS_PCT", 0.40)
+    assert stop_evaluator._stop_decision(1.0, 0.46, 0.95)[0] == "exit"
+
+
+def test_docstring_states_the_bound():
+    doc = stop_evaluator.evaluate_live_stops.__doc__
+    assert "UNIVERSAL_MAX_LOSS_PCT +" in doc and "SPREAD_ALLOW_PCT" in doc and "0.50" in doc
+
+
+# ---------------------------------------------------------------------------
+# A8: the exemption value as an operator writes it in the env file
+# ---------------------------------------------------------------------------
+
+def _load_env_text(monkeypatch, tmp_path, text):
+    """Run live_config's own loader on a temp file. The loader reads the module
+    constant _ENV_FILE and fills os.environ; _ENV_FILE is pointed at a temp file
+    (monkeypatch restores it) and the variable is removed first, because the
+    loader never overrides a key that is already set. The setenv/delenv pair
+    makes monkeypatch remove whatever the loader sets, at teardown. The real
+    environment file is never read."""
+    env_file = tmp_path / "polymarket.env"
+    env_file.write_text(text)
+    monkeypatch.setenv("POLYCLAWD_STOP_EXEMPT_IDS", "placeholder")
+    monkeypatch.delenv("POLYCLAWD_STOP_EXEMPT_IDS")
+    monkeypatch.setattr(live_config, "_ENV_FILE", env_file)
+    live_config._load_env_file()
+
+
+def test_env_file_line_with_double_quotes_and_a_space_gives_both_ids(monkeypatch, tmp_path):
+    _load_env_text(monkeypatch, tmp_path, 'POLYCLAWD_STOP_EXEMPT_IDS="26, 27"\n')
+    assert live_config.stop_exempt_ids() == {26, 27}
+
+
+def test_env_file_line_with_per_element_quotes_raises(monkeypatch, tmp_path):
+    _load_env_text(monkeypatch, tmp_path, "POLYCLAWD_STOP_EXEMPT_IDS='26','27'\n")
+    with pytest.raises(ValueError, match="POLYCLAWD_STOP_EXEMPT_IDS"):
+        live_config.stop_exempt_ids()

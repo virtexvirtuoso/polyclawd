@@ -433,16 +433,66 @@ def _close_live_position_early(live_pos_row, current_yes_price, reason, hard_cap
         logger.error("_close_live_position_early: {} — skipping live exit", exc)
         return None
 
+# Tolerance for float noise only (about 1e-16 on these values). Every real gap
+# between a loss and a bound is orders of magnitude larger: on the 0.01 price
+# grid the smallest is about 0.002, and an off-grid average fill price such as
+# 0.33333 gives a 6e-6 gap. 1e-9 must never be widened to absorb a real one.
+EPS = 1e-9
+
+
 def _usable_price(price):
-    """True for a real prediction-market price: a finite number in (0, 1]."""
-    return (isinstance(price, (int, float)) and not isinstance(price, bool)
-            and 0 < price <= 1 and price == price)
+    """True for a real prediction-market price: a finite number in (0, 1].
+
+    Strict on purpose. bool is refused. Decimal is refused (it is not an int or
+    a float subclass, so the isinstance check fails): the order-book parser
+    produces floats, and a Decimal here means something else wrote the book.
+    numpy float64 is accepted because it subclasses float; numpy float32 and
+    other numpy scalars are refused for the same reason as Decimal."""
+    return bool(isinstance(price, (int, float)) and not isinstance(price, bool)
+                and 0 < price <= 1 and price == price)
+
+
+def _stop_decision(entry: float, bid: float, ask: float) -> tuple[str, dict]:
+    """The stop arithmetic and nothing else: no I/O, no globals except
+    UNIVERSAL_MAX_LOSS_PCT and EPS (and the SPREAD_ALLOW_PCT cap). Returns
+    ("ok" | "spread_held" | "exit", display figures). The caller guarantees
+    entry > 0 and finite and bid and ask usable prices.
+
+    The decision uses the unrounded numbers; the figures are rounded to 4
+    places for display only. EPS absorbs float noise: 1 - 0.171/0.285 is
+    0.39999999999999991 and counts as a 40% loss, while 1 - 0.20/0.33333 is
+    0.399994 and does not."""
+    from execution import live_config
+    loss_raw = 1 - bid / entry
+    base = UNIVERSAL_MAX_LOSS_PCT
+    if loss_raw < base - EPS:
+        return "ok", {"loss_pct": round(loss_raw, 4)}
+    spread_raw = max(0.0, ask - bid) / entry          # crossed book gives 0
+    threshold_raw = base + min(spread_raw, live_config.SPREAD_ALLOW_PCT)
+    figures = {"loss_pct": round(loss_raw, 4), "spread_pct": round(spread_raw, 4),
+               "threshold": round(threshold_raw, 4)}
+    if loss_raw < threshold_raw - EPS:
+        return "spread_held", figures
+    return "exit", figures
 
 
 def evaluate_live_stops(*, dry_run: bool = False, db_path=None) -> list[dict]:
     """One pass over open live positions. The mark is the best bid of the held
     token, and the same mark goes to the exit. Nothing re-prices it.
-    Every open position gets exactly one entry in the result."""
+    Every open position gets exactly one entry in the result.
+
+    The stop always fires by a loss of UNIVERSAL_MAX_LOSS_PCT +
+    live_config.SPREAD_ALLOW_PCT at the best bid (0.40 + 0.10 = 0.50 with the
+    defaults): the spread allowance can delay a sale between the two, never
+    past the sum. UNIVERSAL_MAX_LOSS_PCT can be overridden from the environment,
+    and the bound moves with it.
+
+    Actions: exempt, bad_row, unpriced, ok, spread_held, would_exit (dry run),
+    exited-style results from the exit call, exit_failed (the exit returned
+    nothing: no sale happened as far as it knows), exit_unknown (the exit
+    raised or returned something that is not a result: a sale may have
+    happened) and error (this position could not be evaluated, and no sale was
+    attempted)."""
     from execution import live_config, live_db
     from odds.polymarket_clob import get_orderbook
     armed = live_config.live_armed()
@@ -457,6 +507,10 @@ def evaluate_live_stops(*, dry_run: bool = False, db_path=None) -> list[dict]:
         conn.close()                            # never held across order-book fetches
     out = []
     for row in rows:
+        # "error" means exactly this: the position could not be evaluated and
+        # NO sale was attempted. Once the exit is called, a failure is
+        # exit_unknown or exit_failed, never error. Every path through this
+        # try that does not leave a sale to attempt ends in `continue`.
         try:
             if int(row["id"]) in exempt:
                 out.append({"id": row["id"], "action": "exempt"})
@@ -465,41 +519,60 @@ def evaluate_live_stops(*, dry_run: bool = False, db_path=None) -> list[dict]:
                 entry = float(row.get("entry_price"))
             except (TypeError, ValueError):
                 entry = 0.0
-            if not entry > 0 or entry == float("inf"):
+            if not entry > 0 or entry == float("inf"):      # also NaN and -inf
                 out.append({"id": row["id"], "action": "bad_row"})
                 continue
-            book = get_orderbook(row["token_id"])
+            token_id = row.get("token_id")
+            if not token_id or not str(token_id).strip():
+                out.append({"id": row["id"], "action": "bad_row"})
+                continue
+            book = get_orderbook(token_id)
             if not book or not book.bids or not book.asks:
                 out.append({"id": row["id"], "action": "unpriced"})
                 continue
-            bid, ask = book.bids[0].price, book.asks[0].price
-            if not (_usable_price(bid) and _usable_price(ask)):
+            bid_prices = [lvl.price for lvl in book.bids]
+            ask_prices = [lvl.price for lvl in book.asks]
+            # A book with any corrupt level is not trusted at all, and the sort
+            # order of the levels is not trusted either.
+            if not all(_usable_price(p) for p in bid_prices + ask_prices):
                 out.append({"id": row["id"], "action": "unpriced"})
                 continue
-            mark = float(bid)
-            loss_pct = round(1 - mark / entry, 4)
-            if loss_pct < UNIVERSAL_MAX_LOSS_PCT:
-                out.append({"id": row["id"], "action": "ok",
-                            "mark": mark, "loss_pct": loss_pct})
+            bid, ask = float(max(bid_prices)), float(min(ask_prices))
+            mark = bid
+            decision, figures = _stop_decision(entry, bid, ask)
+            if decision == "ok":
+                out.append({"id": row["id"], "action": "ok", "mark": mark, **figures})
                 continue
-            spread = max(0.0, ask - bid) / entry          # crossed book gives 0
-            threshold = round(UNIVERSAL_MAX_LOSS_PCT
-                              + min(spread, live_config.SPREAD_ALLOW_PCT), 4)
-            detail = {"id": row["id"], "mark": mark, "loss_pct": loss_pct,
-                      "spread_pct": round(spread, 4), "threshold": threshold}
-            if loss_pct < threshold:
+            detail = {"id": row["id"], "mark": mark, **figures}
+            if decision == "spread_held":
                 out.append({**detail, "action": "spread_held"})
                 continue
             if dry_run:
                 out.append({**detail, "action": "would_exit"})
                 continue
-            # hard_cap_frac stays UNIVERSAL_MAX_LOSS_PCT, so every stop exit is at or over the hard cap
-            info = _close_live_position_early(row, mark, f"live stop {loss_pct:.0%}",
-                                              hard_cap_frac=UNIVERSAL_MAX_LOSS_PCT)
-            out.append({**detail, **info} if info else {"id": row["id"], "action": "exit_failed"})
         except Exception as exc:                # one bad row must not stop the rest
             out.append({"id": row.get("id"), "action": "error",
                         "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        # The sale. Its own try: from here on a failure is not "could not evaluate".
+        try:
+            # hard_cap_frac stays UNIVERSAL_MAX_LOSS_PCT, so every stop exit is at or over the hard cap
+            info = _close_live_position_early(row, mark, f"live stop {figures['loss_pct']:.0%}",
+                                              hard_cap_frac=UNIVERSAL_MAX_LOSS_PCT)
+        except Exception as exc:
+            out.append({**detail, "action": "exit_unknown",
+                        "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        if not info:
+            out.append({**detail, "action": "exit_failed"})
+        elif isinstance(info, dict):
+            merged = {**detail, **info}
+            if not merged.get("action"):
+                merged["action"] = "exited"
+            out.append(merged)
+        else:
+            out.append({**detail, "action": "exit_unknown",
+                        "error": f"exit returned {repr(info)[:120]}"})
     return out
 
 
