@@ -4,7 +4,7 @@ Mirrors the smart-wallet pattern: takes tradeable soccer edges (already enriched
 with token_id via sports_edge_common.enrich_executable_edge) and routes them
 through the hybrid maker→taker executor.
 
-Called from scheduler.task_soccer_match_scan when live_config.mode() == "LIVE".
+Called from scheduler.task_soccer_match_scan when live_config.live_armed().
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def execute_tradeable_soccer_edges(edges: list) -> dict:
     from execution import live_config, live_db, live_executor
     from execution.risk_governor import RiskGovernor
 
-    if live_config.mode() != "LIVE":
+    if not live_config.live_armed():
         return {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0, "reason": "not LIVE mode"}
 
     stats = {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0}

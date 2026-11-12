@@ -330,6 +330,25 @@ def armed(monkeypatch):
     assert live_config.live_armed() is True
 
 
+@pytest.fixture
+def mode_env(monkeypatch):
+    """Set the three components independently: mode_env(mode, enforce, path_ready);
+    None unsets the variable. For tests of each unarmed combination."""
+
+    def _set(mode, enforce, path_ready):
+        if mode is None:
+            monkeypatch.delenv("POLYCLAWD_MODE", raising=False)
+        else:
+            monkeypatch.setenv("POLYCLAWD_MODE", mode)
+        if enforce is None:
+            monkeypatch.delenv("POLYCLAWD_LIVE_STOPS_ENFORCE", raising=False)
+        else:
+            monkeypatch.setenv("POLYCLAWD_LIVE_STOPS_ENFORCE", enforce)
+        monkeypatch.setattr(live_config, "LIVE_ORDER_PATH_READY", path_ready, raising=False)
+
+    return _set
+
+
 def _assert_no_client_injected():
     """A client left in ``execution.clob_client`` by an earlier test would be
     used by this one: fail at setup, in any test order."""

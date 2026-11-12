@@ -16,24 +16,6 @@ from execution.clob_client import ClobError
 TOKEN = "71321045679252212594626385532706912750332728571942532289631379312455583992563"
 
 
-@pytest.fixture
-def mode_env(monkeypatch):
-    """Set the three components independently: (mode, enforce, path_ready)."""
-
-    def _set(mode, enforce, path_ready):
-        if mode is None:
-            monkeypatch.delenv("POLYCLAWD_MODE", raising=False)
-        else:
-            monkeypatch.setenv("POLYCLAWD_MODE", mode)
-        if enforce is None:
-            monkeypatch.delenv("POLYCLAWD_LIVE_STOPS_ENFORCE", raising=False)
-        else:
-            monkeypatch.setenv("POLYCLAWD_LIVE_STOPS_ENFORCE", enforce)
-        monkeypatch.setattr(live_config, "LIVE_ORDER_PATH_READY", path_ready, raising=False)
-
-    return _set
-
-
 # --- live_stops_enforce -------------------------------------------------------
 
 

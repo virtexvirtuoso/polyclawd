@@ -11,7 +11,16 @@ re-sync timer catching up.
 import pytest
 
 import execution.clob_client as clob_client
+import execution.live_config as live_config
 from execution.clob_client import ClobError, assert_egress_tunneled
+
+
+def _arm(monkeypatch):
+    """post_maker / cross_taker refuse unless live_armed() (task 1.10), and that check
+    runs before the egress guard: arm all three components to reach the egress check."""
+    monkeypatch.setenv("POLYCLAWD_MODE", "LIVE")
+    monkeypatch.setenv("POLYCLAWD_LIVE_STOPS_ENFORCE", "1")
+    monkeypatch.setattr(live_config, "LIVE_ORDER_PATH_READY", True)
 
 
 @pytest.fixture(autouse=True)
@@ -71,6 +80,7 @@ class _StubClientOrderNotAllowed:
 def test_post_maker_blocked_before_vendor_call(monkeypatch):
     """Load-bearing: fails if the assert_egress_tunneled() call is ever
     removed from post_maker()."""
+    _arm(monkeypatch)
     monkeypatch.setenv("POLYCLAWD_EGRESS_REQUIRE_SRC", "10.2.0.2")
     monkeypatch.setattr(clob_client, "_egress_src_ip", lambda host, port=443: "5.223.63.4")
     monkeypatch.setattr(clob_client, "_get_client", lambda: _StubClientOrderNotAllowed())
@@ -89,6 +99,7 @@ def test_post_maker_blocked_before_vendor_call(monkeypatch):
 def test_cross_taker_blocked_before_vendor_call(monkeypatch):
     """Load-bearing: fails if the assert_egress_tunneled() call is ever
     removed from cross_taker()."""
+    _arm(monkeypatch)
     monkeypatch.setenv("POLYCLAWD_EGRESS_REQUIRE_SRC", "10.2.0.2")
     monkeypatch.setattr(clob_client, "_egress_src_ip", lambda host, port=443: "5.223.63.4")
     monkeypatch.setattr(clob_client, "_get_client", lambda: _StubClientOrderNotAllowed())

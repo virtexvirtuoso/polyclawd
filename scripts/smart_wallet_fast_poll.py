@@ -636,7 +636,9 @@ def _check_governor_rails(bankroll: float, size_usd: float) -> None:
 def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
     """Route qualifying smart wallet entry signals to the live executor.
 
-    Only runs when POLYCLAWD_MODE=LIVE. Only wires 'entry' alert_type.
+    Only runs when live_config.live_armed() (LIVE, enforce flag and
+    LIVE_ORDER_PATH_READY); LIVE but unarmed returns here like PAPER.
+    Only wires 'entry' alert_type.
     Uses hybrid maker+taker path: maker-first, taker fallback if net_edge_taker >= min_taker_edge. On
     signals where we don't have a precise taker-edge calculation.
 
@@ -646,7 +648,7 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
     try:
         from execution import live_config
 
-        if live_config.mode() != "LIVE":
+        if not live_config.live_armed():
             return
     except Exception:
         return

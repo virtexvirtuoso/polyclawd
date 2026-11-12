@@ -256,12 +256,12 @@ def _get_live_position(market_id):
 
     Uses a fresh live_db connection each call — stop_evaluator runs on its
     own conn (paper_positions) and we keep the two schemas separate.
-    Never raises: returns None on any error or when in PAPER mode.
+    Never raises: returns None on any error or when not armed (PAPER, or LIVE but unarmed).
     """
     conn = None
     try:
         from execution import live_config, live_db
-        if live_config.mode() != "LIVE":
+        if not live_config.live_armed():
             return None
         conn = live_db.connect()
         cur = conn.execute(

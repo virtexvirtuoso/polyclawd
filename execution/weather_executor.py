@@ -3,7 +3,7 @@
 Takes TWC resolution-source edges (from weather_resolution_edge.py) and routes
 them through the hybrid maker→taker executor. Mirrors soccer_executor pattern.
 
-Called from scheduler.task_resolution_edge_scan when live_config.mode() == "LIVE".
+Called from scheduler.task_resolution_edge_scan when live_config.live_armed().
 
 Weather markets are bracket format ("between 92-93°F") — we buy NO when TWC
 forecast is above the bracket (TWC says 96°F, bracket is 92-93°F, market
@@ -36,7 +36,7 @@ def execute_tradeable_weather_edges(signals: list) -> dict:
     from execution import live_config, live_db, live_executor
     from execution.risk_governor import RiskGovernor
 
-    if live_config.mode() != "LIVE":
+    if not live_config.live_armed():
         return {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0, "reason": "not LIVE mode"}
 
     stats = {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0}
