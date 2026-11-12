@@ -142,7 +142,8 @@ def test_rule0_uses_the_category_the_executor_actually_sends(rig):
     while the governor rejects everything."""
     import scripts.smart_wallet_fast_poll as m
 
-    src = inspect.getsource(m._route_live_smart_wallet)
+    # Stage 2 of the router (task 1.3 split it out) is where the order is built.
+    src = inspect.getsource(m._route_live_stage2)
     assert f'"category": "{sw._SW_LIVE_STRATEGY}"' in src or \
            f'category="{sw._SW_LIVE_STRATEGY}"' in src, (
         "the rail checks a strategy name the routing code does not send"
@@ -254,7 +255,13 @@ def test_rule3_is_still_asserted(rig):
 
 
 def test_routing_calls_the_rail_check_not_just_the_sizing_check():
-    tree = ast.parse(inspect.getsource(sw._route_live_smart_wallet))
+    # Stage 2 of the router (task 1.3 split it out) sizes and checks the rails;
+    # the router must still reach it.
+    router = ast.parse(inspect.getsource(sw._route_live_smart_wallet))
+    reached = {n.func.id for n in ast.walk(router)
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "_route_live_stage2" in reached
+    tree = ast.parse(inspect.getsource(sw._route_live_stage2))
     called = {n.func.id for n in ast.walk(tree)
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
     assert "_check_governor_rails" in called, "routing still calls only the rule-3 tripwire"

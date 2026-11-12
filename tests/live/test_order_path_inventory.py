@@ -30,7 +30,7 @@ MODE_READERS = {
     "execution/soccer_executor.py": "order gate: returns unless live_armed()",
     "execution/weather_executor.py": "order gate: returns unless live_armed()",
     "scripts/position_sync.py": "passed to RiskGovernor (the governor ignores the mode); no order gate",
-    "scripts/smart_wallet_fast_poll.py": "order gate: _route_live_smart_wallet returns unless live_armed()",
+    "scripts/smart_wallet_fast_poll.py": "order gate: _route_live_smart_wallet filters and logs (stage 1, mode() only in the DRYRUN line), then returns unless live_armed()",
     "services/live_stop_shadow.py": "live_armed() and mode(): tick passes dry_run unless armed; mode in the log line; no order gate of its own",
     "services/scheduler.py": "page: _log_live_unarmed() and _start_live_unarmed_page() at start",
     "services/stop_evaluator.py": "live_armed(): the live stop evaluator's arming check (evaluate_live_stops); mode(): passed to RiskGovernor. The paper stop loops read neither",

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from collections import OrderedDict, deque
 from typing import Optional
@@ -633,11 +634,175 @@ def _check_governor_rails(bankroll: float, size_usd: float) -> None:
         logger.warning("sw_live: governor-rail tripwire failed: %s", exc)
 
 
+# --------------------------------------------------------------------------- #
+# Live routing of smart-wallet entries (task 1.3)
+#
+# Stage 1 runs in every mode and touches no money: for each record it decides
+# would_route or filtered (with the first failing reason) from the record, the
+# market's Gamma data and ONE public order-book read, and logs the record's own
+# facts. When the system is not armed that is all that happens: the log lines
+# are the shadow evidence for the owner's decision on trading real money again.
+# Stage 2 runs only when live_armed(): bankroll, sizing, governor rails, the
+# order itself.
+# --------------------------------------------------------------------------- #
+_SW_PRICE_DRIFT_MAX = 0.15  # >15pp between the book's bid and the alert price = stale signal
+
+
+def _lv(v) -> str:
+    """One log value: no spaces, '-' for a missing one."""
+    if v is None or v == "":
+        return "-"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, float):
+        return f"{v:.4f}"
+    return "_".join(str(v).split()) or "-"
+
+
+def _is_book_price(p) -> bool:
+    """A real number in (0, 1]; bool, NaN, inf, None and strings are not."""
+    return (isinstance(p, (int, float)) and not isinstance(p, bool)
+            and math.isfinite(p) and 0 < p <= 1)
+
+
+def _live_book_check(token_id: str, rec: dict, info: dict) -> Optional[str]:
+    """The spread gate. ONE order-book read: stage 2 prices the order from the same
+    book. Puts bid, ask and spread_pct on rec (and info). Returns the reason or None."""
+    from execution import live_config
+    from odds.polymarket_clob import get_orderbook
+
+    book = get_orderbook(token_id)
+    bids = getattr(book, "bids", None) if book is not None else None
+    asks = getattr(book, "asks", None) if book is not None else None
+    if not bids or not asks:
+        return "unpriced_book"
+    bid_px = [getattr(lv, "price", None) for lv in bids]
+    ask_px = [getattr(lv, "price", None) for lv in asks]
+    if not all(_is_book_price(p) for p in bid_px + ask_px):
+        return "unpriced_book"
+    bid, ask = max(bid_px), min(ask_px)
+    spread_pct = round((ask - bid) / ask, 4)
+    rec["bid"], rec["ask"], rec["spread_pct"] = bid, ask, spread_pct
+    info["bid"], info["ask"], info["spread_pct"] = bid, ask, spread_pct
+    if spread_pct > live_config.SPREAD_ALLOW_PCT:
+        return "wide_spread"
+    return None
+
+
+def _live_check_record(rec: dict, gamma: dict, info: dict) -> Optional[str]:
+    """First failing check's reason, or None when the record would route.
+    Order: eligibility, token, category, archetype, spread, then the old per-record
+    gates that need no bankroll, size, governor or database write."""
+    # 1. the alert filters (price band, bot, CLV), decided in check_and_fire
+    if rec.get("live_eligible") is not True:
+        return rec.get("live_filter_reason") or "not_eligible"
+
+    # 2. the trade's own token (#39). Never derived from outcome_index.
+    token_id = rec.get("asset")
+    if not isinstance(token_id, str) or not token_id.strip():
+        return "no_token"
+    info["token"] = token_id
+    condition_id = rec.get("market") or ""
+
+    # 3. category gate: only approved market verticals (Option B, the 2026-07-01
+    # Rihanna incident). The market's OWN Gamma category only (#31): the wallet's
+    # leaderboard category says where the wallet is good, not what this market is.
+    mkt_category = info.get("category") or ""
+    if not mkt_category:
+        return "no_category"
+    if mkt_category not in _ALLOWED_CATEGORIES:
+        return "category"
+
+    # 4. per-archetype track-record gate (2026-08-21): has THIS wallet ever made
+    # money in this kind of market? Reads the market title (#41).
+    title = rec.get("title")
+    if not isinstance(title, str) or not title.strip() or title == condition_id:
+        return "no_title"  # check_and_fire falls back to the condition id when it has no title
+    try:
+        from signals.whale_follower import classify_archetype
+        from signals.whale_wallets import archetype_gate_ok, get_meta_db
+
+        _arch = classify_archetype("polymarket", condition_id, title)
+        _mconn = get_meta_db()
+        try:
+            _ok, _why = archetype_gate_ok(_mconn, rec.get("wallet", ""), _arch)
+        finally:
+            _mconn.close()
+        if not _ok:
+            return "archetype"
+    except Exception as _ag_exc:  # noqa: BLE001
+        # Fail OPEN, as before: a gate that errors must not silently halt all
+        # trading, but it must say so rather than look like a clean pass.
+        logger.warning("sw_live: archetype gate errored (allowing): %s", _ag_exc)
+
+    # 5. spread gate: one book read per record that gets this far
+    reason = _live_book_check(token_id, rec, info)
+    if reason:
+        return reason
+
+    # 6. the old per-record gates that need no bankroll, size, governor or write
+    if rec.get("alert_type") not in _SW_LIVE_ALERT_TYPES:
+        return "not_entry"
+    price_at_alert = float(rec.get("price_at_alert") or 0)
+    if not condition_id or price_at_alert <= 0:
+        return "unusable_rec"
+    if _is_in_exit_cooldown(token_id):
+        return "exit_cooldown"
+    if abs(_sw_entry_price(rec["bid"]) - price_at_alert) > _SW_PRICE_DRIFT_MAX:
+        return "price_drift"
+    return None
+
+
+def _sw_entry_price(bid: float) -> float:
+    """Post AT the best bid: still a resting maker order (does not cross the ask),
+    but with queue priority over bid-1-tick."""
+    return max(0.01, min(0.99, round(float(bid), 2)))
+
+
+def _live_record_line(rec: dict, verdict: str, reason: Optional[str], info: dict) -> str:
+    def _flag(v):
+        return None if v is None else bool(v)
+
+    price = rec.get("price")
+    if price is None:
+        price = rec.get("price_at_alert")
+    token = rec.get("asset")
+    return (
+        "sw_live RECORD verdict=%s reason=%s alert_type=%s price=%s wallet=%s is_bot=%s "
+        "clv_muted=%s category=%s bid=%s ask=%s spread_pct=%s market=%s token=%s" % (
+            verdict, _lv(reason), _lv(rec.get("alert_type")), _lv(price), _lv(rec.get("wallet")),
+            _lv(_flag(rec.get("is_bot"))), _lv(_flag(rec.get("clv_muted"))),
+            _lv(info.get("category")), _lv(info.get("bid")), _lv(info.get("ask")),
+            _lv(info.get("spread_pct")), _lv(str(rec.get("market") or "")[:16]),
+            _lv(token[-8:] if isinstance(token, str) else None)))
+
+
+def _live_stage1(fired: list, gamma: dict) -> list:
+    """[(rec, reason, token)] for every record, logging one RECORD line each.
+    reason None = would_route. A record-level error filters that record only."""
+    out = []
+    for rec in fired:
+        info: dict = {}
+        r = rec if isinstance(rec, dict) else {}
+        try:
+            cat = (gamma.get(r.get("market") or "") or {}).get("category")
+            info["category"] = cat.lower().strip() if isinstance(cat, str) else ""
+            reason = _live_check_record(r, gamma, info)
+        except Exception as exc:  # noqa: BLE001 - one bad record must not stop the others
+            logger.warning("sw_live: record error type=%s", type(exc).__name__)
+            reason = "record_error"
+        logger.info(_live_record_line(r, "filtered" if reason else "would_route", reason, info))
+        out.append((rec, reason, info.get("token")))
+    return out
+
+
 def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
     """Route qualifying smart wallet entry signals to the live executor.
 
-    Only runs when live_config.live_armed() (LIVE, enforce flag and
-    LIVE_ORDER_PATH_READY); LIVE but unarmed returns here like PAPER.
+    Stage 1 (every mode, no money): decide would_route / filtered per record and
+    log it; when not armed (PAPER, or LIVE that is not live_armed()) log one
+    `sw_live DRYRUN` summary and return. Stage 2 (only when live_armed()): bankroll,
+    sizing, governor rails and the order, for the would_route records.
     Only wires 'entry' alert_type.
     Uses hybrid maker+taker path: maker-first, taker fallback if net_edge_taker >= min_taker_edge. On
     signals where we don't have a precise taker-edge calculation.
@@ -645,15 +810,37 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
     Calibration basis (2026-06-25): entry alerts 62.1% WR, +6.82% avg CLV, n=177.
     Refire excluded: 48.6% WR, -8.37% avg CLV.
     """
+    if not fired:
+        return
     try:
         from execution import live_config
 
-        if not live_config.live_armed():
+        decisions = _live_stage1(fired, gamma)
+        armed = live_config.live_armed()
+        would_route = [(rec, token) for rec, reason, token in decisions if reason is None]
+        counts: dict = {}
+        for _rec, reason, _tok in decisions:
+            if reason:
+                counts[reason] = counts.get(reason, 0) + 1
+        filtered = ",".join(f"{k}:{counts[k]}" for k in sorted(counts)) or "-"
+        if not armed:
+            logger.info("sw_live DRYRUN mode=%s armed=false records=%d would_route=%d filtered=%s",
+                        live_config.mode(), len(decisions), len(would_route), filtered)
             return
-    except Exception:
+        logger.info("sw_live ARMED records=%d would_route=%d filtered=%s",
+                    len(decisions), len(would_route), filtered)
+    except Exception as exc:  # noqa: BLE001 - fail closed, and say so (type only: no URL can leak)
+        logger.error("sw_live DRYRUN error=%s stage=filter", type(exc).__name__)
         return
 
-    logger.info("sw_live: routing %d fired alerts to live executor", len(fired))
+    if not would_route:
+        return
+    _route_live_stage2(would_route, gamma)
+
+
+def _route_live_stage2(would_route: list, gamma: dict) -> None:
+    """Stage 2, only when armed: size, check the governor, place the order."""
+    logger.info("sw_live: routing %d fired alerts to live executor", len(would_route))
 
     from datetime import datetime, timezone
 
@@ -678,102 +865,11 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
     )
     _check_governor_rails(bankroll, size_usd)
 
-    for rec in fired:
-        if rec.get("alert_type") not in _SW_LIVE_ALERT_TYPES:
-            logger.info(
-                "sw_live: dropped — alert_type %r not in %s",
-                rec.get("alert_type"),
-                sorted(_SW_LIVE_ALERT_TYPES),
-            )
-            continue
-
+    for rec, token_id in would_route:
         condition_id = rec.get("market", "")
-        outcome_index = rec.get("outcome_index", 0)  # 0=YES token, 1=NO token
+        outcome_index = rec.get("outcome_index", 0)  # only names the order ref
         price_at_alert = float(rec.get("price_at_alert") or 0)
-        if not condition_id or price_at_alert <= 0:
-            logger.info(
-                "sw_live: dropped — unusable rec (condition_id=%r price_at_alert=%s)",
-                condition_id[:16],
-                price_at_alert,
-            )
-            continue
-
-        # Category gate: only execute in approved market verticals (Option B).
-        # Blocks pop-culture/entertainment markets like the 2026-07-01 Rihanna incident.
-        # Uses Gamma API category first, falls back to the rec dict's category (pre-classified
-        # by smart_wallet_alert.py), then slug keyword matching.
         gm_data = gamma.get(condition_id, {})
-        mkt_category = (gm_data.get("category") or "").lower().strip()
-        mkt_slug = (gm_data.get("slug") or "").lower()
-        mkt_question = (gm_data.get("question") or "").lower()
-        if mkt_category:
-            if mkt_category not in _ALLOWED_CATEGORIES:
-                logger.info(
-                    "sw_live: blocked — category '%s' not in allowlist for %s, skipping",
-                    mkt_category,
-                    condition_id[:16],
-                )
-                continue
-        else:
-            # Fallback 1: use rec dict's pre-classified category (populated by smart_wallet_alert.py)
-            rec_category = (rec.get("category") or "").lower().strip()
-            if rec_category in _ALLOWED_CATEGORIES:
-                pass  # allowed
-            # Fallback 2: keyword match in slug/question
-            elif any(kw in mkt_slug or kw in mkt_question for kw in _ALLOWED_SLUG_KEYWORDS):
-                pass  # allowed
-            else:
-                logger.info(
-                    "sw_live: blocked — no category (rec='%s') + no known pattern (slug='%s') for %s, skipping",
-                    rec_category,
-                    mkt_slug[:40],
-                    condition_id[:16],
-                )
-                continue
-
-        # Per-archetype track-record gate (2026-08-21). The category gate above
-        # asks "is this market vertical allowed?"; this asks "has THIS wallet
-        # ever made money in it?". The canary's first live trade followed a
-        # wallet into sports while wallet_archetype_pnl already recorded it at
-        # -$1,807.97 over 127 sports trades. Abstains when the record is thin.
-        try:
-            from signals.whale_follower import classify_archetype
-            from signals.whale_wallets import archetype_gate_ok, get_meta_db
-
-            _arch = classify_archetype(
-                "polymarket", condition_id,
-                gm_data.get("question") or rec.get("question") or "")
-            _mconn = get_meta_db()
-            try:
-                _ok, _why = archetype_gate_ok(_mconn, rec.get("wallet", ""), _arch)
-            finally:
-                _mconn.close()
-            if not _ok:
-                logger.info("sw_live: blocked — %s for %s, skipping",
-                            _why, condition_id[:16])
-                continue
-            logger.debug("sw_live: archetype gate %s (%s)", _why, _arch)
-        except Exception as _ag_exc:  # noqa: BLE001
-            # Fail OPEN: a gate that errors must not silently halt all trading,
-            # but it must say so rather than look like a clean pass.
-            logger.warning("sw_live: archetype gate errored (allowing): %s", _ag_exc)
-
-        try:
-            from odds.poly_executable_edge import condition_id_to_token_ids
-
-            token_ids = condition_id_to_token_ids(condition_id)
-            if not token_ids or len(token_ids) < 2:
-                logger.warning("sw_live: no token_ids for condition %s", condition_id[:16])
-                continue
-            token_id = token_ids[0] if outcome_index == 0 else token_ids[1]
-        except Exception as exc:
-            logger.warning("sw_live: token resolution failed for %s: %s", condition_id[:16], exc)
-            continue
-
-        # Exit cooldown guard: skip re-entry if we recently stopped out of this market
-        if _is_in_exit_cooldown(token_id):
-            logger.info("sw_live: %s in exit cooldown (stopped within 2h), skipping", token_id[:16])
-            continue
 
         try:
             from execution import clob_client, live_db, live_executor
@@ -784,48 +880,19 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
             logger.warning("sw_live: clob setup failed: %s", exc)
             continue
 
-        # Use live BBO instead of stale alert price to avoid maker post-only rejection.
-        # If BBO fetch fails, fall back to price_at_alert.
-        # Also compute net_edge_taker from the ask side so the taker fallback
-        # fires after the maker window if the signal is still fresh.
-        net_edge_taker = 0.0
-        try:
-            from odds.polymarket_clob import get_orderbook
-
-            book = get_orderbook(token_id)
-            if book and getattr(book, "bids", None):
-                live_bid = float(book.bids[0].price)
-                # Post AT the bid — still a resting maker order (does not cross
-                # the ask), but gets queue priority over bid-1-tick.
-                entry_price = round(live_bid, 2)
-                entry_price = max(0.01, min(0.99, entry_price))
-            else:
-                entry_price = price_at_alert
-            # Taker edge: smart wallet entry vs current ask minus ~2% taker fee.
-            # Goes negative if price has moved past their fill => taker gate blocks it.
-            if book and getattr(book, "asks", None):
-                live_ask = float(book.asks[0].price)
-                net_edge_taker = round(price_at_alert - live_ask - 0.02, 4)
-        except Exception:
-            entry_price = price_at_alert
-
-        # Suppress if market has moved too far from alert price (>15pp drift = stale signal)
-        drift = abs(entry_price - price_at_alert)
-        if drift > 0.15:
-            logger.info(
-                "sw_live: price drifted %.2f→%.2f (%.0fpp), skipping %s",
-                price_at_alert,
-                entry_price,
-                drift * 100,
-                condition_id[:16],
-            )
-            continue
+        # Stage 1 read the book once. Price from that same book: post AT the best
+        # bid, and compute net_edge_taker from the best ask so the taker fallback
+        # fires after the maker window if the signal is still fresh. Goes negative
+        # if price has moved past their fill => taker gate blocks it.
+        entry_price = _sw_entry_price(rec["bid"])
+        net_edge_taker = round(price_at_alert - float(rec["ask"]) - 0.02, 4)
 
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         client_order_ref = f"sw-{date_str}-{condition_id[:16]}-{outcome_index}"
 
         # Dedup gate: block re-entry if this ref already exists in live_open_orders
-        # (catches cancelled maker → taker re-fire on next poll, e.g. 2026-07-01 Rihanna pos #7)
+        # (catches cancelled maker → taker re-fire on next poll, e.g. 2026-07-01 Rihanna pos #7).
+        # Needs the live database, so it belongs to stage 2.
         try:
             from execution import live_db as _live_db
 
