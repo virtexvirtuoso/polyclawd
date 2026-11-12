@@ -28,6 +28,11 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Fill identity lives in a leaf module shared with the alert accumulator, so this
+# module never imports scripts.smart_wallet_alert at import time (it is imported
+# lazily inside run(), inside a try/except).
+from scripts.trade_key import _norm, _trade_key  # noqa: E402,F401
+
 # ── Exit cooldown: don't re-enter a market within 2h of stop-loss exit ────────
 _EXIT_COOLDOWN_SECS = 7200  # 2 hours
 _EXIT_COOLDOWN_FILE = "/tmp/sw_exit_cooldown.json"
@@ -256,40 +261,6 @@ _SEEN_TABLE = "smart_wallet_trade_seen"
 # process instead of passing every trade through to the cumulative threshold.
 _MEM_SEEN_MAX = 5000
 _mem_seen: "OrderedDict[str, int]" = OrderedDict()  # key -> last sighting ts
-
-
-def _norm(v) -> str:
-    """Normalise a numeric field so the same value keys identically across polls.
-
-    The PM feed is JSON: size/price can arrive as int, float or string, so a bare
-    str() makes 100, 100.0 and "100" three different keys for ONE fill — which
-    defeats the dedup on exactly the repeats it exists to catch. %.10g collapses
-    those to "100" while keeping genuinely different sizes distinct.
-    """
-    if v is None or v == "":
-        return ""
-    try:
-        return f"{float(v):.10g}"
-    except (TypeError, ValueError):
-        return str(v)
-
-
-def _trade_key(t: dict) -> str:
-    """Stable identity for one fill.
-
-    transactionHash alone is not unique — one transaction can carry several fills
-    (measured: 7,500 trades / 4,856 distinct hashes) — so qualify it with the
-    asset, wallet, side and size. Numeric fields go through _norm so JSON type
-    drift across polls cannot fork the key.
-    """
-    return "|".join((
-        str(t.get("transactionHash", "")),
-        str(t.get("asset", "")),
-        str(t.get("proxyWallet", "")),
-        str(t.get("side", "")),
-        _norm(t.get("size")),
-        _norm(t.get("price")),
-    ))
 
 
 def _collapse_intra_batch(keys: list, trades: list) -> tuple:
@@ -665,7 +636,9 @@ def _check_governor_rails(bankroll: float, size_usd: float) -> None:
 def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
     """Route qualifying smart wallet entry signals to the live executor.
 
-    Only runs when POLYCLAWD_MODE=LIVE. Only wires 'entry' alert_type.
+    Only runs when live_config.live_armed() (LIVE, enforce flag and
+    LIVE_ORDER_PATH_READY); LIVE but unarmed returns here like PAPER.
+    Only wires 'entry' alert_type.
     Uses hybrid maker+taker path: maker-first, taker fallback if net_edge_taker >= min_taker_edge. On
     signals where we don't have a precise taker-edge calculation.
 
@@ -675,7 +648,7 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
     try:
         from execution import live_config
 
-        if live_config.mode() != "LIVE":
+        if not live_config.live_armed():
             return
     except Exception:
         return

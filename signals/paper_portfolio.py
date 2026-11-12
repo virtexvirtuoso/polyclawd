@@ -1085,6 +1085,7 @@ def open_position(signal: dict) -> dict:
     ).fetchone()
     if prev_stopped:
         prev_edge = prev_stopped["edge_pct"] or 0
+        edge_pct = eval_result["edge"]  # same value/unit stored in paper_positions.edge_pct
         curr_edge = edge_pct or 0
         if curr_edge <= prev_edge:
             logger.info(
@@ -1423,7 +1424,7 @@ def get_position_history(limit: int = 50) -> list:
 
 def _route_live_weather(signal: dict, eval_result: dict) -> dict:
     """Route an eligible weather signal through the risk governor + hybrid
-    maker→taker executor (Phase F).  Only called when live_config.mode() == "LIVE".
+    maker→taker executor (Phase F).  Only called when live_config.live_armed().
 
     Builds a trade intent from the signal, asks the RiskGovernor to approve it,
     and on approval hands off to execution.live_executor.execute_intent.
@@ -1572,7 +1573,7 @@ def process_signals(signals: list) -> dict:
             from execution import live_config
 
             sig_archetype = (sig.get("archetype") or "").lower()
-            if live_config.mode() == "LIVE" and sig_archetype == "weather":
+            if live_config.live_armed() and sig_archetype == "weather":
                 # I4: isolate the LIVE branch — one bad intent must NOT crash the
                 # whole scan loop, and must NOT fall through to the paper
                 # open_position path (that would double-trade). On any exception

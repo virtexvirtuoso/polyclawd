@@ -394,6 +394,16 @@ def get_min_order_size(token_id: str) -> float:
     return val
 
 
+def assert_live_armed() -> None:
+    """Fail closed unless real orders may be sent (live_config.live_armed()).
+
+    post_maker and cross_taker call this first. LIVE that is not armed behaves as
+    PAPER: nothing reaches the exchange client. cancel, get_order and the read
+    calls do not call it and stay allowed in every mode."""
+    if not live_config.live_armed():
+        raise ClobError(f"not armed: no order will be sent ({live_config.arming_state_text()})")
+
+
 def post_maker(
     token_id: str,
     side: str,
@@ -423,6 +433,7 @@ def post_maker(
         ClobError: If the order is rejected by the exchange (including
                    post_only_would_cross — fee avoidance mechanism).
     """
+    assert_live_armed()
     assert_egress_tunneled()
 
     from polymarket import RejectedOrder
@@ -467,6 +478,7 @@ def cross_taker(
     Raises:
         ClobError: For hard rejections (invalid order, insufficient balance, etc.).
     """
+    assert_live_armed()
     assert_egress_tunneled()
 
     from polymarket import RejectedOrder

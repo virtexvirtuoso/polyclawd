@@ -305,6 +305,31 @@ def alert_openclaw(
     return ok_all
 
 
+def page_once(key: str, cooldown_s: int, text: str, *, state: dict, now: Optional[float] = None,
+              **send_kw) -> bool:
+    """Send unless `key` was DELIVERED within cooldown_s; stamp only on delivery.
+
+    A failed send leaves `state` untouched, so the next call tries again (a
+    stamp-before-send cooldown silences a page that never reached anyone).
+    `alert_openclaw` is looked up at call time. Returns whether it was delivered.
+
+    A stored stamp that is not a number is treated as absent, and one in the
+    future (the clock stepped back, or the state was written under another clock)
+    does not suppress: only 0 <= now - stamp < cooldown_s does. The check and the
+    send are not atomic, so two threads or processes sharing a state can both send."""
+    now = time.time() if now is None else now
+    try:
+        stamp = float(state.get(key, 0))
+    except (TypeError, ValueError):
+        stamp = 0
+    if 0 <= now - stamp < cooldown_s:
+        return False
+    delivered = alert_openclaw(text, **send_kw)
+    if delivered:
+        state[key] = now
+    return delivered
+
+
 TELEGRAM_MAX_LEN = 4000  # headroom under Telegram's hard 4096-char sendMessage limit
 
 

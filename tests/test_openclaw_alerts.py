@@ -4,7 +4,12 @@ import io
 import json
 import urllib.error
 
+import pytest
+
 import scripts.openclaw_alerts as oa
+
+# These tests drive the real send stack against a mocked network (see tests/conftest.py).
+pytestmark = pytest.mark.real_alert_transport
 
 
 def test_http_send_returns_err_detail_on_400(monkeypatch, tmp_path):

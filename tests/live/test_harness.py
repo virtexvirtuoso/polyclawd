@@ -1,0 +1,440 @@
+"""Tests of the tests/live harness itself (plan task 1.0c).
+
+Each test drives the REAL wrapper function in execution/clob_client.py against
+FakeClob, so the wrapper's conversion code runs on real SDK objects. Where the
+wrapper does something questionable, the test asserts what it does TODAY and its
+docstring says "documents current behaviour, see audit".
+"""
+
+import pytest
+import requests
+
+from polymarket import Page, Paginator
+
+from execution import clob_client, live_db as live_db_module
+from execution.clob_client import ClobError
+
+TOKEN = "71321045679252212594626385532706912750332728571942532289631379312455583992563"
+
+
+# --- post_maker -------------------------------------------------------------
+
+
+def test_post_maker_accepted(fake_clob, shapes, armed):
+    fake_clob.script("place_limit_order", shapes.accepted_post())
+    out = clob_client.post_maker(TOKEN, "BUY", 0.42, 10.0, tick_size=0.01)
+    assert out == {
+        "orderID": "0xorder-live-1",
+        "id": "0xorder-live-1",
+        "status": "LIVE",
+        "making_amount": 0.0,
+        "taking_amount": 0.0,
+    }
+    assert fake_clob.calls_to("place_limit_order") == [
+        ((), {"token_id": TOKEN, "price": 0.42, "size": 10.0, "side": "BUY", "post_only": True})
+    ]
+
+
+def test_post_maker_rejected_would_cross_raises_clob_error(fake_clob, shapes, armed):
+    """Today a RejectedOrder becomes ClobError(f"post_maker rejected ({code}): {message}")."""
+    fake_clob.script("place_limit_order", shapes.rejected_would_cross())
+    with pytest.raises(ClobError) as exc:
+        clob_client.post_maker(TOKEN, "BUY", 0.99, 10.0, tick_size=0.01)
+    assert str(exc.value) == (
+        "post_maker rejected (post_only_would_cross): invalid post-only order: order crosses book"
+    )
+
+
+def test_post_maker_rejected_bad_tick_raises_clob_error(fake_clob, shapes, armed):
+    fake_clob.script("place_limit_order", shapes.rejected_bad_tick())
+    with pytest.raises(ClobError, match=r"post_maker rejected \(unknown\): invalid price"):
+        clob_client.post_maker(TOKEN, "BUY", 0.425, 10.0, tick_size=0.01)
+
+
+# --- cross_taker ------------------------------------------------------------
+
+
+def test_cross_taker_buy_filled(fake_clob, shapes, armed):
+    fake_clob.script("place_market_order", shapes.fak_filled_buy(usd="4.2", shares="10"))
+    out = clob_client.cross_taker(TOKEN, "BUY", 4.2, tick_size=0.01)
+    assert out["orderID"] == "0xorder-fak-1"
+    assert out["status"] == "MATCHED"
+    assert out["making_amount"] == 4.2 and out["taking_amount"] == 10.0
+    assert out["size_matched"] == out["sizeMatched"] == "10.0"
+    assert out["avg_price"] == pytest.approx(0.42)
+    assert fake_clob.calls_to("place_market_order") == [
+        ((), {"token_id": TOKEN, "side": "BUY", "amount": 4.2, "order_type": "FAK"})
+    ]
+
+
+def test_cross_taker_sell_filled(fake_clob, shapes, armed):
+    fake_clob.script("place_market_order", shapes.fak_filled_sell(shares="10", usd="4.0"))
+    out = clob_client.cross_taker(TOKEN, "SELL", 10.0, tick_size=0.01)
+    assert out["status"] == "MATCHED"
+    assert out["size_matched"] == "10.0"
+    assert out["avg_price"] == pytest.approx(0.4)
+    assert fake_clob.calls_to("place_market_order") == [
+        ((), {"token_id": TOKEN, "side": "SELL", "shares": 10.0, "order_type": "FAK"})
+    ]
+
+
+def test_cross_taker_fak_unfilled_is_unmatched_not_an_error(fake_clob, shapes, armed):
+    fake_clob.script("place_market_order", shapes.fak_unfilled())
+    out = clob_client.cross_taker(TOKEN, "BUY", 4.2, tick_size=0.01)
+    assert out == {
+        "orderID": "",
+        "id": "",
+        "status": "UNMATCHED",
+        "size_matched": "0",
+        "sizeMatched": "0",
+        "making_amount": 0.0,
+        "taking_amount": 0.0,
+    }
+
+
+def test_cross_taker_hard_reject_raises(fake_clob, shapes, armed):
+    fake_clob.script("place_market_order", shapes.rejected_not_enough_balance())
+    with pytest.raises(ClobError, match=r"cross_taker rejected \(not_enough_balance\)"):
+        clob_client.cross_taker(TOKEN, "BUY", 4.2, tick_size=0.01)
+
+
+# --- cancel -----------------------------------------------------------------
+
+
+def test_cancel_confirmed(fake_clob, shapes):
+    fake_clob.script("cancel_order", shapes.cancel_confirmed("0xorder-live-1"))
+    assert clob_client.cancel("0xorder-live-1") == {"cancelled": True, "order_id": "0xorder-live-1"}
+    assert fake_clob.calls_to("cancel_order") == [((), {"order_id": "0xorder-live-1"})]
+
+
+def test_cancel_not_canceled_reports_false_and_drops_the_reason(fake_clob, shapes):
+    """documents current behaviour, see audit: a `not_canceled` entry (the exchange
+    saying why, e.g. already matched) is returned as plain cancelled=False; the
+    reason is not surfaced, so 'already filled' and 'unknown order' look alike."""
+    fake_clob.script("cancel_order", shapes.cancel_not_canceled("0xorder-live-1"))
+    assert clob_client.cancel("0xorder-live-1") == {"cancelled": False, "order_id": "0xorder-live-1"}
+
+
+def test_cancel_other_id_confirmed_is_false(fake_clob, shapes):
+    fake_clob.script("cancel_order", shapes.cancel_confirmed("0xsomething-else"))
+    assert clob_client.cancel("0xorder-live-1")["cancelled"] is False
+
+
+# --- get_order / order_is_filled --------------------------------------------
+
+
+def test_get_order_live(fake_clob, shapes):
+    fake_clob.script("get_order", shapes.order_live())
+    out = clob_client.get_order("0xorder-live-1")
+    assert out == {
+        "id": "0xorder-live-1",
+        "orderID": "0xorder-live-1",
+        "status": "LIVE",
+        "original_size": "10",
+        "originalSize": "10",
+        "size_matched": "0",
+        "sizeMatched": "0",
+        "price": "0.42",
+    }
+    assert fake_clob.calls_to("get_order") == [((), {"order_id": "0xorder-live-1"})]
+    assert clob_client.order_is_filled(out) is False
+
+
+def test_get_order_matched(fake_clob, shapes):
+    fake_clob.script("get_order", shapes.order_matched())
+    out = clob_client.get_order("0xorder-live-1")
+    assert out["status"] == "MATCHED" and out["size_matched"] == "10"
+    assert clob_client.order_is_filled(out) is True
+
+
+def test_get_order_cancelled(fake_clob, shapes):
+    fake_clob.script("get_order", shapes.order_cancelled())
+    out = clob_client.get_order("0xorder-live-1")
+    assert out["status"] == "CANCELED" and out["size_matched"] == "0"
+    assert clob_client.order_is_filled(out) is False
+
+
+def test_get_order_sdk_error_becomes_clob_error(fake_clob):
+    fake_clob.script("get_order", RuntimeError("404 not found"))
+    with pytest.raises(ClobError, match=r"get_order\(0xgone\) failed: 404 not found"):
+        clob_client.get_order("0xgone")
+
+
+# --- get_balance ------------------------------------------------------------
+
+
+def test_get_balance(fake_clob, shapes):
+    fake_clob.script("get_balance_allowance", shapes.balance("12.5"))
+    assert clob_client.get_balance() == 12.5
+    assert fake_clob.calls_to("get_balance_allowance") == [((), {"asset_type": "COLLATERAL"})]
+
+
+# --- list_open_orders (called on the client directly by scripts/position_sync.py) ---
+
+
+def test_list_open_orders_empty_page(fake_clob, shapes):
+    fake_clob.script("list_open_orders", [shapes.empty_page()])
+    paginator = clob_client._get_client().list_open_orders()
+    assert isinstance(paginator, Paginator)
+    assert list(paginator.iter_items()) == []
+
+
+def test_list_open_orders_two_pages_yield_every_item(fake_clob, shapes):
+    fake_clob.script("list_open_orders", shapes.open_orders_pages())
+    items = list(clob_client._get_client().list_open_orders().iter_items())
+    assert [o.id for o in items] == ["0xorder-A", "0xorder-B", "0xorder-C"]
+    assert items[2].side == "SELL"
+    fake_clob.assert_all_consumed()
+
+
+def test_iterating_the_paginator_itself_yields_pages_not_orders(fake_clob, shapes):
+    """documents current behaviour, see audit: scripts/position_sync.py:852 runs
+    `list(client.list_open_orders())` and then reads `.id` of each element. The SDK
+    Paginator iterates PAGES, so every element is a Page with no `id`, and the set
+    of CLOB order ids that sync_open_orders compares against is {""}."""
+    fake_clob.script("list_open_orders", shapes.open_orders_pages())
+    clob_orders = list(clob_client._get_client().list_open_orders())  # the line-852 expression
+    assert all(isinstance(o, Page) for o in clob_orders)
+    clob_ids = {str(getattr(o, "id", "") or "") for o in clob_orders}
+    assert clob_ids == {""}
+
+
+# --- the fake itself --------------------------------------------------------
+
+
+def test_unqueued_call_raises_and_is_recorded(fake_clob):
+    with pytest.raises(fake_clob.Unscripted, match="nothing scripted"):
+        fake_clob.cancel_order(order_id="0xabc")
+    assert fake_clob.calls == [("cancel_order", (), {"order_id": "0xabc"})]
+
+
+def test_unqueued_call_through_post_maker_propagates(fake_clob, armed):
+    with pytest.raises(fake_clob.Unscripted):
+        clob_client.post_maker(TOKEN, "BUY", 0.42, 10.0, tick_size=0.01)
+
+
+def test_unqueued_get_order_is_wrapped_by_the_wrapper(fake_clob):
+    """documents current behaviour, see audit: get_order() converts ANY exception
+    from the client into ClobError, so an unscripted call surfaces as ClobError
+    carrying the fake's message."""
+    with pytest.raises(ClobError, match="nothing scripted"):
+        clob_client.get_order("0xabc")
+
+
+def test_each_method_has_its_own_queue(fake_clob, shapes):
+    fake_clob.script("cancel_order", shapes.cancel_confirmed("0x1"))
+    with pytest.raises(fake_clob.Unscripted):
+        fake_clob.get_order(order_id="0x1")
+    assert fake_clob.cancel_order(order_id="0x1").canceled == ("0x1",)
+    with pytest.raises(fake_clob.Unscripted):  # answers are consumed once
+        fake_clob.cancel_order(order_id="0x1")
+
+
+def test_answers_come_out_in_order(fake_clob, shapes):
+    fake_clob.script("get_order", shapes.order_live(), shapes.order_matched())
+    assert fake_clob.get_order(order_id="x").status == "LIVE"
+    assert fake_clob.get_order(order_id="x").status == "MATCHED"
+
+
+def test_fake_rejects_a_keyword_the_sdk_method_does_not_take(fake_clob, shapes):
+    fake_clob.script("place_limit_order", shapes.accepted_post())
+    with pytest.raises(TypeError):
+        fake_clob.place_limit_order(token_id=TOKEN, price=0.4, size=1.0, side="BUY", tick_size=0.01)
+
+
+def test_fake_has_no_methods_beyond_the_six(fake_clob):
+    with pytest.raises(AttributeError):
+        fake_clob.cancel_all()
+
+
+def test_fake_clob_is_the_injected_client_during_the_test(fake_clob):
+    assert clob_client._get_client() is fake_clob
+
+
+def test_no_call_is_recorded_when_the_wrapper_refuses_before_the_client(fake_clob, monkeypatch, armed):
+    """The egress guard fails closed before any client call (guard active; armed, so
+    the arming guard, which runs first, lets the call through to the egress check)."""
+    monkeypatch.setenv("POLYCLAWD_EGRESS_REQUIRE_SRC", "10.2.0.2")
+    monkeypatch.setattr(clob_client, "_egress_src_ip", lambda host, port=443: "192.0.2.1")
+    with pytest.raises(ClobError, match="egress guard"):
+        clob_client.post_maker(TOKEN, "BUY", 0.42, 10.0, tick_size=0.01)
+    fake_clob.assert_no_calls()
+
+
+def test_egress_guard_is_inactive_by_default():
+    """With POLYCLAWD_EGRESS_REQUIRE_SRC unset the guard returns without probing
+    the network (the autouse fixture removes any ambient value and blocks sockets)."""
+    clob_client.assert_egress_tunneled()
+
+
+# --- no network -------------------------------------------------------------
+
+
+def test_http_is_blocked_in_tests_live(network_attempts):
+    with pytest.raises(AssertionError, match="network access attempted"):
+        requests.get("http://127.0.0.1:9/")
+    assert [label for label, _ in network_attempts] == ["requests"]
+
+
+def test_fixed_tick_and_min_size_helper(fixed_tick_and_min_size):
+    assert clob_client.get_tick_size(TOKEN) == 0.01
+    assert clob_client.get_min_order_size(TOKEN) == 5.0
+
+
+# --- live_db ----------------------------------------------------------------
+
+
+def test_live_db_applies_the_production_schema(live_db):
+    tables = {r[0] for r in live_db.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"live_positions", "live_fills", "live_open_orders", "live_portfolio_state"} <= tables
+
+
+def test_live_db_redirects_argumentless_connect(live_db):
+    conn = live_db_module.connect()
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        assert row[2] == str(live_db.path)
+    finally:
+        conn.close()
+
+
+def test_live_db_does_not_touch_the_default_path(live_db):
+    default_existed = live_db_module.DB_PATH.exists()
+    before = live_db_module.DB_PATH.stat().st_mtime_ns if default_existed else None
+    conn = live_db_module.connect()
+    conn.close()
+    assert live_db_module.DB_PATH.exists() == default_existed
+    if default_existed:
+        assert live_db_module.DB_PATH.stat().st_mtime_ns == before
+
+
+# --- leaked client ----------------------------------------------------------
+# An autouse fixture (tests/live/conftest.py) asserts at SETUP that no client is
+# injected, so a client leaked by any earlier test fails the next test in any order.
+
+
+def test_fake_clob_is_the_injected_client_inside_the_test(fake_clob):
+    assert clob_client._client is fake_clob
+
+
+# --- the guards fail the test at setup / teardown (task 1.0e) ----------------
+# Each check is exercised through a real inner pytest run (a subprocess in a
+# scratch directory) so that removing the fixture wiring makes a test here fail.
+
+import importlib.util
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+_LIVE_CONFTEST = Path(__file__).resolve().parent / "conftest.py"
+_REPO_ROOT = _LIVE_CONFTEST.parent.parent.parent
+
+
+def _live_conftest_copy():
+    spec = importlib.util.spec_from_file_location("repo_live_conftest_copy", _LIVE_CONFTEST)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod  # @dataclass looks its module up here
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_INNER_CONFTEST = textwrap.dedent('''
+    import importlib.util, sys
+    spec = importlib.util.spec_from_file_location("repo_live_conftest", {path!r})
+    _m = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = _m
+    spec.loader.exec_module(_m)
+    _no_network_no_ambient_guard = _m._no_network_no_ambient_guard
+    _no_client_leaked_from_an_earlier_test = _m._no_client_leaked_from_an_earlier_test
+    network_attempts = _m.network_attempts
+''')
+
+
+def _run_inner(tmp_path, test_source, *selectors):
+    (tmp_path / "conftest.py").write_text(_INNER_CONFTEST.format(path=str(_LIVE_CONFTEST)))
+    (tmp_path / "test_inner.py").write_text(textwrap.dedent(test_source))
+    env = dict(os.environ, PYTHONPATH=str(_REPO_ROOT), PYTHONDONTWRITEBYTECODE="1")
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", "--no-header",
+         "--rootdir", str(tmp_path), *(f"test_inner.py::{s}" for s in selectors)],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+_NETWORK_INNER = '''
+    import requests
+
+    def _swallowing_caller():
+        try:
+            requests.get("http://127.0.0.1:9/")
+        except Exception:
+            pass
+
+    def test_swallowed_attempt():
+        _swallowing_caller()
+
+    def test_swallowed_attempt_opted_in(network_attempts):
+        _swallowing_caller()
+        assert len(network_attempts) == 1
+
+    def test_clean():
+        pass
+'''
+
+
+def test_swallowed_network_attempt_fails_the_test(tmp_path):
+    r = _run_inner(tmp_path, _NETWORK_INNER, "test_swallowed_attempt")
+    out = r.stdout + r.stderr
+    assert r.returncode != 0, out
+    assert "attempted network access in tests/live" in out, out
+
+
+def test_opted_in_network_attempt_passes(tmp_path):
+    r = _run_inner(tmp_path, _NETWORK_INNER, "test_swallowed_attempt_opted_in", "test_clean")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_network_teardown_check_unit():
+    mod = _live_conftest_copy()
+    mod._fail_on_network_attempts([], opted_in=False)
+    mod._fail_on_network_attempts([("urlopen", ("http://x",))], opted_in=True)
+    with pytest.raises(pytest.fail.Exception, match="urlopen"):
+        mod._fail_on_network_attempts([("urlopen", ("http://x",))], opted_in=False)
+
+
+_LEAK_INNER = '''
+    from execution import clob_client
+
+    def test_a_leaks_a_client():
+        clob_client.set_client(object())   # deliberately never reset
+
+    def test_b_runs_after_the_leak():
+        pass
+
+    def test_c_runs_after_the_leak():
+        pass
+'''
+
+
+def test_a_leaked_client_fails_the_next_test_at_setup(tmp_path):
+    r = _run_inner(tmp_path, _LEAK_INNER)
+    out = r.stdout + r.stderr
+    assert r.returncode != 0, out
+    assert "an earlier test leaked it" in out, out
+    # the leaking test itself passes; the two after it fail at setup
+    assert "1 passed, 2 errors" in out, out
+
+
+def test_client_check_unit_catches_a_leak_and_leaves_no_trace():
+    mod = _live_conftest_copy()
+    mod._assert_no_client_injected()
+    try:
+        clob_client.set_client(object())
+        with pytest.raises(AssertionError, match="leaked"):
+            mod._assert_no_client_injected()
+    finally:
+        clob_client.set_client(None)
+    mod._assert_no_client_injected()

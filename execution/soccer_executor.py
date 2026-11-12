@@ -4,7 +4,7 @@ Mirrors the smart-wallet pattern: takes tradeable soccer edges (already enriched
 with token_id via sports_edge_common.enrich_executable_edge) and routes them
 through the hybrid maker→taker executor.
 
-Called from scheduler.task_soccer_match_scan when live_config.mode() == "LIVE".
+Called from scheduler.task_soccer_match_scan when live_config.live_armed().
 """
 
 from __future__ import annotations
@@ -32,8 +32,8 @@ def execute_tradeable_soccer_edges(edges: list) -> dict:
     from execution import live_config, live_db, live_executor
     from execution.risk_governor import RiskGovernor
 
-    if live_config.mode() != "LIVE":
-        return {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0, "reason": "not LIVE mode"}
+    if not live_config.live_armed():
+        return {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0, "reason": "not armed"}
 
     stats = {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0}
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -84,7 +84,7 @@ def execute_tradeable_soccer_edges(edges: list) -> dict:
                     # imports datetime/timezone at top; a local re-import previously
                     # shadowed it for the WHOLE function (Python local-scope rule),
                     # making `date_str = datetime.now(...)` above UnboundLocalError
-                    # on every call once live_config.mode() == "LIVE".
+                    # on every call once live_config.live_armed() is true.
                     cdt = datetime.fromisoformat(commence_str.replace("Z", "+00:00"))
                     mins_to_close = (cdt - datetime.now(timezone.utc)).total_seconds() / 60.0
                 except Exception:

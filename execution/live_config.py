@@ -83,6 +83,57 @@ def mode() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Arming: the one rule for "real orders may be sent"
+# ---------------------------------------------------------------------------
+
+# A constant in code, never an environment variable. The LAST commit of Phase 1C
+# flips it to True and nothing else may. While it is False no setting can arm the
+# system: LIVE behaves as PAPER wherever orders are sent.
+LIVE_ORDER_PATH_READY = False
+
+
+def live_stops_enforce() -> bool:
+    """True only when POLYCLAWD_LIVE_STOPS_ENFORCE is exactly the string "1".
+
+    No stripping and no truthy parsing: unset, empty, "0", "true", "yes", "1x",
+    " 1" are all False. Read at call time (a value loaded from the env file after
+    start counts). Never raises: a wrong value or a misspelled name leaves the
+    system unarmed."""
+    try:
+        return os.environ.get("POLYCLAWD_LIVE_STOPS_ENFORCE") == "1"
+    except Exception:
+        return False
+
+
+def arming_state() -> dict:
+    """The three components and their result, for pages, API routes and logs.
+
+    The only place the arming formula is written: mode LIVE, the enforce flag set
+    to exactly "1", and LIVE_ORDER_PATH_READY. Read at call time."""
+    m = mode()
+    enforce = live_stops_enforce()
+    ready = bool(LIVE_ORDER_PATH_READY)
+    return {
+        "mode": m,
+        "enforce": enforce,
+        "path_ready": ready,
+        "armed": m == "LIVE" and enforce and ready,
+    }
+
+
+def live_armed() -> bool:
+    """True when real orders may be sent: arming_state()["armed"]. No I/O, logging
+    or state of its own (it runs on every fast-poll cycle, stop tick and API request)."""
+    return arming_state()["armed"]
+
+
+def arming_state_text() -> str:
+    """The three components as one line, for the guard's error and the start-up page."""
+    st = arming_state()
+    return f"mode={st['mode']} enforce={st['enforce']} LIVE_ORDER_PATH_READY={st['path_ready']}"
+
+
+# ---------------------------------------------------------------------------
 # Risk caps (env-overridable, typed, fail-safe defaults)
 # ---------------------------------------------------------------------------
 

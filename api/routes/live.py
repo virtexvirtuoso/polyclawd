@@ -138,6 +138,7 @@ def get_live_portfolio_endpoint():
             "distance_to_kill": round(distance_to_kill, 4),
             "per_trade_cap": round(live_config.per_trade_cap(), 2),
             "mode": live_config.mode(),
+            "armed": live_config.live_armed(),
             # extras for completeness
             "peak_equity": round(peak_equity, 4),
             "fees_paid_cumulative": round(float(portfolio.get("fees_paid_cumulative") or 0.0), 4),
@@ -259,6 +260,7 @@ def get_live_governor():
             "bankroll": round(gov["bankroll"], 4),
             "ramp_stage": gov.get("ramp_stage"),
             "mode": live_config.mode(),
+            "armed": live_config.live_armed(),
         }
     finally:
         conn.close()

@@ -3,7 +3,7 @@
 Takes TWC resolution-source edges (from weather_resolution_edge.py) and routes
 them through the hybrid maker→taker executor. Mirrors soccer_executor pattern.
 
-Called from scheduler.task_resolution_edge_scan when live_config.mode() == "LIVE".
+Called from scheduler.task_resolution_edge_scan when live_config.live_armed().
 
 Weather markets are bracket format ("between 92-93°F") — we buy NO when TWC
 forecast is above the bracket (TWC says 96°F, bracket is 92-93°F, market
@@ -36,8 +36,8 @@ def execute_tradeable_weather_edges(signals: list) -> dict:
     from execution import live_config, live_db, live_executor
     from execution.risk_governor import RiskGovernor
 
-    if live_config.mode() != "LIVE":
-        return {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0, "reason": "not LIVE mode"}
+    if not live_config.live_armed():
+        return {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0, "reason": "not armed"}
 
     stats = {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0}
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -103,7 +103,7 @@ def execute_tradeable_weather_edges(signals: list) -> dict:
                     # imports datetime/timezone at top; a local re-import previously
                     # shadowed it for the WHOLE function (Python local-scope rule),
                     # making `date_str = datetime.now(...)` above UnboundLocalError
-                    # on every call once live_config.mode() == "LIVE".
+                    # on every call once live_config.live_armed() is true.
                     edt = datetime.fromisoformat(str(end_date_str).replace("Z", "+00:00"))
                     mins_to_close = (edt - datetime.now(timezone.utc)).total_seconds() / 60.0
                 except Exception:

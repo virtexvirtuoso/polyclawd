@@ -20,6 +20,13 @@ def _patch_live_db(monkeypatch, tmp_path, name):
     monkeypatch.setattr(live_db, "connect", lambda path=db_path: real_connect(path))
 
 
+def _arm(monkeypatch):
+    """The executors run only when live_config.live_armed() (task 1.10): mode is patched
+    to LIVE by each test; set the other two components as well."""
+    monkeypatch.setenv("POLYCLAWD_LIVE_STOPS_ENFORCE", "1")
+    monkeypatch.setattr(live_config, "LIVE_ORDER_PATH_READY", True)
+
+
 class _Edge:
     """Minimal stand-in for sports_edge_common.Edge (attribute access, not dict)."""
 
@@ -31,6 +38,7 @@ def test_soccer_executor_close_window_reject_no_namerror(tmp_path, monkeypatch):
     """Close-window gate rejects the only edge -> must log client_order_ref
     (previously undefined there) and return clean stats, not raise."""
     monkeypatch.setattr(live_config, "mode", lambda: "LIVE")
+    _arm(monkeypatch)
     monkeypatch.setattr(
         live_config, "in_close_window", lambda mins, category: (False, "outside window (test)")
     )
@@ -66,6 +74,7 @@ def test_soccer_executor_velocity_reject_no_namerror(tmp_path, monkeypatch):
     """Velocity gate rejects (close-window passes first) -> second buggy
     log line in the original code, also previously undefined there."""
     monkeypatch.setattr(live_config, "mode", lambda: "LIVE")
+    _arm(monkeypatch)
     monkeypatch.setattr(live_config, "in_close_window", lambda mins, category: (True, ""))
     monkeypatch.setattr(
         live_config, "velocity_check", lambda **kw: (False, "collapsing edge (test)")
@@ -103,6 +112,7 @@ def test_weather_executor_velocity_reject_no_namerror(tmp_path, monkeypatch):
     which was assigned AFTER this point (close-window gate must pass first
     so we actually reach the velocity check)."""
     monkeypatch.setattr(live_config, "mode", lambda: "LIVE")
+    _arm(monkeypatch)
     monkeypatch.setattr(live_config, "in_close_window", lambda mins, category: (True, ""))
     monkeypatch.setattr(
         live_config, "velocity_check", lambda **kw: (False, "collapsing edge (test)")
