@@ -105,14 +105,11 @@ def live_stops_enforce() -> bool:
         return False
 
 
-def live_armed() -> bool:
-    """The single definition of "real orders may be sent": mode LIVE, the enforce
-    flag set to exactly "1", and LIVE_ORDER_PATH_READY. Read at call time."""
-    return mode() == "LIVE" and live_stops_enforce() and bool(LIVE_ORDER_PATH_READY)
-
-
 def arming_state() -> dict:
-    """The three components and their result, for pages, API routes and logs."""
+    """The three components and their result, for pages, API routes and logs.
+
+    The only place the arming formula is written: mode LIVE, the enforce flag set
+    to exactly "1", and LIVE_ORDER_PATH_READY. Read at call time."""
     m = mode()
     enforce = live_stops_enforce()
     ready = bool(LIVE_ORDER_PATH_READY)
@@ -122,6 +119,18 @@ def arming_state() -> dict:
         "path_ready": ready,
         "armed": m == "LIVE" and enforce and ready,
     }
+
+
+def live_armed() -> bool:
+    """True when real orders may be sent: arming_state()["armed"]. No I/O, logging
+    or state of its own (it runs on every fast-poll cycle, stop tick and API request)."""
+    return arming_state()["armed"]
+
+
+def arming_state_text() -> str:
+    """The three components as one line, for the guard's error and the start-up page."""
+    st = arming_state()
+    return f"mode={st['mode']} enforce={st['enforce']} LIVE_ORDER_PATH_READY={st['path_ready']}"
 
 
 # ---------------------------------------------------------------------------

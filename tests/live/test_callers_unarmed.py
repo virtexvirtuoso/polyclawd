@@ -77,11 +77,11 @@ CALLERS = {
         _observe_smart_wallet, {"reached_sizing": 0}, {"reached_sizing": 1}),
     "soccer_executor.execute_tradeable_soccer_edges": (
         _observe_soccer,
-        {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0, "reason": "not LIVE mode"},
+        {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0, "reason": "not armed"},
         {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0}),
     "weather_executor.execute_tradeable_weather_edges": (
         _observe_weather,
-        {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0, "reason": "not LIVE mode"},
+        {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0, "reason": "not armed"},
         {"filled": 0, "dropped": 0, "skipped": 0, "errors": 0}),
     "paper_portfolio.process_signals": (
         _observe_paper_portfolio,

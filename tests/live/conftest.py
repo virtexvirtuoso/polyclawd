@@ -326,7 +326,7 @@ def armed(monkeypatch):
     runs unarmed and ``post_maker`` / ``cross_taker`` refuse."""
     monkeypatch.setenv("POLYCLAWD_MODE", "LIVE")
     monkeypatch.setenv("POLYCLAWD_LIVE_STOPS_ENFORCE", "1")
-    monkeypatch.setattr(live_config, "LIVE_ORDER_PATH_READY", True, raising=False)
+    monkeypatch.setattr(live_config, "LIVE_ORDER_PATH_READY", True)
     assert live_config.live_armed() is True
 
 
@@ -344,7 +344,7 @@ def mode_env(monkeypatch):
             monkeypatch.delenv("POLYCLAWD_LIVE_STOPS_ENFORCE", raising=False)
         else:
             monkeypatch.setenv("POLYCLAWD_LIVE_STOPS_ENFORCE", enforce)
-        monkeypatch.setattr(live_config, "LIVE_ORDER_PATH_READY", path_ready, raising=False)
+        monkeypatch.setattr(live_config, "LIVE_ORDER_PATH_READY", path_ready)
 
     return _set
 

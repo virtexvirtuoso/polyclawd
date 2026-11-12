@@ -73,15 +73,36 @@ def test_live_armed_truth_table(mode_env, mode, enforce, ready):
     mode_env(mode, enforce, ready)
     expected = mode == "LIVE" and enforce == "1" and ready is True
     assert live_config.live_armed() is expected
+    assert live_config.arming_state()["armed"] is expected  # the two cannot drift apart
 
 
 def test_live_armed_table_has_exactly_one_true_row(mode_env):
     trues = []
     for mode, enforce, ready in itertools.product(["PAPER", "LIVE"], [None, "1"], [False, True]):
         mode_env(mode, enforce, ready)
+        assert live_config.live_armed() is live_config.arming_state()["armed"]
         if live_config.live_armed():
             trues.append((mode, enforce, ready))
     assert trues == [("LIVE", "1", True)]
+
+
+def test_live_armed_is_arming_state_and_has_no_other_body():
+    """One formula: live_armed() is a one-line read of arming_state()["armed"]."""
+    import ast
+    import inspect
+    import textwrap
+
+    fn = ast.parse(textwrap.dedent(inspect.getsource(live_config.live_armed))).body[0]
+    body = [n for n in fn.body if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))]
+    assert len(body) == 1 and isinstance(body[0], ast.Return)
+    assert ast.unparse(body[0].value) == "arming_state()['armed']"
+
+
+def test_arming_state_text_has_the_three_components(mode_env):
+    mode_env("LIVE", "1", False)
+    assert live_config.arming_state_text() == "mode=LIVE enforce=True LIVE_ORDER_PATH_READY=False"
+    mode_env("PAPER", None, True)
+    assert live_config.arming_state_text() == "mode=PAPER enforce=False LIVE_ORDER_PATH_READY=True"
 
 
 def test_arming_state_reports_the_components(mode_env):
@@ -130,6 +151,7 @@ def test_not_armed_error_names_the_three_components(fake_clob, mode_env):
     text = str(exc.value)
     assert text.startswith("not armed")
     assert "mode=LIVE" in text and "enforce=False" in text and "LIVE_ORDER_PATH_READY=False" in text
+    assert live_config.arming_state_text() in text  # the one text, not a second copy
 
 
 def test_guard_runs_before_the_client_is_even_built(monkeypatch, mode_env):

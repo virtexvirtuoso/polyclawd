@@ -401,12 +401,7 @@ def assert_live_armed() -> None:
     PAPER: nothing reaches the exchange client. cancel, get_order and the read
     calls do not call it and stay allowed in every mode."""
     if not live_config.live_armed():
-        st = live_config.arming_state()
-        raise ClobError(
-            "not armed: no order will be sent "
-            f"(mode={st['mode']} enforce={st['enforce']} "
-            f"LIVE_ORDER_PATH_READY={st['path_ready']})"
-        )
+        raise ClobError(f"not armed: no order will be sent ({live_config.arming_state_text()})")
 
 
 def post_maker(
