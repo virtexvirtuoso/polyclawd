@@ -153,6 +153,7 @@ _NO_ID_ITEMS = {
     "empty-string-id": lambda shapes: shapes.open_order(""),
     "none-id": lambda shapes: types.SimpleNamespace(id=None),  # the SDK model rejects a None id
     "no-id-attribute": lambda shapes: types.SimpleNamespace(status="LIVE"),
+    "integer-id": lambda shapes: types.SimpleNamespace(id=123),  # an int is not a usable id: str only
     "a-page-as-an-item": lambda shapes: _page_with(),  # the exact shape the old line 852 produced
 }
 
@@ -176,6 +177,35 @@ def test_item_without_id_aborts_the_run_logs_error_and_changes_no_row(live_db, f
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert errors, "expected an ERROR log line"
     assert type(bad).__name__ in errors[0].getMessage()
+
+
+def test_the_tick_continues_after_a_malformed_open_order_list(live_db, fake_clob, shapes, monkeypatch):
+    """Drives scripts.position_sync.run() itself. What is patched, and why: the
+    three steps before the order sync (check_resolutions, check_wallet_balance,
+    check_fill_reconciliation) reach the network or the data API and are not what
+    this test is about; sync_positions is replaced by a recorder, which is what
+    the assertion needs. Not patched: live_db (the temp database), the order
+    sync, and the bankroll block, which calls the fake client's
+    get_balance_allowance, has nothing scripted, and so fails inside its own
+    try/except, as it does when the exchange is down. run() must not raise and
+    must still reach sync_positions."""
+    _add_order(live_db.conn, "0xorder-gone")
+    live_db.conn.commit()
+    monkeypatch.setattr(ps, "check_resolutions", lambda conn: [])
+    monkeypatch.setattr(ps, "check_wallet_balance", lambda conn: None)
+    monkeypatch.setattr(ps, "check_fill_reconciliation", lambda *a, **k: {})
+    sync_calls = []
+    monkeypatch.setattr(ps, "sync_positions", lambda conn: sync_calls.append(conn) or [])
+    fake_clob.script("list_open_orders", _page_with(types.SimpleNamespace(id=None)))
+    fake_clob.script("get_order", shapes.order_matched("0xorder-gone"))  # would relabel it if the sync went on
+    before = _snapshot(live_db.conn)
+
+    out = ps.run()                                  # must not raise
+
+    assert len(sync_calls) == 1                     # the tick went on to the next step
+    assert "error" not in out and out["new"] == 0   # a clean tick as far as run() reports
+    assert fake_clob.calls_to("get_order") == []    # the malformed list stopped the order sync only
+    assert _snapshot(live_db.conn) == before
 
 
 # --- the status list lives in one place ---------------------------------------

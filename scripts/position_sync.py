@@ -876,7 +876,9 @@ def sync_open_orders(conn) -> dict:
     LIVE the row is left untouched. If the open-order list has an item without an
     id the run aborts with no row changed (logged at ERROR, returned as `error`).
 
-    Returns: {'reconciled': N, 'cancelled_stale': N, 'filled_stale': N}
+    Returns: {'reconciled': N, 'cancelled_stale': N, 'filled_stale': N}, plus
+    'error': <message> when the run aborted (open-order list malformed or CLOB fetch
+    failed); the three counts are then all 0 and no row was changed.
     """
     try:
         from execution.clob_client import _get_client, get_order, order_is_filled
