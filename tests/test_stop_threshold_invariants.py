@@ -7,6 +7,9 @@ reads every loss threshold the module still has and requires each to be strictly
 below it. Adding a threshold means adding it to EXPECTED on purpose.
 """
 
+import re
+from pathlib import Path
+
 import services.stop_evaluator as se
 
 EXPECTED = {
@@ -36,3 +39,19 @@ def test_every_per_strategy_threshold_is_strictly_below_the_universal_stop():
         assert value < se.UNIVERSAL_MAX_LOSS_PCT, (
             f"{name}={value} is not below UNIVERSAL_MAX_LOSS_PCT={se.UNIVERSAL_MAX_LOSS_PCT}: "
             "the universal stop would fire first and this threshold could never fire")
+
+
+def test_post_lock_weather_loss_default_is_strictly_below_the_universal_stop():
+    """The paper loops read the post-lock weather loss from engine state with an
+    inline literal default (no constant is exposed), once in each loop. Read both
+    literals from the source so the check follows the code, and require each to
+    be below the universal stop; the two must agree."""
+    src = Path(se.__file__).read_text()
+    defaults = re.findall(
+        r'engine_state\.get\("post_lock_weather_max_loss",\s*([0-9.]+)\)', src)
+    assert len(defaults) == 2, defaults       # one per paper loop
+    assert len(set(defaults)) == 1, defaults
+    for value in map(float, defaults):
+        assert value < se.UNIVERSAL_MAX_LOSS_PCT, (
+            f"post_lock_weather_max_loss default {value} is not below "
+            f"UNIVERSAL_MAX_LOSS_PCT={se.UNIVERSAL_MAX_LOSS_PCT}")

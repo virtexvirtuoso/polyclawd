@@ -34,6 +34,11 @@ KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 # Checked FIRST in both evaluate_stops() and evaluate_stops_urgent().
 # No strategy-specific override can exceed this — it's the hard floor.
 # Env override: UNIVERSAL_MAX_LOSS_PCT for rapid rollback without redeploy.
+# This stop now shadows every other loss stop and is the ONLY loss cap for every
+# strategy, weather included: the tiers that used to sit above it (50% and 70%)
+# were deleted on 2026-11-12 because they could never fire while it is 0.40.
+# Raising it (it is read from the environment) raises the loss cap for every
+# strategy, and there is no second cap behind it.
 UNIVERSAL_MAX_LOSS_PCT = float(os.getenv("UNIVERSAL_MAX_LOSS_PCT", "0.40"))
 
 # ── PRE-RESOLUTION WARNING ─────────────────────────────────────────────────
