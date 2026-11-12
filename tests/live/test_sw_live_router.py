@@ -470,13 +470,14 @@ def test_a_refire_that_claims_to_be_eligible_is_still_not_routed(env, paper):
 # the log lines
 # --------------------------------------------------------------------------- #
 def test_record_line_for_a_would_route_record_field_by_field(env, paper):
+    env.archetype_rows = [(WALLET, "sports", 40, 500.0)]
     env.books[TOKEN_A] = _book(TOKEN_A, [0.38, 0.39], [0.41, 0.40])
     sw._route_live_smart_wallet([_rec(price=0.4, price_at_alert=0.4)], _gamma())
     (line,) = _lines(env, "sw_live RECORD")
     assert line == (
         "sw_live RECORD verdict=would_route reason=- alert_type=entry price=0.4000 "
         f"wallet={WALLET} is_bot=false clv_muted=false category=sports bid=0.3900 ask=0.4000 "
-        f"spread_pct=0.0250 market={CID[:16]} token={TOKEN_A[-8:]} gamma=present book=ok")
+        f"spread_pct=0.0250 market={CID[:16]} token={TOKEN_A[-8:]} gamma=present book=ok arch=ok")
     assert all(" " not in v for v in _fields(line).values())
 
 
@@ -488,7 +489,7 @@ def test_record_line_for_a_filtered_record_field_by_field(env, paper):
     assert line == (
         "sw_live RECORD verdict=filtered reason=price_band alert_type=entry price=0.7200 "
         f"wallet={WALLET} is_bot=false clv_muted=true category=politics bid=- ask=- "
-        f"spread_pct=- market={CID[:16]} token={TOKEN_A[-8:]} gamma=present book=-")
+        f"spread_pct=- market={CID[:16]} token={TOKEN_A[-8:]} gamma=present book=- arch=-")
     assert all(" " not in v for v in _fields(line).values())
 
 
@@ -514,13 +515,14 @@ def test_dryrun_summary_counts_per_reason_sorted_by_name(env, paper):
     sw._route_live_smart_wallet(recs, _gamma())
     (line,) = _lines(env, "sw_live DRYRUN")
     assert line == ("sw_live DRYRUN mode=PAPER armed=false records=5 would_route=1 "
-                    "filtered=bot_wallet:1,no_title:1,price_band:2 gamma_missing=0")
+                    "filtered=bot_wallet:1,no_title:1,price_band:2 gamma_missing=0 arch_abstain=1")
 
 
 def test_dryrun_summary_with_nothing_filtered(env, paper):
     sw._route_live_smart_wallet([_rec()], _gamma())
     (line,) = _lines(env, "sw_live DRYRUN")
-    assert line == "sw_live DRYRUN mode=PAPER armed=false records=1 would_route=1 filtered=- gamma_missing=0"
+    assert line == ("sw_live DRYRUN mode=PAPER armed=false records=1 would_route=1 filtered=- "
+                    "gamma_missing=0 arch_abstain=1")
 
 
 def test_zero_records_log_nothing(env, paper):
@@ -615,7 +617,8 @@ def test_armed_logs_the_summary_before_routing(armed_env):
     msgs = [r.getMessage() for r in armed_env.caplog.records if r.getMessage().startswith("sw_live")]
     armed_i = next(i for i, m in enumerate(msgs) if m.startswith("sw_live ARMED"))
     routing_i = next(i for i, m in enumerate(msgs) if m.startswith("sw_live: routing"))
-    assert msgs[armed_i] == "sw_live ARMED records=2 would_route=1 filtered=bot_wallet:1 gamma_missing=0"
+    assert msgs[armed_i] == ("sw_live ARMED records=2 would_route=1 filtered=bot_wallet:1 "
+                             "gamma_missing=0 arch_abstain=1")
     assert armed_i < routing_i
     assert msgs[routing_i] == "sw_live: routing 1 fired alerts to live executor"
     assert not any(m.startswith("sw_live DRYRUN") for m in msgs)
@@ -673,7 +676,7 @@ def test_a_record_error_filters_that_record_and_the_rest_continue(env, paper):
         ("filtered", "record_error"), ("would_route", "-"),
         ("filtered", "not_eligible"), ("would_route", "-")]
     (line,) = _lines(env, "sw_live DRYRUN")
-    assert line.endswith("records=4 would_route=2 filtered=not_eligible:1,record_error:1 gamma_missing=1")   # the non-dict has no market
+    assert line.endswith("records=4 would_route=2 filtered=not_eligible:1,record_error:1 gamma_missing=1 arch_abstain=3")   # the non-dict has no market
 
 
 def test_a_gate_that_raises_outside_the_record_handling_is_the_stage_error(env, paper, monkeypatch):
@@ -816,6 +819,142 @@ def test_a_wallet_with_no_archetype_record_still_routes(env, paper):
 
 
 # --------------------------------------------------------------------------- #
+# fix-7 R1: a record the gate could not look up is not a pass
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("wallet", ["", None])
+def test_a_record_with_no_wallet_is_archetype_error_using_the_real_gate(env, paper, wallet):
+    f = _one(env, _rec(wallet=wallet))
+    assert (f["verdict"], f["reason"], f["book"], f["arch"]) == ("filtered", "archetype_error", "-", "-")
+    assert env.book_calls == []
+
+
+def test_a_record_with_no_wallet_never_reaches_the_executor_when_armed(armed_env):
+    (f,) = _route(armed_env, [_rec(wallet="")])
+    assert (f["verdict"], f["reason"]) == ("filtered", "archetype_error")
+    assert armed_env.intents == []
+
+
+# --------------------------------------------------------------------------- #
+# fix-7 R2: arch= says whether the gate had data
+# --------------------------------------------------------------------------- #
+W2 = "0xwallet0000000000000000000000000000000002"
+W3 = "0xwallet0000000000000000000000000000000003"
+W4 = "0xwallet0000000000000000000000000000000004"
+
+
+def test_a_wallet_with_enough_history_is_arch_ok(env, paper):
+    env.archetype_rows = [(WALLET, "sports", 40, 500.0)]
+    f = _one(env, _rec())
+    assert (f["verdict"], f["reason"], f["arch"]) == ("would_route", "-", "ok")
+    assert not [r for r in env.caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_wallet_with_no_row_would_route_with_arch_abstain(env, paper):
+    f = _one(env, _rec())
+    assert (f["verdict"], f["reason"], f["arch"]) == ("would_route", "-", "abstain")
+
+
+def test_a_wallet_under_the_minimum_trade_count_is_arch_abstain(env, paper):
+    from signals.whale_wallets import ARCHETYPE_GATE_MIN_TRADES
+
+    env.archetype_rows = [(WALLET, "sports", ARCHETYPE_GATE_MIN_TRADES - 1, 5.0)]
+    f = _one(env, _rec())
+    assert (f["verdict"], f["arch"]) == ("would_route", "abstain")
+    env.archetype_rows = [(WALLET, "sports", ARCHETYPE_GATE_MIN_TRADES, 5.0)]
+    assert _one(env, _rec())["arch"] == "ok"                      # the boundary itself has data
+
+
+def test_arch_is_a_dash_for_a_record_filtered_before_the_archetype_check(env, paper):
+    f = _one(env, _rec(live_eligible=False, live_filter_reason="price_band"))
+    assert (f["reason"], f["arch"]) == ("price_band", "-")
+    assert _one(env, _rec(title=""))["arch"] == "-"               # no_title comes before the gate
+
+
+def test_arch_is_a_dash_for_a_record_the_gate_rejected(env, paper):
+    env.archetype_rows = [(WALLET, "sports", 40, -500.0)]
+    f = _one(env, _rec())
+    assert (f["reason"], f["arch"]) == ("archetype", "-")
+
+
+def test_arch_is_a_dash_for_a_lookup_that_raised(env, paper, monkeypatch):
+    monkeypatch.setattr("signals.whale_wallets.get_meta_db",
+                        lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError("locked")))
+    assert _one(env, _rec())["arch"] == "-"
+
+
+def test_a_record_filtered_after_the_archetype_check_keeps_what_the_gate_said(env, paper):
+    env.archetype_rows = [(WALLET, "sports", 40, 500.0)]
+    f = _spread_case(env, 0.08, 0.09)
+    assert (f["reason"], f["arch"]) == ("wide_spread", "ok")
+
+
+def test_arch_comes_after_book_and_is_the_last_field_of_every_record_line(env, paper):
+    env.archetype_rows = [(WALLET, "sports", 40, 500.0)]
+    sw._route_live_smart_wallet([_rec(), _rec(live_eligible=False, live_filter_reason="price_band")],
+                                _gamma())
+    for line in _lines(env, "sw_live RECORD"):
+        keys = [p.split("=", 1)[0] for p in line.split()[2:]]
+        assert keys[-2:] == ["book", "arch"] and keys.count("arch") == 1, line
+
+
+def test_the_summary_counts_the_records_whose_arch_is_abstain_not_the_filtered_ones(env, paper):
+    env.archetype_rows = [(WALLET, "sports", 40, 500.0), (W3, "sports", 3, 9.0),
+                          (W4, "sports", 40, -500.0)]
+    recs = [_rec(),                                                     # ok
+            _rec(wallet=W2, market=CID, asset=TOKEN_A),                 # no row: abstain
+            _rec(wallet=W3),                                            # too few trades: abstain
+            _rec(live_eligible=False, live_filter_reason="price_band"),  # -
+            _rec(wallet=W4),                                            # rejected by the gate: -
+            _rec(wallet="")]                                            # not looked up: -
+    sw._route_live_smart_wallet(recs, _gamma())
+    assert [_fields(x)["arch"] for x in _lines(env, "sw_live RECORD")] == [
+        "ok", "abstain", "abstain", "-", "-", "-"]
+    (line,) = _lines(env, "sw_live DRYRUN")
+    assert line.endswith("records=6 would_route=3 filtered=archetype:1,archetype_error:1,price_band:1 "
+                         "gamma_missing=0 arch_abstain=2")
+
+
+def test_the_armed_summary_counts_arch_abstain(armed_env):
+    armed_env.archetype_rows = [(WALLET, "sports", 40, 500.0)]
+    _route(armed_env, [_rec(), _rec(wallet=W2, market=CID, asset=TOKEN_B)])
+    (line,) = _lines(armed_env, "sw_live ARMED")
+    assert line.endswith("gamma_missing=0 arch_abstain=1")
+
+
+def test_an_abstain_record_reaches_the_executor_exactly_like_an_ok_record(armed_env):
+    armed_env.archetype_rows = [(WALLET, "sports", 40, 500.0)]
+    (f,) = _route(armed_env, [_rec()])
+    assert f["arch"] == "ok"
+    ok_intents = list(armed_env.intents)
+    assert len(ok_intents) == 1
+    armed_env.intents.clear()
+    armed_env.archetype_rows = []                                       # same record, no history
+    (f,) = _route(armed_env, [_rec()])
+    assert (f["verdict"], f["arch"]) == ("would_route", "abstain")
+    assert armed_env.intents == ok_intents
+
+
+@pytest.mark.parametrize("answer", ["fine, nothing to see", "OK: shouted", "abstain: reworded no record", ""])
+def test_an_answer_the_router_does_not_recognise_counts_as_abstain_with_one_warning(env, paper, monkeypatch,
+                                                                                   answer):
+    bad = answer + "x" * 80 + "\nsecond line"
+    monkeypatch.setattr("signals.whale_wallets.archetype_gate_ok", lambda conn, w, a: (True, bad))
+    fields = _route(env, [_rec(), _rec(asset=TOKEN_B)])
+    assert [(f["verdict"], f["arch"]) for f in fields] == [("would_route", "abstain")] * 2
+    warnings = [r.getMessage() for r in env.caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "does not recognise" in warnings[0] and "\n" not in warnings[0]
+    assert "x" * 41 not in warnings[0] and "first=" in warnings[0]
+    (line,) = _lines(env, "sw_live DRYRUN")
+    assert line.endswith("arch_abstain=2")
+
+
+def test_the_recognised_answers_log_no_warning(env, paper):
+    env.archetype_rows = [(WALLET, "sports", 40, 500.0), (W3, "sports", 3, 9.0)]
+    _route(env, [_rec(), _rec(wallet=W2), _rec(wallet=W3)])
+    assert not [r for r in env.caplog.records if r.levelno >= logging.WARNING]
+
+
+# --------------------------------------------------------------------------- #
 # fix-5 F4: one list of reasons
 # --------------------------------------------------------------------------- #
 def _emitted_reasons(*funcs):
@@ -904,13 +1043,14 @@ def test_the_summary_counts_the_records_whose_market_was_not_in_the_gamma_data(e
     recs = [_rec(), _rec(market="0xother0000000000", asset=TOKEN_B), _rec(market="0xthird00000000")]
     sw._route_live_smart_wallet(recs, _gamma())
     (line,) = _lines(env, "sw_live DRYRUN")
-    assert line.endswith("records=3 would_route=1 filtered=no_category:2 gamma_missing=2")
+    assert line.endswith("records=3 would_route=1 filtered=no_category:2 gamma_missing=2 arch_abstain=1")
 
 
 def test_the_armed_summary_has_gamma_missing_too(armed_env):
     _route(armed_env, [_rec(), _rec(market="0xother0000000000", asset=TOKEN_B)])
     (line,) = _lines(armed_env, "sw_live ARMED")
-    assert line == "sw_live ARMED records=2 would_route=1 filtered=no_category:1 gamma_missing=1"
+    assert line == ("sw_live ARMED records=2 would_route=1 filtered=no_category:1 gamma_missing=1 "
+                    "arch_abstain=1")
 
 
 def test_book_is_a_dash_when_the_record_was_filtered_before_the_read(env, paper):
@@ -974,12 +1114,12 @@ def test_raw_trade_to_router_record_line_end_to_end(env, paper, tmp_path, monkey
     assert lines == [
         "sw_live RECORD verdict=would_route reason=- alert_type=entry price=0.4000 "
         f"wallet={WALLET} is_bot=false clv_muted=false category=sports bid=0.3900 ask=0.4000 "
-        f"spread_pct=0.0250 market={CID[:16]} token={TOKEN_A[-8:]} gamma=present book=ok",
+        f"spread_pct=0.0250 market={CID[:16]} token={TOKEN_A[-8:]} gamma=present book=ok arch=abstain",
         "sw_live RECORD verdict=filtered reason=price_band alert_type=entry price=0.7200 "
         f"wallet={WALLET} is_bot=false clv_muted=false category=sports bid=- ask=- "
-        f"spread_pct=- market={cid2[:16]} token={TOKEN_B[-8:]} gamma=present book=-",
+        f"spread_pct=- market={cid2[:16]} token={TOKEN_B[-8:]} gamma=present book=- arch=-",
     ]
     assert env.book_calls == [TOKEN_A]
     (summary,) = _lines(env, "sw_live DRYRUN")
     assert summary == ("sw_live DRYRUN mode=PAPER armed=false records=2 would_route=1 "
-                       "filtered=price_band:1 gamma_missing=0")
+                       "filtered=price_band:1 gamma_missing=0 arch_abstain=1")

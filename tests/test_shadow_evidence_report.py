@@ -35,9 +35,10 @@ def pre(ts, name=SW_LOGGER, level="INFO"):
 
 
 def record_msg(verdict, reason=None, price=0.40, is_bot=False, clv_muted=False,
-               bid=0.39, ask=0.40, spread=0.025, extra="", gamma=None, book=None):
+               bid=0.39, ask=0.40, spread=0.025, extra="", gamma=None, book=None, arch=None):
     """A real RECORD line from the emitter. With neither gamma nor book given, the two
-    trailing diagnostic fields are cut off again: that is a line from before they existed."""
+    trailing diagnostic fields are cut off again: that is a line from before they existed.
+    The same for arch: unless one is given, the emitter's arch= field is cut off."""
     rec = {"alert_type": "entry", "price": price, "wallet": "0xabc", "is_bot": is_bot,
            "clv_muted": clv_muted, "market": "0xmarket0123456789", "asset": "123456789012345678900000AAAA"}
     info = {"category": "sports", "bid": bid, "ask": ask, "spread_pct": spread}
@@ -45,9 +46,13 @@ def record_msg(verdict, reason=None, price=0.40, is_bot=False, clv_muted=False,
         info["gamma"] = gamma
     if book is not None:
         info["book"] = book
+    if arch is not None:
+        info["arch"] = arch
     line = sw._live_record_line(rec, verdict, reason, info)
-    if gamma is None and book is None:
-        line = re.sub(r" gamma=\S+ book=\S+$", "", line)
+    if arch is None:
+        line = re.sub(r" arch=\S+$", "", line)
+        if gamma is None and book is None:
+            line = re.sub(r" gamma=\S+ book=\S+$", "", line)
     return line + extra
 
 
@@ -926,12 +931,11 @@ def test_backward_step_threshold_is_24_hours(stop_msgs, hours, status):
 
 
 # --------------------------------------------------------------------------- archetype diagnostics
-# `arch=` is not in the emitter yet (a later commit adds it). These lines are real emitter lines
-# with ` arch=...` appended by hand; switch to the emitter once it produces the field.
+# These lines come from the real emitter, `arch=` included.
 
 
 def arch_line(ts, arch, verdict="would_route", **kw):
-    return record_line(ts, verdict, **kw) + f" arch={arch}"
+    return record_line(ts, verdict, arch=arch, **kw)
 
 
 def test_archetype_mixed_ok_and_abstain_passes_with_the_counts(stop_msgs):
@@ -960,5 +964,5 @@ def test_archetype_field_absent_is_not_logged_and_neither_pass_nor_warn(stop_msg
 
 def test_archetype_logged_on_filtered_records_only_with_no_would_route_does_not_warn(stop_msgs):
     t = T0 + timedelta(hours=5)
-    rc, out = run1(one_day(stop_msgs, tail=[record_line(t, "filtered", "price_band") + " arch=-"]))
+    rc, out = run1(one_day(stop_msgs, tail=[record_line(t, "filtered", "price_band", arch="-")]))
     assert "[WARN] archetype_gate_had_data" not in out

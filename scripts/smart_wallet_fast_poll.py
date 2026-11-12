@@ -615,6 +615,25 @@ LIVE_FILTER_REASONS = (
 )
 
 
+# What archetype_gate_ok answers when it passes a record (True, reason). The router decides
+# `ok` versus `abstain` for the log line HERE and nowhere else. A pass the router cannot place
+# is counted as an abstain (never as ok) and warned about, so a reworded gate message shows up.
+_ARCH_OK_PREFIX = "ok:"
+_ARCH_ABSTAIN_PREFIXES = ("abstain: no ", "abstain: only ")
+# A gate that did not look the record up is not a pass: filtered as archetype_error.
+_ARCH_NOT_LOOKED_UP = ("abstain: lookup failed", "abstain: missing wallet/archetype")
+
+
+def _arch_state(why) -> tuple:
+    """(state, recognised) for a gate answer of True: state is 'ok' or 'abstain'."""
+    text = str(why)
+    if text.startswith(_ARCH_OK_PREFIX):
+        return "ok", True
+    if text.startswith(_ARCH_ABSTAIN_PREFIXES):
+        return "abstain", True
+    return "abstain", False
+
+
 def _lv(v) -> str:
     """One log value: no spaces, '-' for a missing one."""
     if v is None or v == "":
@@ -714,11 +733,14 @@ def _live_check_record(rec: dict, gamma: dict, info: dict) -> Optional[str]:
             _mconn.close()
         if not _ok:
             return "archetype"
-        if str(_why).startswith("abstain: lookup failed"):
-            # archetype_gate_ok catches a failing lookup itself and abstains. That
-            # is a record nobody checked, not a pass.
+        if str(_why).startswith(_ARCH_NOT_LOOKED_UP):
+            # archetype_gate_ok catches a failing lookup itself (or has no wallet to look
+            # up) and abstains. That is a record nobody checked, not a pass.
             logger.warning("sw_live: archetype lookup failed (blocking)")
             return "archetype_error"
+        info["arch"], _known = _arch_state(_why)
+        if not _known:
+            info["arch_unrecognised"] = str(_why)
     except Exception as _ag_exc:  # noqa: BLE001
         # Fail CLOSED: a record the gate could not check is not "would_route",
         # in the shadow log or in the order path.
@@ -759,13 +781,14 @@ def _live_record_line(rec: dict, verdict: str, reason: Optional[str], info: dict
     token = rec.get("asset")
     return (
         "sw_live RECORD verdict=%s reason=%s alert_type=%s price=%s wallet=%s is_bot=%s "
-        "clv_muted=%s category=%s bid=%s ask=%s spread_pct=%s market=%s token=%s gamma=%s book=%s" % (
+        "clv_muted=%s category=%s bid=%s ask=%s spread_pct=%s market=%s token=%s gamma=%s book=%s arch=%s" % (
             verdict, _lv(reason), _lv(rec.get("alert_type")), _lv(price), _lv(rec.get("wallet")),
             _lv(_flag(rec.get("is_bot"))), _lv(_flag(rec.get("clv_muted"))),
             _lv(info.get("category")), _lv(info.get("bid")), _lv(info.get("ask")),
             _lv(info.get("spread_pct")), _lv(str(rec.get("market") or "")[:16]),
             _lv(token[-8:] if isinstance(token, str) else None),
-            "present" if info.get("gamma") == "present" else "missing", _lv(info.get("book"))))
+            "present" if info.get("gamma") == "present" else "missing", _lv(info.get("book")),
+            _lv(info.get("arch"))))
 
 
 def _safe_text(v, limit: int = 40) -> str:
@@ -774,11 +797,14 @@ def _safe_text(v, limit: int = 40) -> str:
 
 
 def _live_stage1(fired: list, gamma: dict) -> list:
-    """[(rec, reason, token, gamma_state)] for every record, logging one RECORD line each.
+    """[(rec, reason, token, gamma_state, arch)] for every record, logging one RECORD line each.
     reason None = would_route. A record-level error filters that record only. A reason
-    that is not in LIVE_FILTER_REASONS is logged as unknown_reason (one warning per call)."""
+    that is not in LIVE_FILTER_REASONS is logged as unknown_reason (one warning per call).
+    arch is ok, abstain or '-' (see _arch_state); an answer the router does not recognise
+    counts as abstain and gets one warning per call."""
     out = []
     unknown = []
+    unrecognised = []
     for rec in fired:
         info: dict = {}
         r = rec if isinstance(rec, dict) else {}
@@ -795,10 +821,17 @@ def _live_stage1(fired: list, gamma: dict) -> list:
             unknown.append(reason)
             reason = "unknown_reason"
         logger.info(_live_record_line(r, "filtered" if reason else "would_route", reason, info))
-        out.append((rec, reason, info.get("token"), info.get("gamma", "missing")))
+        if "arch_unrecognised" in info:
+            unrecognised.append(info["arch_unrecognised"])
+        out.append((rec, reason, info.get("token"), info.get("gamma", "missing"),
+                    info.get("arch", "-")))
     if unknown:
         logger.warning("sw_live: %d record(s) with a reason outside LIVE_FILTER_REASONS, first=%s",
                        len(unknown), _safe_text(unknown[0]))
+    if unrecognised:
+        logger.warning("sw_live: %d record(s) with an archetype answer the router does not "
+                       "recognise (counted as abstain), first=%s",
+                       len(unrecognised), _safe_text(unrecognised[0]))
     return out
 
 
@@ -823,20 +856,22 @@ def _route_live_smart_wallet(fired: list, gamma: dict) -> None:
 
         decisions = _live_stage1(fired, gamma)
         armed = live_config.live_armed()
-        would_route = [(rec, token) for rec, reason, token, _g in decisions if reason is None]
+        would_route = [(rec, token) for rec, reason, token, _g, _a in decisions if reason is None]
         counts: dict = {}
-        for _rec, reason, _tok, _g in decisions:
+        for _rec, reason, _tok, _g, _a in decisions:
             if reason:
                 counts[reason] = counts.get(reason, 0) + 1
         filtered = ",".join(f"{k}:{counts[k]}" for k in sorted(counts)) or "-"
         gamma_missing = sum(1 for d in decisions if d[3] != "present")
+        arch_abstain = sum(1 for d in decisions if d[4] == "abstain")
         if not armed:
             logger.info("sw_live DRYRUN mode=%s armed=false records=%d would_route=%d filtered=%s "
-                        "gamma_missing=%d", live_config.mode(), len(decisions), len(would_route),
-                        filtered, gamma_missing)
+                        "gamma_missing=%d arch_abstain=%d", live_config.mode(), len(decisions),
+                        len(would_route), filtered, gamma_missing, arch_abstain)
             return
-        logger.info("sw_live ARMED records=%d would_route=%d filtered=%s gamma_missing=%d",
-                    len(decisions), len(would_route), filtered, gamma_missing)
+        logger.info("sw_live ARMED records=%d would_route=%d filtered=%s gamma_missing=%d "
+                    "arch_abstain=%d", len(decisions), len(would_route), filtered, gamma_missing,
+                    arch_abstain)
     except Exception as exc:  # noqa: BLE001 - fail closed, and say so (type only: no URL can leak)
         logger.error("sw_live DRYRUN error=%s stage=filter", type(exc).__name__)
         return
