@@ -31,11 +31,11 @@ MODE_READERS = {
     "execution/weather_executor.py": "order gate: returns unless live_armed()",
     "scripts/position_sync.py": "passed to RiskGovernor (the governor ignores the mode); no order gate",
     "scripts/smart_wallet_fast_poll.py": "order gate: _route_live_smart_wallet returns unless live_armed()",
-    "services/scheduler.py": "page: _page_if_live_unarmed() at start",
+    "services/scheduler.py": "page: _log_live_unarmed() and _start_live_unarmed_page() at start",
     "services/stop_evaluator.py": "live_armed(): live-position lookup gate; mode(): passed to RiskGovernor",
     "signals/paper_portfolio.py": "order gate: weather signals go live only when live_armed()",
 }
-MODE_FUNCS = {"mode", "live_armed", "arming_state"}
+MODE_FUNCS = {"mode", "live_armed", "arming_state", "arming_state_text"}
 
 # --- Test 2: who sends an order or moves money -------------------------------------
 ORDER_SENDERS = {
@@ -63,6 +63,11 @@ def _called_name(call):
     return None
 
 
+def _is_live_config_module(name):
+    """`live_config` itself (a bare import) or any dotted path ending in `.live_config`."""
+    return bool(name) and (name == "live_config" or name.endswith(".live_config"))
+
+
 def _live_config_names(tree):
     """Names bound to the live_config module, and names bound to its functions."""
     modules, funcs = {"live_config"}, {}
@@ -71,45 +76,55 @@ def _live_config_names(tree):
             for a in node.names:
                 if a.name == "live_config":
                     modules.add(a.asname or a.name)
-                elif node.module and node.module.endswith("live_config") and a.name in MODE_FUNCS:
+                elif _is_live_config_module(node.module) and a.name in MODE_FUNCS:
                     funcs[a.asname or a.name] = a.name
         elif isinstance(node, ast.Import):
             for a in node.names:
-                if a.name.endswith(".live_config") and a.asname:
+                if _is_live_config_module(a.name) and a.asname:
                     modules.add(a.asname)
     return modules, funcs
 
 
 def mode_reads(source):
-    """Names of the mode/arming functions called on live_config (or imported from it)."""
+    """Names of the mode/arming functions that live_config (or an import from it) is
+    asked for: any load of the attribute or the imported name, so `f = live_config.mode`
+    counts as well as a call."""
     tree = ast.parse(source)
     modules, funcs = _live_config_names(tree)
     found = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        f = node.func
-        if isinstance(f, ast.Attribute) and f.attr in MODE_FUNCS:
-            obj = f.value
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load) and node.attr in MODE_FUNCS:
+            obj = node.value
             if (isinstance(obj, ast.Name) and obj.id in modules) or (
                 isinstance(obj, ast.Attribute) and obj.attr == "live_config"
             ):
-                found.add(f.attr)
-        elif isinstance(f, ast.Name) and f.id in funcs:
-            found.add(funcs[f.id])
+                found.add(node.attr)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in funcs:
+            found.add(funcs[node.id])
     return found
 
 
 def order_sends(source):
-    """What in the source sends an order or moves money, as a set of labels."""
+    """What in the source sends an order or moves money, as a set of labels.
+
+    A sender method counts when it is ACCESSED (`client.place_limit_order`, called or
+    not: `f = client.place_limit_order; f(...)` is caught), when its bare name is
+    loaded, or when it is named in `getattr(obj, "place_limit_order")`. A function or
+    method DEFINITION with that name does not count."""
     tree = ast.parse(source)
     found = set()
     for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load) and node.attr in SENDER_METHODS:
+            found.add(node.attr)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in SENDER_METHODS:
+            found.add(node.id)
         if not isinstance(node, ast.Call):
             continue
         name = _called_name(node)
-        if name in SENDER_METHODS:
-            found.add(name)
+        if name == "getattr" and len(node.args) >= 2:
+            attr = node.args[1]
+            if isinstance(attr, ast.Constant) and attr.value in SENDER_METHODS:
+                found.add(attr.value)
         if name == KALSHI_POST_FUNC:
             found.add("kalshi_post")
         for arg in node.args:
@@ -210,13 +225,27 @@ def test_files_sending_orders_or_moving_money_are_inventoried():
         ("from execution.live_config import mode as m\nm()", {"mode"}),
         ("import execution\nexecution.live_config.mode()", {"mode"}),
         ("from execution import live_config\nlive_config.arming_state()", {"arming_state"}),
+        ("from execution import live_config\nlive_config.arming_state_text()", {"arming_state_text"}),
+        # a bare module import counts as the live-config module
+        ("import live_config as lc\nlc.mode()", {"mode"}),
+        ("import live_config\nlive_config.live_armed()", {"live_armed"}),
+        ("from live_config import mode\nmode()", {"mode"}),
+        ("from live_config import arming_state as st\nst()", {"arming_state"}),
+        # an attribute ACCESS is a read, called or not
+        ("from execution import live_config\nf = live_config.mode\nf()", {"mode"}),
+        ("from execution import live_config as lc\nfn = lc.live_armed", {"live_armed"}),
+        ("from live_config import mode\nf = mode", {"mode"}),
         # negatives: comments, strings, docstrings, other objects, other functions, no call
         ("# live_config.mode()\nx = 1", set()),
         ('s = "live_config.mode()"', set()),
         ('def f():\n    """calls live_config.live_armed()"""', set()),
         ("other.mode()", set()),
         ("from execution import live_config\nlive_config.per_trade_cap()", set()),
-        ("from execution import live_config\nf = live_config.mode", set()),
+        ("import live_config as lc", set()),
+        ("from live_config import mode", set()),
+        ("from live_config import per_trade_cap\nper_trade_cap()", set()),
+        ("import live_config\nlive_config.per_trade_cap", set()),
+        ("from execution import live_config\nlive_config.mode = 1", set()),
         ("def mode(): pass\nmode()", set()),
     ],
 )
@@ -230,6 +259,13 @@ def test_mode_detector_controls(src, expected):
         ("c.place_limit_order(token_id=1)", {"place_limit_order"}),
         ("place_market_order(1)", {"place_market_order"}),
         ("handle = client.redeem_positions(condition_id=m)", {"redeem_positions"}),
+        # an access without a call
+        ("f = client.place_limit_order\nf(token_id=1)", {"place_limit_order"}),
+        ("fns = [c.place_market_order, c.redeem_positions]", {"place_market_order", "redeem_positions"}),
+        # getattr with a string constant naming a sender method
+        ('getattr(client, "place_limit_order")(1)', {"place_limit_order"}),
+        ('m = getattr(self._c, "redeem_positions", None)', {"redeem_positions"}),
+        ('f = place_market_order', {"place_market_order"}),
         ('kalshi_post("/x", {})', {"kalshi_post"}),
         ('r = post("/trade-api/v2/portfolio/events/orders", o)', {"kalshi_orders_path"}),
         ('_simmer_request("/trade", method="POST", data=d)', {"simmer_trade_post"}),
@@ -237,6 +273,11 @@ def test_mode_detector_controls(src, expected):
         ("# c.place_limit_order()", set()),
         ('s = "place_limit_order"', set()),
         ("def place_limit_order(self): pass", set()),
+        ("class C:\n    def place_market_order(self): pass\n    async def redeem_positions(self): pass", set()),
+        ("client.place_limit_order = fake", set()),
+        ('getattr(client, "place_limit_orders")', set()),
+        ("getattr(client, name)", set()),
+        ('getattr(client, "get_order")', set()),
         ('x = "/trade-api/v2/portfolio/events/orders"', set()),
         ('_simmer_request("/trades?limit=5")', set()),
         ('_simmer_request("/trade", method="GET")', set()),
