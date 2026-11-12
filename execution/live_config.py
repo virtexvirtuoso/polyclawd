@@ -83,6 +83,48 @@ def mode() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Arming: the one rule for "real orders may be sent"
+# ---------------------------------------------------------------------------
+
+# A constant in code, never an environment variable. The LAST commit of Phase 1C
+# flips it to True and nothing else may. While it is False no setting can arm the
+# system: LIVE behaves as PAPER wherever orders are sent.
+LIVE_ORDER_PATH_READY = False
+
+
+def live_stops_enforce() -> bool:
+    """True only when POLYCLAWD_LIVE_STOPS_ENFORCE is exactly the string "1".
+
+    No stripping and no truthy parsing: unset, empty, "0", "true", "yes", "1x",
+    " 1" are all False. Read at call time (a value loaded from the env file after
+    start counts). Never raises: a wrong value or a misspelled name leaves the
+    system unarmed."""
+    try:
+        return os.environ.get("POLYCLAWD_LIVE_STOPS_ENFORCE") == "1"
+    except Exception:
+        return False
+
+
+def live_armed() -> bool:
+    """The single definition of "real orders may be sent": mode LIVE, the enforce
+    flag set to exactly "1", and LIVE_ORDER_PATH_READY. Read at call time."""
+    return mode() == "LIVE" and live_stops_enforce() and bool(LIVE_ORDER_PATH_READY)
+
+
+def arming_state() -> dict:
+    """The three components and their result, for pages, API routes and logs."""
+    m = mode()
+    enforce = live_stops_enforce()
+    ready = bool(LIVE_ORDER_PATH_READY)
+    return {
+        "mode": m,
+        "enforce": enforce,
+        "path_ready": ready,
+        "armed": m == "LIVE" and enforce and ready,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Risk caps (env-overridable, typed, fail-safe defaults)
 # ---------------------------------------------------------------------------
 

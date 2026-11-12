@@ -20,7 +20,7 @@ TOKEN = "71321045679252212594626385532706912750332728571942532289631379312455583
 # --- post_maker -------------------------------------------------------------
 
 
-def test_post_maker_accepted(fake_clob, shapes):
+def test_post_maker_accepted(fake_clob, shapes, armed):
     fake_clob.script("place_limit_order", shapes.accepted_post())
     out = clob_client.post_maker(TOKEN, "BUY", 0.42, 10.0, tick_size=0.01)
     assert out == {
@@ -35,7 +35,7 @@ def test_post_maker_accepted(fake_clob, shapes):
     ]
 
 
-def test_post_maker_rejected_would_cross_raises_clob_error(fake_clob, shapes):
+def test_post_maker_rejected_would_cross_raises_clob_error(fake_clob, shapes, armed):
     """Today a RejectedOrder becomes ClobError(f"post_maker rejected ({code}): {message}")."""
     fake_clob.script("place_limit_order", shapes.rejected_would_cross())
     with pytest.raises(ClobError) as exc:
@@ -45,7 +45,7 @@ def test_post_maker_rejected_would_cross_raises_clob_error(fake_clob, shapes):
     )
 
 
-def test_post_maker_rejected_bad_tick_raises_clob_error(fake_clob, shapes):
+def test_post_maker_rejected_bad_tick_raises_clob_error(fake_clob, shapes, armed):
     fake_clob.script("place_limit_order", shapes.rejected_bad_tick())
     with pytest.raises(ClobError, match=r"post_maker rejected \(unknown\): invalid price"):
         clob_client.post_maker(TOKEN, "BUY", 0.425, 10.0, tick_size=0.01)
@@ -54,7 +54,7 @@ def test_post_maker_rejected_bad_tick_raises_clob_error(fake_clob, shapes):
 # --- cross_taker ------------------------------------------------------------
 
 
-def test_cross_taker_buy_filled(fake_clob, shapes):
+def test_cross_taker_buy_filled(fake_clob, shapes, armed):
     fake_clob.script("place_market_order", shapes.fak_filled_buy(usd="4.2", shares="10"))
     out = clob_client.cross_taker(TOKEN, "BUY", 4.2, tick_size=0.01)
     assert out["orderID"] == "0xorder-fak-1"
@@ -67,7 +67,7 @@ def test_cross_taker_buy_filled(fake_clob, shapes):
     ]
 
 
-def test_cross_taker_sell_filled(fake_clob, shapes):
+def test_cross_taker_sell_filled(fake_clob, shapes, armed):
     fake_clob.script("place_market_order", shapes.fak_filled_sell(shares="10", usd="4.0"))
     out = clob_client.cross_taker(TOKEN, "SELL", 10.0, tick_size=0.01)
     assert out["status"] == "MATCHED"
@@ -78,7 +78,7 @@ def test_cross_taker_sell_filled(fake_clob, shapes):
     ]
 
 
-def test_cross_taker_fak_unfilled_is_unmatched_not_an_error(fake_clob, shapes):
+def test_cross_taker_fak_unfilled_is_unmatched_not_an_error(fake_clob, shapes, armed):
     fake_clob.script("place_market_order", shapes.fak_unfilled())
     out = clob_client.cross_taker(TOKEN, "BUY", 4.2, tick_size=0.01)
     assert out == {
@@ -92,7 +92,7 @@ def test_cross_taker_fak_unfilled_is_unmatched_not_an_error(fake_clob, shapes):
     }
 
 
-def test_cross_taker_hard_reject_raises(fake_clob, shapes):
+def test_cross_taker_hard_reject_raises(fake_clob, shapes, armed):
     fake_clob.script("place_market_order", shapes.rejected_not_enough_balance())
     with pytest.raises(ClobError, match=r"cross_taker rejected \(not_enough_balance\)"):
         clob_client.cross_taker(TOKEN, "BUY", 4.2, tick_size=0.01)
@@ -208,7 +208,7 @@ def test_unqueued_call_raises_and_is_recorded(fake_clob):
     assert fake_clob.calls == [("cancel_order", (), {"order_id": "0xabc"})]
 
 
-def test_unqueued_call_through_post_maker_propagates(fake_clob):
+def test_unqueued_call_through_post_maker_propagates(fake_clob, armed):
     with pytest.raises(fake_clob.Unscripted):
         clob_client.post_maker(TOKEN, "BUY", 0.42, 10.0, tick_size=0.01)
 
@@ -251,8 +251,9 @@ def test_fake_clob_is_the_injected_client_during_the_test(fake_clob):
     assert clob_client._get_client() is fake_clob
 
 
-def test_no_call_is_recorded_when_the_wrapper_refuses_before_the_client(fake_clob, monkeypatch):
-    """The egress guard fails closed before any client call (guard active)."""
+def test_no_call_is_recorded_when_the_wrapper_refuses_before_the_client(fake_clob, monkeypatch, armed):
+    """The egress guard fails closed before any client call (guard active; armed, so
+    the arming guard, which runs first, lets the call through to the egress check)."""
     monkeypatch.setenv("POLYCLAWD_EGRESS_REQUIRE_SRC", "10.2.0.2")
     monkeypatch.setattr(clob_client, "_egress_src_ip", lambda host, port=443: "192.0.2.1")
     with pytest.raises(ClobError, match="egress guard"):

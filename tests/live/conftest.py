@@ -37,7 +37,7 @@ from polymarket import (
     SecureClient,
 )
 
-from execution import clob_client, live_db as live_db_module
+from execution import clob_client, live_config, live_db as live_db_module
 
 # Exchange messages that the SDK maps to a code (polymarket/models/clob/order_response.py).
 _MSG_POST_ONLY_CROSS = "invalid post-only order: order crosses book"
@@ -316,6 +316,18 @@ def fake_clob():
         yield fake
     finally:
         clob_client.set_client(None)
+
+
+@pytest.fixture
+def armed(monkeypatch):
+    """The three components of ``live_config.live_armed()`` set to True: mode LIVE,
+    POLYCLAWD_LIVE_STOPS_ENFORCE=1 and LIVE_ORDER_PATH_READY True. For tests that
+    legitimately drive the live order path against ``fake_clob``; every other test
+    runs unarmed and ``post_maker`` / ``cross_taker`` refuse."""
+    monkeypatch.setenv("POLYCLAWD_MODE", "LIVE")
+    monkeypatch.setenv("POLYCLAWD_LIVE_STOPS_ENFORCE", "1")
+    monkeypatch.setattr(live_config, "LIVE_ORDER_PATH_READY", True, raising=False)
+    assert live_config.live_armed() is True
 
 
 def _assert_no_client_injected():
