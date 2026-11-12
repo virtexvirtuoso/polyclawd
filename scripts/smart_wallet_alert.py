@@ -43,6 +43,7 @@ from config.polymarket_urls import clob_url  # polyproxy: central URL config
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
+from db import connect as db_connect  # noqa: E402
 from signals.alert_dispatch import TIER_DIGEST, dispatch  # noqa: E402
 from scripts.wallet_allowlist import page_tier_for  # noqa: E402
 # Canonical project shadow DB (NOT the stray 0-byte repo-root file) — matches
@@ -657,12 +658,39 @@ def check_and_fire(
             continue
         _cycle_sides.setdefault((_f["wallet"], _f["market"], _f["direction"]), set()).add(_o)
     _two_sided = {k for k, s in _cycle_sides.items() if len(s) >= 2}
+    # Write window (task 1.13): no write transaction may stay open while a fill
+    # does slow work (order-book HTTP, Telegram/digest sends, other databases).
+    # sqlite3 opens a transaction at the first INSERT/UPDATE and holds the file's
+    # write lock until commit(), and the old end-of-loop commit held it for the
+    # whole cycle (30-129 fills) -- every other writer of whale_meta.db and
+    # shadow_trades.db in the process waited out its busy timeout and failed.
+    # So each write is committed right after it is made.
+    #
+    # Failure semantics, now per fill rather than per cycle:
+    #   * If the loop raises midway, what earlier fills (and the failing fill's
+    #     own accumulator write) already committed stays committed. Before, the
+    #     abandoned transaction was rolled back (the fast poll closes meta_conn,
+    #     scanner_hook closes the shadow connection) while the fast poll's
+    #     cross-poll ledger had already marked those trades seen: the cycle's
+    #     fills were lost for good.
+    #   * Cost: a fill can be in the accumulator with its alert not yet sent.
+    #       - Failure before _mark_fired commits (alert_fired still 0, total at
+    #         or above THRESHOLD): the next delivery for that row, even one
+    #         whose trades are all duplicates, reaches _decide's "first" branch,
+    #         so the alert goes out late. It is lost only if the wallet never
+    #         trades that market/outcome again while the row is live.
+    #       - Failure after _mark_fired commits (exec snapshot, shadow log,
+    #         send): the row is marked fired, so this alert is NOT sent late; the
+    #         next one is the refire at 2x. The whale-sweep path already behaved
+    #         like this (its caller commits meta after scanner_hook returns).
+    # The commits after the loop stay as a safety net.
     for f in smart_fills:
         total, nfills, af, ft = _accumulate(
             meta_conn, f["wallet"], f["market"], f["direction"],
             f.get("outcome") or "", f["usd"], f["price"], now,
             parts=f.get("trade_parts"),
         )
+        meta_conn.commit()
         kind = _decide(total, af, ft)
         if not kind:
             continue
@@ -704,15 +732,18 @@ def check_and_fire(
                 "ts_alert": int(now),
                 "category": f.get("source_category"),
             })
+            shadow_conn.commit()
             meta_conn.execute(
                 "UPDATE smart_wallet_accum SET arb_fired=?, arb_fired_total=? "
                 "WHERE wallet=? AND market=? AND direction=? AND outcome=?",
                 (int(now), float(total), f["wallet"], f["market"],
                  f["direction"], f.get("outcome") or ""),
             )
+            meta_conn.commit()
             continue
         _mark_fired(meta_conn, f["wallet"], f["market"], f["direction"],
                     f.get("outcome") or "", now, total)
+        meta_conn.commit()
         alert_type = "refire" if kind == "refire" else "entry" if f["direction"] == "BUY" else "exit"
         # Suppress bot wallets from Telegram delivery (still shadow-log for CLV tracking)
         is_bot = bool(f.get("is_bot"))
@@ -751,6 +782,7 @@ def check_and_fire(
         else:
             rec.update(_executable_snapshot(f["market"], f.get("outcome_index"), f["direction"]))
         _log_shadow(shadow_conn, rec)
+        shadow_conn.commit()
         _check_convergence(shadow_conn, rec["market"], rec["direction"], rec["title"], now,
                            close_time=rec.get("close_time") or "",
                            outcome_index=rec.get("outcome_index"),
@@ -1132,7 +1164,9 @@ def scanner_hook(meta_conn, trades: list, gamma: dict, smart: dict) -> list:
     DB, runs the sweep, and never raises into the scan loop."""
     try:
         init_accum(meta_conn)
-        sconn = sqlite3.connect(str(SHADOW_DB))
+        # Same helper and timeout as every other writer (busy_timeout 30000);
+        # the bare connect waited only sqlite3's default 5 s (task 1.13).
+        sconn = db_connect(str(SHADOW_DB), timeout=30)
         sconn.row_factory = sqlite3.Row
         try:
             init_shadows(sconn)
