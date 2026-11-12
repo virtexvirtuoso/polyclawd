@@ -38,6 +38,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 from config.data_api import read_data_v2
+from scripts.trade_key import _norm, _trade_key  # noqa: F401  (re-exported; tests use both names)
 from config.polymarket_urls import clob_url  # polyproxy: central URL config
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -183,43 +184,6 @@ def init_shadows(conn) -> None:
     conn.commit()
 
 
-# --------------------------------------------------------------------------- #
-# Fill identity (moved here from smart_wallet_fast_poll, task 1.5)
-# --------------------------------------------------------------------------- #
-def _norm(v) -> str:
-    """Normalise a numeric field so the same value keys identically across polls.
-
-    The PM feed is JSON: size/price can arrive as int, float or string, so a bare
-    str() makes 100, 100.0 and "100" three different keys for ONE fill — which
-    defeats the dedup on exactly the repeats it exists to catch. %.10g collapses
-    those to "100" while keeping genuinely different sizes distinct.
-    """
-    if v is None or v == "":
-        return ""
-    try:
-        return f"{float(v):.10g}"
-    except (TypeError, ValueError):
-        return str(v)
-
-
-def _trade_key(t: dict) -> str:
-    """Stable identity for one fill.
-
-    transactionHash alone is not unique — one transaction can carry several fills
-    (measured: 7,500 trades / 4,856 distinct hashes) — so qualify it with the
-    asset, wallet, side and size. Numeric fields go through _norm so JSON type
-    drift across polls cannot fork the key.
-    """
-    return "|".join((
-        str(t.get("transactionHash", "")),
-        str(t.get("asset", "")),
-        str(t.get("proxyWallet", "")),
-        str(t.get("side", "")),
-        _norm(t.get("size")),
-        _norm(t.get("price")),
-    ))
-
-
 def _accum_key(t: dict) -> Optional[str]:
     """Identity of one raw trade for the accumulator, or None when the feed row
     carries no transactionHash. Without a hash the _trade_key of two real fills
@@ -232,28 +196,31 @@ def _accum_key(t: dict) -> Optional[str]:
 # Accumulator (true rolling window)
 # --------------------------------------------------------------------------- #
 def _entry_keys(entry) -> tuple:
-    """Fill keys carried by one stored window entry. Old 3-element entries
-    [ts, usd, price] are keyless; a 4th element is one key or a list of keys."""
+    """Fill keys carried by one stored window entry. Three shapes can exist in
+    stored state: no 4th element (written before task 1.5, or keyless), a string
+    (one key, written by commit 8fcff46) and a list of keys (written now).
+
+    Rollback-safe: the code before task 1.5 reads only entry[0] and entry[1],
+    so the extra 4th element is ignored by it."""
     if len(entry) < 4 or not entry[3]:
         return ()
     return (entry[3],) if isinstance(entry[3], str) else tuple(entry[3])
 
 
 def _accumulate(conn, wallet: str, market: str, direction: str, outcome: str,
-                usd: float, price: float, now: int, fill_key: Optional[str] = None,
-                parts: Optional[list] = None):
+                usd: float, price: float, now: int, parts: Optional[list] = None):
     """Add a fill, prune the 4h window, persist. Returns
     (total_usd, num_fills, alert_fired, fired_total) AFTER the update.
 
     2026-09-30: keyed per-outcome — the old (wallet, market, direction) key
     blended opposite outcomes of the same market into one total/price.
 
-    Dedup (task 1.5): `fill_key` names the raw trade; `parts` is a list of
-    (key, usd, price) for a fill aggregated from several trades (key None =
-    keyless). A key already inside the window is not added again, so the same
-    trade reaching us from the fast poll, the whale sweep or an inclusive
-    cursor counts once; totals come back unchanged when nothing is new.
-    The stored entry is [ts, usd, price, key] (key omitted when keyless)."""
+    Dedup (task 1.5): `parts` is a list of (key, usd, price), one per raw trade
+    of a fill (key None = keyless, always counted). A key already inside the
+    window is not added again, so the same trade reaching us from the fast
+    poll, the whale sweep or an inclusive cursor counts once; totals come back
+    unchanged when nothing is new. The stored entry is [ts, usd, price, [keys]]
+    (4th element omitted when there are no keys)."""
     row = conn.execute(
         "SELECT fills_json, alert_fired, fired_total, first_seen "
         "FROM smart_wallet_accum WHERE wallet=? AND market=? AND direction=? AND outcome=?",
@@ -268,8 +235,6 @@ def _accumulate(conn, wallet: str, market: str, direction: str, outcome: str,
         fills, alert_fired, fired_total, first_seen = [], 0, 0.0, now
 
     cutoff = now - ACCUM_WINDOW
-    if parts is None and fill_key:
-        parts = [(fill_key, usd, price)]
     if parts is None:
         fills.append([int(now), float(usd), float(price)])
     else:
@@ -287,7 +252,7 @@ def _accumulate(conn, wallet: str, market: str, direction: str, outcome: str,
             entry = [int(now), float(f_usd), float(f_px)]
             keys = [k for k, _, _ in fresh if k is not None]
             if keys:
-                entry.append(keys[0] if len(keys) == 1 else keys)
+                entry.append(keys)
             fills.append(entry)
     fills = [f for f in fills if f[0] >= cutoff]
     total = sum(f[1] for f in fills)
@@ -1059,6 +1024,14 @@ def fills_from_trades(trades: list, smart: dict) -> list:
     to graduated smart wallets. price = $-weighted avg of the cycle's fills."""
     agg = {}
     _setops = {}  # (wallet, conditionId) -> count of MERGE/SPLIT/CONVERSION rows
+    # Twin fills: one transaction can carry several real fills with identical
+    # hash/asset/wallet/side/size/price (a taker order matching two makers for
+    # the same size), and the feed has no per-fill id. So the n-th identical
+    # row of this call gets the key <base>#<n>; re-delivering the same batch
+    # yields the same keys, a repeat is skipped and a twin is not. The fast
+    # poll's own intra-batch collapse can deliver only one twin on its path;
+    # the sweep's delivery then completes the pair.
+    _nth = {}  # base accumulator key -> rows seen so far in this call
     for t in trades:
         w = t.get("proxyWallet")
         if not w or w not in smart:
@@ -1101,7 +1074,12 @@ def fills_from_trades(trades: list, smart: dict) -> list:
         )
         a["usd"] += usd
         a["pxw"] += usd * price
-        a["parts"].append((_accum_key(t), usd, price))
+        base = _accum_key(t)
+        if base is not None:
+            n = _nth.get(base, 0)
+            _nth[base] = n + 1
+            base = f"{base}#{n}"
+        a["parts"].append((base, usd, price))
     out = []
     for (w, cid, side, _koi), a in agg.items():
         px = a["pxw"] / a["usd"] if a["usd"] else 0.0

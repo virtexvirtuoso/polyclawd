@@ -28,9 +28,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Fill identity lives with the accumulator (task 1.5); re-exported here because
-# the cross-poll dedup below and its tests use these names.
-from scripts.smart_wallet_alert import _norm, _trade_key  # noqa: E402,F401
+# Fill identity lives in a leaf module shared with the alert accumulator, so this
+# module never imports scripts.smart_wallet_alert at import time (it is imported
+# lazily inside run(), inside a try/except).
+from scripts.trade_key import _norm, _trade_key  # noqa: E402,F401
 
 # ── Exit cooldown: don't re-enter a market within 2h of stop-loss exit ────────
 _EXIT_COOLDOWN_SECS = 7200  # 2 hours
