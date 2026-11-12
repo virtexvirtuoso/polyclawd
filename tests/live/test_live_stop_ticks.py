@@ -68,9 +68,14 @@ def world(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def fresh_state(monkeypatch):
-    """A fresh paging state per test, and the tick lock free."""
+    """A fresh paging state per test, the tick lock free, and a fresh process's in-memory
+    unpriced map and failure count."""
     monkeypatch.setattr(shadow, "_PAGE_STATE", {})
     monkeypatch.setattr(shadow, "_TICK_LOCK", threading.Lock())
+    monkeypatch.setattr(shadow, "_PAGE_LOCK", threading.Lock())
+    shadow.reset_state_for_tests()
+    yield
+    shadow.reset_state_for_tests()
 
 
 @pytest.fixture
@@ -150,6 +155,16 @@ def test_dryrun_line_paper_all_actions(live_db, world, state_path, logs, monkeyp
         f"spread_pct=0.1 threshold=0.5",
     ]
     assert world.exit_calls == []
+
+
+def test_detail_line_for_a_spread_held_entry(monkeypatch, state_path, logs):
+    patched_eval(monkeypatch, [{"id": 4, "action": "spread_held", "mark": 0.11, "loss_pct": 0.45,
+                                "spread_pct": 0.1, "threshold": 0.5}])
+    shadow.run_live_stop_tick("stop_evaluator", now=T0, state_path=state_path)
+    assert [m for m in logs() if m.startswith("live_stops DETAIL")] == [
+        "live_stops DETAIL id=4 action=spread_held mark=0.11 loss_pct=0.45 spread_pct=0.1 threshold=0.5"]
+    (line,) = [m for m in logs() if m.startswith("live_stops DRYRUN")]
+    assert "spread_held=[4]" in line and "would_exit=[]" in line
 
 
 def test_dryrun_line_with_no_positions(live_db, world, state_path, logs):
@@ -345,6 +360,118 @@ def test_state_file_not_rewritten_when_unchanged_and_write_is_atomic(live_db, wo
     assert len(replaced) == 2
 
 
+def unwritable_path(tmp_path):
+    blocker = tmp_path / "a_regular_file"
+    blocker.write_text("x")
+    return blocker / "sub" / "live_stop_state.json"          # a directory cannot be made under a file
+
+
+def test_unwritable_state_file_still_pages_after_30_minutes(live_db, world, tmp_path, sent_alerts, logs):
+    bad = unwritable_path(tmp_path)
+    pid = add_position(live_db, 0.50)
+    book(world, pid, [0.30], [])
+    tick(live_db, bad, now=T0)
+    tick(live_db, bad, now=T0 + 29 * MIN)
+    assert pages(sent_alerts) == []
+    tick(live_db, bad, now=T0 + 31 * MIN)
+    assert len(pages(sent_alerts)) == 1 and "31 minutes" in page_texts(sent_alerts)[0]
+
+
+def test_write_failure_logged_once_then_again_after_a_success(live_db, world, state_path, logs,
+                                                              monkeypatch):
+    real_replace = os.replace
+    broken = [True]
+
+    def flaky_replace(src, dst):
+        if broken[0]:
+            raise OSError("disk full")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(shadow.os, "replace", flaky_replace)
+    pid = add_position(live_db, 0.50)
+    book(world, pid, [0.30], [])
+    for k in range(10):
+        tick(live_db, state_path, now=T0 + 60 * k)
+    write_errors = [m for m in logs(logging.ERROR) if "could not write state file" in m]
+    assert len(write_errors) == 1 and "disk full" in write_errors[0]
+    assert not state_path.exists()
+    broken[0] = False
+    tick(live_db, state_path, now=T0 + 600)                  # nothing changed, but the file is owed
+    assert read_state(state_path) == {"unpriced_since": {str(pid): T0}}
+    broken[0] = True
+    book(world, pid, [0.50], [0.52])                         # the map changes again
+    tick(live_db, state_path, now=T0 + 660)
+    tick(live_db, state_path, now=T0 + 720)
+    write_errors = [m for m in logs(logging.ERROR) if "could not write state file" in m]
+    assert len(write_errors) == 2
+
+
+def test_fresh_process_restores_first_seen_time_from_the_file(live_db, world, state_path, sent_alerts):
+    pid = add_position(live_db, 0.50)
+    book(world, pid, [0.30], [])
+    tick(live_db, state_path, now=T0)
+    shadow.reset_state_for_tests()                           # the 8 hour scheduler restart
+    tick(live_db, state_path, now=T0 + 31 * MIN)
+    assert read_state(state_path) == {"unpriced_since": {str(pid): T0}}
+    assert len(pages(sent_alerts)) == 1
+
+
+def test_map_is_not_rebuilt_from_the_file_each_tick(live_db, world, state_path, monkeypatch):
+    pid = add_position(live_db, 0.50)
+    book(world, pid, [0.30], [])
+    reads = []
+    real = shadow._load_state
+    monkeypatch.setattr(shadow, "_load_state", lambda p: reads.append(p) or real(p))
+    for k in range(5):
+        tick(live_db, state_path, now=T0 + 60 * k)
+    assert len(reads) == 1
+
+
+def test_missing_state_file_is_silent(live_db, world, state_path, logs):
+    tick(live_db, state_path)
+    assert logs(logging.WARNING) == []
+
+
+def test_unreadable_state_file_warns_once_like_corrupt(live_db, world, state_path, logs, monkeypatch):
+    state_path.write_text('{"unpriced_since": {}}')
+    real_read = Path.read_text
+
+    def deny(self, *a, **k):
+        if self == state_path:
+            raise PermissionError("denied")
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", deny)
+    pid = add_position(live_db, 0.50)
+    book(world, pid, [0.30], [])
+    for k in range(4):
+        tick(live_db, state_path, now=T0 + 60 * k)
+    warnings = [m for m in logs(logging.WARNING) if "state" in m]
+    assert len(warnings) == 1 and "unreadable" in warnings[0]
+
+
+def test_unpriced_entry_removed_when_it_becomes_error_or_exempt(live_db, world, state_path,
+                                                                sent_alerts, monkeypatch):
+    """A position that stops being 'unpriced' leaves the map whatever it became. So a
+    position flickering unpriced <-> error never alarms through the unpriced path (each
+    spell restarts the clock) but does page through the error path."""
+    p_err = add_position(live_db, 0.50)
+    p_ex = add_position(live_db, 0.50)
+    book(world, p_err, [0.30], [])
+    book(world, p_ex, [0.30], [])
+    tick(live_db, state_path, now=T0)
+    assert read_state(state_path) == {"unpriced_since": {str(p_err): T0, str(p_ex): T0}}
+    world.books[f"tok-{p_err}"] = RuntimeError("book fetch failed")
+    monkeypatch.setenv("POLYCLAWD_STOP_EXEMPT_IDS", str(p_ex))
+    tick(live_db, state_path, now=T0 + 10 * MIN)
+    assert read_state(state_path) == {"unpriced_since": {}}
+    assert len(pages(sent_alerts)) == 1                      # the error path paged
+    book(world, p_err, [0.30], [])                           # unpriced again: clock restarts
+    tick(live_db, state_path, now=T0 + 40 * MIN)
+    assert read_state(state_path) == {"unpriced_since": {str(p_err): T0 + 40 * MIN}}
+    assert len(pages(sent_alerts)) == 1                      # no unpriced page despite 40 minutes since T0
+
+
 # ---------------------------------------------------------------------------
 # Immediate pages: bad_row, error, exit_failed
 # ---------------------------------------------------------------------------
@@ -432,21 +559,122 @@ def test_unknown_future_action_counts_as_exited(monkeypatch, state_path, logs, a
 # Failure of the whole evaluation, and of paging
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("exc", [sqlite3.OperationalError("database is locked"),
-                                 ValueError("POLYCLAWD_STOP_EXEMPT_IDS='2x6': bad")])
-def test_whole_evaluation_raising_logs_error_pages_and_returns(monkeypatch, state_path, logs,
-                                                                sent_alerts, exc):
+FAIL_EXCS = [sqlite3.OperationalError("database is locked"),
+             ValueError("POLYCLAWD_STOP_EXEMPT_IDS='2x6': bad")]
+
+
+def failing_eval(monkeypatch, exc):
     def boom(*, dry_run=False, db_path=None):
         raise exc
 
     monkeypatch.setattr(stop_evaluator, "evaluate_live_stops", boom)
-    assert shadow.run_live_stop_tick("stop_evaluator", now=T0, state_path=state_path) == {"failed": True}
-    errors = logs(logging.ERROR)
-    assert errors == [f"live_stops FAILED source=stop_evaluator error={type(exc).__name__}: {exc}"]
-    assert len(pages(sent_alerts)) == 1 and "live stop" in page_texts(sent_alerts)[0]
-    shadow.run_live_stop_tick("stop_evaluator", now=T0 + 60, state_path=state_path)
-    assert len(pages(sent_alerts)) == 1                      # cooldown
+
+
+def good_eval(monkeypatch, entries=()):
+    monkeypatch.setattr(stop_evaluator, "evaluate_live_stops",
+                        lambda *, dry_run=False, db_path=None: list(entries))
+
+
+def run(now, source="stop_evaluator", state_path=None):
+    return shadow.run_live_stop_tick(source, now=now, state_path=state_path)
+
+
+@pytest.mark.parametrize("exc", FAIL_EXCS)
+def test_whole_evaluation_raising_logs_error_and_returns(monkeypatch, state_path, logs,
+                                                         sent_alerts, exc):
+    failing_eval(monkeypatch, exc)
+    assert run(T0, state_path=state_path) == {"failed": True}
+    assert logs(logging.ERROR) == [
+        f"live_stops FAILED source=stop_evaluator consecutive=1 error={type(exc).__name__}: {exc}"]
+    assert pages(sent_alerts) == []                          # one failure does not page
     assert not state_path.exists()                           # a failed tick changes no alarm state
+
+
+def test_tick_failed_page_threshold_is_three():
+    assert shadow.TICK_FAILED_PAGE_AFTER == 3
+
+
+def test_one_and_two_failures_do_not_page_third_does(monkeypatch, state_path, logs, sent_alerts):
+    exc = sqlite3.OperationalError("database is locked")
+    failing_eval(monkeypatch, exc)
+    run(T0, state_path=state_path)
+    run(T0 + 60, state_path=state_path)
+    assert pages(sent_alerts) == []
+    run(T0 + 120, state_path=state_path)
+    assert page_texts(sent_alerts) == [
+        "Polyclawd live stop: the stop evaluation itself has failed 3 times in a row; last error "
+        "OperationalError: database is locked. No position was checked."]
+    assert [m for m in logs(logging.ERROR)] == [
+        f"live_stops FAILED source=stop_evaluator consecutive={n} error=OperationalError: "
+        f"database is locked" for n in (1, 2, 3)]
+
+
+def test_failure_page_names_the_last_error_truncated(monkeypatch, state_path, sent_alerts):
+    failing_eval(monkeypatch, ValueError("a"))
+    run(T0, state_path=state_path)
+    run(T0 + 60, state_path=state_path)
+    failing_eval(monkeypatch, ValueError("z" * 500))
+    run(T0 + 120, state_path=state_path)
+    (text,) = page_texts(sent_alerts)
+    assert "3 times in a row" in text and "ValueError: " + "z" * 200 + "." in text
+    assert "z" * 201 not in text
+
+
+def test_a_success_between_failures_resets_the_count(monkeypatch, state_path, logs, sent_alerts):
+    failing_eval(monkeypatch, RuntimeError("x"))
+    run(T0, state_path=state_path)
+    run(T0 + 60, state_path=state_path)
+    good_eval(monkeypatch)
+    assert run(T0 + 120, state_path=state_path) == {"checked": 0}
+    failing_eval(monkeypatch, RuntimeError("x"))
+    run(T0 + 180, state_path=state_path)
+    run(T0 + 240, state_path=state_path)
+    assert pages(sent_alerts) == []                          # count restarted: only 2 in a row
+    assert "consecutive=2" in logs(logging.ERROR)[-1]
+    run(T0 + 300, state_path=state_path)
+    assert len(pages(sent_alerts)) == 1 and "3 times" in page_texts(sent_alerts)[0]
+
+
+def test_fourth_and_fifth_failure_inside_the_cooldown_do_not_page_again(monkeypatch, state_path,
+                                                                        sent_alerts):
+    failing_eval(monkeypatch, RuntimeError("x"))
+    for k in range(5):
+        run(T0 + 60 * k, state_path=state_path)
+    assert len(pages(sent_alerts)) == 1
+    run(T0 + 65 * MIN, state_path=state_path)                 # later failure, cooldown (1 hour from the page at the 3rd) over
+    assert len(pages(sent_alerts)) == 2 and "6 times in a row" in page_texts(sent_alerts)[1]
+
+
+def test_skipped_ticks_neither_count_nor_reset(monkeypatch, state_path, sent_alerts):
+    failing_eval(monkeypatch, RuntimeError("x"))
+    run(T0, state_path=state_path)
+    run(T0 + 60, state_path=state_path)
+    assert shadow._TICK_LOCK.acquire(blocking=False)         # another pass is running
+    try:
+        for k in range(5):
+            assert run(T0 + 120 + k, state_path=state_path) == {"skipped": True}
+    finally:
+        shadow._TICK_LOCK.release()
+    assert pages(sent_alerts) == [] and shadow._CONSECUTIVE_FAILURES == 2
+    run(T0 + 180, state_path=state_path)                     # the third real failure pages
+    assert len(pages(sent_alerts)) == 1
+
+
+def test_live_armed_raising_is_a_failed_tick_not_an_exception(monkeypatch, state_path, logs,
+                                                              sent_alerts):
+    from execution import live_config
+
+    def broken():
+        raise RuntimeError("env unreadable")
+
+    monkeypatch.setattr(live_config, "live_armed", broken)
+    assert run(T0, state_path=state_path) == {"failed": True}
+    assert logs(logging.ERROR) == [
+        "live_stops FAILED source=stop_evaluator consecutive=1 error=RuntimeError: env unreadable"]
+    assert not [m for m in logs() if m.startswith("live_stops DRYRUN") or m.startswith("live_stops ARMED")]
+    run(T0 + 60, state_path=state_path)
+    run(T0 + 120, state_path=state_path)
+    assert len(pages(sent_alerts)) == 1 and "3 times in a row" in page_texts(sent_alerts)[0]
 
 
 def test_paging_failure_is_logged_and_tick_returns(live_db, world, state_path, logs, monkeypatch):
@@ -460,6 +688,92 @@ def test_paging_failure_is_logged_and_tick_returns(live_db, world, state_path, l
     assert out.get("failed") is not True
     assert any("page" in m and "transport down" in m for m in logs(logging.ERROR))
     assert any(m.startswith("live_stops DRYRUN") for m in logs())
+
+
+# ---------------------------------------------------------------------------
+# Pages are sent after the tick lock is released
+# ---------------------------------------------------------------------------
+
+def test_pages_are_sent_outside_the_tick_lock(monkeypatch, state_path, logs):
+    """A page stuck in flight (dead transport) must not hold the lock: a second tick
+    from another thread runs and logs its DRYRUN line, and the first tick's own summary
+    line was logged before its page was attempted."""
+    order = []
+    in_page, release = threading.Event(), threading.Event()
+
+    class Handler(logging.Handler):
+        def emit(self, record):
+            order.append(record.getMessage())
+
+    h = Handler()
+    logging.getLogger("live_stops").addHandler(h)
+
+    def slow_page_once(key, cooldown_s, text, *, state, now=None, **kw):
+        order.append("PAGE:" + key)
+        in_page.set()
+        release.wait(timeout=10)
+        return False
+
+    monkeypatch.setattr("scripts.openclaw_alerts.page_once", slow_page_once)
+    patched_eval(monkeypatch, [{"id": 5, "action": "bad_row"}])
+    first = []
+    t = threading.Thread(target=lambda: first.append(run(T0, state_path=state_path)))
+    try:
+        t.start()
+        assert in_page.wait(timeout=5)
+        patched_eval(monkeypatch, [])
+        second = run(T0 + 1, source="stop_evaluator_urgent", state_path=state_path)
+        assert second == {"checked": 0}
+        assert not [m for m in logs() if "SKIPPED" in m]
+        assert any(m.startswith("live_stops DRYRUN") and "source=stop_evaluator_urgent" in m for m in logs())
+        assert t.is_alive()                                  # first tick is still stuck in its page
+    finally:
+        release.set()
+        t.join(timeout=10)
+        logging.getLogger("live_stops").removeHandler(h)
+    assert first == [{"checked": 1}]
+    first_summary = next(i for i, m in enumerate(order) if m.startswith("live_stops DRYRUN")
+                         and "source=stop_evaluator " in m)
+    assert first_summary < order.index("PAGE:live-stop-bad_row-5")
+
+
+def test_a_page_that_raises_does_not_stop_the_remaining_pages(monkeypatch, state_path, logs):
+    attempted = []
+
+    def flaky(key, cooldown_s, text, *, state, now=None, **kw):
+        attempted.append(key)
+        if key.endswith("-1"):
+            raise RuntimeError("transport down")
+        return True
+
+    monkeypatch.setattr("scripts.openclaw_alerts.page_once", flaky)
+    patched_eval(monkeypatch, [{"id": 1, "action": "bad_row"}, {"id": 2, "action": "bad_row"}])
+    assert run(T0, state_path=state_path) == {"checked": 2}
+    assert attempted == ["live-stop-bad_row-1", "live-stop-bad_row-2"]
+    assert any("live-stop-bad_row-1" in m and "transport down" in m for m in logs(logging.ERROR))
+
+
+def test_sends_from_two_threads_are_serialised_by_the_page_lock(monkeypatch):
+    """page_once reads then writes the shared dict; two sends never overlap."""
+    active, peak = [0], [0]
+    guard = threading.Lock()
+
+    def counting(key, cooldown_s, text, *, state, now=None, **kw):
+        with guard:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        threading.Event().wait(0.05)
+        with guard:
+            active[0] -= 1
+        return True
+
+    monkeypatch.setattr("scripts.openclaw_alerts.page_once", counting)
+    ts = [threading.Thread(target=shadow._send_pages, args=([("k", 1, "t")], T0)) for _ in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(timeout=10)
+    assert peak[0] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -519,8 +833,9 @@ def test_startup_validation_empty_is_fine(monkeypatch, caplog):
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
-def test_startup_validation_invalid_exits_nonzero(monkeypatch, caplog):
+def test_startup_validation_invalid_under_live_exits_nonzero(monkeypatch, caplog, mode_env):
     import services.scheduler as sched
+    mode_env("LIVE", None, False)
     monkeypatch.setenv("POLYCLAWD_STOP_EXEMPT_IDS", "2x6")
     with pytest.raises(SystemExit) as ei:
         sched._validate_stop_exempt_ids()
@@ -528,6 +843,18 @@ def test_startup_validation_invalid_exits_nonzero(monkeypatch, caplog):
     crit = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
     assert len(crit) == 1
     assert crit[0].startswith("POLYCLAWD_STOP_EXEMPT_IDS is invalid:") and "refusing to start" in crit[0]
+
+
+def test_startup_validation_invalid_under_paper_continues(monkeypatch, caplog, sent_alerts):
+    import services.scheduler as sched
+    monkeypatch.setenv("POLYCLAWD_STOP_EXEMPT_IDS", "2x6")
+    assert sched._validate_stop_exempt_ids() is None         # returns, no SystemExit
+    crit = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert len(crit) == 1
+    assert crit[0].startswith("POLYCLAWD_STOP_EXEMPT_IDS is invalid:")
+    assert crit[0].endswith("; continuing in PAPER; the live stop shadow will fail every tick "
+                            "until it is fixed")
+    assert pages(sent_alerts) == []                          # the tick's own page (3rd failure) is the page
 
 
 def test_main_validates_before_the_task_loops_start():

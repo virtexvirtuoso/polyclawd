@@ -450,14 +450,25 @@ def _run_live_stop_shadow(source: str) -> None:
 
 
 def _validate_stop_exempt_ids() -> None:
-    """Called once from main(), in every mode: a POLYCLAWD_STOP_EXEMPT_IDS value that
-    does not parse stops the scheduler from starting."""
+    """Called once from main(). A POLYCLAWD_STOP_EXEMPT_IDS value that does not parse
+    stops the scheduler from starting only in LIVE (the operator is mid go-live and must
+    fix it first). In any other mode it is logged at CRITICAL and start-up continues:
+    exiting would make systemd restart-loop the scheduler and stop paper trading and
+    every alert. No sale can happen meanwhile: evaluate_live_stops re-reads the value on
+    every tick and raises, so the stop shadow reports FAILED each tick and pages on the
+    third failure in a row (Fix 2). That tick page is the page for this condition; no
+    separate start-up page is sent."""
     from execution import live_config
     try:
         ids = live_config.stop_exempt_ids()
     except ValueError as exc:
-        logger.critical("POLYCLAWD_STOP_EXEMPT_IDS is invalid: %s; refusing to start", exc)
-        sys.exit(1)
+        mode = live_config.mode()
+        if mode == "LIVE":
+            logger.critical("POLYCLAWD_STOP_EXEMPT_IDS is invalid: %s; refusing to start", exc)
+            sys.exit(1)
+        logger.critical("POLYCLAWD_STOP_EXEMPT_IDS is invalid: %s; continuing in %s; the live "
+                        "stop shadow will fail every tick until it is fixed", exc, mode)
+        return
     logger.info("live stop exempt ids: %s", sorted(ids))
 
 
