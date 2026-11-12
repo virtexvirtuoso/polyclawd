@@ -2483,12 +2483,51 @@ async def tick_nfl_edge_scan():
         await asyncio.sleep(60)
 
 
+_LIVE_UNARMED_PAGE_STATE: dict = {}  # per-process page_once state: one page per start per UTC day
+
+
+def _page_if_live_unarmed(now=None) -> bool:
+    """At start: if mode is LIVE but the system is not armed, log it and page once.
+
+    Task 1.10 (hard rule 8): LIVE that is not armed behaves as PAPER, which looks like
+    a quiet market, so make it loud. Holds no state of its own (page_once gets a
+    per-process dict, key carries the UTC date). Returns True when the state is
+    LIVE-but-unarmed (whether or not a page went out), False otherwise. Never raises.
+    Under PAPER, or when armed, it imports and calls nothing else."""
+    try:
+        from execution import live_config
+
+        if live_config.mode() != "LIVE" or live_config.live_armed():
+            return False
+        st = live_config.arming_state()
+    except Exception:
+        logger.exception("arming check failed at start")
+        return False
+    text = (
+        "LIVE but not armed: no order will be sent "
+        f"(mode={st['mode']} enforce={st['enforce']} "
+        f"LIVE_ORDER_PATH_READY={st['path_ready']})"
+    )
+    logger.error(text)
+    try:
+        from scripts.openclaw_alerts import page_once
+
+        when = time.time() if now is None else now
+        day = datetime.fromtimestamp(when, timezone.utc).strftime("%Y-%m-%d")
+        page_once(f"live-unarmed-{day}", 86400, text,
+                  state=_LIVE_UNARMED_PAGE_STATE, now=when, parse_mode=None)
+    except Exception as exc:
+        logger.error("could not page LIVE-but-unarmed state: %s", exc)
+    return True
+
+
 async def main():
     logger.info("=" * 60)
     logger.info("Polyclawd Scheduler starting")
     logger.info("Project: %s", PROJECT_ROOT)
     logger.info("DB: %s", DB_PATH)
     _assert_live_cap_fits_min_action()
+    _page_if_live_unarmed()
     logger.info("=" * 60)
 
     # Stagger starts to avoid thundering herd
