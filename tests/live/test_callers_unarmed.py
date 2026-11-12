@@ -1,4 +1,4 @@
-"""Task 1.10, reader 2: the five caller-side mode checks use live_armed().
+"""Task 1.10, reader 2: the four caller-side mode checks use live_armed().
 
 Each caller is driven three ways: under PAPER, under LIVE-but-unarmed and armed.
 The two unarmed states must give the same observable result (the PAPER branch);
@@ -10,7 +10,6 @@ import pytest
 
 from execution import soccer_executor, weather_executor
 from scripts import smart_wallet_fast_poll as sw
-from services import stop_evaluator
 from signals import paper_portfolio as pp
 
 # (mode, enforce flag, LIVE_ORDER_PATH_READY)
@@ -63,15 +62,6 @@ def _observe_paper_portfolio(monkeypatch, live_db):
     return {"calls": calls, "action": out["signals"][0]["action"]}
 
 
-def _observe_stop_evaluator(monkeypatch, live_db):
-    """An open live position exists; the PAPER branch does not look it up."""
-    live_db.conn.execute(
-        "INSERT INTO live_positions (market_id, status, side, shares) VALUES ('0xm1', 'open', 'BUY', 5)")
-    live_db.conn.commit()
-    row = stop_evaluator._get_live_position("0xm1")
-    return {"found": None if row is None else row["market_id"]}
-
-
 CALLERS = {
     "smart_wallet_fast_poll._route_live_smart_wallet": (
         _observe_smart_wallet, {"reached_sizing": 0}, {"reached_sizing": 1}),
@@ -87,8 +77,6 @@ CALLERS = {
         _observe_paper_portfolio,
         {"calls": ["open_position"], "action": "opened"},
         {"calls": ["route_live_weather"], "action": "skipped"}),
-    "stop_evaluator._get_live_position": (
-        _observe_stop_evaluator, {"found": None}, {"found": "0xm1"}),
 }
 
 

@@ -247,36 +247,6 @@ def _display_title(raw_title, market_id):
         resolved = None
     return resolved or title or str(market_id or "")[:24]
 
-# ---------------------------------------------------------------------------
-# Phase G — Live-position exit routing
-# ---------------------------------------------------------------------------
-
-def _get_live_position(market_id):
-    """Return the first open live_positions row for *market_id*, or None.
-
-    Uses a fresh live_db connection each call — stop_evaluator runs on its
-    own conn (paper_positions) and we keep the two schemas separate.
-    Never raises: returns None on any error or when not armed (PAPER, or LIVE but unarmed).
-    """
-    conn = None
-    try:
-        from execution import live_config, live_db
-        if not live_config.live_armed():
-            return None
-        conn = live_db.connect()
-        cur = conn.execute(
-            "SELECT * FROM live_positions WHERE market_id = ? AND status = 'open' LIMIT 1",
-            (market_id,),
-        )
-        row = cur.fetchone()
-        return dict(row) if row is not None else None
-    except Exception as exc:
-        logger.debug("_get_live_position: {} — treating as no live position", exc)
-        return None
-    finally:
-        if conn is not None:
-            conn.close()
-
 # The executor's own action names. Anything else is not something it said.
 _EXECUTOR_ACTIONS = ("maker_closed", "taker_closed", "partial_closed", "held_remainder")
 
@@ -928,21 +898,12 @@ def evaluate_stops():
         if unrealized < 0 and loss_pct >= UNIVERSAL_MAX_LOSS_PCT:
             reason = (f"UNIVERSAL STOP loss {loss_pct:.0%} >= {UNIVERSAL_MAX_LOSS_PCT:.0%} "
                       f"threshold (all strategies)")
-            live_pos = _get_live_position(pos["market_id"])
-            if live_pos is not None:
-                result = _close_live_position_early(
-                    live_pos, current_yes_price, reason,
-                    hard_cap_frac=UNIVERSAL_MAX_LOSS_PCT,
-                )
-            else:
-                result = _close_position_early(conn, pos, current_yes_price,
-                                               unrealized, reason)
-                if result is not None:
-                    conn.commit()
-            if result is not None:
-                stopped.append(result)
-                _send_discord_alert(result)
-                _send_stop_close_telegram(result)
+            result = _close_position_early(conn, pos, current_yes_price,
+                                           unrealized, reason)
+            conn.commit()
+            stopped.append(result)
+            _send_discord_alert(result)
+            _send_stop_close_telegram(result)
             continue
 
         # ── PRE-RESOLUTION WARNING ──────────────────────────────────────────
@@ -957,10 +918,7 @@ def evaluate_stops():
                 if 0 < hours_to_close <= PRE_RESOLVE_WARN_HOURS:
                     try:
                         from scripts.alert_formatter import send_telegram
-                        _lp = _get_live_position(pos["market_id"])
-                        _warn_side = _side_label(_lp.get("token_id")) if _lp else "?"
-                        if _warn_side == "?":
-                            _warn_side = side
+                        _warn_side = side
                         lines = [
                             f"⚠️ <b>PRE-RESOLUTION WARNING</b>",
                             f"Market: {_display_title(pos.get('market_title'), pos['market_id'])[:60]}",
@@ -990,38 +948,20 @@ def evaluate_stops():
                         reason = (f"HARD-CAP loss {loss_pct:.0%} >= {HARD_CAP:.0%} "
                                   f"({hours_to_close:.1f}h to close, deferred "
                                   f"to reeval otherwise)")
-                        live_pos = _get_live_position(pos["market_id"])
-                        if live_pos is not None:
-                            result = _close_live_position_early(
-                                live_pos, current_yes_price, reason,
-                                hard_cap_frac=HARD_CAP,
-                            )
-                        else:
-                            result = _close_position_early(conn, pos, current_yes_price,
-                                                           unrealized, reason)
-                            if result is not None:
-                                conn.commit()
-                        if result is not None:
-                            stopped.append(result)
-                            _send_discord_alert(result)
+                        result = _close_position_early(conn, pos, current_yes_price,
+                                                       unrealized, reason)
+                        conn.commit()
+                        stopped.append(result)
+                        _send_discord_alert(result)
                     continue  # skip threshold + edge_floor while deferred
 
         # ── Check 1: Max loss percentage ──
         if unrealized < 0 and loss_pct >= config["max_loss_pct"]:
             reason = f"loss {loss_pct:.0%} >= {config['max_loss_pct']:.0%} threshold"
-            live_pos = _get_live_position(pos["market_id"])
-            if live_pos is not None:
-                result = _close_live_position_early(
-                    live_pos, current_yes_price, reason,
-                    hard_cap_frac=config["max_loss_pct"],
-                )
-            else:
-                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                if result is not None:
-                    conn.commit()
-            if result is not None:
-                stopped.append(result)
-                _send_discord_alert(result)
+            result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+            conn.commit()
+            stopped.append(result)
+            _send_discord_alert(result)
             continue
 
         # ── Check 1b: Post-lock tight stop (toggle-gated) ──
@@ -1033,19 +973,10 @@ def evaluate_stops():
             if post_thr is not None and loss_pct >= post_thr:
                 reason = (f"POST-LOCK loss {loss_pct:.0%} >= {post_thr:.0%} threshold "
                           f"({strategy}, inside info-lock window)")
-                live_pos = _get_live_position(pos["market_id"])
-                if live_pos is not None:
-                    result = _close_live_position_early(
-                        live_pos, current_yes_price, reason,
-                        hard_cap_frac=post_thr,
-                    )
-                else:
-                    result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                    if result is not None:
-                        conn.commit()
-                if result is not None:
-                    stopped.append(result)
-                    _send_discord_alert(result)
+                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+                conn.commit()
+                stopped.append(result)
+                _send_discord_alert(result)
                 continue
 
         # ── Check 2: Edge decay stop ──
@@ -1072,19 +1003,10 @@ def evaluate_stops():
         if current_edge < edge_floor and unrealized < 0:
             reason = (f"edge decay: {entry_edge:+.1%} → {current_edge:+.1%} "
                       f"(floor {edge_floor:+.1%})")
-            live_pos = _get_live_position(pos["market_id"])
-            if live_pos is not None:
-                result = _close_live_position_early(
-                    live_pos, current_yes_price, reason,
-                    hard_cap_frac=config.get("edge_floor_hard_cap_frac", 0.50),
-                )
-            else:
-                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                if result is not None:
-                    conn.commit()
-            if result is not None:
-                stopped.append(result)
-                _send_discord_alert(result)
+            result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+            conn.commit()
+            stopped.append(result)
+            _send_discord_alert(result)
             continue
 
     _write_heartbeat(conn, len(positions), warnings_fired)
@@ -1224,20 +1146,11 @@ def evaluate_stops_urgent():
         if unrealized < 0 and loss_pct >= UNIVERSAL_MAX_LOSS_PCT:
             reason = (f"UNIVERSAL STOP (urgent) loss {loss_pct:.0%} >= {UNIVERSAL_MAX_LOSS_PCT:.0%} "
                       f"({pos['_hours_left']}h to resolution)")
-            live_pos = _get_live_position(pos["market_id"])
-            if live_pos is not None:
-                result = _close_live_position_early(
-                    live_pos, current_yes_price, reason,
-                    hard_cap_frac=UNIVERSAL_MAX_LOSS_PCT,
-                )
-            else:
-                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                if result is not None:
-                    conn.commit()
-            if result is not None:
-                stopped.append(result)
-                _send_discord_alert(result)
-                _send_stop_close_telegram(result)
+            result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+            conn.commit()
+            stopped.append(result)
+            _send_discord_alert(result)
+            _send_stop_close_telegram(result)
             continue
 
         # Post-lock check BEFORE urgent threshold (tighter takes precedence)
@@ -1246,19 +1159,10 @@ def evaluate_stops_urgent():
             if post_thr is not None and loss_pct >= post_thr:
                 reason = (f"POST-LOCK URGENT loss {loss_pct:.0%} >= {post_thr:.0%} "
                           f"({strategy}, {pos['_hours_left']}h to resolution)")
-                live_pos = _get_live_position(pos["market_id"])
-                if live_pos is not None:
-                    result = _close_live_position_early(
-                        live_pos, current_yes_price, reason,
-                        hard_cap_frac=post_thr,
-                    )
-                else:
-                    result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                    if result is not None:
-                        conn.commit()
-                if result is not None:
-                    stopped.append(result)
-                    _send_discord_alert(result)
+                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+                conn.commit()
+                stopped.append(result)
+                _send_discord_alert(result)
                 continue
 
         # Dead-zone gate (lower) + window-ceiling (upper). Skip PnL stop if
@@ -1277,19 +1181,10 @@ def evaluate_stops_urgent():
         if not pnl_stop_suppressed and unrealized < 0 and loss_pct >= config["max_loss_pct"]:
             reason = (f"URGENT loss {loss_pct:.0%} >= {config['max_loss_pct']:.0%} "
                       f"threshold ({pos['_hours_left']}h to resolution)")
-            live_pos = _get_live_position(pos["market_id"])
-            if live_pos is not None:
-                result = _close_live_position_early(
-                    live_pos, current_yes_price, reason,
-                    hard_cap_frac=config["max_loss_pct"],
-                )
-            else:
-                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                if result is not None:
-                    conn.commit()
-            if result is not None:
-                stopped.append(result)
-                _send_discord_alert(result)
+            result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+            conn.commit()
+            stopped.append(result)
+            _send_discord_alert(result)
             continue
 
         # ── Edge decay (urgent) ──
@@ -1309,19 +1204,10 @@ def evaluate_stops_urgent():
         if current_edge < urgent_edge_floor and unrealized < 0:
             reason = (f"URGENT edge decay: {entry_edge:+.1%} → {current_edge:+.1%} "
                       f"({pos['_hours_left']}h to resolution)")
-            live_pos = _get_live_position(pos["market_id"])
-            if live_pos is not None:
-                result = _close_live_position_early(
-                    live_pos, current_yes_price, reason,
-                    hard_cap_frac=0.50,
-                )
-            else:
-                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                if result is not None:
-                    conn.commit()
-            if result is not None:
-                stopped.append(result)
-                _send_discord_alert(result)
+            result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+            conn.commit()
+            stopped.append(result)
+            _send_discord_alert(result)
             continue
 
     conn.close()
