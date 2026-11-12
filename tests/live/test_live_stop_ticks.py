@@ -871,3 +871,16 @@ def test_main_validates_before_the_task_loops_start():
                         and c.args[0].func.attr == "to_thread")]
     assert len(validate) == 1
     assert creates and validate[0] < min(creates)
+
+
+def test_an_exit_entry_carrying_post_error_still_counts_as_exited(monkeypatch, state_path, logs,
+                                                                   sent_alerts, armed):
+    """1.2c-1: a completed sale whose alert failed keeps its real action and a
+    post_error. It is exited, not an error and not a page: the ERROR line is logged
+    by _close_live_position_early where the failure happens."""
+    patched_eval(monkeypatch, [{"id": 8, "action": "maker_closed", "pnl": -1.0,
+                                "post_error": "OSError: webhook unreachable"}])
+    shadow.run_live_stop_tick("stop_evaluator", now=T0, state_path=state_path)
+    (line,) = [m for m in logs() if m.startswith("live_stops ARMED")]
+    assert "exited=[8]" in line and "errors=[]" in line
+    assert pages(sent_alerts) == []

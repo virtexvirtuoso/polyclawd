@@ -277,48 +277,151 @@ def _get_live_position(market_id):
         if conn is not None:
             conn.close()
 
-def _close_live_position_early(live_pos_row, current_yes_price, reason, hard_cap_frac=0.50):
-    """Route a genuine stop on a LIVE position through execute_exit.
+# The executor's own action names. Anything else is not something it said.
+_EXECUTOR_ACTIONS = ("maker_closed", "taker_closed", "partial_closed", "held_remainder")
 
-    Called ONLY when a stop GENUINELY fires (hard-cap or near-resolution).
-    The weather noise-stop deferral in evaluate_stops() still suppresses
-    non-genuine stops before this function is ever reached.
+# Shares are compared with this tolerance when deciding "all sold" (the executor
+# itself uses 1e-9; a float residue never counts as a position left open).
+_SHARES_EPS = 1e-6
+
+
+def _num(value, default=0.0):
+    """A finite float from *value*, else *default*. Never raises."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    return f if f == f and abs(f) != float("inf") else default
+
+
+def _fire_stop(live_pos_row, result, mark, reason):
+    """The one alert for a live close: the same text to Discord and to Telegram.
+
+    Reads result["action"] and the executor's own figures (shares_sold,
+    exit_price, pnl, fee_paid) and says what actually happened:
+      * every share sold          -> CLOSED
+      * some, but not all, sold   -> PARTLY CLOSED, and how many shares remain
+      * none sold (held_remainder)-> NOT SOLD, and how many shares are still held
+    "How many were sold" is judged from the shares, not from the action's name, so
+    a held_remainder (or a short taker fill named partial_closed) is never reported
+    as a close (#17). exit_failed, exit_unknown and anything else that is not one
+    of the executor's four actions send nothing here: the tick wrapper pages those.
+
+    Both channels are always attempted. Returns a list of failure strings, one per
+    channel that failed (empty when both were sent); never raises for a channel."""
+    action = result.get("action")
+    if action not in _EXECUTOR_ACTIONS:
+        return []
+    held = _num(live_pos_row.get("shares"))
+    sold = _num(result.get("shares_sold"))
+    remaining = max(0.0, held - sold)
+    price = _num(result.get("exit_price"), mark)
+    pnl = _num(result.get("pnl"))
+    fee = _num(result.get("fee_paid"))
+    entry = _num(live_pos_row.get("entry_price"))
+    title = _display_title(live_pos_row.get("market_title"),
+                           str(live_pos_row.get("market_id") or ""))[:70]
+    side = _side_label(live_pos_row.get("token_id"))
+    figures = (f"Side: {side} | Entry: {entry:.4f} -> Exit: {price:.4f} "
+               f"(stop price {mark:.4f})\n"
+               f"PnL: ${pnl:+.2f} | Fee: ${fee:.4f}\n"
+               f"Reason: {reason}")
+    if sold <= _SHARES_EPS:
+        head = f"🛑 STOP-LOSS NOT SOLD — {title}"
+        text = (f"{head}\nThe stop fired but no shares were sold: all {held:.2f} shares "
+                f"are still held.\n{figures}")
+        if result.get("hard_stop_blocked"):
+            text += "\nThe hard stop could not execute (position below the exchange minimum)."
+        color_red = False
+    elif remaining <= _SHARES_EPS:
+        head = f"🛑 STOP-LOSS CLOSED — {title}"
+        text = f"{head}\nSold {sold:.2f} of {held:.2f} shares.\n{figures}"
+        color_red = True
+    else:
+        head = f"🛑 STOP-LOSS PARTLY CLOSED — {title}"
+        text = (f"{head}\nThe position is not fully closed: sold {sold:.2f} of {held:.2f} "
+                f"shares, {remaining:.2f} shares remain open.\n{figures}")
+        if result.get("hard_stop_blocked"):
+            text += "\nThe rest could not be sold (below the exchange minimum)."
+        color_red = False
+
+    failures = []
+
+    def _failed(channel, exc):
+        logger.error("_fire_stop: {} alert failed for position {} ({}): {}: {}",
+                     channel, live_pos_row.get("id"), action, type(exc).__name__, exc)
+        failures.append(f"{type(exc).__name__}: {exc} [{channel}]")
+
+    try:
+        from signals.discord_alerts import _send, COLOR_ORANGE, COLOR_RED
+        if not _send([{
+            "title": head[:250],
+            "description": text,
+            "color": COLOR_RED if color_red else COLOR_ORANGE,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "Stop-Loss Monitor"},
+        }], alert_type="stop_loss", alert_meta={
+            "market": title, "action": action, "shares_sold": sold,
+            "shares_remaining": remaining, "pnl": pnl, "reason": reason,
+        }):
+            raise RuntimeError("the Discord sender reported failure")
+    except Exception as exc:
+        _failed("discord", exc)
+    try:
+        from scripts.openclaw_alerts import alert_openclaw
+        if not alert_openclaw(text, parse_mode=None):
+            raise RuntimeError("the Telegram sender reported failure")
+    except Exception as exc:
+        _failed("telegram", exc)
+    return failures
+
+
+def _close_live_position_early(live_pos_row, mark, reason, *, hard_cap_frac):
+    """Sell a live position through execute_exit, at the mark it is given.
+
+    The mark is the price the stop decided on (the best bid of the held token).
+    It is the only price used: nothing here fetches an order book or re-marks.
+    (execute_exit prices its maker leg at this mark; its taker leg is priced by
+    the exchange call, not by this function.)
+
+    Always returns a dict, in three stages with separate failure handling:
+      1. before the sale (checking the mark, tick size, database, governor): any
+         exception returns {"action": "exit_failed", "error": "<Type>: <msg>",
+         "stage": "pre"}. No sale was attempted.
+      2. the sale, the single execute_exit call: an exception PROPAGATES. A sale
+         was attempted and its outcome is unknown; the caller labels that
+         exit_unknown. If execute_exit returns without one of its four actions the
+         result is {"action": "exit_unknown", "error": ..., "raw": repr[:200]}.
+      3. after the sale (log line, share-count bookkeeping, alerts, cooldown): an
+         exception is logged at ERROR and recorded in result["post_error"]; the
+         result still reports what execute_exit returned.
 
     Parameters
     ----------
     live_pos_row : dict
-        Row from live_positions (with id, market_id, token_id, entry_price,
-        shares, cost_usd, neg_risk).
-    current_yes_price : float
-        Current mark price (mid from order book or last price).
+        Row from live_positions (id, market_id, token_id, entry_price, shares,
+        cost_usd, neg_risk, ...).
+    mark : float
+        The price to sell at; the same number the stop decided on.
     reason : str
         Human-readable trigger reason.
     hard_cap_frac : float
-        Loss fraction that qualifies this as a genuine hard stop vs. a
-        noise stop that should be held to resolution.
-        Weather default = 0.70 (STOP_CONFIG["weather"]["max_loss_pct"]).
-        Non-weather default = 0.50 (STOP_CONFIG["default"]["max_loss_pct"]).
-
-    Returns stop_info dict or None on error.
+        Loss fraction at which execute_exit treats the stop as genuine and crosses
+        taker for what the maker leg did not sell; below it the remainder is held.
     """
+    market_id = str(live_pos_row.get("market_id") or "")
+    position_id = live_pos_row.get("id")
+
+    # ---- stage 1: before the sale --------------------------------------------
+    conn = None
     try:
         from execution import live_config, live_db, risk_governor
         from execution.live_executor import execute_exit
-        from odds.polymarket_clob import get_orderbook
 
+        if not _usable_price(mark):
+            raise ValueError(f"mark is not a usable price: {mark!r}")
+        mark_price = float(mark)
         token_id = live_pos_row.get("token_id") or ""
-        market_id = str(live_pos_row.get("market_id") or "")
-
-        # Use CLOB order-book mid as the mark price where available; fall back
-        # to the price already computed by the stop-evaluator loop.
-        mark_price = current_yes_price
-        if token_id:
-            try:
-                book = get_orderbook(token_id)
-                if book is not None and getattr(book, "mid_price", None):
-                    mark_price = book.mid_price
-            except Exception:
-                pass
 
         # Get tick_size for the token — default 0.01 if unknown.
         try:
@@ -329,109 +432,139 @@ def _close_live_position_early(live_pos_row, current_yes_price, reason, hard_cap
 
         # I4: derive category and strategy label from archetype so non-weather
         # live strategies (when added) route through the correct fee tier.
-        # Weather is the only LIVE-eligible strategy today; this is future-proofing.
         archetype = live_pos_row.get("archetype") or "weather"
         conn = live_db.connect()
-        try:
-            gov = risk_governor.RiskGovernor(conn, mode=live_config.mode())
-
-            exit_result = execute_exit(
-                conn,
-                gov,
-                position_row=live_pos_row,
-                mark_price=mark_price,
-                tick_size=tick_size,
-                hard_cap_frac=hard_cap_frac,
-                reason=reason,
-                category=archetype,
-            )
-
-            pnl = exit_result.get("pnl", 0.0)
-            exit_action = exit_result.get("action")
-            logger.info(
-                "LIVE STOP-LOSS: market={} action={} shares={:.2f} @ {:.4f} pnl={:+.4f} reason={}",
-                market_id,
-                exit_action,
-                exit_result.get("shares_sold", 0.0),
-                exit_result.get("exit_price", mark_price),
-                pnl,
-                reason,
-            )
-
-            # Partial fill: update shares_held in live_positions
-            if exit_action == "partial_closed":
-                try:
-                    shares_sold = exit_result.get("shares_sold", 0.0)
-                    orig_shares = float(live_pos_row.get("shares", 0))
-                    remaining = max(0.0, orig_shares - shares_sold)
-                    conn_upd = live_db.connect()
-                    conn_upd.execute(
-                        "UPDATE live_positions SET shares=? WHERE id=?",
-                        (remaining, live_pos_row.get("id"))
-                    )
-                    conn_upd.commit()
-                    conn_upd.close()
-                    logger.info(
-                        "_close_live_position_early: partial_closed shares {} -> {} remaining",
-                        orig_shares, remaining
-                    )
-                except Exception as upd_exc:
-                    logger.warning("_close_live_position_early: partial shares update failed: {}", upd_exc)
-
-            # Instant Telegram alert on any real exit (not held_remainder)
-            if exit_action in ("maker_closed", "taker_closed", "partial_closed"):
-                try:
-                    from scripts.alert_formatter import send_telegram
-                    exit_price = exit_result.get("exit_price", mark_price)
-                    shares_sold = exit_result.get("shares_sold", 0.0)
-                    fee = exit_result.get("fee_paid", 0.0)
-                    entry_price = live_pos_row.get("entry_price", 0.0)
-                    market_title = _display_title(
-                        live_pos_row.get("market_title"), market_id)
-                    pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-                    liq = exit_result.get("liquidity") or ("taker" if "taker" in exit_action else "maker")
-                    label = "PARTIAL EXIT" if exit_action == "partial_closed" else "LIVE EXIT"
-                    lines = [
-                        f"{pnl_emoji} <b>{label}</b> ({liq.upper()}) — {reason}",
-                        f"Market: {market_title}",
-                        f"Side: {_side_label(live_pos_row.get('token_id'))}",
-                        f"Entry: {entry_price:.2f} → Exit: {exit_price:.2f} | Shares: {shares_sold:.2f}",
-                        f"PnL: ${pnl:+.2f} | Fee: ${fee:.4f}",
-                    ]
-                    send_telegram("\n".join(lines))
-                except Exception as tg_exc:
-                    logger.warning("_close_live_position_early: telegram exit alert failed: {}", tg_exc)
-
-            # Register exit cooldown — prevent re-entry within 2h on same token
-            if exit_action in ("maker_closed", "taker_closed", "partial_closed"):
-                try:
-                    token_id_str = live_pos_row.get("token_id", "")
-                    if token_id_str:
-                        from scripts.smart_wallet_fast_poll import register_exit_cooldown
-                        register_exit_cooldown(token_id_str)
-                except Exception:
-                    pass
-
-            return {
-                "position_id": live_pos_row.get("id"),
-                "market_title": _display_title(
-                    live_pos_row.get("market_title"), market_id),
-                "side": live_pos_row.get("side", "BUY"),
-                "outcome": _side_label(live_pos_row.get("token_id")),
-                "entry_price": live_pos_row.get("entry_price", 0.0),
-                "current_price": mark_price,
-                "pnl": round(pnl, 4),
-                "bet_size": live_pos_row.get("cost_usd", 0.0),
-                "reason": reason,
-                "strategy": archetype,
-                "live": True,
-                "action": exit_result.get("action"),
-            }
-        finally:
-            conn.close()
+        gov = risk_governor.RiskGovernor(conn, mode=live_config.mode())
     except Exception as exc:
-        logger.error("_close_live_position_early: {} — skipping live exit", exc)
-        return None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        logger.error("_close_live_position_early: position {} failed BEFORE the sale, "
+                     "nothing was sold: {}: {}", position_id, type(exc).__name__, exc)
+        return {"position_id": position_id, "action": "exit_failed",
+                "error": f"{type(exc).__name__}: {exc}", "stage": "pre"}
+
+    # ---- stage 2: the sale ---------------------------------------------------
+    try:
+        exit_result = execute_exit(
+            conn,
+            gov,
+            position_row=live_pos_row,
+            mark_price=mark_price,
+            tick_size=tick_size,
+            hard_cap_frac=hard_cap_frac,
+            reason=reason,
+            category=archetype,
+        )
+    except Exception as exc:
+        logger.error("_close_live_position_early: the sale call for position {} RAISED, "
+                     "outcome unknown: {}: {}", position_id, type(exc).__name__, exc)
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    exit_action = exit_result.get("action") if isinstance(exit_result, dict) else None
+    if exit_action not in _EXECUTOR_ACTIONS:
+        logger.error("_close_live_position_early: position {} sale call returned no usable "
+                     "action, outcome unknown: {!r}", position_id, exit_result)
+        return {"position_id": position_id, "action": "exit_unknown",
+                "error": "executor returned no action", "raw": repr(exit_result)[:200],
+                "current_price": mark_price}
+
+    # ---- stage 3: after the sale. Nothing below may change what the sale did. ----
+    post_errors = []
+
+    def _post_failed(step, exc):
+        logger.error("_close_live_position_early: {} failed AFTER the sale of position {} "
+                     "(action {}): {}: {}", step, position_id, exit_action,
+                     type(exc).__name__, exc)
+        post_errors.append(f"{type(exc).__name__}: {exc}")
+
+    pnl = _num(exit_result.get("pnl"))
+    shares_sold = _num(exit_result.get("shares_sold"))
+    exit_price = _num(exit_result.get("exit_price"), mark_price)
+    try:
+        result = {
+            "position_id": position_id,
+            "market_title": _display_title(live_pos_row.get("market_title"), market_id),
+            "side": live_pos_row.get("side", "BUY"),
+            "outcome": _side_label(live_pos_row.get("token_id")),
+            "entry_price": live_pos_row.get("entry_price", 0.0),
+            "current_price": mark_price,
+            "pnl": round(pnl, 4),
+            "bet_size": live_pos_row.get("cost_usd", 0.0),
+            "reason": reason,
+            "strategy": archetype,
+            "live": True,
+            "action": exit_action,
+            "shares_sold": shares_sold,
+            "exit_price": exit_price,
+            "fee_paid": _num(exit_result.get("fee_paid")),
+        }
+        for extra in ("liquidity", "min_size_blocked", "hard_stop_blocked"):
+            if extra in exit_result:
+                result[extra] = exit_result[extra]
+    except Exception as exc:
+        _post_failed("building the result", exc)
+        result = {"position_id": position_id, "action": exit_action, "live": True,
+                  "current_price": mark_price, "pnl": round(pnl, 4),
+                  "shares_sold": shares_sold, "exit_price": exit_price, "reason": reason}
+
+    try:
+        logger.info(
+            "LIVE STOP-LOSS: market={} action={} shares={:.2f} @ {:.4f} pnl={:+.4f} reason={}",
+            market_id, exit_action, shares_sold, exit_price, pnl, reason,
+        )
+    except Exception as exc:
+        _post_failed("logging the sale", exc)
+
+    # Partial fill: update shares_held in live_positions
+    if exit_action == "partial_closed":
+        try:
+            orig_shares = float(live_pos_row.get("shares", 0))
+            remaining = max(0.0, orig_shares - shares_sold)
+            conn_upd = live_db.connect()
+            try:
+                conn_upd.execute(
+                    "UPDATE live_positions SET shares=? WHERE id=?",
+                    (remaining, position_id)
+                )
+                conn_upd.commit()
+            finally:
+                conn_upd.close()
+            logger.info(
+                "_close_live_position_early: partial_closed shares {} -> {} remaining",
+                orig_shares, remaining
+            )
+        except Exception as exc:
+            _post_failed("the partial shares update", exc)
+
+    # One alert, both channels. held_remainder is announced as what it is.
+    try:
+        for failure in _fire_stop(live_pos_row, result, mark_price, reason):
+            post_errors.append(failure)
+    except Exception as exc:
+        _post_failed("the stop alert", exc)
+
+    # Register exit cooldown — prevent re-entry within 2h on same token
+    if exit_action in ("maker_closed", "taker_closed", "partial_closed"):
+        try:
+            token_id_str = live_pos_row.get("token_id", "")
+            if token_id_str:
+                from scripts.smart_wallet_fast_poll import register_exit_cooldown
+                register_exit_cooldown(token_id_str)
+        except Exception as exc:
+            _post_failed("registering the exit cooldown", exc)
+
+    if post_errors:
+        result["post_error"] = "; ".join(post_errors)
+    return result
+
 
 # Tolerance for float noise only (about 1e-16 on these values). Every real gap
 # between a loss and a bound is orders of magnitude larger: on the 0.01 price
@@ -488,11 +621,12 @@ def evaluate_live_stops(*, dry_run: bool = False, db_path=None) -> list[dict]:
     and the bound moves with it.
 
     Actions: exempt, bad_row, unpriced, ok, spread_held, would_exit (dry run),
-    exited-style results from the exit call, exit_failed (the exit returned
-    nothing: no sale happened as far as it knows), exit_unknown (the exit
-    raised or returned something that is not a result: a sale may have
-    happened) and error (this position could not be evaluated, and no sale was
-    attempted)."""
+    the exit call's own action (maker_closed, taker_closed, partial_closed,
+    held_remainder), exit_failed (the exit returned nothing, or failed before
+    the sale: no sale happened as far as it knows), exit_unknown (the exit
+    raised, or returned something that does not say what happened: a sale may
+    have happened) and error (this position could not be evaluated, and no sale
+    was attempted)."""
     from execution import live_config, live_db
     from odds.polymarket_clob import get_orderbook
     armed = live_config.live_armed()
@@ -567,8 +701,10 @@ def evaluate_live_stops(*, dry_run: bool = False, db_path=None) -> list[dict]:
             out.append({**detail, "action": "exit_failed"})
         elif isinstance(info, dict):
             merged = {**detail, **info}
-            if not merged.get("action"):
-                merged["action"] = "exited"
+            if not merged.get("action"):        # a result that does not say what happened
+                merged["action"] = "exit_unknown"   # is not a confirmed exit
+                if not merged.get("error"):
+                    merged["error"] = "exit result has no action"
             out.append(merged)
         else:
             out.append({**detail, "action": "exit_unknown",

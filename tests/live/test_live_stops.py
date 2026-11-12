@@ -343,12 +343,25 @@ def test_exit_unknown_error_text_is_capped_at_120_chars_of_repr(live_db, world, 
     assert err == "exit returned " + repr("x" * 500)[:120]
 
 
-def test_exit_dict_without_action_gets_exited(live_db, world, armed):
+def test_exit_dict_without_action_is_exit_unknown(live_db, world, armed):
+    # CHANGED in 1.2c-1: this test pinned "exited" for a result with no action. A
+    # result that does not say what happened is not a confirmed exit.
     pid = add_position(live_db, 0.50)
     world.books[TOKEN.format(pid)] = make_book(TOKEN.format(pid), [0.20], [0.21])
     world.exit_result = {"pnl": -2.0}
     out = evaluate(live_db)
-    assert out[0]["action"] == "exited" and out[0]["pnl"] == -2.0 and out[0]["loss_pct"] == 0.6
+    assert out[0]["action"] == "exit_unknown" and out[0]["pnl"] == -2.0 and out[0]["loss_pct"] == 0.6
+    assert out[0]["error"] == "exit result has no action"
+
+
+@pytest.mark.parametrize("action", ["exit_failed", "exit_unknown"])
+def test_exit_result_that_says_failed_or_unknown_is_kept_as_that_action(live_db, world, armed, action):
+    pid = add_position(live_db, 0.50)
+    world.books[TOKEN.format(pid)] = make_book(TOKEN.format(pid), [0.20], [0.21])
+    world.exit_result = {"action": action, "error": "from the exit", "stage": "pre"}
+    out = evaluate(live_db)
+    assert out[0]["action"] == action and out[0]["error"] == "from the exit"
+    assert out[0]["mark"] == 0.20 and out[0]["loss_pct"] == 0.6
 
 
 @pytest.mark.parametrize("falsy", [None, 0, "", [], {}], ids=["none", "zero", "emptystr", "emptylist", "emptydict"])
