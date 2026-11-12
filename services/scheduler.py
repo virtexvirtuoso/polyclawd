@@ -2483,42 +2483,73 @@ async def tick_nfl_edge_scan():
         await asyncio.sleep(60)
 
 
-_LIVE_UNARMED_PAGE_STATE: dict = {}  # per-process page_once state: one page per start per UTC day
+_LIVE_UNARMED_PAGE_STATE: dict = {}  # per-process page_once state
+_LIVE_UNARMED_PAGE_KEY = "live-unarmed"
+_BACKGROUND_TASKS: set = set()  # strong references: a bare asyncio task can be garbage-collected mid-run
 
 
-def _page_if_live_unarmed(now=None) -> bool:
-    """At start: if mode is LIVE but the system is not armed, log it and page once.
+def _log_live_unarmed():
+    """Start-up check, synchronous: if mode is LIVE but the system is not armed, write
+    the ERROR line now and return the page text; otherwise return None. Never raises.
 
     Task 1.10 (hard rule 8): LIVE that is not armed behaves as PAPER, which looks like
-    a quiet market, so make it loud. Holds no state of its own (page_once gets a
-    per-process dict, key carries the UTC date). Returns True when the state is
-    LIVE-but-unarmed (whether or not a page went out), False otherwise. Never raises.
-    Under PAPER, or when armed, it imports and calls nothing else."""
+    a quiet market, so make it loud. The line is written before anything is handed to a
+    thread, so the journal shows it even if the page never arrives. Under PAPER, or when
+    armed, it logs nothing and imports nothing else."""
     try:
         from execution import live_config
 
         if live_config.mode() != "LIVE" or live_config.live_armed():
-            return False
-        st = live_config.arming_state()
+            return None
+        state_text = live_config.arming_state_text()
     except Exception:
         logger.exception("arming check failed at start")
-        return False
-    text = (
-        "LIVE but not armed: no order will be sent "
-        f"(mode={st['mode']} enforce={st['enforce']} "
-        f"LIVE_ORDER_PATH_READY={st['path_ready']})"
+        return None
+    logger.error("LIVE but not armed: no order will be sent (%s)", state_text)
+    return (
+        "Polyclawd scheduler: mode is LIVE but the bot is NOT armed, so it is behaving as "
+        f"PAPER and will send no order. {state_text}. To trade, arm it through the go-live "
+        "sequence; otherwise set POLYCLAWD_MODE=PAPER."
     )
-    logger.error(text)
+
+
+def _page_live_unarmed(text, now=None) -> bool:
+    """Send the LIVE-but-unarmed page. Blocking (the alert transports can take about 70 s
+    when Telegram is down), so main() runs it in a worker thread. Never raises.
+
+    What actually happens: one page per scheduler start (about three a day at the
+    current 8-hour restart) for as long as the condition lasts. The state dict is per
+    process and this runs once per start, so the constant key and the 86,400 s
+    cooldown given to page_once never suppress anything. page_once stamps only on
+    delivery, so a failed delivery is retried at the next start. Returns whether the
+    page was delivered."""
     try:
         from scripts.openclaw_alerts import page_once
 
-        when = time.time() if now is None else now
-        day = datetime.fromtimestamp(when, timezone.utc).strftime("%Y-%m-%d")
-        page_once(f"live-unarmed-{day}", 86400, text,
-                  state=_LIVE_UNARMED_PAGE_STATE, now=when, parse_mode=None)
+        return bool(page_once(_LIVE_UNARMED_PAGE_KEY, 86400, text,
+                              state=_LIVE_UNARMED_PAGE_STATE, now=now, parse_mode=None))
     except Exception as exc:
         logger.error("could not page LIVE-but-unarmed state: %s", exc)
-    return True
+        return False
+
+
+def _start_live_unarmed_page():
+    """Called once from main(): log at once, page in the background. Never raises.
+
+    Returns the background task when a page was started, else None. The task is kept in
+    _BACKGROUND_TASKS until it ends, so it cannot be garbage-collected; start-up does
+    not wait for it."""
+    text = _log_live_unarmed()
+    if text is None:
+        return None
+    try:
+        task = asyncio.create_task(asyncio.to_thread(_page_live_unarmed, text))
+    except Exception as exc:
+        logger.error("could not start the LIVE-but-unarmed page: %s", exc)
+        return None
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
 
 
 async def main():
@@ -2527,7 +2558,7 @@ async def main():
     logger.info("Project: %s", PROJECT_ROOT)
     logger.info("DB: %s", DB_PATH)
     _assert_live_cap_fits_min_action()
-    _page_if_live_unarmed()
+    _start_live_unarmed_page()
     logger.info("=" * 60)
 
     # Stagger starts to avoid thundering herd
