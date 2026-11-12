@@ -5,7 +5,7 @@ Conservative fixed stops for now. Will transition to learned/adaptive
 exits once position_price_log has enough resolved trade trajectories.
 
 Conservative defaults (Phase 1):
-- Exit if unrealized loss > 50% of bet size
+- Exit if unrealized loss >= UNIVERSAL_MAX_LOSS_PCT (40%) of bet size
 - Exit if edge flipped negative (signal reversal)
 
 Called from scheduler tick_5min().
@@ -34,6 +34,11 @@ KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 # Checked FIRST in both evaluate_stops() and evaluate_stops_urgent().
 # No strategy-specific override can exceed this — it's the hard floor.
 # Env override: UNIVERSAL_MAX_LOSS_PCT for rapid rollback without redeploy.
+# This stop now shadows every other loss stop and is the ONLY loss cap for every
+# strategy, weather included: the tiers that used to sit above it (50% and 70%)
+# were deleted on 2026-11-12 because they could never fire while it is 0.40.
+# Raising it (it is read from the environment) raises the loss cap for every
+# strategy, and there is no second cap behind it.
 UNIVERSAL_MAX_LOSS_PCT = float(os.getenv("UNIVERSAL_MAX_LOSS_PCT", "0.40"))
 
 # ── PRE-RESOLUTION WARNING ─────────────────────────────────────────────────
@@ -48,44 +53,35 @@ PRE_RESOLVE_WARN_HOURS = float(os.getenv("PRE_RESOLVE_WARN_HOURS", "6.0"))
 PRE_RESOLVE_WARN_LOSS_PCT = float(os.getenv("PRE_RESOLVE_WARN_LOSS_PCT", "0.30"))
 
 # ── Stop Config ──────────────────────────────────────────────────────────
-# 2026-04-27 weather recalibration. Diagnostic on n=440 weather trades:
-#   * Model is calibrated (mean P(NO) 0.80 vs realized 0.75; CLV +36¢/contract).
-#   * 30% standard stop fired 151× and cost ~$66k of expected P&L.
-#   * Live books are 7–10pp wide with $25–50 of depth per 5pp slice. A single
-#     $500 market order moves the price 5–10pp, generating fake "20–30% losses"
-#     that revert when the maker refills.
-#   * 70% of winner-dips ≥20% mean-revert in <30 min; 94% within 1h.
-# Solution: weather positions further than 6h from resolution skip the
-# threshold-based stop and defer to reeval_weather_positions(), which has
-# fresh ensemble data. The threshold here is a HARD-CAP safety net only.
-# Inside 6h, the urgent path (25% with a 2h dead zone, calibrated 2026-04-23)
-# remains in charge.
+# Per-strategy settings that are NOT a loss threshold. There is no per-strategy
+# loss threshold in this table: the ones that used to be here (0.50 default and
+# tweet_count_mc, 0.70 weather, env WEATHER_HARD_CAP_MAX_LOSS_PCT) were all above
+# UNIVERSAL_MAX_LOSS_PCT (0.40), and the universal stop is checked first, on the
+# same loss figure, with `continue`, so none of them could ever fire (audit #16).
+# They were deleted. Every loss threshold that remains (URGENT_STOP_CONFIG,
+# POST_LOCK_CONFIG, PRE_RESOLVE_WARN_LOSS_PCT) is below the universal stop, and a
+# test keeps it so.
 #
-# 2026-05-15 weather HARD-CAP widening: live tracker showed mid-life HARD-CAP
-# (0.50) was firing ~10×/day at ~$2.5k/day cost despite the defer-to-reeval
-# logic — the reeval doesn't always close fast enough to prevent 50% drawdowns.
-# ENSEMBLE_AUDIT_2026-05-14 stop-sensitivity backtest on 375 resolved stops
-# found held-WR rises monotonically with loss-bucket depth: 30-40% wins 68.9%
-# held, 50-70% wins 73.9%, >=70% wins 93.1%. Same widening recommendation
-# applies to BOTH URGENT and HARD-CAP paths. Widened 0.50 -> 0.70.
-# Env override: WEATHER_HARD_CAP_MAX_LOSS_PCT for rapid rollback without redeploy.
-# See ENSEMBLE_AUDIT_2026-05-15_02_Stop-Sensitivity-Backtest.md
+# 2026-04-27 weather recalibration (still in force): live books are 7–10pp wide
+# with thin depth, so a single market order generated fake "20–30% losses" that
+# revert when the maker refills. Weather positions further than 6h from
+# resolution therefore skip the post-lock and edge-decay stops and defer to
+# reeval_weather_positions(), which has fresh ensemble data; only the universal
+# stop (and the pre-resolution warning) apply there. Inside 6h the urgent path is
+# in charge.
 
 STOP_CONFIG = {
     "default": {
-        "max_loss_pct": 0.50,      # hard-cap safety net (any strategy)
         "edge_floor": -0.02,       # exit if current edge < -2pp (signal flipped)
-        "defer_to_reeval_above_h": 0,   # 0 = no deferral, threshold rules
+        "defer_to_reeval_above_h": 0,   # 0 = no deferral
     },
     # Weather: defer mid-life stops to the model-aware path
     "weather": {
-        "max_loss_pct": float(os.getenv("WEATHER_HARD_CAP_MAX_LOSS_PCT", "0.70")),  # widened 2026-05-15 from 0.50; env-tunable for rollback
         "edge_floor": -0.02,
-        "defer_to_reeval_above_h": 6.0,  # >6h to close: skip threshold stop,
+        "defer_to_reeval_above_h": 6.0,  # >6h to close: skip post-lock + edge stops,
                                           # let reeval (ensemble-aware) decide
     },
     "tweet_count_mc": {
-        "max_loss_pct": 0.50,
         "edge_floor": -0.02,
     },
 }
@@ -247,191 +243,480 @@ def _display_title(raw_title, market_id):
         resolved = None
     return resolved or title or str(market_id or "")[:24]
 
-# ---------------------------------------------------------------------------
-# Phase G — Live-position exit routing
-# ---------------------------------------------------------------------------
+# The executor's own action names. Anything else is not something it said.
+_EXECUTOR_ACTIONS = ("maker_closed", "taker_closed", "partial_closed", "held_remainder")
 
-def _get_live_position(market_id):
-    """Return the first open live_positions row for *market_id*, or None.
+# Shares are compared with this tolerance when deciding "all sold" (the executor
+# itself uses 1e-9; a float residue never counts as a position left open).
+_SHARES_EPS = 1e-6
 
-    Uses a fresh live_db connection each call — stop_evaluator runs on its
-    own conn (paper_positions) and we keep the two schemas separate.
-    Never raises: returns None on any error or when not armed (PAPER, or LIVE but unarmed).
-    """
-    conn = None
+
+def _num(value, default=0.0):
+    """A finite float from *value*, else *default*. Never raises."""
     try:
-        from execution import live_config, live_db
-        if not live_config.live_armed():
-            return None
-        conn = live_db.connect()
-        cur = conn.execute(
-            "SELECT * FROM live_positions WHERE market_id = ? AND status = 'open' LIMIT 1",
-            (market_id,),
-        )
-        row = cur.fetchone()
-        return dict(row) if row is not None else None
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    return f if f == f and abs(f) != float("inf") else default
+
+
+def _short(exc_or_text, limit=300):
+    """Bounded text for an error field: "<Type>: <message>" for an exception, the text
+    itself otherwise, cut to *limit* characters. Exceptions from the exchange SDK and
+    HTTP libraries can carry URLs and whole response bodies; none of that is kept past
+    the limit, and the exception type name always stays at the front."""
+    if isinstance(exc_or_text, BaseException):
+        message = str(exc_or_text)
+        name = type(exc_or_text).__name__
+        text = f"{name}: {message}" if message else name
+    else:
+        text = str(exc_or_text)
+    return text[:limit]
+
+
+def _fire_stop(live_pos_row, result, mark, reason):
+    """The one alert for a live close: the same text to Discord and to Telegram.
+
+    Reads result["action"] and the executor's own figures (shares_sold,
+    exit_price, pnl, fee_paid) and says what actually happened:
+      * every share sold          -> CLOSED
+      * some, but not all, sold   -> PARTLY CLOSED, and how many shares remain
+      * none sold (held_remainder)-> NOT SOLD, and how many shares are still held
+      * no usable share count     -> "outcome unclear, check the exchange and the
+        ledger" (never NOT SOLD, never CLOSED), and a failure note is returned
+    "How many were sold" is judged from the shares, not from the action's name, so
+    a held_remainder (or a short taker fill named partial_closed) is never reported
+    as a close (#17). exit_failed, exit_unknown and anything else that is not one
+    of the executor's four actions send nothing here: the tick wrapper pages those.
+
+    Both channels are always attempted. Returns a list of failure strings, one per
+    channel that failed (empty when both were sent); never raises for a channel."""
+    action = result.get("action")
+    if action not in _EXECUTOR_ACTIONS:
+        return []
+    held = _num(live_pos_row.get("shares"))
+    sold_known = _num(result.get("shares_sold"), None)
+    sold = sold_known if sold_known is not None else 0.0
+    remaining = max(0.0, held - sold)
+    price = _num(result.get("exit_price"), mark)
+    pnl = _num(result.get("pnl"))
+    fee = _num(result.get("fee_paid"))
+    entry = _num(live_pos_row.get("entry_price"))
+    title = _display_title(live_pos_row.get("market_title"),
+                           str(live_pos_row.get("market_id") or ""))[:70]
+    side = _side_label(live_pos_row.get("token_id"))
+    figures = (f"Side: {side} | Entry: {entry:.4f} -> Exit: {price:.4f} "
+               f"(stop price {mark:.4f})\n"
+               f"PnL: ${pnl:+.2f} | Fee: ${fee:.4f}\n"
+               f"Reason: {reason}")
+    if sold_known is None:
+        head = f"🛑 STOP-LOSS OUTCOME UNCLEAR — {title}"
+        text = (f"🛑 STOP-LOSS: {title}: the executor reported {action} but no share "
+                "count. Check the position on the exchange and in the ledger.")
+        color_red = False
+    elif sold <= _SHARES_EPS:
+        head = f"🛑 STOP-LOSS NOT SOLD — {title}"
+        text = (f"{head}\nThe stop fired but no shares were sold: all {held:.2f} shares "
+                f"are still held.\n{figures}")
+        if result.get("hard_stop_blocked"):
+            text += "\nThe hard stop could not execute (position below the exchange minimum)."
+        color_red = False
+    elif remaining <= _SHARES_EPS:
+        head = f"🛑 STOP-LOSS CLOSED — {title}"
+        text = f"{head}\nSold {sold:.2f} of {held:.2f} shares.\n{figures}"
+        color_red = True
+    else:
+        head = f"🛑 STOP-LOSS PARTLY CLOSED — {title}"
+        text = (f"{head}\nThe position is not fully closed: sold {sold:.2f} of {held:.2f} "
+                f"shares, {remaining:.2f} shares remain open.\n{figures}")
+        if result.get("hard_stop_blocked"):
+            text += "\nThe rest could not be sold (below the exchange minimum)."
+        color_red = False
+
+    failures = []
+
+    def _failed(channel, exc):
+        logger.error("_fire_stop: {} alert failed for position {} ({}): {}: {}",
+                     channel, live_pos_row.get("id"), action, type(exc).__name__, exc)
+        tag = f" [{channel}]"
+        failures.append(_short(exc, 300 - len(tag)) + tag)
+
+    try:
+        from signals.discord_alerts import _send, COLOR_ORANGE, COLOR_RED
+        if not _send([{
+            "title": head[:250],
+            "description": text,
+            "color": COLOR_RED if color_red else COLOR_ORANGE,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "Stop-Loss Monitor"},
+        }], alert_type="stop_loss", alert_meta={
+            "market": title, "action": action, "shares_sold": sold_known,
+            "shares_remaining": None if sold_known is None else remaining,
+            "pnl": pnl, "reason": reason,
+        }):
+            raise RuntimeError("the Discord sender reported failure")
     except Exception as exc:
-        logger.debug("_get_live_position: {} — treating as no live position", exc)
-        return None
-    finally:
-        if conn is not None:
-            conn.close()
+        _failed("discord", exc)
+    try:
+        from scripts.openclaw_alerts import alert_openclaw
+        if not alert_openclaw(text, parse_mode=None):
+            raise RuntimeError("the Telegram sender reported failure")
+    except Exception as exc:
+        _failed("telegram", exc)
+    if sold_known is None:
+        failures.append(f"the executor reported {action} but no share count; outcome unclear")
+    return failures
 
-def _close_live_position_early(live_pos_row, current_yes_price, reason, hard_cap_frac=0.50):
-    """Route a genuine stop on a LIVE position through execute_exit.
 
-    Called ONLY when a stop GENUINELY fires (hard-cap or near-resolution).
-    The weather noise-stop deferral in evaluate_stops() still suppresses
-    non-genuine stops before this function is ever reached.
+def _close_live_position_early(live_pos_row, mark, reason, *, hard_cap_frac):
+    """Sell a live position through execute_exit, at the mark it is given.
+
+    The mark is the price the stop decided on (the best bid of the held token).
+    It is the only price used: nothing here fetches an order book or re-marks.
+    (execute_exit prices its maker leg at this mark; its taker leg is priced by
+    the exchange call, not by this function.)
+
+    Always returns a dict, in three stages with separate failure handling:
+      1. before the sale (checking the mark, tick size, database, governor): any
+         exception returns {"action": "exit_failed", "error": "<Type>: <msg>",
+         "stage": "pre"}. No sale was attempted.
+      2. the sale, the single execute_exit call: an exception PROPAGATES. A sale
+         was attempted and its outcome is unknown; the caller labels that
+         exit_unknown. If execute_exit returns without one of its four actions the
+         result is {"action": "exit_unknown", "error": ..., "raw": repr[:200]}.
+      3. after the sale (log line, alerts, cooldown; no database write): an
+         exception is logged at ERROR and recorded in result["post_error"]; the
+         result still reports what execute_exit returned.
 
     Parameters
     ----------
     live_pos_row : dict
-        Row from live_positions (with id, market_id, token_id, entry_price,
-        shares, cost_usd, neg_risk).
-    current_yes_price : float
-        Current mark price (mid from order book or last price).
+        Row from live_positions (id, market_id, token_id, entry_price, shares,
+        cost_usd, neg_risk, ...).
+    mark : float
+        The price to sell at; the same number the stop decided on.
     reason : str
         Human-readable trigger reason.
     hard_cap_frac : float
-        Loss fraction that qualifies this as a genuine hard stop vs. a
-        noise stop that should be held to resolution.
-        Weather default = 0.70 (STOP_CONFIG["weather"]["max_loss_pct"]).
-        Non-weather default = 0.50 (STOP_CONFIG["default"]["max_loss_pct"]).
-
-    Returns stop_info dict or None on error.
+        Loss fraction at which execute_exit treats the stop as genuine and crosses
+        taker for what the maker leg did not sell; below it the remainder is held.
     """
+    market_id = str(live_pos_row.get("market_id") or "")
+    position_id = live_pos_row.get("id")
+
+    # ---- stage 1: before the sale --------------------------------------------
+    conn = None
     try:
         from execution import live_config, live_db, risk_governor
         from execution.live_executor import execute_exit
-        from odds.polymarket_clob import get_orderbook
 
+        if not _usable_price(mark):
+            raise ValueError(f"mark is not a usable price: {mark!r}")
+        mark_price = float(mark)
         token_id = live_pos_row.get("token_id") or ""
-        market_id = str(live_pos_row.get("market_id") or "")
-
-        # Use CLOB order-book mid as the mark price where available; fall back
-        # to the price already computed by the stop-evaluator loop.
-        mark_price = current_yes_price
-        if token_id:
-            try:
-                book = get_orderbook(token_id)
-                if book is not None and getattr(book, "mid_price", None):
-                    mark_price = book.mid_price
-            except Exception:
-                pass
 
         # Get tick_size for the token — default 0.01 if unknown.
         try:
             from execution.clob_client import get_tick_size
             tick_size = get_tick_size(token_id) if token_id else 0.01
-        except Exception:
+        except Exception as exc:
+            logger.warning("_close_live_position_early: tick size lookup failed for position "
+                           "{}, using 0.01: {}", position_id, _short(exc))
             tick_size = 0.01
 
         # I4: derive category and strategy label from archetype so non-weather
         # live strategies (when added) route through the correct fee tier.
-        # Weather is the only LIVE-eligible strategy today; this is future-proofing.
         archetype = live_pos_row.get("archetype") or "weather"
         conn = live_db.connect()
+        gov = risk_governor.RiskGovernor(conn, mode=live_config.mode())
+    except Exception as exc:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        logger.error("_close_live_position_early: position {} failed BEFORE the sale, "
+                     "nothing was sold: {}: {}", position_id, type(exc).__name__, exc)
+        return {"position_id": position_id, "action": "exit_failed",
+                "error": _short(exc), "stage": "pre"}
+
+    # ---- stage 2: the sale ---------------------------------------------------
+    try:
+        exit_result = execute_exit(
+            conn,
+            gov,
+            position_row=live_pos_row,
+            mark_price=mark_price,
+            tick_size=tick_size,
+            hard_cap_frac=hard_cap_frac,
+            reason=reason,
+            category=archetype,
+        )
+    except Exception as exc:
+        logger.error("_close_live_position_early: the sale call for position {} RAISED, "
+                     "outcome unknown: {}: {}", position_id, type(exc).__name__, exc)
+        raise
+    finally:
         try:
-            gov = risk_governor.RiskGovernor(conn, mode=live_config.mode())
+            conn.close()
+        except Exception:
+            pass
 
-            exit_result = execute_exit(
-                conn,
-                gov,
-                position_row=live_pos_row,
-                mark_price=mark_price,
-                tick_size=tick_size,
-                hard_cap_frac=hard_cap_frac,
-                reason=reason,
-                category=archetype,
-            )
+    exit_action = exit_result.get("action") if isinstance(exit_result, dict) else None
+    if exit_action not in _EXECUTOR_ACTIONS:
+        logger.error("_close_live_position_early: position {} sale call returned no usable "
+                     "action, outcome unknown: {!r}", position_id, exit_result)
+        return {"position_id": position_id, "action": "exit_unknown",
+                "error": "executor returned no action", "raw": repr(exit_result)[:200],
+                "current_price": mark_price}
 
-            pnl = exit_result.get("pnl", 0.0)
-            exit_action = exit_result.get("action")
-            logger.info(
-                "LIVE STOP-LOSS: market={} action={} shares={:.2f} @ {:.4f} pnl={:+.4f} reason={}",
-                market_id,
-                exit_action,
-                exit_result.get("shares_sold", 0.0),
-                exit_result.get("exit_price", mark_price),
-                pnl,
-                reason,
-            )
+    # ---- stage 3: after the sale. Nothing below may change what the sale did. ----
+    post_errors = []
 
-            # Partial fill: update shares_held in live_positions
-            if exit_action == "partial_closed":
-                try:
-                    shares_sold = exit_result.get("shares_sold", 0.0)
-                    orig_shares = float(live_pos_row.get("shares", 0))
-                    remaining = max(0.0, orig_shares - shares_sold)
-                    conn_upd = live_db.connect()
-                    conn_upd.execute(
-                        "UPDATE live_positions SET shares=? WHERE id=?",
-                        (remaining, live_pos_row.get("id"))
-                    )
-                    conn_upd.commit()
-                    conn_upd.close()
-                    logger.info(
-                        "_close_live_position_early: partial_closed shares {} -> {} remaining",
-                        orig_shares, remaining
-                    )
-                except Exception as upd_exc:
-                    logger.warning("_close_live_position_early: partial shares update failed: {}", upd_exc)
+    def _post_failed(step, exc):
+        logger.error("_close_live_position_early: {} failed AFTER the sale of position {} "
+                     "(action {}): {}: {}", step, position_id, exit_action,
+                     type(exc).__name__, exc)
+        post_errors.append(_short(exc))
 
-            # Instant Telegram alert on any real exit (not held_remainder)
-            if exit_action in ("maker_closed", "taker_closed", "partial_closed"):
-                try:
-                    from scripts.alert_formatter import send_telegram
-                    exit_price = exit_result.get("exit_price", mark_price)
-                    shares_sold = exit_result.get("shares_sold", 0.0)
-                    fee = exit_result.get("fee_paid", 0.0)
-                    entry_price = live_pos_row.get("entry_price", 0.0)
-                    market_title = _display_title(
-                        live_pos_row.get("market_title"), market_id)
-                    pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-                    liq = exit_result.get("liquidity") or ("taker" if "taker" in exit_action else "maker")
-                    label = "PARTIAL EXIT" if exit_action == "partial_closed" else "LIVE EXIT"
-                    lines = [
-                        f"{pnl_emoji} <b>{label}</b> ({liq.upper()}) — {reason}",
-                        f"Market: {market_title}",
-                        f"Side: {_side_label(live_pos_row.get('token_id'))}",
-                        f"Entry: {entry_price:.2f} → Exit: {exit_price:.2f} | Shares: {shares_sold:.2f}",
-                        f"PnL: ${pnl:+.2f} | Fee: ${fee:.4f}",
-                    ]
-                    send_telegram("\n".join(lines))
-                except Exception as tg_exc:
-                    logger.warning("_close_live_position_early: telegram exit alert failed: {}", tg_exc)
+    pnl = _num(exit_result.get("pnl"))
+    shares_sold = _num(exit_result.get("shares_sold"), None)   # None = the executor gave no count
+    exit_price = _num(exit_result.get("exit_price"), mark_price)
+    try:
+        result = {
+            "position_id": position_id,
+            "market_title": _display_title(live_pos_row.get("market_title"), market_id),
+            "side": live_pos_row.get("side", "BUY"),
+            "outcome": _side_label(live_pos_row.get("token_id")),
+            "entry_price": live_pos_row.get("entry_price", 0.0),
+            "current_price": mark_price,
+            "pnl": round(pnl, 4),
+            "bet_size": live_pos_row.get("cost_usd", 0.0),
+            "reason": reason,
+            "strategy": archetype,
+            "live": True,
+            "action": exit_action,
+            "shares_sold": shares_sold,
+            "exit_price": exit_price,
+            "fee_paid": _num(exit_result.get("fee_paid")),
+        }
+        for extra in ("liquidity", "min_size_blocked", "hard_stop_blocked"):
+            if extra in exit_result:
+                result[extra] = exit_result[extra]
+    except Exception as exc:
+        _post_failed("building the result", exc)
+        result = {"position_id": position_id, "action": exit_action, "live": True,
+                  "current_price": mark_price, "pnl": round(pnl, 4),
+                  "shares_sold": shares_sold, "exit_price": exit_price, "reason": reason}
 
-            # Register exit cooldown — prevent re-entry within 2h on same token
-            if exit_action in ("maker_closed", "taker_closed", "partial_closed"):
-                try:
-                    token_id_str = live_pos_row.get("token_id", "")
-                    if token_id_str:
-                        from scripts.smart_wallet_fast_poll import register_exit_cooldown
-                        register_exit_cooldown(token_id_str)
-                except Exception:
-                    pass
+    try:
+        logger.info(
+            "LIVE STOP-LOSS: market={} action={} shares={} @ {:.4f} pnl={:+.4f} reason={}",
+            market_id, exit_action,
+            "unknown" if shares_sold is None else f"{shares_sold:.2f}", exit_price, pnl, reason,
+        )
+    except Exception as exc:
+        _post_failed("logging the sale", exc)
 
-            return {
-                "position_id": live_pos_row.get("id"),
-                "market_title": _display_title(
-                    live_pos_row.get("market_title"), market_id),
-                "side": live_pos_row.get("side", "BUY"),
-                "outcome": _side_label(live_pos_row.get("token_id")),
-                "entry_price": live_pos_row.get("entry_price", 0.0),
-                "current_price": mark_price,
-                "pnl": round(pnl, 4),
-                "bet_size": live_pos_row.get("cost_usd", 0.0),
-                "reason": reason,
-                "strategy": archetype,
-                "live": True,
-                "action": exit_result.get("action"),
-            }
+    # No write to live_positions here: execute_exit's close_position calls (the position
+    # tracker) already reduced shares and cost_usd for every leg, partial_closed included.
+
+    # One alert, both channels. held_remainder is announced as what it is.
+    try:
+        for failure in _fire_stop(live_pos_row, result, mark_price, reason):
+            post_errors.append(failure)
+    except Exception as exc:
+        _post_failed("the stop alert", exc)
+
+    # Register exit cooldown — prevent re-entry within 2h on same token
+    if exit_action in ("maker_closed", "taker_closed", "partial_closed"):
+        try:
+            token_id_str = live_pos_row.get("token_id", "")
+            if token_id_str:
+                from scripts.smart_wallet_fast_poll import register_exit_cooldown
+                register_exit_cooldown(token_id_str)
+        except Exception as exc:
+            _post_failed("registering the exit cooldown", exc)
+
+    if post_errors:
+        result["post_error"] = _short("; ".join(post_errors))
+    return result
+
+
+# Tolerance for float noise only (about 1e-16 on these values). Every real gap
+# between a loss and a bound is orders of magnitude larger: on the 0.01 price
+# grid the smallest is about 0.002, and an off-grid average fill price such as
+# 0.33333 gives a 6e-6 gap. 1e-9 must never be widened to absorb a real one.
+EPS = 1e-9
+
+
+def _usable_price(price):
+    """True for a real prediction-market price: a finite number in (0, 1].
+
+    Strict on purpose. bool is refused. Decimal is refused (it is not an int or
+    a float subclass, so the isinstance check fails): the order-book parser
+    produces floats, and a Decimal here means something else wrote the book.
+    numpy float64 is accepted because it subclasses float; numpy float32 and
+    other numpy scalars are refused for the same reason as Decimal."""
+    return bool(isinstance(price, (int, float)) and not isinstance(price, bool)
+                and 0 < price <= 1 and price == price)
+
+
+def _stop_decision(entry: float, bid: float, ask: float) -> tuple[str, dict]:
+    """The stop arithmetic and nothing else: no I/O, no globals except
+    UNIVERSAL_MAX_LOSS_PCT and EPS (and the SPREAD_ALLOW_PCT cap). Returns
+    ("ok" | "spread_held" | "exit", display figures). The caller guarantees
+    entry > 0 and finite and bid and ask usable prices.
+
+    The decision uses the unrounded numbers; the figures are rounded to 4
+    places for display only. EPS absorbs float noise: 1 - 0.171/0.285 is
+    0.39999999999999991 and counts as a 40% loss, while 1 - 0.20/0.33333 is
+    0.399994 and does not."""
+    from execution import live_config
+    loss_raw = 1 - bid / entry
+    base = UNIVERSAL_MAX_LOSS_PCT
+    if loss_raw < base - EPS:
+        return "ok", {"loss_pct": round(loss_raw, 4)}
+    spread_raw = max(0.0, ask - bid) / entry          # crossed book gives 0
+    threshold_raw = base + min(spread_raw, live_config.SPREAD_ALLOW_PCT)
+    figures = {"loss_pct": round(loss_raw, 4), "spread_pct": round(spread_raw, 4),
+               "threshold": round(threshold_raw, 4)}
+    if loss_raw < threshold_raw - EPS:
+        return "spread_held", figures
+    return "exit", figures
+
+
+def _ledger_now(row, db_path):
+    """What the ledger shows for *row*'s position after a sale of unknown outcome:
+    {"shares_before", "shares_now", "status_now"}, or shares_now None and
+    reread_error when the row cannot be read again. A short-lived connection,
+    its own try; never raises."""
+    info = {"shares_before": row.get("shares")}
+    try:
+        from execution import live_db
+        conn = live_db.connect(db_path) if db_path else live_db.connect()
+        try:
+            cur = conn.execute("SELECT shares, status FROM live_positions WHERE id=?",
+                               (row["id"],)).fetchone()
         finally:
             conn.close()
+        if cur is None:
+            raise LookupError(f"position {row['id']} not found")
+        info["shares_now"] = cur["shares"]
+        info["status_now"] = cur["status"]
     except Exception as exc:
-        logger.error("_close_live_position_early: {} — skipping live exit", exc)
-        return None
+        info["shares_now"] = None
+        info["reread_error"] = _short(exc)
+    return info
+
+
+def evaluate_live_stops(*, dry_run: bool = False, db_path=None) -> list[dict]:
+    """One pass over open live positions. The mark is the best bid of the held
+    token, and the same mark goes to the exit. Nothing re-prices it.
+    Every open position gets exactly one entry in the result.
+
+    The stop always fires by a loss of UNIVERSAL_MAX_LOSS_PCT +
+    live_config.SPREAD_ALLOW_PCT at the best bid (0.40 + 0.10 = 0.50 with the
+    defaults): the spread allowance can delay a sale between the two, never
+    past the sum. UNIVERSAL_MAX_LOSS_PCT can be overridden from the environment,
+    and the bound moves with it.
+
+    Actions: exempt, bad_row, unpriced, ok, spread_held, would_exit (dry run),
+    the exit call's own action (maker_closed, taker_closed, partial_closed,
+    held_remainder), exit_failed (the exit returned nothing, or failed before
+    the sale: no sale happened as far as it knows), exit_unknown (the exit
+    raised, or returned something that does not say what happened: a sale may
+    have happened) and error (this position could not be evaluated, and no sale
+    was attempted). An exit_unknown entry also carries shares_before (the row the
+    loop started with), shares_now and status_now (the row read again), or
+    shares_now None and reread_error when the ledger could not be read."""
+    from execution import live_config, live_db
+    from odds.polymarket_clob import get_orderbook
+    armed = live_config.live_armed()
+    if not armed and not dry_run:
+        return []
+    exempt = live_config.stop_exempt_ids()      # a bad value must raise here, loudly
+    conn = live_db.connect(db_path) if db_path else live_db.connect()
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM live_positions WHERE status='open' AND shares > 0 ORDER BY id")]
+    finally:
+        conn.close()                            # never held across order-book fetches
+    out = []
+    for row in rows:
+        # "error" means exactly this: the position could not be evaluated and
+        # NO sale was attempted. Once the exit is called, a failure is
+        # exit_unknown or exit_failed, never error. Every path through this
+        # try that does not leave a sale to attempt ends in `continue`.
+        try:
+            if int(row["id"]) in exempt:
+                out.append({"id": row["id"], "action": "exempt"})
+                continue
+            try:
+                entry = float(row.get("entry_price"))
+            except (TypeError, ValueError):
+                entry = 0.0
+            if not entry > 0 or entry == float("inf"):      # also NaN and -inf
+                out.append({"id": row["id"], "action": "bad_row"})
+                continue
+            token_id = row.get("token_id")
+            if not token_id or not str(token_id).strip():
+                out.append({"id": row["id"], "action": "bad_row"})
+                continue
+            book = get_orderbook(token_id)
+            if not book or not book.bids or not book.asks:
+                out.append({"id": row["id"], "action": "unpriced"})
+                continue
+            bid_prices = [lvl.price for lvl in book.bids]
+            ask_prices = [lvl.price for lvl in book.asks]
+            # A book with any corrupt level is not trusted at all, and the sort
+            # order of the levels is not trusted either.
+            if not all(_usable_price(p) for p in bid_prices + ask_prices):
+                out.append({"id": row["id"], "action": "unpriced"})
+                continue
+            bid, ask = float(max(bid_prices)), float(min(ask_prices))
+            mark = bid
+            decision, figures = _stop_decision(entry, bid, ask)
+            if decision == "ok":
+                out.append({"id": row["id"], "action": "ok", "mark": mark, **figures})
+                continue
+            detail = {"id": row["id"], "mark": mark, **figures}
+            if decision == "spread_held":
+                out.append({**detail, "action": "spread_held"})
+                continue
+            if dry_run:
+                out.append({**detail, "action": "would_exit"})
+                continue
+        except Exception as exc:                # one bad row must not stop the rest
+            out.append({"id": row.get("id"), "action": "error",
+                        "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        # The sale. Its own try: from here on a failure is not "could not evaluate".
+        try:
+            # hard_cap_frac stays UNIVERSAL_MAX_LOSS_PCT, so every stop exit is at or over the hard cap
+            info = _close_live_position_early(row, mark, f"live stop {figures['loss_pct']:.0%}",
+                                              hard_cap_frac=UNIVERSAL_MAX_LOSS_PCT)
+        except Exception as exc:
+            out.append({**detail, "action": "exit_unknown", "error": _short(exc),
+                        **_ledger_now(row, db_path)})
+            continue
+        if not info:
+            out.append({**detail, "action": "exit_failed"})
+        elif isinstance(info, dict):
+            merged = {**detail, **info}
+            if not merged.get("action"):        # a result that does not say what happened
+                merged["action"] = "exit_unknown"   # is not a confirmed exit
+                if not merged.get("error"):
+                    merged["error"] = "exit result has no action"
+            if merged["action"] == "exit_unknown":
+                merged.update(_ledger_now(row, db_path))
+            out.append(merged)
+        else:
+            out.append({**detail, "action": "exit_unknown",
+                        "error": f"exit returned {repr(info)[:120]}",
+                        **_ledger_now(row, db_path)})
+    return out
+
 
 def _close_position_early(conn, pos, current_yes_price, unrealized_pnl, reason):
     """
@@ -501,7 +786,7 @@ def _send_discord_alert(stop_info):
 
         entry = stop_info["entry_price"]
         current = stop_info["current_price"]
-        side = stop_info.get("outcome") or stop_info["side"]
+        side = stop_info["side"]
         bet_size = stop_info["bet_size"]
         pnl = stop_info["pnl"]
         full_loss = -bet_size
@@ -572,7 +857,7 @@ def _send_stop_close_telegram(stop_info):
         title = (stop_info.get("market_title") or "?")[:70]
         msg = (
             f"🛑 STOP-LOSS CLOSED — {title}\n"
-            f"Side: {stop_info.get('outcome') or stop_info.get('side', '?')} | "
+            f"Side: {stop_info.get('side', '?')} | "
             f"Entry: {stop_info.get('entry_price') or 0:.0%} → "
             f"Exit: {stop_info.get('current_price') or 0:.0%}\n"
             f"PnL: ${stop_info.get('pnl') or 0:+.2f} | "
@@ -649,21 +934,12 @@ def evaluate_stops():
         if unrealized < 0 and loss_pct >= UNIVERSAL_MAX_LOSS_PCT:
             reason = (f"UNIVERSAL STOP loss {loss_pct:.0%} >= {UNIVERSAL_MAX_LOSS_PCT:.0%} "
                       f"threshold (all strategies)")
-            live_pos = _get_live_position(pos["market_id"])
-            if live_pos is not None:
-                result = _close_live_position_early(
-                    live_pos, current_yes_price, reason,
-                    hard_cap_frac=UNIVERSAL_MAX_LOSS_PCT,
-                )
-            else:
-                result = _close_position_early(conn, pos, current_yes_price,
-                                               unrealized, reason)
-                if result is not None:
-                    conn.commit()
-            if result is not None:
-                stopped.append(result)
-                _send_discord_alert(result)
-                _send_stop_close_telegram(result)
+            result = _close_position_early(conn, pos, current_yes_price,
+                                           unrealized, reason)
+            conn.commit()
+            stopped.append(result)
+            _send_discord_alert(result)
+            _send_stop_close_telegram(result)
             continue
 
         # ── PRE-RESOLUTION WARNING ──────────────────────────────────────────
@@ -678,10 +954,7 @@ def evaluate_stops():
                 if 0 < hours_to_close <= PRE_RESOLVE_WARN_HOURS:
                     try:
                         from scripts.alert_formatter import send_telegram
-                        _lp = _get_live_position(pos["market_id"])
-                        _warn_side = _side_label(_lp.get("token_id")) if _lp else "?"
-                        if _warn_side == "?":
-                            _warn_side = side
+                        _warn_side = side
                         lines = [
                             f"⚠️ <b>PRE-RESOLUTION WARNING</b>",
                             f"Market: {_display_title(pos.get('market_title'), pos['market_id'])[:60]}",
@@ -695,57 +968,19 @@ def evaluate_stops():
                         logger.warning("pre-resolve warning telegram failed (mkt=%s)", pos.get('market_title','')[:40], exc_info=True)
 
         # ── Time-to-resolution gate (2026-04-27) ──
-        # Strategies with `defer_to_reeval_above_h > 0` skip the threshold-
-        # based stop while still far from resolution and rely on the
-        # model-aware reeval path (e.g. reeval_weather_positions). Only the
-        # 50% hard cap fires in the deferred window — that catches the
-        # "lost the full amount at resolution" failure mode at half cost.
+        # Strategies with `defer_to_reeval_above_h > 0` skip the post-lock and
+        # edge-decay stops while still far from resolution and rely on the
+        # model-aware reeval path (e.g. reeval_weather_positions). The universal
+        # stop above has already had its say.
         defer_h = float(config.get("defer_to_reeval_above_h", 0))
         if defer_h > 0:
             target_date = _parse_market_date(pos.get("market_title") or "")
             if target_date is not None:
                 hours_to_close = (target_date - now).total_seconds() / 3600
                 if hours_to_close > defer_h:
-                    HARD_CAP = 0.50
-                    if unrealized < 0 and loss_pct >= HARD_CAP:
-                        reason = (f"HARD-CAP loss {loss_pct:.0%} >= {HARD_CAP:.0%} "
-                                  f"({hours_to_close:.1f}h to close, deferred "
-                                  f"to reeval otherwise)")
-                        live_pos = _get_live_position(pos["market_id"])
-                        if live_pos is not None:
-                            result = _close_live_position_early(
-                                live_pos, current_yes_price, reason,
-                                hard_cap_frac=HARD_CAP,
-                            )
-                        else:
-                            result = _close_position_early(conn, pos, current_yes_price,
-                                                           unrealized, reason)
-                            if result is not None:
-                                conn.commit()
-                        if result is not None:
-                            stopped.append(result)
-                            _send_discord_alert(result)
-                    continue  # skip threshold + edge_floor while deferred
+                    continue  # skip post-lock + edge_floor while deferred
 
-        # ── Check 1: Max loss percentage ──
-        if unrealized < 0 and loss_pct >= config["max_loss_pct"]:
-            reason = f"loss {loss_pct:.0%} >= {config['max_loss_pct']:.0%} threshold"
-            live_pos = _get_live_position(pos["market_id"])
-            if live_pos is not None:
-                result = _close_live_position_early(
-                    live_pos, current_yes_price, reason,
-                    hard_cap_frac=config["max_loss_pct"],
-                )
-            else:
-                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                if result is not None:
-                    conn.commit()
-            if result is not None:
-                stopped.append(result)
-                _send_discord_alert(result)
-            continue
-
-        # ── Check 1b: Post-lock tight stop (toggle-gated) ──
+        # ── Check 1: Post-lock tight stop (toggle-gated) ──
         # Inside the info-lock window (final hours before resolution), winners
         # don't dip past ~10% drawdown (backtest n=14 weather wins, max 10.4%).
         # A 12% threshold saves +$1,247 net on 26-trade backtest sample.
@@ -754,19 +989,10 @@ def evaluate_stops():
             if post_thr is not None and loss_pct >= post_thr:
                 reason = (f"POST-LOCK loss {loss_pct:.0%} >= {post_thr:.0%} threshold "
                           f"({strategy}, inside info-lock window)")
-                live_pos = _get_live_position(pos["market_id"])
-                if live_pos is not None:
-                    result = _close_live_position_early(
-                        live_pos, current_yes_price, reason,
-                        hard_cap_frac=post_thr,
-                    )
-                else:
-                    result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                    if result is not None:
-                        conn.commit()
-                if result is not None:
-                    stopped.append(result)
-                    _send_discord_alert(result)
+                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+                conn.commit()
+                stopped.append(result)
+                _send_discord_alert(result)
                 continue
 
         # ── Check 2: Edge decay stop ──
@@ -793,19 +1019,10 @@ def evaluate_stops():
         if current_edge < edge_floor and unrealized < 0:
             reason = (f"edge decay: {entry_edge:+.1%} → {current_edge:+.1%} "
                       f"(floor {edge_floor:+.1%})")
-            live_pos = _get_live_position(pos["market_id"])
-            if live_pos is not None:
-                result = _close_live_position_early(
-                    live_pos, current_yes_price, reason,
-                    hard_cap_frac=config.get("edge_floor_hard_cap_frac", 0.50),
-                )
-            else:
-                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                if result is not None:
-                    conn.commit()
-            if result is not None:
-                stopped.append(result)
-                _send_discord_alert(result)
+            result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+            conn.commit()
+            stopped.append(result)
+            _send_discord_alert(result)
             continue
 
     _write_heartbeat(conn, len(positions), warnings_fired)
@@ -842,29 +1059,20 @@ def _parse_market_date(title):
     return target
 
 # Urgent stop config — tighter thresholds for positions resolving soon.
-# Calibrated 2026-04-23: 14d counterfactual showed 15% weather stop cost $1,857
-# (57/91 correct, 34/91 cut winners). Widened to 25% with a 2h dead zone before
-# close. See 02-Projects/Polyclawd/Strategy/Urgent-Stop-Calibration-Apr2026.md
-#
-# Calibrated 2026-05-06: realized-resolution segmentation on 73 post-Apr-23
-# weather URGENT 25% trades showed [2-4h] neutral (-$385 / 25 trades) but
-# [4-6h] bleeding (+$5,476 / 48 trades, 43.8% would-have-won). Added
-# max_hours_to_close=4.0 (env-tunable) to skip the bleeder slice. See
-# 02-Projects/Polyclawd/Strategy/Urgent-Stop-Window-Narrowing-PreReg-May2026.md
-#
-# Calibrated 2026-05-15: ENSEMBLE_AUDIT_2026-05-14 stop-sensitivity backtest
-# (~/Desktop/polyclawd/scratch/sensitivity.py, n=375 resolved weather stops)
-# found held-WR rises monotonically with loss-bucket depth: 30-40% bucket wins
-# 68.9% held, 50-70% wins 73.9%, >=70% bucket wins 93.1%. Stop systematically
-# liquidates winners. Threshold widened 0.25 -> 0.70 (URGENT path, weather).
-# Recovers ~+$87k on the 375-row cohort; worst per-trade DD $379. The 0.50
-# hard-cap in STOP_CONFIG["weather"] remains as a second-layer safety net.
-# Env override: URGENT_WEATHER_MAX_LOSS_PCT for rapid rollback without redeploy.
-# See ENSEMBLE_AUDIT_2026-05-15_02_Stop-Sensitivity-Backtest.md
+# Calibrated 2026-04-23: 14d counterfactual showed a 15% weather stop cost $1,857
+# (57/91 correct, 34/91 cut winners), and 2026-05-15 (ENSEMBLE_AUDIT_2026-05-14,
+# n=375 resolved weather stops) found the same for deeper stops: held-WR rises
+# with loss depth. Weather therefore has NO urgent loss threshold of its own: its
+# old one (0.40, env URGENT_WEATHER_MAX_LOSS_PCT, with a [2h, 4h] window) equalled
+# UNIVERSAL_MAX_LOSS_PCT, and the universal stop is checked first on the same loss
+# figure, so it could never fire (audit #16). Weather positions are stopped by the
+# universal stop, post-lock and edge decay only. A strategy without "max_loss_pct"
+# has no urgent loss stop. Every threshold here must stay below
+# UNIVERSAL_MAX_LOSS_PCT (a test keeps it so).
+# "min_hours_to_close": dead zone, no urgent loss stop once fewer hours are left.
 URGENT_STOP_CONFIG = {
     "default":        {"max_loss_pct": 0.30, "min_hours_to_close": 0.0},
-    "weather":        {"max_loss_pct": float(os.getenv("URGENT_WEATHER_MAX_LOSS_PCT", "0.40")), "min_hours_to_close": 2.0,
-                       "max_hours_to_close": float(os.getenv("URGENT_MAX_HOURS_TO_CLOSE_WEATHER", "4.0"))},
+    "weather":        {},
     "tweet_count_mc": {"max_loss_pct": 0.30, "min_hours_to_close": 0.0},
 }
 
@@ -945,20 +1153,11 @@ def evaluate_stops_urgent():
         if unrealized < 0 and loss_pct >= UNIVERSAL_MAX_LOSS_PCT:
             reason = (f"UNIVERSAL STOP (urgent) loss {loss_pct:.0%} >= {UNIVERSAL_MAX_LOSS_PCT:.0%} "
                       f"({pos['_hours_left']}h to resolution)")
-            live_pos = _get_live_position(pos["market_id"])
-            if live_pos is not None:
-                result = _close_live_position_early(
-                    live_pos, current_yes_price, reason,
-                    hard_cap_frac=UNIVERSAL_MAX_LOSS_PCT,
-                )
-            else:
-                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                if result is not None:
-                    conn.commit()
-            if result is not None:
-                stopped.append(result)
-                _send_discord_alert(result)
-                _send_stop_close_telegram(result)
+            result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+            conn.commit()
+            stopped.append(result)
+            _send_discord_alert(result)
+            _send_stop_close_telegram(result)
             continue
 
         # Post-lock check BEFORE urgent threshold (tighter takes precedence)
@@ -967,50 +1166,28 @@ def evaluate_stops_urgent():
             if post_thr is not None and loss_pct >= post_thr:
                 reason = (f"POST-LOCK URGENT loss {loss_pct:.0%} >= {post_thr:.0%} "
                           f"({strategy}, {pos['_hours_left']}h to resolution)")
-                live_pos = _get_live_position(pos["market_id"])
-                if live_pos is not None:
-                    result = _close_live_position_early(
-                        live_pos, current_yes_price, reason,
-                        hard_cap_frac=post_thr,
-                    )
-                else:
-                    result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                    if result is not None:
-                        conn.commit()
-                if result is not None:
-                    stopped.append(result)
-                    _send_discord_alert(result)
-                continue
-
-        # Dead-zone gate (lower) + window-ceiling (upper). Skip PnL stop if
-        # hours_left is inside the last N hours (noise dominates signal) OR
-        # above the ceiling (segment-level realized data 2026-05-06 showed
-        # the upper band fires on noise too — see Urgent-Stop-Window-
-        # Narrowing-PreReg-May2026.md). Edge-decay exit below still fires.
-        min_hours = config.get("min_hours_to_close", 0.0)
-        max_hours = config.get("max_hours_to_close")  # None = no upper bound
-        hours_left = pos["_hours_left"]
-        pnl_stop_suppressed = (
-            hours_left < min_hours
-            or (max_hours is not None and hours_left > max_hours)
-        )
-
-        if not pnl_stop_suppressed and unrealized < 0 and loss_pct >= config["max_loss_pct"]:
-            reason = (f"URGENT loss {loss_pct:.0%} >= {config['max_loss_pct']:.0%} "
-                      f"threshold ({pos['_hours_left']}h to resolution)")
-            live_pos = _get_live_position(pos["market_id"])
-            if live_pos is not None:
-                result = _close_live_position_early(
-                    live_pos, current_yes_price, reason,
-                    hard_cap_frac=config["max_loss_pct"],
-                )
-            else:
                 result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                if result is not None:
-                    conn.commit()
-            if result is not None:
+                conn.commit()
                 stopped.append(result)
                 _send_discord_alert(result)
+                continue
+
+        # Dead-zone gate. Skip the PnL stop if hours_left is inside the last N
+        # hours (noise dominates signal). Edge-decay exit below still fires.
+        # A strategy with no "max_loss_pct" (weather) has no urgent PnL stop.
+        urgent_max_loss = config.get("max_loss_pct")
+        min_hours = config.get("min_hours_to_close", 0.0)
+        hours_left = pos["_hours_left"]
+        pnl_stop_suppressed = hours_left < min_hours
+
+        if (urgent_max_loss is not None and not pnl_stop_suppressed
+                and unrealized < 0 and loss_pct >= urgent_max_loss):
+            reason = (f"URGENT loss {loss_pct:.0%} >= {urgent_max_loss:.0%} "
+                      f"threshold ({pos['_hours_left']}h to resolution)")
+            result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+            conn.commit()
+            stopped.append(result)
+            _send_discord_alert(result)
             continue
 
         # ── Edge decay (urgent) ──
@@ -1030,19 +1207,10 @@ def evaluate_stops_urgent():
         if current_edge < urgent_edge_floor and unrealized < 0:
             reason = (f"URGENT edge decay: {entry_edge:+.1%} → {current_edge:+.1%} "
                       f"({pos['_hours_left']}h to resolution)")
-            live_pos = _get_live_position(pos["market_id"])
-            if live_pos is not None:
-                result = _close_live_position_early(
-                    live_pos, current_yes_price, reason,
-                    hard_cap_frac=0.50,
-                )
-            else:
-                result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-                if result is not None:
-                    conn.commit()
-            if result is not None:
-                stopped.append(result)
-                _send_discord_alert(result)
+            result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
+            conn.commit()
+            stopped.append(result)
+            _send_discord_alert(result)
             continue
 
     conn.close()

@@ -188,10 +188,10 @@ def test_list_open_orders_two_pages_yield_every_item(fake_clob, shapes):
 
 
 def test_iterating_the_paginator_itself_yields_pages_not_orders(fake_clob, shapes):
-    """documents current behaviour, see audit: scripts/position_sync.py:852 runs
-    `list(client.list_open_orders())` and then reads `.id` of each element. The SDK
-    Paginator iterates PAGES, so every element is a Page with no `id`, and the set
-    of CLOB order ids that sync_open_orders compares against is {""}."""
+    """Pins the SDK behaviour behind audit #29: iterating the Paginator itself yields
+    PAGES, so `list(client.list_open_orders())` holds Page objects with no `id`, and
+    an id set built from them is {""}. scripts/position_sync.py no longer does this
+    (it uses `.iter_items()`; see tests/live/test_open_order_reconciliation.py)."""
     fake_clob.script("list_open_orders", shapes.open_orders_pages())
     clob_orders = list(clob_client._get_client().list_open_orders())  # the line-852 expression
     assert all(isinstance(o, Page) for o in clob_orders)

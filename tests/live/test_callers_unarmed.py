@@ -1,4 +1,4 @@
-"""Task 1.10, reader 2: the five caller-side mode checks use live_armed().
+"""Task 1.10, reader 2: the four caller-side mode checks use live_armed().
 
 Each caller is driven three ways: under PAPER, under LIVE-but-unarmed and armed.
 The two unarmed states must give the same observable result (the PAPER branch);
@@ -10,7 +10,6 @@ import pytest
 
 from execution import soccer_executor, weather_executor
 from scripts import smart_wallet_fast_poll as sw
-from services import stop_evaluator
 from signals import paper_portfolio as pp
 
 # (mode, enforce flag, LIVE_ORDER_PATH_READY)
@@ -28,12 +27,40 @@ ARMED = ("LIVE", "1", True)
 
 
 def _observe_smart_wallet(monkeypatch, live_db):
-    """_route_live_smart_wallet returns None either way; the live branch reaches the
-    sizing step (patched to a recorder), the PAPER branch returns before it."""
+    """_route_live_smart_wallet returns None either way. It is given one record that
+    passes every stage-1 filter (a patched book and wallet database); the live branch
+    then reaches the sizing step (patched to a recorder), the unarmed branch returns
+    after stage 1, before it."""
+    import sqlite3
+
+    from odds.polymarket_clob import OrderBook, OrderBookLevel
+
     reached = []
     monkeypatch.setattr(sw, "_sw_live_size_usd", lambda bankroll: reached.append(bankroll) or 1.0)
     monkeypatch.setattr(sw, "_check_governor_rails", lambda bankroll, size: None)
-    assert sw._route_live_smart_wallet([], {}) is None
+    monkeypatch.setattr(sw, "_is_in_exit_cooldown", lambda token: False)
+    monkeypatch.setattr(
+        "odds.polymarket_clob.get_orderbook",
+        lambda token: OrderBook("", token, "", [OrderBookLevel(0.39, 5.0)], [OrderBookLevel(0.40, 5.0)],
+                                0.01, 0.395, ""))
+
+    def meta_db(*a, **k):
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        c.execute("CREATE TABLE wallet_archetype_pnl (wallet TEXT, archetype TEXT, trades INTEGER, "
+                  "wins INTEGER, pnl REAL)")
+        return c
+
+    monkeypatch.setattr("signals.whale_wallets.get_meta_db", meta_db)
+
+    def no_tick_size(token):  # ends the armed branch right after sizing: nothing is sent
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr("execution.clob_client.get_tick_size", no_tick_size)
+    rec = {"wallet": "0xw", "market": "0xcond", "title": "Lakers vs Celtics", "asset": "tok-1",
+           "outcome_index": 0, "price": 0.4, "price_at_alert": 0.4, "alert_type": "entry",
+           "live_eligible": True, "live_filter_reason": None, "is_bot": False, "clv_muted": False}
+    assert sw._route_live_smart_wallet([rec], {"0xcond": {"category": "sports"}}) is None
     return {"reached_sizing": len(reached)}
 
 
@@ -63,15 +90,6 @@ def _observe_paper_portfolio(monkeypatch, live_db):
     return {"calls": calls, "action": out["signals"][0]["action"]}
 
 
-def _observe_stop_evaluator(monkeypatch, live_db):
-    """An open live position exists; the PAPER branch does not look it up."""
-    live_db.conn.execute(
-        "INSERT INTO live_positions (market_id, status, side, shares) VALUES ('0xm1', 'open', 'BUY', 5)")
-    live_db.conn.commit()
-    row = stop_evaluator._get_live_position("0xm1")
-    return {"found": None if row is None else row["market_id"]}
-
-
 CALLERS = {
     "smart_wallet_fast_poll._route_live_smart_wallet": (
         _observe_smart_wallet, {"reached_sizing": 0}, {"reached_sizing": 1}),
@@ -87,8 +105,6 @@ CALLERS = {
         _observe_paper_portfolio,
         {"calls": ["open_position"], "action": "opened"},
         {"calls": ["route_live_weather"], "action": "skipped"}),
-    "stop_evaluator._get_live_position": (
-        _observe_stop_evaluator, {"found": None}, {"found": "0xm1"}),
 }
 
 

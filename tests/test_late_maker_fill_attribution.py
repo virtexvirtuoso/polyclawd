@@ -163,9 +163,21 @@ def test_attribution_lookup_failure_returns_manual_default(conn):
 # ---------------------------------------------------------------------------
 
 
+def _two_page_client():
+    """A client whose list_open_orders returns a real two-page SDK Paginator of
+    other orders (none of them the database rows under test)."""
+    from polymarket import Page, Paginator
+
+    pages = (
+        Page(items=(types.SimpleNamespace(id="0xother-1"),), has_more=True, next_cursor="c2"),
+        Page(items=(types.SimpleNamespace(id="0xother-2"),), has_more=False),
+    )
+    return type("C", (), {"list_open_orders": lambda self: Paginator(lambda cursor: pages[0 if cursor is None else 1])})()
+
+
 def _inject_clob_module(monkeypatch, order_status: dict):
     fake = types.ModuleType("execution.clob_client")
-    fake._get_client = lambda: type("C", (), {"list_open_orders": lambda self: []})()
+    fake._get_client = _two_page_client
     fake.get_order = lambda order_id: order_status
     fake.order_is_filled = lambda st: str(st.get("status", "")).upper() in ("MATCHED", "FILLED")
     monkeypatch.setitem(sys.modules, "execution.clob_client", fake)
@@ -207,7 +219,7 @@ def test_sync_open_orders_probe_failure_defaults_cancelled(conn, monkeypatch):
     )
     conn.commit()
     fake = types.ModuleType("execution.clob_client")
-    fake._get_client = lambda: type("C", (), {"list_open_orders": lambda self: []})()
+    fake._get_client = _two_page_client
 
     def _boom(order_id):
         raise RuntimeError("clob down")

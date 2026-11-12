@@ -439,16 +439,55 @@ def task_weather_reeval():
     reeval_weather_positions()
 
 
+def _run_live_stop_shadow(source: str) -> None:
+    """Live stop shadow pass (dry run unless armed). Never raises, so it cannot
+    break the paper stop pass it follows."""
+    try:
+        from services.live_stop_shadow import run_live_stop_tick
+        run_live_stop_tick(source)
+    except Exception:
+        logger.exception("live stop shadow pass failed (%s)", source)
+
+
+def _validate_stop_exempt_ids() -> None:
+    """Called once from main(). A POLYCLAWD_STOP_EXEMPT_IDS value that does not parse
+    stops the scheduler from starting only in LIVE (the operator is mid go-live and must
+    fix it first). In any other mode it is logged at CRITICAL and start-up continues:
+    exiting would make systemd restart-loop the scheduler and stop paper trading and
+    every alert. No sale can happen meanwhile: evaluate_live_stops re-reads the value on
+    every tick and raises, so the stop shadow reports FAILED each tick and pages on the
+    third failure in a row (Fix 2). That tick page is the page for this condition; no
+    separate start-up page is sent."""
+    from execution import live_config
+    try:
+        ids = live_config.stop_exempt_ids()
+    except ValueError as exc:
+        mode = live_config.mode()
+        if mode == "LIVE":
+            logger.critical("POLYCLAWD_STOP_EXEMPT_IDS is invalid: %s; refusing to start", exc)
+            sys.exit(1)
+        logger.critical("POLYCLAWD_STOP_EXEMPT_IDS is invalid: %s; continuing in %s; the live "
+                        "stop shadow will fail every tick until it is fixed", exc, mode)
+        return
+    logger.info("live stop exempt ids: %s", sorted(ids))
+
+
 def task_stop_evaluator():
     """Check all open positions against stop-loss thresholds."""
     from services.stop_evaluator import evaluate_stops
-    evaluate_stops()
+    try:
+        evaluate_stops()
+    finally:
+        _run_live_stop_shadow("stop_evaluator")
 
 
 def task_stop_evaluator_urgent():
     """Fast stop check for positions resolving within 6 hours."""
     from services.stop_evaluator import evaluate_stops_urgent
-    evaluate_stops_urgent()
+    try:
+        evaluate_stops_urgent()
+    finally:
+        _run_live_stop_shadow("stop_evaluator_urgent")
 
 
 def _milestone_already_sent(strategy: str) -> bool:
@@ -2557,6 +2596,7 @@ async def main():
     logger.info("Polyclawd Scheduler starting")
     logger.info("Project: %s", PROJECT_ROOT)
     logger.info("DB: %s", DB_PATH)
+    _validate_stop_exempt_ids()
     _assert_live_cap_fits_min_action()
     _start_live_unarmed_page()
     logger.info("=" * 60)

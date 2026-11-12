@@ -92,7 +92,6 @@ def stop_db(tmp_path, monkeypatch):
 
     monkeypatch.setattr(se, "DB_PATH", db)
     monkeypatch.setattr(se, "_load_engine_state", lambda: {})
-    monkeypatch.setattr(se, "_get_live_position", lambda market_id: None)
     monkeypatch.setattr(se, "_send_discord_alert", lambda info: None)
     import signals.resolution_logger as rl
     monkeypatch.setattr(rl, "log_position_close", lambda *a, **k: None)

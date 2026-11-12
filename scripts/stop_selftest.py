@@ -7,9 +7,10 @@ closes it AND the 🛑 [SELFTEST] stop-close alert goes through the Telegram
 sender (scripts.openclaw_alerts.alert_openclaw).
 
 Safety design (critic-reviewed — do not "simplify"):
-* market_id = 'selftest-<uuid4>' — can NEVER collide with a real market, so
-  _get_live_position() finds nothing and _close_live_position_early (an
-  ACTUAL live exit) is unreachable. Never reuse a real market_id here.
+* market_id = 'selftest-<uuid4>' — can NEVER collide with a real market. The
+  paper loops (evaluate_stops, evaluate_stops_urgent) have no live-exit branch
+  at all: live positions are stopped only by evaluate_live_stops. Never reuse a
+  real market_id here.
 * _fetch_price is monkeypatched PREFIX-SCOPED: only rows whose market_id
   starts with 'selftest-' get the synthetic 0.27 price; every other row
   delegates to the real function (real positions get normal treatment).
