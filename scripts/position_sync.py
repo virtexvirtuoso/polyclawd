@@ -637,11 +637,23 @@ def check_wallet_balance(conn) -> None:
                 pass
 
 
+# The live_open_orders statuses the reconciler reads: rows in these statuses are
+# believed to be resting on the exchange. Defined once; a later task (1.7) will
+# add 'pending' and 'unconfirmed' here.
+_RECONCILED_ORDER_STATUSES = ("live",)
+
+
+def _reconciled_status_filter() -> tuple[str, tuple]:
+    """SQL `IN (...)` fragment and parameters for _RECONCILED_ORDER_STATUSES."""
+    return "(" + ",".join("?" * len(_RECONCILED_ORDER_STATUSES)) + ")", _RECONCILED_ORDER_STATUSES
+
+
 def _get_tracked_token_ids(conn) -> set[str]:
     rows = conn.execute("SELECT token_id FROM live_positions WHERE status='open'").fetchall()
     tracked = {r[0] for r in rows}
     # Also exclude tokens with active open orders (executor placed, not yet filled)
-    order_rows = conn.execute("SELECT token_id FROM live_open_orders WHERE status='live'").fetchall()
+    marks, params = _reconciled_status_filter()
+    order_rows = conn.execute(f"SELECT token_id FROM live_open_orders WHERE status IN {marks}", params).fetchall()
     tracked |= {r[0] for r in order_rows}
     return tracked
 
@@ -834,14 +846,35 @@ def sync_positions(conn) -> list[dict]:
     return new_positions
 
 
+class OpenOrderListMalformed(RuntimeError):
+    """The exchange's open-order list held an item with no usable `id`."""
+
+
+def _open_order_ids(items) -> set[str]:
+    """Ids of the orders the exchange lists as open. An item without a usable id
+    (missing attribute, None or "") raises OpenOrderListMalformed: reading ""
+    for every item once made every resting order look absent (audit #29)."""
+    ids: set[str] = set()
+    for item in items:
+        oid = getattr(item, "id", None)
+        if not isinstance(oid, str) or not oid:
+            raise OpenOrderListMalformed(
+                f"open-order list item of type {type(item).__name__} has no usable id (id={oid!r})"
+            )
+        ids.add(oid)
+    return ids
+
+
 def sync_open_orders(conn) -> dict:
     """Reconcile live_open_orders against CLOB.
 
     Fetches current open orders from CLOB via SDK, compares against DB rows
-    with status='live'. Any DB-live orders NOT in CLOB are classified: if the
+    in _RECONCILED_ORDER_STATUSES. Any such DB order NOT in CLOB is classified: if the
     CLOB reports the order fully filled (size_matched >= original_size) it is
     marked 'filled', otherwise 'cancelled' (2026-09-22: filled maker orders
-    were previously mislabeled 'cancelled').
+    were previously mislabeled 'cancelled'). If the CLOB still reports the order
+    LIVE the row is left untouched. If the open-order list has an item without an
+    id the run aborts with no row changed (logged at ERROR, returned as `error`).
 
     Returns: {'reconciled': N, 'cancelled_stale': N, 'filled_stale': N}
     """
@@ -849,13 +882,19 @@ def sync_open_orders(conn) -> dict:
         from execution.clob_client import _get_client, get_order, order_is_filled
 
         client = _get_client()
-        clob_orders = list(client.list_open_orders())
-        clob_ids = {str(getattr(o, "id", "") or "") for o in clob_orders}
+        clob_orders = list(client.list_open_orders().iter_items())
+        clob_ids = _open_order_ids(clob_orders)
+    except OpenOrderListMalformed as exc:
+        logger.error("position_sync: sync_open_orders aborted, no order relabelled: %s", exc)
+        return {"reconciled": 0, "cancelled_stale": 0, "filled_stale": 0, "error": str(exc)}
     except Exception as exc:
         logger.warning("position_sync: sync_open_orders CLOB fetch failed: %s", exc)
         return {"reconciled": 0, "cancelled_stale": 0, "filled_stale": 0, "error": str(exc)}
 
-    db_rows = conn.execute("SELECT id, order_id, token_id FROM live_open_orders WHERE status='live'").fetchall()
+    marks, params = _reconciled_status_filter()
+    db_rows = conn.execute(
+        f"SELECT id, order_id, token_id FROM live_open_orders WHERE status IN {marks}", params
+    ).fetchall()
 
     cancelled_stale = 0
     filled_stale = 0
@@ -864,7 +903,15 @@ def sync_open_orders(conn) -> dict:
         if db_order_id and db_order_id not in clob_ids:
             filled = False
             try:
-                filled = order_is_filled(get_order(db_order_id))
+                order_state = get_order(db_order_id)
+                if str(order_state.get("status", "")).strip().upper() == "LIVE":
+                    logger.warning(
+                        "position_sync: order %s is absent from the open-order list but get_order says LIVE; "
+                        "left untouched",
+                        db_order_id,
+                    )
+                    continue
+                filled = order_is_filled(order_state)
             except Exception as probe_exc:  # noqa: BLE001 - classify best-effort
                 logger.warning("position_sync: order-status probe failed for %.16s: %s", db_order_id, probe_exc)
             new_status = "filled" if filled else "cancelled"
