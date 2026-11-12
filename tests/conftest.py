@@ -28,6 +28,58 @@ _IMPORT_TIME_CREDENTIAL_CONSTANTS = {
 }
 
 
+_NOTIFIER_HOSTS = ("api.telegram.org", "discord.com", "discordapp.com")
+
+
+class NotifierHostBlocked(AssertionError):
+    """A test tried to open an HTTP connection to a Telegram or Discord host."""
+
+
+def _notifier_host(target):
+    """Hostname of `target` (str, bytes, urllib Request or httpx Request) if it
+    is a notifier host or a subdomain of one, else None. Parsed hostname only,
+    never a substring match: `notdiscord.com` and `discord.com.evil.example`
+    are not notifier hosts."""
+    from urllib.parse import urlsplit
+
+    url = getattr(target, "full_url", None) or getattr(target, "url", None) or target
+    if isinstance(url, bytes):
+        url = url.decode("utf-8", "replace")
+    try:
+        host = (urlsplit(str(url)).hostname or "").rstrip(".").lower()
+    except ValueError:
+        return None
+    return host if any(host == h or host.endswith("." + h) for h in _NOTIFIER_HOSTS) else None
+
+
+def _block_notifier_hosts(monkeypatch, calls, owner, name, url_of, is_async=False):
+    """Replace owner.name with a wrapper that raises NotifierHostBlocked (and
+    records a BLOCKED_HTTP entry) for a notifier host, else calls the original."""
+    original = getattr(owner, name)
+
+    def _check(args, kwargs):
+        host = _notifier_host(url_of(*args, **kwargs))
+        if host:
+            calls.append({"fn": "BLOCKED_HTTP", "args": (), "kwargs": {"host": host, "via": name}})
+            raise NotifierHostBlocked(f"test tried to reach notifier host {host} via {name}")
+
+    if is_async:
+        async def wrapper(*args, **kwargs):
+            _check(args, kwargs)
+            return await original(*args, **kwargs)
+    else:
+        def wrapper(*args, **kwargs):
+            _check(args, kwargs)
+            return original(*args, **kwargs)
+    monkeypatch.setattr(owner, name, wrapper)
+
+
+@pytest.fixture
+def notifier_host_blocked():
+    """The exception class the host block raises."""
+    return NotifierHostBlocked
+
+
 @pytest.fixture(autouse=True)
 def _notifier_capture(request, monkeypatch, tmp_path):
     """Suite-wide notifier capture (hard rule 2): no test can send a Telegram
@@ -75,6 +127,22 @@ def _notifier_capture(request, monkeypatch, tmp_path):
         mod = sys.modules.get(modname)
         if mod is not None and getattr(mod, const, ""):
             monkeypatch.setattr(mod, const, "")
+    # Host-level block: any HTTP attempt to a notifier host fails before network
+    # I/O, whatever function makes it and whatever credentials are present.
+    # (Tests that mock urlopen themselves patch later and win.)
+    import urllib.request
+    import requests.sessions
+
+    _block_notifier_hosts(monkeypatch, calls, urllib.request, "urlopen",
+                          lambda url, *a, **k: url)
+    _block_notifier_hosts(monkeypatch, calls, urllib.request.OpenerDirector, "open",
+                          lambda self, fullurl, *a, **k: fullurl)
+    _block_notifier_hosts(monkeypatch, calls, requests.sessions.Session, "request",
+                          lambda self, method, url, *a, **k: url)
+    _block_notifier_hosts(monkeypatch, calls, httpx.Client, "send",
+                          lambda self, request, *a, **k: request)
+    _block_notifier_hosts(monkeypatch, calls, httpx.AsyncClient, "send",
+                          lambda self, request, *a, **k: request, is_async=True)
     yield calls
 
 

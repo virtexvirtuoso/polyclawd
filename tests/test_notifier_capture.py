@@ -134,3 +134,216 @@ def _fake_import_time_modules():
 @pytest.mark.parametrize("modname,const", sorted(_IMPORT_TIME_CONSTANTS.items()))
 def test_import_time_credential_constant_is_emptied(modname, const, sent_alerts):
     assert getattr(sys.modules[modname], const) == ""
+
+
+# --- host-level block (plan task 1.0d) --------------------------------------
+# The capture above replaces known senders. The block below works one layer
+# lower: whatever function tries to open an HTTP connection to a notifier host
+# (Telegram, Discord) fails before any network I/O, with any credentials set.
+# Every test here also installs a socket-layer guard, so a missing block shows
+# up as "reached the socket layer" and never as a real connection.
+
+import re
+from pathlib import Path
+
+import httpx
+import requests
+
+
+class SocketReached(Exception):
+    """Raised by the socket-layer guard: the call got past the host block."""
+
+
+@pytest.fixture
+def socket_hits(monkeypatch):
+    import socket
+
+    hits: list = []
+
+    def _guard(name):
+        def _boom(*a, **k):
+            hits.append(name)
+            raise SocketReached(name)
+        return _boom
+
+    monkeypatch.setattr(socket.socket, "connect", _guard("connect"))
+    monkeypatch.setattr(socket, "getaddrinfo", _guard("getaddrinfo"))
+    return hits
+
+
+def _blocked_entries(sent_alerts):
+    return [e for e in sent_alerts if e["fn"] == "BLOCKED_HTTP"]
+
+
+def test_urlopen_to_telegram_is_blocked_even_with_a_token(
+        monkeypatch, sent_alerts, socket_hits, notifier_host_blocked):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:fake")
+    with pytest.raises(notifier_host_blocked, match="api.telegram.org"):
+        urllib.request.urlopen("https://api.telegram.org/botX/sendMessage", data=b"a=b")
+    assert socket_hits == []
+    entries = _blocked_entries(sent_alerts)
+    assert len(entries) == 1
+    assert entries[0]["kwargs"]["host"] == "api.telegram.org"
+
+
+def test_urlopen_with_a_request_object_is_blocked(sent_alerts, socket_hits, notifier_host_blocked):
+    req = urllib.request.Request("https://API.Telegram.org/botX/sendMessage", data=b"a=b")
+    with pytest.raises(notifier_host_blocked):
+        urllib.request.urlopen(req, timeout=5)
+    assert socket_hits == []
+    assert len(_blocked_entries(sent_alerts)) == 1
+
+
+def test_opener_open_to_telegram_is_blocked(sent_alerts, socket_hits, notifier_host_blocked):
+    opener = urllib.request.build_opener()
+    with pytest.raises(notifier_host_blocked):
+        opener.open("https://api.telegram.org/botX/sendMessage", data=b"a=b")
+    assert socket_hits == []
+    assert len(_blocked_entries(sent_alerts)) == 1
+
+
+@pytest.mark.parametrize("url", [
+    "https://discord.com/api/webhooks/1/abc",
+    "https://ptb.discord.com/api/webhooks/1/abc",
+    "https://canary.discord.com/api/webhooks/1/abc",
+    "https://discordapp.com/api/webhooks/1/abc",
+    "https://cdn.discordapp.com/x",
+    "https://discord.com./api/webhooks/1/abc",
+])
+def test_requests_to_discord_hosts_are_blocked(url, sent_alerts, socket_hits, notifier_host_blocked):
+    with pytest.raises(notifier_host_blocked):
+        requests.Session().post(url, json={})
+    assert socket_hits == []
+    assert len(_blocked_entries(sent_alerts)) == 1
+
+
+def test_requests_module_post_is_blocked(sent_alerts, socket_hits, notifier_host_blocked):
+    with pytest.raises(notifier_host_blocked):
+        requests.post("https://discord.com/api/webhooks/1/abc", json={})
+    assert socket_hits == []
+
+
+def test_httpx_client_to_telegram_is_blocked(sent_alerts, socket_hits, notifier_host_blocked):
+    with httpx.Client() as client:
+        with pytest.raises(notifier_host_blocked):
+            client.post("https://api.telegram.org/botX/sendMessage", data={"a": "b"})
+    assert socket_hits == []
+    assert len(_blocked_entries(sent_alerts)) == 1
+
+
+async def test_httpx_async_client_to_discord_is_blocked(sent_alerts, socket_hits, notifier_host_blocked):
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(notifier_host_blocked):
+            await client.post("https://discord.com/api/webhooks/1/abc", json={})
+    assert socket_hits == []
+    assert len(_blocked_entries(sent_alerts)) == 1
+
+
+def test_non_notifier_host_is_passed_through_to_the_real_function(socket_hits):
+    with pytest.raises(Exception):
+        urllib.request.urlopen("http://example.test/x", timeout=1)
+    assert socket_hits, "wrapper did not call through to the real opener"
+    socket_hits.clear()
+    with pytest.raises(Exception):
+        requests.get("http://localhost:9/x", timeout=1)
+    assert socket_hits
+    socket_hits.clear()
+    with pytest.raises(Exception):
+        httpx.get("http://example.test/x", timeout=1)
+    assert socket_hits
+
+
+@pytest.mark.parametrize("host", [
+    "discord.com.evil.example",
+    "notdiscord.com",
+    "api.telegram.org.evil.example",
+    "evil.example",
+])
+def test_lookalike_hosts_are_not_treated_as_notifier_hosts(host, sent_alerts, socket_hits):
+    # a notifier name in the path or query must not matter either
+    url = f"http://{host}/discord.com/api.telegram.org?u=discord.com"
+    with pytest.raises(Exception):
+        urllib.request.urlopen(url, timeout=1)
+    assert socket_hits, "look-alike host was blocked"
+    assert _blocked_entries(sent_alerts) == []
+
+
+# Each direct sender, called with a fake credential set, must end at the block.
+
+def _assert_sender_blocked(sent_alerts, socket_hits):
+    assert socket_hits == [], "sender reached the socket layer"
+    entries = _blocked_entries(sent_alerts)
+    assert entries, "sender did not hit the host block"
+    assert {e["kwargs"]["host"] for e in entries} == {"api.telegram.org"}
+
+
+def test_tier1_whale_alert_send_is_blocked(monkeypatch, sent_alerts, socket_hits):
+    # this file puts a stand-in module in sys.modules (module-scoped fixture
+    # above); drop it for this test so the real module is imported
+    monkeypatch.delitem(sys.modules, "signals.tier1_whale_alert", raising=False)
+    import signals.tier1_whale_alert as t1
+    assert hasattr(t1, "_send_telegram")
+    monkeypatch.setattr(t1, "TELEGRAM_BOT_TOKEN", "123:fake")
+    assert t1._send_telegram("hello") is False
+    _assert_sender_blocked(sent_alerts, socket_hits)
+
+
+def test_prop_clv_logger_send_is_blocked(monkeypatch, sent_alerts, socket_hits):
+    import scripts.prop_clv_logger as pc
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:fake")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    pc.send_telegram("hello")
+    _assert_sender_blocked(sent_alerts, socket_hits)
+
+
+def test_sports_pulse_send_is_blocked(monkeypatch, sent_alerts, socket_hits):
+    import scripts.sports_pulse as sp
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:fake")
+    monkeypatch.setattr(sp.time, "sleep", lambda s: None)
+    sp._send_telegram("hello")
+    _assert_sender_blocked(sent_alerts, socket_hits)
+
+
+def test_scorer_paper_portfolio_send_is_blocked(monkeypatch, sent_alerts, socket_hits):
+    import signals.scorer_paper_portfolio as sc
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:fake")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    sc.send_alert([], send=True)
+    _assert_sender_blocked(sent_alerts, socket_hits)
+
+
+# signals.ingame_monitor posts to Discord directly and loads /etc/default/polyclawd
+# into os.environ when imported, so no test may import it until the capture
+# stops depending on a module that was already imported.
+
+_INGAME_IMPORT = re.compile(
+    r"^\s*(?:import\s+(?:signals\.)?ingame_monitor\b"
+    r"|from\s+(?:signals\.)?ingame_monitor\b"
+    r"|from\s+signals\s+import\s+[^#\n]*\bingame_monitor\b)"
+    r"|import_module\(\s*['\"](?:signals\.)?ingame_monitor['\"]"
+    r"|__import__\(\s*['\"](?:signals\.)?ingame_monitor['\"]",
+    re.MULTILINE,
+)
+
+
+def test_no_test_imports_ingame_monitor():
+    here = Path(__file__).resolve()
+    offenders = [
+        str(p.relative_to(here.parent.parent))
+        for p in sorted(here.parent.rglob("*.py"))
+        if p.resolve() != here and _INGAME_IMPORT.search(p.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        f"{offenders} import signals.ingame_monitor, which loads /etc/default/polyclawd "
+        "at import and posts to Discord directly. Extend the notifier capture in "
+        "tests/conftest.py first (block or stub it before the import), then change this guard."
+    )
+
+
+def test_ingame_import_guard_regex_matches_the_import_forms():
+    for line in ("import signals.ingame_monitor", "from signals.ingame_monitor import X",
+                 "from signals import ingame_monitor", "    import ingame_monitor",
+                 "importlib.import_module('signals.ingame_monitor')"):
+        assert _INGAME_IMPORT.search(line), line
+    for line in ('"signals.ingame_monitor": "X",', "# ingame_monitor loads the env at import"):
+        assert not _INGAME_IMPORT.search(line), line
