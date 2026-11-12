@@ -31,8 +31,9 @@ MODE_READERS = {
     "execution/weather_executor.py": "order gate: returns unless live_armed()",
     "scripts/position_sync.py": "passed to RiskGovernor (the governor ignores the mode); no order gate",
     "scripts/smart_wallet_fast_poll.py": "order gate: _route_live_smart_wallet returns unless live_armed()",
+    "services/live_stop_shadow.py": "live_armed() and mode(): tick passes dry_run unless armed; mode in the log line; no order gate of its own",
     "services/scheduler.py": "page: _log_live_unarmed() and _start_live_unarmed_page() at start",
-    "services/stop_evaluator.py": "live_armed(): live-position lookup gate; mode(): passed to RiskGovernor",
+    "services/stop_evaluator.py": "live_armed(): live-position lookup gate and the stop evaluator's arming check (evaluate_live_stops); mode(): passed to RiskGovernor",
     "signals/paper_portfolio.py": "order gate: weather signals go live only when live_armed()",
 }
 MODE_FUNCS = {"mode", "live_armed", "arming_state", "arming_state_text"}
