@@ -184,15 +184,76 @@ def init_shadows(conn) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Fill identity (moved here from smart_wallet_fast_poll, task 1.5)
+# --------------------------------------------------------------------------- #
+def _norm(v) -> str:
+    """Normalise a numeric field so the same value keys identically across polls.
+
+    The PM feed is JSON: size/price can arrive as int, float or string, so a bare
+    str() makes 100, 100.0 and "100" three different keys for ONE fill — which
+    defeats the dedup on exactly the repeats it exists to catch. %.10g collapses
+    those to "100" while keeping genuinely different sizes distinct.
+    """
+    if v is None or v == "":
+        return ""
+    try:
+        return f"{float(v):.10g}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _trade_key(t: dict) -> str:
+    """Stable identity for one fill.
+
+    transactionHash alone is not unique — one transaction can carry several fills
+    (measured: 7,500 trades / 4,856 distinct hashes) — so qualify it with the
+    asset, wallet, side and size. Numeric fields go through _norm so JSON type
+    drift across polls cannot fork the key.
+    """
+    return "|".join((
+        str(t.get("transactionHash", "")),
+        str(t.get("asset", "")),
+        str(t.get("proxyWallet", "")),
+        str(t.get("side", "")),
+        _norm(t.get("size")),
+        _norm(t.get("price")),
+    ))
+
+
+def _accum_key(t: dict) -> Optional[str]:
+    """Identity of one raw trade for the accumulator, or None when the feed row
+    carries no transactionHash. Without a hash the _trade_key of two real fills
+    of equal size and price collides, so such a row stays keyless (always
+    counted) rather than risk dropping a real fill."""
+    return _trade_key(t) if t.get("transactionHash") else None
+
+
+# --------------------------------------------------------------------------- #
 # Accumulator (true rolling window)
 # --------------------------------------------------------------------------- #
+def _entry_keys(entry) -> tuple:
+    """Fill keys carried by one stored window entry. Old 3-element entries
+    [ts, usd, price] are keyless; a 4th element is one key or a list of keys."""
+    if len(entry) < 4 or not entry[3]:
+        return ()
+    return (entry[3],) if isinstance(entry[3], str) else tuple(entry[3])
+
+
 def _accumulate(conn, wallet: str, market: str, direction: str, outcome: str,
-                usd: float, price: float, now: int):
+                usd: float, price: float, now: int, fill_key: Optional[str] = None,
+                parts: Optional[list] = None):
     """Add a fill, prune the 4h window, persist. Returns
     (total_usd, num_fills, alert_fired, fired_total) AFTER the update.
 
     2026-09-30: keyed per-outcome — the old (wallet, market, direction) key
-    blended opposite outcomes of the same market into one total/price."""
+    blended opposite outcomes of the same market into one total/price.
+
+    Dedup (task 1.5): `fill_key` names the raw trade; `parts` is a list of
+    (key, usd, price) for a fill aggregated from several trades (key None =
+    keyless). A key already inside the window is not added again, so the same
+    trade reaching us from the fast poll, the whale sweep or an inclusive
+    cursor counts once; totals come back unchanged when nothing is new.
+    The stored entry is [ts, usd, price, key] (key omitted when keyless)."""
     row = conn.execute(
         "SELECT fills_json, alert_fired, fired_total, first_seen "
         "FROM smart_wallet_accum WHERE wallet=? AND market=? AND direction=? AND outcome=?",
@@ -206,8 +267,28 @@ def _accumulate(conn, wallet: str, market: str, direction: str, outcome: str,
     else:
         fills, alert_fired, fired_total, first_seen = [], 0, 0.0, now
 
-    fills.append([int(now), float(usd), float(price)])
     cutoff = now - ACCUM_WINDOW
+    if parts is None and fill_key:
+        parts = [(fill_key, usd, price)]
+    if parts is None:
+        fills.append([int(now), float(usd), float(price)])
+    else:
+        seen = {k for f in fills if f[0] >= cutoff for k in _entry_keys(f)}
+        fresh = []
+        for k, u, p in parts:
+            if k is not None:
+                if k in seen:
+                    continue
+                seen.add(k)
+            fresh.append((k, u, p))
+        if fresh:
+            f_usd = sum(u for _, u, _ in fresh)
+            f_px = sum(u * p for _, u, p in fresh) / f_usd if f_usd else float(price)
+            entry = [int(now), float(f_usd), float(f_px)]
+            keys = [k for k, _, _ in fresh if k is not None]
+            if keys:
+                entry.append(keys[0] if len(keys) == 1 else keys)
+            fills.append(entry)
     fills = [f for f in fills if f[0] >= cutoff]
     total = sum(f[1] for f in fills)
 
@@ -614,7 +695,8 @@ def check_and_fire(
     for f in smart_fills:
         total, nfills, af, ft = _accumulate(
             meta_conn, f["wallet"], f["market"], f["direction"],
-            f.get("outcome") or "", f["usd"], f["price"], now
+            f.get("outcome") or "", f["usd"], f["price"], now,
+            parts=f.get("trade_parts"),
         )
         kind = _decide(total, af, ft)
         if not kind:
@@ -1014,10 +1096,12 @@ def fills_from_trades(trades: list, smart: dict) -> list:
                 "outcome_index": t.get("outcomeIndex"),
                 "title": (t.get("title") or "")[:80],
                 "name": smart[w].get("name") or t.get("name") or w[:8],
+                "parts": [],
             },
         )
         a["usd"] += usd
         a["pxw"] += usd * price
+        a["parts"].append((_accum_key(t), usd, price))
     out = []
     for (w, cid, side, _koi), a in agg.items():
         px = a["pxw"] / a["usd"] if a["usd"] else 0.0
@@ -1031,6 +1115,7 @@ def fills_from_trades(trades: list, smart: dict) -> list:
                 "price": px,
                 "outcome": a["outcome"],
                 "outcome_index": a["outcome_index"],
+                "trade_parts": a["parts"],
                 "name": a["name"],
                 "title": a["title"],
                 "wallet_wr": sw.get("win_rate"),

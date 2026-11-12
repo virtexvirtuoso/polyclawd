@@ -28,6 +28,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Fill identity lives with the accumulator (task 1.5); re-exported here because
+# the cross-poll dedup below and its tests use these names.
+from scripts.smart_wallet_alert import _norm, _trade_key  # noqa: E402,F401
+
 # ── Exit cooldown: don't re-enter a market within 2h of stop-loss exit ────────
 _EXIT_COOLDOWN_SECS = 7200  # 2 hours
 _EXIT_COOLDOWN_FILE = "/tmp/sw_exit_cooldown.json"
@@ -256,40 +260,6 @@ _SEEN_TABLE = "smart_wallet_trade_seen"
 # process instead of passing every trade through to the cumulative threshold.
 _MEM_SEEN_MAX = 5000
 _mem_seen: "OrderedDict[str, int]" = OrderedDict()  # key -> last sighting ts
-
-
-def _norm(v) -> str:
-    """Normalise a numeric field so the same value keys identically across polls.
-
-    The PM feed is JSON: size/price can arrive as int, float or string, so a bare
-    str() makes 100, 100.0 and "100" three different keys for ONE fill — which
-    defeats the dedup on exactly the repeats it exists to catch. %.10g collapses
-    those to "100" while keeping genuinely different sizes distinct.
-    """
-    if v is None or v == "":
-        return ""
-    try:
-        return f"{float(v):.10g}"
-    except (TypeError, ValueError):
-        return str(v)
-
-
-def _trade_key(t: dict) -> str:
-    """Stable identity for one fill.
-
-    transactionHash alone is not unique — one transaction can carry several fills
-    (measured: 7,500 trades / 4,856 distinct hashes) — so qualify it with the
-    asset, wallet, side and size. Numeric fields go through _norm so JSON type
-    drift across polls cannot fork the key.
-    """
-    return "|".join((
-        str(t.get("transactionHash", "")),
-        str(t.get("asset", "")),
-        str(t.get("proxyWallet", "")),
-        str(t.get("side", "")),
-        _norm(t.get("size")),
-        _norm(t.get("price")),
-    ))
 
 
 def _collapse_intra_batch(keys: list, trades: list) -> tuple:
