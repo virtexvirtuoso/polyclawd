@@ -1,5 +1,6 @@
 # Pytest configuration and fixtures for polyclawd tests
 import asyncio
+import functools
 import os
 import sys
 from pathlib import Path
@@ -64,19 +65,44 @@ def _block_notifier_hosts(monkeypatch, calls, owner, name, url_of, is_async=Fals
             raise NotifierHostBlocked(f"test tried to reach notifier host {host} via {name}")
 
     if is_async:
+        @functools.wraps(original)
         async def wrapper(*args, **kwargs):
             _check(args, kwargs)
             return await original(*args, **kwargs)
     else:
+        @functools.wraps(original)
         def wrapper(*args, **kwargs):
             _check(args, kwargs)
             return original(*args, **kwargs)
     monkeypatch.setattr(owner, name, wrapper)
 
 
+def _fail_on_swallowed_blocks(calls, opted_in):
+    """Fail if the host block fired during a test that did not ask for it.
+
+    NotifierHostBlocked is an AssertionError, but production senders wrap their
+    HTTP call in `except Exception` and swallow it, so a test that triggers a
+    block inside one would end green. The BLOCKED_HTTP entry is the evidence.
+    `opted_in` is True for tests that provoke a block on purpose (they request
+    the `notifier_host_blocked` fixture)."""
+    if opted_in:
+        return
+    blocked = [e["kwargs"] for e in calls if e["fn"] == "BLOCKED_HTTP"]
+    if blocked:
+        what = "; ".join(f"{b['host']} via {b['via']}" for b in blocked)
+        pytest.fail(
+            f"test reached a notifier host and the block fired ({what}). A sender "
+            "may have swallowed the NotifierHostBlocked exception, so the test would "
+            "otherwise pass. Stub the sender, or request the `notifier_host_blocked` "
+            "fixture if the block is intended.",
+            pytrace=False,
+        )
+
+
 @pytest.fixture
 def notifier_host_blocked():
-    """The exception class the host block raises."""
+    """The exception class the host block raises. Requesting this fixture marks
+    the test as one that provokes a block on purpose."""
     return NotifierHostBlocked
 
 
@@ -144,6 +170,7 @@ def _notifier_capture(request, monkeypatch, tmp_path):
     _block_notifier_hosts(monkeypatch, calls, httpx.AsyncClient, "send",
                           lambda self, request, *a, **k: request, is_async=True)
     yield calls
+    _fail_on_swallowed_blocks(calls, "notifier_host_blocked" in request.fixturenames)
 
 
 @pytest.fixture

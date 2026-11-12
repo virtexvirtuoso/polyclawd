@@ -316,7 +316,23 @@ def fake_clob():
         yield fake
     finally:
         clob_client.set_client(None)
-        assert clob_client._client is None, "fake_clob teardown did not reset the client"
+
+
+def _assert_no_client_injected():
+    """A client left in ``execution.clob_client`` by an earlier test would be
+    used by this one: fail at setup, in any test order."""
+    leaked = clob_client._client
+    assert leaked is None, (
+        f"execution.clob_client has a client injected before this test ({leaked!r}): "
+        "an earlier test leaked it (inject through the fake_clob fixture, or call "
+        "set_client(None) in a finally)"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_client_leaked_from_an_earlier_test():
+    _assert_no_client_injected()
+    yield
 
 
 @pytest.fixture
@@ -358,18 +374,50 @@ def live_db(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _fail_on_network_attempts(attempts, opted_in):
+    """Fail if the network guard fired during a test that did not ask for it.
+    The guard raises AssertionError, but code under test may wrap its call in
+    `except Exception` and swallow it, so the record is what fails the test.
+    `opted_in` is True for tests that provoke the guard on purpose (they request
+    the ``network_attempts`` fixture)."""
+    if opted_in or not attempts:
+        return
+    what = "; ".join(f"{label} {args}" for label, args in attempts)
+    pytest.fail(
+        f"test attempted network access in tests/live ({what}). Code under test may "
+        "have swallowed the guard's AssertionError. Stub the call, or request the "
+        "`network_attempts` fixture if the attempt is intended.",
+        pytrace=False,
+    )
+
+
 @pytest.fixture(autouse=True)
-def _no_network_no_ambient_guard(monkeypatch):
-    """tests/live must not touch the network: HTTP and socket connects fail loudly.
+def _no_network_no_ambient_guard(request, monkeypatch):
+    """tests/live must not touch the network: HTTP and socket connects fail loudly
+    and are recorded; a test that did not request ``network_attempts`` fails at
+    teardown if any was recorded (even one the code under test swallowed).
     The egress guard is inactive unless POLYCLAWD_EGRESS_REQUIRE_SRC is set, so
     remove any ambient value; tests that want the guard set it themselves."""
     monkeypatch.delenv("POLYCLAWD_EGRESS_REQUIRE_SRC", raising=False)
     monkeypatch.delenv("POLYCLAWD_EGRESS_HOSTS", raising=False)
+    attempts: list = []
 
-    def _boom(*a, **k):
-        raise AssertionError(f"network access attempted in tests/live: {a[:2]}")
+    def _guard(label):
+        def _boom(*a, **k):
+            attempts.append((label, a[:2]))
+            raise AssertionError(f"network access attempted in tests/live: {a[:2]}")
+        return _boom
 
-    monkeypatch.setattr(requests.sessions.Session, "request", _boom)
-    monkeypatch.setattr(urllib.request, "urlopen", _boom)
-    monkeypatch.setattr(socket.socket, "connect", _boom)
-    monkeypatch.setattr(socket, "getaddrinfo", _boom)
+    monkeypatch.setattr(requests.sessions.Session, "request", _guard("requests"))
+    monkeypatch.setattr(urllib.request, "urlopen", _guard("urlopen"))
+    monkeypatch.setattr(socket.socket, "connect", _guard("socket.connect"))
+    monkeypatch.setattr(socket, "getaddrinfo", _guard("getaddrinfo"))
+    yield attempts
+    _fail_on_network_attempts(attempts, "network_attempts" in request.fixturenames)
+
+
+@pytest.fixture
+def network_attempts(_no_network_no_ambient_guard) -> list:
+    """The network attempts recorded in this test (label, first two arguments).
+    Requesting it marks the test as one that provokes the guard on purpose."""
+    return _no_network_no_ambient_guard

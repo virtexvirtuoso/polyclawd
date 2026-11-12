@@ -83,3 +83,34 @@ def test_default_now_uses_time_time(sent_alerts, monkeypatch):
     state = {}
     assert oa.page_once("k", 60, "x", state=state) is True
     assert state == {"k": 5000.0}
+
+
+# --- robustness (task 1.0e) -------------------------------------------------
+
+
+def test_stamp_in_the_future_does_not_silence_the_page_and_is_corrected(sent_alerts):
+    state = {"k": 9000.0}  # clock stepped back, or written under another clock
+    assert oa.page_once("k", 300, "x", state=state, now=1000.0) is True
+    assert len(_sent(sent_alerts)) == 1
+    assert state == {"k": 1000.0}
+
+
+@pytest.mark.parametrize("bad", [None, "", "abc", [], {}])
+def test_non_numeric_stamp_is_treated_as_absent(sent_alerts, bad):
+    state = {"k": bad}
+    assert oa.page_once("k", 300, "x", state=state, now=1000.0) is True
+    assert state == {"k": 1000.0}
+
+
+def test_numeric_string_stamp_is_honoured(sent_alerts):
+    state = {"k": "800"}
+    assert oa.page_once("k", 300, "x", state=state, now=1000.0) is False
+    assert _sent(sent_alerts) == []
+
+
+@pytest.mark.parametrize("cooldown", [0, -5])
+def test_zero_or_negative_cooldown_always_sends(sent_alerts, cooldown):
+    state = {}
+    assert oa.page_once("k", cooldown, "x", state=state, now=1000.0) is True
+    assert oa.page_once("k", cooldown, "x", state=state, now=1000.0) is True
+    assert len(_sent(sent_alerts)) == 2

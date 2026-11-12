@@ -277,7 +277,8 @@ def _assert_sender_blocked(sent_alerts, socket_hits):
     assert {e["kwargs"]["host"] for e in entries} == {"api.telegram.org"}
 
 
-def test_tier1_whale_alert_send_is_blocked(monkeypatch, sent_alerts, socket_hits):
+def test_tier1_whale_alert_send_is_blocked(monkeypatch, sent_alerts, socket_hits,
+                                           notifier_host_blocked):
     # this file puts a stand-in module in sys.modules (module-scoped fixture
     # above); drop it for this test so the real module is imported
     monkeypatch.delitem(sys.modules, "signals.tier1_whale_alert", raising=False)
@@ -288,7 +289,8 @@ def test_tier1_whale_alert_send_is_blocked(monkeypatch, sent_alerts, socket_hits
     _assert_sender_blocked(sent_alerts, socket_hits)
 
 
-def test_prop_clv_logger_send_is_blocked(monkeypatch, sent_alerts, socket_hits):
+def test_prop_clv_logger_send_is_blocked(monkeypatch, sent_alerts, socket_hits,
+                                         notifier_host_blocked):
     import scripts.prop_clv_logger as pc
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:fake")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
@@ -296,7 +298,8 @@ def test_prop_clv_logger_send_is_blocked(monkeypatch, sent_alerts, socket_hits):
     _assert_sender_blocked(sent_alerts, socket_hits)
 
 
-def test_sports_pulse_send_is_blocked(monkeypatch, sent_alerts, socket_hits):
+def test_sports_pulse_send_is_blocked(monkeypatch, sent_alerts, socket_hits,
+                                      notifier_host_blocked):
     import scripts.sports_pulse as sp
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:fake")
     monkeypatch.setattr(sp.time, "sleep", lambda s: None)
@@ -304,7 +307,8 @@ def test_sports_pulse_send_is_blocked(monkeypatch, sent_alerts, socket_hits):
     _assert_sender_blocked(sent_alerts, socket_hits)
 
 
-def test_scorer_paper_portfolio_send_is_blocked(monkeypatch, sent_alerts, socket_hits):
+def test_scorer_paper_portfolio_send_is_blocked(monkeypatch, sent_alerts, socket_hits,
+                                                notifier_host_blocked):
     import signals.scorer_paper_portfolio as sc
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:fake")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
@@ -347,3 +351,136 @@ def test_ingame_import_guard_regex_matches_the_import_forms():
         assert _INGAME_IMPORT.search(line), line
     for line in ('"signals.ingame_monitor": "X",', "# ingame_monitor loads the env at import"):
         assert not _INGAME_IMPORT.search(line), line
+
+
+# --- a swallowed block must fail the test (task 1.0e) ------------------------
+# NotifierHostBlocked is an AssertionError, but senders wrap their HTTP call in
+# `except Exception`, so the exception alone cannot fail a test. The capture
+# fixture fails the test at teardown if a BLOCKED_HTTP entry was recorded and
+# the test did not request `notifier_host_blocked`.
+
+import importlib.util
+import textwrap
+
+_CONFTEST = Path(__file__).resolve().parent / "conftest.py"
+
+
+def _fail_on_swallowed_blocks(calls, opted_in):
+    # a private copy of tests/conftest.py, loaded by path: the module name
+    # `conftest` is ambiguous when several conftest.py files exist
+    spec = importlib.util.spec_from_file_location("repo_tests_conftest_copy", _CONFTEST)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod._fail_on_swallowed_blocks(calls, opted_in)
+
+
+def _entry(host="api.telegram.org", via="urlopen"):
+    return {"fn": "BLOCKED_HTTP", "args": (), "kwargs": {"host": host, "via": via}}
+
+
+def test_teardown_check_raises_naming_host_and_function():
+    with pytest.raises(pytest.fail.Exception) as exc:
+        _fail_on_swallowed_blocks([{"fn": "alert_openclaw", "args": (), "kwargs": {}}, _entry()],
+                                  opted_in=False)
+    assert "api.telegram.org via urlopen" in str(exc.value)
+
+
+def test_teardown_check_ignores_non_block_entries():
+    _fail_on_swallowed_blocks([{"fn": "alert_openclaw", "args": (), "kwargs": {}}], opted_in=False)
+    _fail_on_swallowed_blocks([], opted_in=False)
+
+
+def test_teardown_check_passes_when_opted_in():
+    _fail_on_swallowed_blocks([_entry()], opted_in=True)
+
+
+_INNER = textwrap.dedent('''
+    import importlib.util, sys
+    import pytest
+
+    spec = importlib.util.spec_from_file_location("repo_tests_conftest", {conftest!r})
+    _m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(_m)
+    _notifier_capture = _m._notifier_capture
+    notifier_host_blocked = _m.notifier_host_blocked
+    sent_alerts = _m.sent_alerts
+''')
+
+_INNER_TESTS = textwrap.dedent('''
+    import urllib.request
+
+    def _swallowing_sender():
+        try:
+            urllib.request.urlopen("https://api.telegram.org/botX/sendMessage")
+        except Exception:
+            pass
+
+    def test_swallowed_block_without_opt_in():
+        _swallowing_sender()
+
+    def test_swallowed_block_with_opt_in(notifier_host_blocked):
+        _swallowing_sender()
+
+    def test_clean():
+        pass
+''')
+
+
+def _run_inner(tmp_path, selector):
+    (tmp_path / "conftest.py").write_text(_INNER.format(conftest=str(_CONFTEST)))
+    (tmp_path / "test_inner.py").write_text(_INNER_TESTS)
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", "--no-header",
+         "--rootdir", str(tmp_path), f"test_inner.py::{selector}"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL,
+    )
+
+
+def test_swallowed_block_fails_the_test_at_teardown(tmp_path):
+    r = _run_inner(tmp_path, "test_swallowed_block_without_opt_in")
+    out = r.stdout + r.stderr
+    assert r.returncode != 0, out
+    assert "api.telegram.org via urlopen" in out, out
+
+
+def test_swallowed_block_in_an_opted_in_test_passes(tmp_path):
+    r = _run_inner(tmp_path, "test_swallowed_block_with_opt_in")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_clean_test_is_unaffected_by_the_teardown_check(tmp_path):
+    r = _run_inner(tmp_path, "test_clean")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+# --- the five wrappers keep the original's name and signature (task 1.0e) ----
+
+
+def _wrapper_targets():
+    import requests.sessions
+    return [(urllib.request, "urlopen"), (urllib.request.OpenerDirector, "open"),
+            (requests.sessions.Session, "request"), (httpx.Client, "send"),
+            (httpx.AsyncClient, "send")]
+
+
+@pytest.mark.parametrize("index", range(5))
+def test_host_block_wrapper_preserves_name_and_signature(index):
+    import inspect
+    owner, name = _wrapper_targets()[index]
+    wrapper = getattr(owner, name)
+    original = inspect.unwrap(wrapper)
+    assert wrapper is not original, "no wrapper installed"
+    assert wrapper.__name__ == original.__name__ == name
+    assert list(inspect.signature(wrapper).parameters) == list(inspect.signature(original).parameters)
+    assert inspect.iscoroutinefunction(wrapper) == inspect.iscoroutinefunction(original)
+
+
+def test_urlopen_signature_is_the_real_one():
+    import inspect
+    params = list(inspect.signature(urllib.request.urlopen).parameters)
+    assert params[:2] == ["url", "data"] and "timeout" in params
+
+
+def test_async_send_wrapper_is_still_a_coroutine_function():
+    import inspect
+    assert inspect.iscoroutinefunction(httpx.AsyncClient.send)

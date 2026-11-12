@@ -269,9 +269,10 @@ def test_egress_guard_is_inactive_by_default():
 # --- no network -------------------------------------------------------------
 
 
-def test_http_is_blocked_in_tests_live():
+def test_http_is_blocked_in_tests_live(network_attempts):
     with pytest.raises(AssertionError, match="network access attempted"):
         requests.get("http://127.0.0.1:9/")
+    assert [label for label, _ in network_attempts] == ["requests"]
 
 
 def test_fixed_tick_and_min_size_helper(fixed_tick_and_min_size):
@@ -306,14 +307,133 @@ def test_live_db_does_not_touch_the_default_path(live_db):
         assert live_db_module.DB_PATH.stat().st_mtime_ns == before
 
 
-# --- teardown ---------------------------------------------------------------
-# The fake_clob fixture asserts its own reset in teardown. This pair adds an
-# observation from the next test; it relies on file order (pytest's default).
+# --- leaked client ----------------------------------------------------------
+# An autouse fixture (tests/live/conftest.py) asserts at SETUP that no client is
+# injected, so a client leaked by any earlier test fails the next test in any order.
 
 
-def test_zz_teardown_part_1_injects_a_client(fake_clob):
+def test_fake_clob_is_the_injected_client_inside_the_test(fake_clob):
     assert clob_client._client is fake_clob
 
 
-def test_zz_teardown_part_2_client_was_reset():
-    assert clob_client._client is None
+# --- the guards fail the test at setup / teardown (task 1.0e) ----------------
+# Each check is exercised through a real inner pytest run (a subprocess in a
+# scratch directory) so that removing the fixture wiring makes a test here fail.
+
+import importlib.util
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+_LIVE_CONFTEST = Path(__file__).resolve().parent / "conftest.py"
+_REPO_ROOT = _LIVE_CONFTEST.parent.parent.parent
+
+
+def _live_conftest_copy():
+    spec = importlib.util.spec_from_file_location("repo_live_conftest_copy", _LIVE_CONFTEST)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod  # @dataclass looks its module up here
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_INNER_CONFTEST = textwrap.dedent('''
+    import importlib.util, sys
+    spec = importlib.util.spec_from_file_location("repo_live_conftest", {path!r})
+    _m = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = _m
+    spec.loader.exec_module(_m)
+    _no_network_no_ambient_guard = _m._no_network_no_ambient_guard
+    _no_client_leaked_from_an_earlier_test = _m._no_client_leaked_from_an_earlier_test
+    network_attempts = _m.network_attempts
+''')
+
+
+def _run_inner(tmp_path, test_source, *selectors):
+    (tmp_path / "conftest.py").write_text(_INNER_CONFTEST.format(path=str(_LIVE_CONFTEST)))
+    (tmp_path / "test_inner.py").write_text(textwrap.dedent(test_source))
+    env = dict(os.environ, PYTHONPATH=str(_REPO_ROOT), PYTHONDONTWRITEBYTECODE="1")
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", "--no-header",
+         "--rootdir", str(tmp_path), *(f"test_inner.py::{s}" for s in selectors)],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+_NETWORK_INNER = '''
+    import requests
+
+    def _swallowing_caller():
+        try:
+            requests.get("http://127.0.0.1:9/")
+        except Exception:
+            pass
+
+    def test_swallowed_attempt():
+        _swallowing_caller()
+
+    def test_swallowed_attempt_opted_in(network_attempts):
+        _swallowing_caller()
+        assert len(network_attempts) == 1
+
+    def test_clean():
+        pass
+'''
+
+
+def test_swallowed_network_attempt_fails_the_test(tmp_path):
+    r = _run_inner(tmp_path, _NETWORK_INNER, "test_swallowed_attempt")
+    out = r.stdout + r.stderr
+    assert r.returncode != 0, out
+    assert "attempted network access in tests/live" in out, out
+
+
+def test_opted_in_network_attempt_passes(tmp_path):
+    r = _run_inner(tmp_path, _NETWORK_INNER, "test_swallowed_attempt_opted_in", "test_clean")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_network_teardown_check_unit():
+    mod = _live_conftest_copy()
+    mod._fail_on_network_attempts([], opted_in=False)
+    mod._fail_on_network_attempts([("urlopen", ("http://x",))], opted_in=True)
+    with pytest.raises(pytest.fail.Exception, match="urlopen"):
+        mod._fail_on_network_attempts([("urlopen", ("http://x",))], opted_in=False)
+
+
+_LEAK_INNER = '''
+    from execution import clob_client
+
+    def test_a_leaks_a_client():
+        clob_client.set_client(object())   # deliberately never reset
+
+    def test_b_runs_after_the_leak():
+        pass
+
+    def test_c_runs_after_the_leak():
+        pass
+'''
+
+
+def test_a_leaked_client_fails_the_next_test_at_setup(tmp_path):
+    r = _run_inner(tmp_path, _LEAK_INNER)
+    out = r.stdout + r.stderr
+    assert r.returncode != 0, out
+    assert "an earlier test leaked it" in out, out
+    # the leaking test itself passes; the two after it fail at setup
+    assert "1 passed, 2 errors" in out, out
+
+
+def test_client_check_unit_catches_a_leak_and_leaves_no_trace():
+    mod = _live_conftest_copy()
+    mod._assert_no_client_injected()
+    try:
+        clob_client.set_client(object())
+        with pytest.raises(AssertionError, match="leaked"):
+            mod._assert_no_client_injected()
+    finally:
+        clob_client.set_client(None)
+    mod._assert_no_client_injected()

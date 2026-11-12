@@ -57,3 +57,42 @@ def test_explicit_path_ignores_variable(tmp_path, monkeypatch):
     finally:
         conn.close()
     assert not other.exists()
+
+
+# --- the override is visible (task 1.0e) -------------------------------------
+
+
+import logging
+
+
+def _override_warnings(caplog):
+    return [r for r in caplog.records
+            if r.levelno == logging.WARNING and "POLYCLAWD_LIVE_DB" in r.getMessage()]
+
+
+def test_override_logs_one_warning_per_process(tmp_path, monkeypatch, caplog):
+    target = tmp_path / "override.db"
+    monkeypatch.setattr(live_db, "_override_warned", False, raising=False)
+    monkeypatch.setenv("POLYCLAWD_LIVE_DB", str(target))
+    with caplog.at_level(logging.WARNING, logger=live_db.__name__):
+        live_db.connect().close()
+        live_db.connect().close()
+    (record,) = _override_warnings(caplog)
+    assert str(target) in record.getMessage()
+
+
+def test_no_warning_without_the_variable(monkeypatch, caplog):
+    monkeypatch.setattr(live_db, "_override_warned", False, raising=False)
+    monkeypatch.delenv("POLYCLAWD_LIVE_DB", raising=False)
+    with caplog.at_level(logging.WARNING, logger=live_db.__name__):
+        assert live_db.resolve_db_path() == live_db.DB_PATH
+        assert live_db.resolve_db_path() == live_db.DB_PATH
+    assert _override_warnings(caplog) == []
+
+
+def test_explicit_path_does_not_warn_even_with_the_variable_set(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(live_db, "_override_warned", False, raising=False)
+    monkeypatch.setenv("POLYCLAWD_LIVE_DB", str(tmp_path / "env.db"))
+    with caplog.at_level(logging.WARNING, logger=live_db.__name__):
+        assert live_db.resolve_db_path(tmp_path / "explicit.db") == tmp_path / "explicit.db"
+    assert _override_warnings(caplog) == []

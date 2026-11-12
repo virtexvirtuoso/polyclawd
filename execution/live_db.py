@@ -5,6 +5,7 @@ touching the existing schema. Every public function accepts a `conn` so
 callers can inject a test DB (tmp file or :memory:).
 """
 
+import logging
 import os
 import sqlite3
 from db import connect as db_connect
@@ -12,6 +13,9 @@ from pathlib import Path
 
 # Canonical prod DB path — same file the rest of the app uses.
 DB_PATH = Path(__file__).parent.parent / "storage" / "shadow_trades.db"
+
+logger = logging.getLogger(__name__)
+_override_warned = False  # the POLYCLAWD_LIVE_DB warning is logged once per process
 
 # ---------------------------------------------------------------------------
 # Column allowlists (I3) — guard CRUD helpers against unknown kwarg keys
@@ -224,11 +228,25 @@ def resolve_db_path(path: "Path | str | None" = None) -> Path:
     POLYCLAWD_LIVE_DB environment variable if set and non-empty, else DB_PATH.
 
     Decided at call time, so a test (or an operator) can redirect every
-    argument-less `connect()` to another file without touching callers."""
+    argument-less `connect()` to another file without touching callers. That
+    redirect is silent to the callers (about 20 services and routes), so the
+    first use of the variable in a process logs one WARNING naming the path.
+
+    An absolute path is expected: a relative value resolves against the
+    process's working directory, which differs between a service, a cron job
+    and a shell."""
+    global _override_warned
     if path is not None:
         return Path(path)
     override = os.environ.get("POLYCLAWD_LIVE_DB", "").strip()
-    return Path(override) if override else DB_PATH
+    if not override:
+        return DB_PATH
+    resolved = Path(override)
+    if not _override_warned:
+        _override_warned = True
+        logger.warning("POLYCLAWD_LIVE_DB is set: argument-less live_db.connect() opens %s "
+                       "instead of the default %s", resolved.resolve(), DB_PATH)
+    return resolved
 
 
 def connect(path: "Path | str | None" = None) -> sqlite3.Connection:
