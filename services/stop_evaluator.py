@@ -5,7 +5,7 @@ Conservative fixed stops for now. Will transition to learned/adaptive
 exits once position_price_log has enough resolved trade trajectories.
 
 Conservative defaults (Phase 1):
-- Exit if unrealized loss > 50% of bet size
+- Exit if unrealized loss >= UNIVERSAL_MAX_LOSS_PCT (40%) of bet size
 - Exit if edge flipped negative (signal reversal)
 
 Called from scheduler tick_5min().
@@ -48,44 +48,35 @@ PRE_RESOLVE_WARN_HOURS = float(os.getenv("PRE_RESOLVE_WARN_HOURS", "6.0"))
 PRE_RESOLVE_WARN_LOSS_PCT = float(os.getenv("PRE_RESOLVE_WARN_LOSS_PCT", "0.30"))
 
 # ── Stop Config ──────────────────────────────────────────────────────────
-# 2026-04-27 weather recalibration. Diagnostic on n=440 weather trades:
-#   * Model is calibrated (mean P(NO) 0.80 vs realized 0.75; CLV +36¢/contract).
-#   * 30% standard stop fired 151× and cost ~$66k of expected P&L.
-#   * Live books are 7–10pp wide with $25–50 of depth per 5pp slice. A single
-#     $500 market order moves the price 5–10pp, generating fake "20–30% losses"
-#     that revert when the maker refills.
-#   * 70% of winner-dips ≥20% mean-revert in <30 min; 94% within 1h.
-# Solution: weather positions further than 6h from resolution skip the
-# threshold-based stop and defer to reeval_weather_positions(), which has
-# fresh ensemble data. The threshold here is a HARD-CAP safety net only.
-# Inside 6h, the urgent path (25% with a 2h dead zone, calibrated 2026-04-23)
-# remains in charge.
+# Per-strategy settings that are NOT a loss threshold. There is no per-strategy
+# loss threshold in this table: the ones that used to be here (0.50 default and
+# tweet_count_mc, 0.70 weather, env WEATHER_HARD_CAP_MAX_LOSS_PCT) were all above
+# UNIVERSAL_MAX_LOSS_PCT (0.40), and the universal stop is checked first, on the
+# same loss figure, with `continue`, so none of them could ever fire (audit #16).
+# They were deleted. Every loss threshold that remains (URGENT_STOP_CONFIG,
+# POST_LOCK_CONFIG, PRE_RESOLVE_WARN_LOSS_PCT) is below the universal stop, and a
+# test keeps it so.
 #
-# 2026-05-15 weather HARD-CAP widening: live tracker showed mid-life HARD-CAP
-# (0.50) was firing ~10×/day at ~$2.5k/day cost despite the defer-to-reeval
-# logic — the reeval doesn't always close fast enough to prevent 50% drawdowns.
-# ENSEMBLE_AUDIT_2026-05-14 stop-sensitivity backtest on 375 resolved stops
-# found held-WR rises monotonically with loss-bucket depth: 30-40% wins 68.9%
-# held, 50-70% wins 73.9%, >=70% wins 93.1%. Same widening recommendation
-# applies to BOTH URGENT and HARD-CAP paths. Widened 0.50 -> 0.70.
-# Env override: WEATHER_HARD_CAP_MAX_LOSS_PCT for rapid rollback without redeploy.
-# See ENSEMBLE_AUDIT_2026-05-15_02_Stop-Sensitivity-Backtest.md
+# 2026-04-27 weather recalibration (still in force): live books are 7–10pp wide
+# with thin depth, so a single market order generated fake "20–30% losses" that
+# revert when the maker refills. Weather positions further than 6h from
+# resolution therefore skip the post-lock and edge-decay stops and defer to
+# reeval_weather_positions(), which has fresh ensemble data; only the universal
+# stop (and the pre-resolution warning) apply there. Inside 6h the urgent path is
+# in charge.
 
 STOP_CONFIG = {
     "default": {
-        "max_loss_pct": 0.50,      # hard-cap safety net (any strategy)
         "edge_floor": -0.02,       # exit if current edge < -2pp (signal flipped)
-        "defer_to_reeval_above_h": 0,   # 0 = no deferral, threshold rules
+        "defer_to_reeval_above_h": 0,   # 0 = no deferral
     },
     # Weather: defer mid-life stops to the model-aware path
     "weather": {
-        "max_loss_pct": float(os.getenv("WEATHER_HARD_CAP_MAX_LOSS_PCT", "0.70")),  # widened 2026-05-15 from 0.50; env-tunable for rollback
         "edge_floor": -0.02,
-        "defer_to_reeval_above_h": 6.0,  # >6h to close: skip threshold stop,
+        "defer_to_reeval_above_h": 6.0,  # >6h to close: skip post-lock + edge stops,
                                           # let reeval (ensemble-aware) decide
     },
     "tweet_count_mc": {
-        "max_loss_pct": 0.50,
         "edge_floor": -0.02,
     },
 }
@@ -932,39 +923,19 @@ def evaluate_stops():
                         logger.warning("pre-resolve warning telegram failed (mkt=%s)", pos.get('market_title','')[:40], exc_info=True)
 
         # ── Time-to-resolution gate (2026-04-27) ──
-        # Strategies with `defer_to_reeval_above_h > 0` skip the threshold-
-        # based stop while still far from resolution and rely on the
-        # model-aware reeval path (e.g. reeval_weather_positions). Only the
-        # 50% hard cap fires in the deferred window — that catches the
-        # "lost the full amount at resolution" failure mode at half cost.
+        # Strategies with `defer_to_reeval_above_h > 0` skip the post-lock and
+        # edge-decay stops while still far from resolution and rely on the
+        # model-aware reeval path (e.g. reeval_weather_positions). The universal
+        # stop above has already had its say.
         defer_h = float(config.get("defer_to_reeval_above_h", 0))
         if defer_h > 0:
             target_date = _parse_market_date(pos.get("market_title") or "")
             if target_date is not None:
                 hours_to_close = (target_date - now).total_seconds() / 3600
                 if hours_to_close > defer_h:
-                    HARD_CAP = 0.50
-                    if unrealized < 0 and loss_pct >= HARD_CAP:
-                        reason = (f"HARD-CAP loss {loss_pct:.0%} >= {HARD_CAP:.0%} "
-                                  f"({hours_to_close:.1f}h to close, deferred "
-                                  f"to reeval otherwise)")
-                        result = _close_position_early(conn, pos, current_yes_price,
-                                                       unrealized, reason)
-                        conn.commit()
-                        stopped.append(result)
-                        _send_discord_alert(result)
-                    continue  # skip threshold + edge_floor while deferred
+                    continue  # skip post-lock + edge_floor while deferred
 
-        # ── Check 1: Max loss percentage ──
-        if unrealized < 0 and loss_pct >= config["max_loss_pct"]:
-            reason = f"loss {loss_pct:.0%} >= {config['max_loss_pct']:.0%} threshold"
-            result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
-            conn.commit()
-            stopped.append(result)
-            _send_discord_alert(result)
-            continue
-
-        # ── Check 1b: Post-lock tight stop (toggle-gated) ──
+        # ── Check 1: Post-lock tight stop (toggle-gated) ──
         # Inside the info-lock window (final hours before resolution), winners
         # don't dip past ~10% drawdown (backtest n=14 weather wins, max 10.4%).
         # A 12% threshold saves +$1,247 net on 26-trade backtest sample.
@@ -1043,29 +1014,20 @@ def _parse_market_date(title):
     return target
 
 # Urgent stop config — tighter thresholds for positions resolving soon.
-# Calibrated 2026-04-23: 14d counterfactual showed 15% weather stop cost $1,857
-# (57/91 correct, 34/91 cut winners). Widened to 25% with a 2h dead zone before
-# close. See 02-Projects/Polyclawd/Strategy/Urgent-Stop-Calibration-Apr2026.md
-#
-# Calibrated 2026-05-06: realized-resolution segmentation on 73 post-Apr-23
-# weather URGENT 25% trades showed [2-4h] neutral (-$385 / 25 trades) but
-# [4-6h] bleeding (+$5,476 / 48 trades, 43.8% would-have-won). Added
-# max_hours_to_close=4.0 (env-tunable) to skip the bleeder slice. See
-# 02-Projects/Polyclawd/Strategy/Urgent-Stop-Window-Narrowing-PreReg-May2026.md
-#
-# Calibrated 2026-05-15: ENSEMBLE_AUDIT_2026-05-14 stop-sensitivity backtest
-# (~/Desktop/polyclawd/scratch/sensitivity.py, n=375 resolved weather stops)
-# found held-WR rises monotonically with loss-bucket depth: 30-40% bucket wins
-# 68.9% held, 50-70% wins 73.9%, >=70% bucket wins 93.1%. Stop systematically
-# liquidates winners. Threshold widened 0.25 -> 0.70 (URGENT path, weather).
-# Recovers ~+$87k on the 375-row cohort; worst per-trade DD $379. The 0.50
-# hard-cap in STOP_CONFIG["weather"] remains as a second-layer safety net.
-# Env override: URGENT_WEATHER_MAX_LOSS_PCT for rapid rollback without redeploy.
-# See ENSEMBLE_AUDIT_2026-05-15_02_Stop-Sensitivity-Backtest.md
+# Calibrated 2026-04-23: 14d counterfactual showed a 15% weather stop cost $1,857
+# (57/91 correct, 34/91 cut winners), and 2026-05-15 (ENSEMBLE_AUDIT_2026-05-14,
+# n=375 resolved weather stops) found the same for deeper stops: held-WR rises
+# with loss depth. Weather therefore has NO urgent loss threshold of its own: its
+# old one (0.40, env URGENT_WEATHER_MAX_LOSS_PCT, with a [2h, 4h] window) equalled
+# UNIVERSAL_MAX_LOSS_PCT, and the universal stop is checked first on the same loss
+# figure, so it could never fire (audit #16). Weather positions are stopped by the
+# universal stop, post-lock and edge decay only. A strategy without "max_loss_pct"
+# has no urgent loss stop. Every threshold here must stay below
+# UNIVERSAL_MAX_LOSS_PCT (a test keeps it so).
+# "min_hours_to_close": dead zone, no urgent loss stop once fewer hours are left.
 URGENT_STOP_CONFIG = {
     "default":        {"max_loss_pct": 0.30, "min_hours_to_close": 0.0},
-    "weather":        {"max_loss_pct": float(os.getenv("URGENT_WEATHER_MAX_LOSS_PCT", "0.40")), "min_hours_to_close": 2.0,
-                       "max_hours_to_close": float(os.getenv("URGENT_MAX_HOURS_TO_CLOSE_WEATHER", "4.0"))},
+    "weather":        {},
     "tweet_count_mc": {"max_loss_pct": 0.30, "min_hours_to_close": 0.0},
 }
 
@@ -1165,21 +1127,17 @@ def evaluate_stops_urgent():
                 _send_discord_alert(result)
                 continue
 
-        # Dead-zone gate (lower) + window-ceiling (upper). Skip PnL stop if
-        # hours_left is inside the last N hours (noise dominates signal) OR
-        # above the ceiling (segment-level realized data 2026-05-06 showed
-        # the upper band fires on noise too — see Urgent-Stop-Window-
-        # Narrowing-PreReg-May2026.md). Edge-decay exit below still fires.
+        # Dead-zone gate. Skip the PnL stop if hours_left is inside the last N
+        # hours (noise dominates signal). Edge-decay exit below still fires.
+        # A strategy with no "max_loss_pct" (weather) has no urgent PnL stop.
+        urgent_max_loss = config.get("max_loss_pct")
         min_hours = config.get("min_hours_to_close", 0.0)
-        max_hours = config.get("max_hours_to_close")  # None = no upper bound
         hours_left = pos["_hours_left"]
-        pnl_stop_suppressed = (
-            hours_left < min_hours
-            or (max_hours is not None and hours_left > max_hours)
-        )
+        pnl_stop_suppressed = hours_left < min_hours
 
-        if not pnl_stop_suppressed and unrealized < 0 and loss_pct >= config["max_loss_pct"]:
-            reason = (f"URGENT loss {loss_pct:.0%} >= {config['max_loss_pct']:.0%} "
+        if (urgent_max_loss is not None and not pnl_stop_suppressed
+                and unrealized < 0 and loss_pct >= urgent_max_loss):
+            reason = (f"URGENT loss {loss_pct:.0%} >= {urgent_max_loss:.0%} "
                       f"threshold ({pos['_hours_left']}h to resolution)")
             result = _close_position_early(conn, pos, current_yes_price, unrealized, reason)
             conn.commit()
