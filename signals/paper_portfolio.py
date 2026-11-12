@@ -1085,6 +1085,7 @@ def open_position(signal: dict) -> dict:
     ).fetchone()
     if prev_stopped:
         prev_edge = prev_stopped["edge_pct"] or 0
+        edge_pct = eval_result["edge"]  # same value/unit stored in paper_positions.edge_pct
         curr_edge = edge_pct or 0
         if curr_edge <= prev_edge:
             logger.info(
