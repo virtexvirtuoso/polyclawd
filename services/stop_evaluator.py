@@ -433,6 +433,76 @@ def _close_live_position_early(live_pos_row, current_yes_price, reason, hard_cap
         logger.error("_close_live_position_early: {} — skipping live exit", exc)
         return None
 
+def _usable_price(price):
+    """True for a real prediction-market price: a finite number in (0, 1]."""
+    return (isinstance(price, (int, float)) and not isinstance(price, bool)
+            and 0 < price <= 1 and price == price)
+
+
+def evaluate_live_stops(*, dry_run: bool = False, db_path=None) -> list[dict]:
+    """One pass over open live positions. The mark is the best bid of the held
+    token, and the same mark goes to the exit. Nothing re-prices it.
+    Every open position gets exactly one entry in the result."""
+    from execution import live_config, live_db
+    from odds.polymarket_clob import get_orderbook
+    armed = live_config.live_armed()
+    if not armed and not dry_run:
+        return []
+    exempt = live_config.stop_exempt_ids()      # a bad value must raise here, loudly
+    conn = live_db.connect(db_path) if db_path else live_db.connect()
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM live_positions WHERE status='open' AND shares > 0 ORDER BY id")]
+    finally:
+        conn.close()                            # never held across order-book fetches
+    out = []
+    for row in rows:
+        try:
+            if int(row["id"]) in exempt:
+                out.append({"id": row["id"], "action": "exempt"})
+                continue
+            try:
+                entry = float(row.get("entry_price"))
+            except (TypeError, ValueError):
+                entry = 0.0
+            if not entry > 0 or entry == float("inf"):
+                out.append({"id": row["id"], "action": "bad_row"})
+                continue
+            book = get_orderbook(row["token_id"])
+            if not book or not book.bids or not book.asks:
+                out.append({"id": row["id"], "action": "unpriced"})
+                continue
+            bid, ask = book.bids[0].price, book.asks[0].price
+            if not (_usable_price(bid) and _usable_price(ask)):
+                out.append({"id": row["id"], "action": "unpriced"})
+                continue
+            mark = float(bid)
+            loss_pct = round(1 - mark / entry, 4)
+            if loss_pct < UNIVERSAL_MAX_LOSS_PCT:
+                out.append({"id": row["id"], "action": "ok",
+                            "mark": mark, "loss_pct": loss_pct})
+                continue
+            spread = max(0.0, ask - bid) / entry          # crossed book gives 0
+            threshold = round(UNIVERSAL_MAX_LOSS_PCT
+                              + min(spread, live_config.SPREAD_ALLOW_PCT), 4)
+            detail = {"id": row["id"], "mark": mark, "loss_pct": loss_pct,
+                      "spread_pct": round(spread, 4), "threshold": threshold}
+            if loss_pct < threshold:
+                out.append({**detail, "action": "spread_held"})
+                continue
+            if dry_run:
+                out.append({**detail, "action": "would_exit"})
+                continue
+            # hard_cap_frac stays UNIVERSAL_MAX_LOSS_PCT, so every stop exit is at or over the hard cap
+            info = _close_live_position_early(row, mark, f"live stop {loss_pct:.0%}",
+                                              hard_cap_frac=UNIVERSAL_MAX_LOSS_PCT)
+            out.append({**detail, **info} if info else {"id": row["id"], "action": "exit_failed"})
+        except Exception as exc:                # one bad row must not stop the rest
+            out.append({"id": row.get("id"), "action": "error",
+                        "error": f"{type(exc).__name__}: {exc}"})
+    return out
+
+
 def _close_position_early(conn, pos, current_yes_price, unrealized_pnl, reason):
     """
     Close a position at current market price (early exit).

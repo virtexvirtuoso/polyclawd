@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import math
+import re
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -131,6 +132,39 @@ def arming_state_text() -> str:
     """The three components as one line, for the guard's error and the start-up page."""
     st = arming_state()
     return f"mode={st['mode']} enforce={st['enforce']} LIVE_ORDER_PATH_READY={st['path_ready']}"
+
+
+# ---------------------------------------------------------------------------
+# Live stop-loss: spread allowance and exemptions
+# ---------------------------------------------------------------------------
+
+# How much of the current bid-ask spread may be added to the stop threshold, as a
+# share of the entry price in points: threshold = UNIVERSAL_MAX_LOSS_PCT +
+# min(spread / entry, SPREAD_ALLOW_PCT). A constant in code, not an environment
+# variable. Also read by the entry gate and the preflight (later tasks). The 10
+# points is a choice, reviewed by the owner on the shadow counts.
+SPREAD_ALLOW_PCT = 0.10
+
+
+def stop_exempt_ids() -> set[int]:
+    """Position ids the live stop must not sell: POLYCLAWD_STOP_EXEMPT_IDS, comma
+    separated, read at call time. Unset or empty gives an empty set; whitespace
+    around an id is tolerated. Any element that is not a plain non-negative
+    integer raises ValueError naming the variable and the element: a typo must
+    never silently drop an exemption, and a partial set is never returned."""
+    raw = os.environ.get("POLYCLAWD_STOP_EXEMPT_IDS", "")
+    if not raw.strip():
+        return set()
+    ids: set[int] = set()
+    for piece in raw.split(","):
+        element = piece.strip()
+        if not re.fullmatch(r"[0-9]+", element):
+            raise ValueError(
+                f"POLYCLAWD_STOP_EXEMPT_IDS={raw!r}: element {element!r} is not a "
+                "plain non-negative integer"
+            )
+        ids.add(int(element))
+    return ids
 
 
 # ---------------------------------------------------------------------------
